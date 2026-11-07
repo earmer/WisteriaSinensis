@@ -1,0 +1,15 @@
+[package]
+name = "mutil-engine"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+description = "Headless multilingual typesetting and interactive layout engine (Phase 0: type system and trait contracts)"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+smallvec = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
