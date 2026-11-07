@@ -16,7 +16,8 @@ use crate::types::{
 pub struct PositionedGlyph {
     /// Backend glyph index in the run's font.
     pub glyph_id: u32,
-    /// Pen x position from the line's left edge.
+    /// Drawing-origin x from the line's left edge: pen position plus the
+    /// shaper's `x_offset`.
     pub x: f32,
     /// Vertical offset from the baseline (clamped, §5 Stage 4.3).
     pub y_offset: f32,
@@ -135,6 +136,15 @@ pub enum HangSide {
 pub enum LineInvariantError {
     /// `visual_width`, `hanging_left` or `hanging_right` is negative, NaN or infinite.
     NonFiniteOrNegativeExtent,
+    /// `baseline_y`, `ascent`, `descent` or `line_height` is NaN or infinite.
+    NonFiniteLineMetrics,
+    /// A glyph's `x`, `advance` or `y_offset` is NaN or infinite.
+    NonFiniteGlyph {
+        /// Index into `visual_runs`.
+        run: usize,
+        /// Index into that run's `glyphs`.
+        glyph: usize,
+    },
     /// An empty line (`byte_range.start == byte_range.end`) has visual runs.
     EmptyLineHasVisualRuns,
     /// An empty line's `line_height` differs from the strut's.
@@ -184,6 +194,8 @@ impl PositionedLine {
     /// 2. **`visual_width` is the body width only.** Every `is_hanging` glyph lies
     ///    wholly outside `[0, visual_width]`; every other glyph lies inside it.
     ///    Hanging punctuation therefore cannot be counted in `visual_width`.
+    ///    Zero-advance glyphs (marks) are skipped, since `x` is a drawing origin
+    ///    that includes `x_offset` and such a glyph has no extent.
     ///    (Equality with the body width is not derivable from glyphs alone,
     ///    because inline boxes and tabs occupy width without glyphs; the layout
     ///    stage owns that equality.)
@@ -198,6 +210,10 @@ impl PositionedLine {
         let ok = |v: f32| v.is_finite() && v >= 0.0;
         if !(ok(self.visual_width) && ok(self.hanging_left) && ok(self.hanging_right)) {
             return Err(E::NonFiniteOrNegativeExtent);
+        }
+        let metrics = [self.baseline_y, self.ascent, self.descent, self.line_height];
+        if !metrics.iter().all(|v| v.is_finite()) {
+            return Err(E::NonFiniteLineMetrics);
         }
         if self.byte_range.is_empty() {
             if !self.visual_runs.is_empty() {
@@ -221,6 +237,14 @@ impl PositionedLine {
         let (mut left, mut right) = (0.0_f32, 0.0_f32);
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
+                if !(g.x.is_finite() && g.advance.is_finite() && g.y_offset.is_finite()) {
+                    return Err(E::NonFiniteGlyph { run, glyph });
+                }
+                // Zero-advance glyphs (combining marks) are positioned by their
+                // x_offset and attach to a base; they carry no extent to contain.
+                if g.advance == 0.0 {
+                    continue;
+                }
                 let end = g.x + g.advance;
                 if g.is_hanging {
                     if g.x < 0.0 && end <= eps {
@@ -437,6 +461,42 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn non_finite_geometry_is_rejected() {
+        for bad in [f32::NAN, f32::INFINITY] {
+            let mut g = glyph(0.0, 5.0, false);
+            g.x = bad;
+            assert_eq!(
+                line(vec![g], 5.0, 0.0, 0.0).validate(&STRUT),
+                Err(LineInvariantError::NonFiniteGlyph { run: 0, glyph: 0 })
+            );
+            let mut g = glyph(0.0, 5.0, false);
+            g.advance = bad;
+            assert!(matches!(
+                line(vec![g], 5.0, 0.0, 0.0).validate(&STRUT),
+                Err(LineInvariantError::NonFiniteGlyph { .. })
+            ));
+            let mut l = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+            l.line_height = bad;
+            assert_eq!(
+                l.validate(&STRUT),
+                Err(LineInvariantError::NonFiniteLineMetrics)
+            );
+        }
+    }
+
+    #[test]
+    fn zero_advance_marks_with_offsets_do_not_trip_containment() {
+        // A combining mark at the line start, drawn 3 units left of its base.
+        let l = line(
+            vec![glyph(-3.0, 0.0, false), glyph(0.0, 20.0, false)],
+            20.0,
+            0.0,
+            0.0,
+        );
+        assert!(l.is_valid(&STRUT));
     }
 
     #[test]

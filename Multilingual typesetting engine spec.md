@@ -59,6 +59,18 @@ Version-specific facts carry their dates. Where a source page is itself marked d
 | 41 | Stage 4: diacritic clamp ±1.5 line height; Stage 5: lowest `underline_position` | UNSUPPORTED | Kept as design decisions. No precedent was found. | none found |
 | 42 | Backends: rustybuzz implied | CORRECTED | rustybuzz is archived. HarfRust 0.15.0 (2026-10-22) is the maintained successor. | B2 |
 
+### Changes from Phase 0 implementation
+
+| # | Item | Change | Where |
+|---|---|---|---|
+| 43 | `reshape_window` | Gains `atoms` and `features` parameters. | 4.1 |
+| 44 | `BoundaryEdit` | Fully listed; `ReplaceSuffix` added to mirror `suffix_replacement`. | 4.1 |
+| 45 | `PositionedLine`, `PositionedGlyph` | `hanging_left`, `hanging_right`, `is_hanging` added; `visual_width` excludes hanging. | 2.6 |
+| 46 | `RawShapedGlyph` | Defined; carries `is_synthesized` so a generated hyphen survives into the output. | 2.3 |
+| 47 | `FontFeatures` | Also carries variation-axis settings (cache key, 4.2 req. 5). | 4.1 |
+| 48 | Safety-flag implication | Stated over the `safe_*` booleans; an early implementation tested the converse. | 2.3 |
+| 49 | Option and strategy enums | `HangMode`, `LineHeight`, `QuotePolicy`, `AutospaceProfile`, `HangingWhitespaceMode`, `LineBreakStrategy`, `SoftHyphenPolicy`, `ShaperProfile` defined as plain enums; the spec named them in prose only. | 2.4, 3, 4.6, 5, 6.6 |
+
 ---
 
 ## 1. System scope and architecture boundaries
@@ -162,6 +174,8 @@ pub struct ShapedCluster {
 
 **`UNSAFE_TO_CONCAT`.** Defined as: if text on one side of the start of the cluster changes, the other side's shaping might change. Its absence does not by itself prove that concatenation is safe: only two pieces both clear of the flag can be joined. `UNSAFE_TO_BREAK` always implies `UNSAFE_TO_CONCAT`. The flag is produced only if the buffer flag `HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT` is set, which was added in HarfBuzz 4.0.0 (2022-03-01) `[B1]`. `UNSAFE_TO_BREAK` itself dates from HarfBuzz 1.5.0 (2017-08-23) `[B1]`.
 
+**Phase 0 contract notes [Design decision].** (1) In terms of the two `safe_*` booleans, "`UNSAFE_TO_BREAK` implies `UNSAFE_TO_CONCAT`" reads `safe_to_concat_before ⇒ safe_to_break_before`. The combination `safe_to_break_before = true, safe_to_concat_before = false` is legal (only concatenation is unsafe); the converse is a contradiction. (2) `atom_range` is relative to the atom slice stored beside the cluster: the `atoms` argument of `shape_run`, or `atoms` of the owning `WordNode` after the frontend has re-based it. (3) A cluster belongs to exactly one `WordNode`: split points are chosen before clusters are assigned, and a split inside a multi-atom cluster is resolved by re-shaping that window. (4) Within a node the clusters partition its atoms in logical order, and each `byte_range` runs from its first atom's start to its last atom's end.
+
 ### 2.4 Box-and-glue sequence: `WordNode`
 
 ```rust
@@ -226,7 +240,10 @@ pub struct PositionedLine {
     pub byte_range: TextRange,        // includes trailing whitespace
     pub visible_byte_end: ByteIndex,
     pub baseline_y: f32, pub ascent: f32, pub descent: f32, pub line_height: f32,
-    pub visual_width: f32, pub is_justified: bool,
+    pub visual_width: f32,            // body only; hanging glyphs excluded
+    pub hanging_left: f32,            // new: width hanging outside the left edge (glyph x < 0)
+    pub hanging_right: f32,           // new: width hanging outside the right edge
+    pub is_justified: bool,
     pub visual_runs: Vec<VisualGlyphRun>,   // screen left to right
     pub caret_stops: Vec<CaretStop>,        // new: visual-order stops, see 6.1
     pub decorations: Vec<DecorationLine>,
@@ -235,8 +252,11 @@ pub struct PositionedGlyph {
     pub glyph_id: u32, pub x: f32, pub y_offset: f32, pub advance: f32,
     pub byte_range: Option<TextRange>,  // None, or an empty range, for synthesized glyphs
     pub is_synthesized: bool,           // generated hyphen; never copied
+    pub is_hanging: bool,               // new: hanging punctuation, wholly outside [0, visual_width]
 }
 ```
+
+**Geometry conventions [Design decision].** `x` is line-local and is the drawing origin (pen position plus the shaper's `x_offset`); it may be negative for left-hanging punctuation. `visual_width` is the body width and never includes hanging glyphs. A line is valid only if: (a) an empty line (`byte_range` empty) has no visual runs, zero `visual_width` and hanging extents, and a `line_height` equal to the strut's; (b) every `is_hanging` glyph lies wholly outside `[0, visual_width]` and every other glyph inside it (zero-advance glyphs excepted); (c) `hanging_left` and `hanging_right` are positive exactly when such glyphs exist and equal the extent they occupy. The reference implementation is `PositionedLine::validate`.
 
 The draft required a mandatory `byte_range` on every glyph while 6.6 said synthesized glyphs have none. **[Design decision]** The field is `Option<TextRange>`. Because `CjkAutospace` has `start == end`, it cannot be a distinct item inside `line.byte_range`; this is harmless but must be handled in the line builder `[C1]`.
 
@@ -331,10 +351,12 @@ pub trait TextShaper {
         output_clusters: &mut Vec<ShapedCluster>,
     );
 
-    /// New. Re-shape a window around a break or hyphenation point (5.1).
+    /// New. Re-shape a window around a break, hyphenation point or word split (5.1).
+    /// `atoms` and `features` are the values given to `shape_run` for this run.
     fn reshape_window(
-        &self, text: &str, run: &ShapingRun, window: TextRange,
-        edit: BoundaryEdit,          // None, AppendHyphen{..}, ReplacePrefix{..}
+        &self, text: &str, run: &ShapingRun, atoms: &[GraphemeAtom],
+        window: TextRange, features: &FontFeatures,
+        edit: BoundaryEdit,          // None, AppendHyphen, ReplacePrefix, ReplaceSuffix
         output_clusters: &mut Vec<ShapedCluster>,
     );
 
@@ -344,6 +366,8 @@ pub trait TextShaper {
 ```
 
 `reshape_window` and `ligature_carets` are **[Design decisions]** that make the break-safety and caret requirements implementable. The HarfBuzz primitive behind the latter is `hb_ot_layout_get_ligature_carets`, which returns GDEF positions that may need adjustment for kerning `[B1][B7]`.
+
+**`reshape_window` contract (Phase 0) [Design decision].** `atoms` and `features` were added to the draft signature: without the atoms the output cannot carry a local `atom_range`, and re-shaping with other features or variations would not splice. `window` is in paragraph text coordinates, lies within `run.byte_range`, and starts and ends on atom boundaries. Output `atom_range`s index `atoms` directly, in the same space as `shape_run` output, and the output clusters partition exactly the atoms inside the window. Ranges always describe the original text (6.6). `BoundaryEdit` is `None`, `AppendHyphen { hyphen }`, `ReplacePrefix { replacement, cut_bytes, hyphen }` or `ReplaceSuffix { replacement, cut_bytes }`; the first three act at the end of a line's window, `ReplaceSuffix` at the start of the following line's window and adds no hyphen. A generated hyphen is appended as glyphs of the last cluster, flagged `RawShapedGlyph::is_synthesized`. Where `cut_bytes` may fall relative to atom boundaries is open (Open question 21).
 
 ### 4.2 Implementation requirements
 
@@ -596,6 +620,16 @@ Drawn from the Gaps sections of the research notes.
 17. **Platform input and accessibility.** Windows TSF, Android `InputConnection`, iOS `UITextInput`, `NSTextInputClient.characterIndexForPoint` and AccessKit's offset units are unexamined; the AccessKit version appears as 0.25.2 on one page and 0.25.0 on another.
 18. **GPUI.** Per-platform fallback implementation (CoreText, DirectWrite or cosmic-text on Linux) is unconfirmed; the crate release (0.2.2, 2026-10-30) may differ from `main`. The Servo, Blitz, Vello and Xilem text stacks were not researched.
 19. **Status banners.** Unicode 18.0 pages carry draft or preliminary banners (UAX #29, the versions page); UTS #37 rev 16 is a proposed update. Cite them as "Unicode 18.0 reports, revision N, date D".
+20. **`HyphenOpportunity.cut_bytes`.** One count serves both `prefix_replacement` and `suffix_replacement`, but `BoundaryEdit` carries a count per side and libhyphen's cut can straddle the break (`ck` to `k-k`). The split is undefined. A proposal (not adopted): `prefix_cut_bytes` and `suffix_cut_bytes`, with `byte_offset` the original break position.
+21. **`reshape_window` edge semantics.** The window is one-sided in practice (see 4.1) but nothing in the signature says which edge an edit applies to when `edit` is `None`. Whether `cut_bytes` may fall inside an atom is unspecified; the window rule says boundaries are atom-aligned.
+22. **Non-glyph items in the output.** `PositionedLine` has no place for the positions of `InlineBox` and `Tab` items, so painting, hit-testing and selection over them cannot be expressed. A `visual_items` list or per-kind vectors is needed.
+23. **`Preserved` trailing spaces versus hanging.** Stage 1.7 says preserved spaces hang outside the width and stay caret-reachable. Whether they are `is_hanging` glyphs counted in `hanging_right` (or `hanging_left` for RTL) is undecided; the fields are currently documented for punctuation. 6.2.3 (collapse to `(visible_byte_end, Upstream)`) and 6.3.3 (extreme visual stop) also need reconciling.
+24. **Resolved strut.** `ParagraphAst::strut_metrics` is raw font metrics, yet the empty-line rule needs a strut resolved for the active `LineHeight` (half-leading folded into ascent and descent). Either the frontend resolves it or a `resolve_strut(LineHeight, FontMetrics)` is specified.
+25. **`HangMode` start side.** The enum has end modes only, while CSS `first` and `last` and the left-hanging fields imply hanging at line start. Either add a start flag or declare hanging end-only.
+26. **Cluster flag union.** `ShapedCluster.flags` is the union of its atoms' flags. That is wrong for `ALLOW_CJK_JUSTIFY_AFTER` of a ligature (only the last atom's boundary exists) and questionable for `IS_OPEN_PUNCT` and `IS_CLOSE_PUNCT`. A per-flag rule (any, first, last) is needed.
+27. **Chunk-join wording (4.2 req. 5).** "Each cached chunk records whether its first and last clusters are clear of `UNSAFE_TO_CONCAT`" does not fit the "before" polarity of 2.3, since no flag describes a chunk's end. A seam is presumably clear if the first cluster of the right piece is clear. **[Unverified]** against the HarfBuzz recipe.
+28. **`ligature_carets` units, `shape_run` inputs.** The return values have no stated unit (design units, em, or layout units at `font_size`). Whether `text` is the paragraph or the run slice, and whether `families` and `font_size` must equal the run's, is unstated.
+29. **Option aggregates.** `wrap_width` and the option enums are named in prose only; no `LayoutOptions` or `FrontendOptions` struct fixes the entry-point signature.
 
 ---
 

@@ -22,7 +22,7 @@ pub use bidi::{BIDI_MAX_DEPTH, BidiDirection, BidiLevel, Direction};
 pub use cluster::{RawShapedGlyph, ShapedCluster};
 pub use font::{
     FamilyStack, FontFamily, FontFeature, FontFeatures, FontId, FontMetrics, FontRef, FontSlant,
-    FontStyle, FontWeight, GenericFamily, VerticalMetrics,
+    FontStyle, FontVariation, FontWeight, GenericFamily, VerticalMetrics,
 };
 pub use geometry::{Point, Rect, Size};
 pub use tag::{LocaleTag, ScriptTag};

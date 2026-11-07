@@ -118,11 +118,12 @@ impl ShapedCluster {
     }
 
     /// `true` when the break-safety flags honour the HarfBuzz implication
-    /// "unsafe to break implies unsafe to concat".
+    /// "unsafe to break implies unsafe to concat", i.e. `safe_to_concat_before`
+    /// implies `safe_to_break_before`.
     #[inline]
     #[must_use]
     pub fn safety_flags_consistent(&self) -> bool {
-        self.safe_to_concat_before || !self.safe_to_break_before
+        self.safe_to_break_before || !self.safe_to_concat_before
     }
 }
 
@@ -163,8 +164,10 @@ mod tests {
     fn unsafe_to_break_implies_unsafe_to_concat() {
         assert!(cluster(0..1, true, true).safety_flags_consistent());
         assert!(cluster(0..1, false, false).safety_flags_consistent());
-        assert!(cluster(0..1, false, true).safety_flags_consistent());
-        // safe to break but unsafe to concat contradicts the HarfBuzz contract
-        assert!(!cluster(0..1, true, false).safety_flags_consistent());
+        // Only concat unsafe: legal (UNSAFE_TO_CONCAT without UNSAFE_TO_BREAK).
+        assert!(cluster(0..1, true, false).safety_flags_consistent());
+        // Unsafe to break but safe to concat contradicts HarfBuzz: UNSAFE_TO_BREAK
+        // always implies UNSAFE_TO_CONCAT.
+        assert!(!cluster(0..1, false, true).safety_flags_consistent());
     }
 }
