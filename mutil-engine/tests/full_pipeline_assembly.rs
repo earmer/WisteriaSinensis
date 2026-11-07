@@ -188,7 +188,28 @@ fn zero_layout_full_pipeline_assembly() {
     // ---- Shaping bridge: both spelling edits through the trait ----------
     let shaper: &dyn TextShaper = &NoopShaper;
     let r = &ast.runs[0];
-    let run_atoms: Vec<_> = (0..TEXT.len()).map(atom).collect();
+    // One atom per char: U+FFFC is a single 3-byte atom (8..11), so every
+    // window edge below lies on an atom boundary.
+    let run_atoms: Vec<_> = TEXT
+        .char_indices()
+        .map(|(i, c)| GraphemeAtom {
+            byte_range: TextRange::new(i, i + c.len_utf8()),
+            ..atom(i)
+        })
+        .collect();
+    assert_eq!(run_atoms.len(), TEXT.len() - 2);
+    assert!(
+        run_atoms
+            .iter()
+            .any(|a| a.byte_range == TextRange::new(8, 11))
+    );
+    let starts: Vec<_> = run_atoms.iter().map(|a| a.byte_range.start).collect();
+    for edge in [0, 3, 7] {
+        assert!(
+            starts.contains(&edge),
+            "window edge {edge} is not an atom start"
+        );
+    }
     let features = FontFeatures::new();
     // Each side reads only its own replacement and cut count.
     let trailing_edit = TrailingEdit::for_opportunity(&opportunity, '-');
@@ -208,7 +229,8 @@ fn zero_layout_full_pipeline_assembly() {
             cut_bytes: 2
         }
     );
-    let mut out = Vec::new();
+    // Seeded: shapers append to the buffer and never clear it.
+    let mut out = vec![cluster(0, 0)];
     // Regular break: line 0 ends at the break, line 1 starts after it.
     shaper.reshape_window(
         TEXT,
@@ -241,7 +263,7 @@ fn zero_layout_full_pipeline_assembly() {
         trailing_edit,
         &mut out,
     );
-    assert!(out.is_empty());
+    assert_eq!(out, vec![cluster(0, 0)]);
 
     // ---- Middle-end: three lines ----------------------------------------
     let word_a = clusters_of(&ast.items[0]);

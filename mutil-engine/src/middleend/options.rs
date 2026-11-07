@@ -178,7 +178,9 @@ impl TabStops {
         if !self.is_valid() {
             return x;
         }
-        ((x / self.step).floor() + 1.0) * self.step
+        let next = ((x / self.step).floor() + 1.0) * self.step;
+        // At large `x` the f32 product can round back to `x`; always move forward.
+        if next > x { next } else { x + self.step }
     }
 }
 
@@ -308,6 +310,9 @@ mod tests {
         for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
             assert!(!TabStops { step: bad }.is_valid());
         }
+        // At large x the f32 product rounds back to x; a stop still lies ahead.
+        let x = 3.0e7_f32;
+        assert!(t.next_stop(x) > x);
         let c = LayoutConstraints {
             wrap_width: 100.0,
             tab_stops: t,

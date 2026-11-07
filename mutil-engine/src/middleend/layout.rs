@@ -4,7 +4,7 @@
 //! inputs, but lays nothing out.
 
 use super::{LayoutConstraints, LayoutOptions, LineContext, PositionedParagraph};
-use crate::frontend::{ParagraphAst, WordNode};
+use crate::frontend::{HyphenOpportunity, ParagraphAst, WordNode};
 use crate::shaping::TextShaper;
 use core::fmt;
 
@@ -38,6 +38,17 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
+    /// An inline box has a non-finite or negative width, ascent or descent.
+    InvalidInlineBox {
+        /// Index into `ParagraphAst::items`.
+        item: usize,
+    },
+    /// A hyphenation opportunity of a word lies outside the word, or it or one
+    /// of its cuts does not end on an atom boundary.
+    InvalidHyphenOpportunity {
+        /// Index into `ParagraphAst::items`.
+        item: usize,
+    },
 }
 
 impl fmt::Display for LayoutInputError {
@@ -53,11 +64,37 @@ impl fmt::Display for LayoutInputError {
             Self::ItemNotSelfContained { item } => {
                 write!(f, "item {item} does not partition its atoms")
             }
+            Self::InvalidInlineBox { item } => {
+                write!(f, "inline box {item} has a non-finite or negative size")
+            }
+            Self::InvalidHyphenOpportunity { item } => {
+                write!(f, "item {item} has a hyphenation opportunity off its atoms")
+            }
         }
     }
 }
 
 impl std::error::Error for LayoutInputError {}
+
+/// Whether every hyphenation opportunity of a word lies strictly inside it and,
+/// with both cuts, ends on an atom boundary.
+fn hyphen_breaks_valid(atoms: &[crate::types::GraphemeAtom], breaks: &[HyphenOpportunity]) -> bool {
+    let (Some(first), Some(last)) = (atoms.first(), atoms.last()) else {
+        return breaks.is_empty();
+    };
+    let (start, end) = (first.byte_range.start, last.byte_range.end);
+    let boundary = |pos: usize| pos == end || atoms.iter().any(|a| a.byte_range.start == pos);
+    breaks.iter().all(|b| {
+        let off = b.byte_offset;
+        let prefix = off.checked_sub(b.prefix_cut_bytes as usize);
+        let suffix = off.checked_add(b.suffix_cut_bytes as usize);
+        start < off
+            && off < end
+            && boundary(off)
+            && prefix.is_some_and(|p| p >= start && boundary(p))
+            && suffix.is_some_and(|q| q <= end && boundary(q))
+    })
+}
 
 fn fits(text: &str, r: crate::types::TextRange) -> bool {
     r.start <= r.end
@@ -86,7 +123,7 @@ pub fn check_layout_inputs(
     let m = &ast.strut_metrics;
     let fixed_ok = match options.line_height {
         super::LineHeight::Normal => true,
-        super::LineHeight::Fixed(v) => v.is_finite(),
+        super::LineHeight::Fixed(v) => v.is_finite() && v >= 0.0,
     };
     if !([m.ascent, m.descent, m.line_gap]
         .iter()
@@ -104,25 +141,67 @@ pub fn check_layout_inputs(
     }
     for (item, node) in ast.items.iter().enumerate() {
         if let WordNode::Word { run_index, .. } | WordNode::PunctuationRun { run_index, .. } = node
-            && *run_index >= ast.runs.len()
         {
-            return Err(E::RunIndexOutOfRange { item });
+            if *run_index >= ast.runs.len() {
+                return Err(E::RunIndexOutOfRange { item });
+            }
         }
-        if let Some(span) = node.byte_span()
-            && !fits(text, span)
+        if let WordNode::Word { atoms, .. } | WordNode::PunctuationRun { atoms, .. } = node {
+            // Every atom must fit, even when the node's overall span does.
+            if !atoms.iter().all(|a| fits(text, a.byte_range)) {
+                return Err(E::ItemOutsideText { item });
+            }
+        }
+        match node.byte_span() {
+            Some(span) if !fits(text, span) => return Err(E::ItemOutsideText { item }),
+            // A node with atoms but no span has out-of-order atoms.
+            None if matches!(
+                node,
+                WordNode::Word { atoms, .. } | WordNode::PunctuationRun { atoms, .. }
+                    if !atoms.is_empty()
+            ) =>
+            {
+                return Err(E::ItemOutsideText { item });
+            }
+            _ => {}
+        }
+        if let WordNode::InlineBox {
+            width,
+            ascent,
+            descent,
+            ..
+        } = node
         {
-            return Err(E::ItemOutsideText { item });
+            if ![width, ascent, descent]
+                .iter()
+                .all(|v| v.is_finite() && **v >= 0.0)
+            {
+                return Err(E::InvalidInlineBox { item });
+            }
         }
         if !node.is_self_contained() {
             return Err(E::ItemNotSelfContained { item });
         }
+        if let WordNode::Word {
+            atoms,
+            hyphen_breaks,
+            ..
+        } = node
+        {
+            if !hyphen_breaks_valid(atoms, hyphen_breaks) {
+                return Err(E::InvalidHyphenOpportunity { item });
+            }
+        }
     }
-    Ok(LineContext::from_options(
-        m,
-        ast.strut_font_size,
-        ast.base_direction,
-        options,
-    ))
+    let context = LineContext::from_options(m, ast.strut_font_size, ast.base_direction, options);
+    let r = &context.strut;
+    if ![r.ascent, r.descent, r.line_gap, r.natural_line_height()]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(E::InvalidStrut);
+    }
+    Ok(context)
 }
 
 /// Lays out one paragraph (spec §5).
@@ -248,5 +327,162 @@ mod tests {
         };
         let p = layout_paragraph(&ast(), "\n", &NoopShaper, &bad, &LayoutOptions::default());
         assert!(p.lines.is_empty());
+    }
+
+    use crate::frontend::HyphenOpportunity;
+    use crate::types::{AtomFlags, GraphemeAtom, LineBreakClass, ScriptTag, ShapedCluster};
+
+    fn atom(start: usize, end: usize) -> GraphemeAtom {
+        GraphemeAtom {
+            byte_range: TextRange::new(start, end),
+            script: ScriptTag::LATIN,
+            bidi_level: 0,
+            linebreak_class: LineBreakClass::Al,
+            flags: AtomFlags::EMPTY,
+        }
+    }
+
+    fn word(atoms: Vec<GraphemeAtom>, breaks: Vec<HyphenOpportunity>) -> WordNode {
+        let clusters = atoms
+            .iter()
+            .enumerate()
+            .map(|(i, a)| ShapedCluster {
+                byte_range: a.byte_range,
+                atom_range: i..i + 1,
+                font: crate::types::FontRef::unscaled(crate::types::FontId(0)),
+                bidi_level: 0,
+                flags: AtomFlags::EMPTY,
+                glyphs: Default::default(),
+                natural_width: 0.0,
+                uncompressed_width: 0.0,
+                safe_to_break_before: true,
+                safe_to_concat_before: true,
+            })
+            .collect();
+        WordNode::Word {
+            run_index: 0,
+            atoms,
+            clusters,
+            hyphen_breaks: breaks,
+            total_width: 0.0,
+        }
+    }
+
+    fn run() -> crate::frontend::ShapingRun {
+        crate::frontend::ShapingRun {
+            byte_range: TextRange::new(0, 4),
+            families: std::sync::Arc::from([]),
+            font_size: 10.0,
+            style: Default::default(),
+            script: ScriptTag::LATIN,
+            locale: Default::default(),
+            bidi_level: 0,
+            decoration: Default::default(),
+        }
+    }
+
+    fn opportunity(offset: usize, prefix_cut: u32, suffix_cut: u32) -> HyphenOpportunity {
+        HyphenOpportunity {
+            byte_offset: offset,
+            prefix_replacement: None,
+            suffix_replacement: None,
+            prefix_cut_bytes: prefix_cut,
+            suffix_cut_bytes: suffix_cut,
+            penalty: 0,
+        }
+    }
+
+    fn with_items(items: Vec<WordNode>) -> ParagraphAst {
+        ParagraphAst {
+            runs: vec![run()],
+            items,
+            ..ast()
+        }
+    }
+
+    #[test]
+    fn inline_boxes_must_have_finite_non_negative_sizes() {
+        let o = LayoutOptions::default();
+        for (w, a, d) in [
+            (f32::NAN, 1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, f32::INFINITY),
+        ] {
+            let a = with_items(vec![WordNode::InlineBox {
+                byte_range: TextRange::new(0, 1),
+                box_id: 1,
+                width: w,
+                ascent: a,
+                descent: d,
+            }]);
+            assert_eq!(
+                check_layout_inputs(&a, "abcd", &constraints(), &o),
+                Err(LayoutInputError::InvalidInlineBox { item: 0 })
+            );
+        }
+    }
+
+    #[test]
+    fn hyphen_opportunities_must_sit_on_atom_boundaries_inside_the_word() {
+        let o = LayoutOptions::default();
+        // Word "ab" + "é" (2 bytes) = bytes 0..4 with atoms 0..1, 1..2, 2..4.
+        let atoms = || vec![atom(0, 1), atom(1, 2), atom(2, 4)];
+        let check = |b: HyphenOpportunity| {
+            check_layout_inputs(
+                &with_items(vec![word(atoms(), vec![b])]),
+                "abé",
+                &constraints(),
+                &o,
+            )
+        };
+        assert!(check(opportunity(1, 0, 0)).is_ok());
+        assert!(check(opportunity(2, 1, 2)).is_ok()); // cuts end at 1 and at 4
+        let bad = Err(LayoutInputError::InvalidHyphenOpportunity { item: 0 });
+        assert_eq!(check(opportunity(0, 0, 0)), bad); // not strictly inside
+        assert_eq!(check(opportunity(4, 0, 0)), bad);
+        assert_eq!(check(opportunity(3, 0, 0)), bad); // inside the 2-byte atom
+        assert_eq!(check(opportunity(2, 3, 0)), bad); // cut before the word
+        assert_eq!(check(opportunity(1, 0, 2)), bad); // ends mid-atom (at 3)
+        assert_eq!(check(opportunity(2, 0, 3)), bad); // cut past the word
+    }
+
+    #[test]
+    fn every_atom_must_fit_and_be_in_order() {
+        let o = LayoutOptions::default();
+        // Overall span fits "abcd" but the middle atom does not end inside it.
+        let a = with_items(vec![word(vec![atom(0, 1), atom(1, 9), atom(2, 4)], vec![])]);
+        assert_eq!(
+            check_layout_inputs(&a, "abcd", &constraints(), &o),
+            Err(LayoutInputError::ItemOutsideText { item: 0 })
+        );
+        // First atom starts after the last one ends: no panic, an error.
+        let a = with_items(vec![word(vec![atom(3, 4), atom(0, 1)], vec![])]);
+        assert_eq!(
+            check_layout_inputs(&a, "abcd", &constraints(), &o),
+            Err(LayoutInputError::ItemOutsideText { item: 0 })
+        );
+    }
+
+    #[test]
+    fn strut_inputs_are_validated_after_resolution() {
+        let negative = LayoutOptions {
+            line_height: crate::middleend::LineHeight::Fixed(-1.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            check_layout_inputs(&ast(), "\n", &constraints(), &negative),
+            Err(LayoutInputError::InvalidStrut)
+        );
+        // Finite inputs whose resolved height overflows.
+        let huge = LayoutOptions {
+            line_height: crate::middleend::LineHeight::Fixed(f32::MAX),
+            ..Default::default()
+        };
+        let mut a = ast();
+        a.strut_font_size = 10.0;
+        assert_eq!(
+            check_layout_inputs(&a, "\n", &constraints(), &huge),
+            Err(LayoutInputError::InvalidStrut)
+        );
     }
 }

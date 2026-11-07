@@ -361,6 +361,24 @@ pub enum LineInvariantError {
         /// Index into `tabs`.
         index: usize,
     },
+    /// A caret stop has a non-finite `x`.
+    NonFiniteCaretStop {
+        /// Index into `caret_stops`.
+        index: usize,
+    },
+    /// A decoration has a non-finite coordinate or thickness.
+    NonFiniteDecoration {
+        /// Index into `decorations`.
+        index: usize,
+    },
+    /// A trailing-whitespace glyph is flagged `is_hanging`; the flag is
+    /// reserved for hanging punctuation.
+    TrailingWhitespaceMarkedHanging {
+        /// Index into `visual_runs`.
+        run: usize,
+        /// Index into that run's `glyphs`.
+        glyph: usize,
+    },
     /// Punctuation hangs at an edge the active `HangMode` does not allow.
     HangingNotAllowed {
         /// Edge concerned.
@@ -466,6 +484,18 @@ impl fmt::Display for LineInvariantError {
                     "trailing tab {index} is not on the far edge of the base direction"
                 )
             }
+            Self::NonFiniteCaretStop { index } => {
+                write!(f, "caret stop {index} has a non-finite x")
+            }
+            Self::NonFiniteDecoration { index } => {
+                write!(f, "decoration {index} has a non-finite coordinate")
+            }
+            Self::TrailingWhitespaceMarkedHanging { run, glyph } => {
+                write!(
+                    f,
+                    "trailing whitespace glyph {glyph} of run {run} is flagged as hanging"
+                )
+            }
             Self::HangingNotAllowed { side } => {
                 write!(
                     f,
@@ -542,13 +572,14 @@ impl PositionedLine {
         }
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
-                if !(g.x.is_finite() && g.advance.is_finite() && g.y_offset.is_finite()) {
+                let finite = g.x.is_finite() && g.advance.is_finite() && g.y_offset.is_finite();
+                if !(finite && (g.x + g.advance).is_finite()) {
                     return Err(E::NonFiniteGlyph { run, glyph });
                 }
             }
         }
         for (index, b) in self.visual_boxes.iter().enumerate() {
-            let finite = [b.x, b.y, b.width, b.ascent, b.descent]
+            let finite = [b.x, b.y, b.width, b.ascent, b.descent, b.x + b.width]
                 .iter()
                 .all(|v| v.is_finite());
             if !(finite && b.width >= 0.0 && b.ascent >= 0.0 && b.descent >= 0.0) {
@@ -556,8 +587,22 @@ impl PositionedLine {
             }
         }
         for (index, t) in self.tabs.iter().enumerate() {
-            if !(t.x.is_finite() && t.width.is_finite() && t.width >= 0.0) {
+            let finite = t.x.is_finite() && t.width.is_finite() && (t.x + t.width).is_finite();
+            if !(finite && t.width >= 0.0) {
                 return Err(E::InvalidTab { index });
+            }
+        }
+        for (index, c) in self.caret_stops.iter().enumerate() {
+            if !c.x.is_finite() {
+                return Err(E::NonFiniteCaretStop { index });
+            }
+        }
+        for (index, d) in self.decorations.iter().enumerate() {
+            if ![d.x_start, d.x_end, d.y_offset, d.thickness]
+                .iter()
+                .all(|v| v.is_finite())
+            {
+                return Err(E::NonFiniteDecoration { index });
             }
         }
         Ok(())
@@ -627,18 +672,26 @@ impl PositionedLine {
         };
 
         let (mut left, mut right) = (0.0_f32, 0.0_f32);
+        let (mut has_left, mut has_right) = (false, false);
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
-                let end = g.x + g.advance;
-                let trailing = g
-                    .byte_range
-                    .is_some_and(|b| b.start >= self.visible_byte_end);
+                // Normalised endpoints: a negative advance (kerning) must not
+                // turn containment or hanging upside down.
+                let (lo, hi) = (g.x.min(g.x + g.advance), g.x.max(g.x + g.advance));
+                // A synthesized glyph (generated hyphen) is never trailing
+                // whitespace, even when its range is empty at `visible_byte_end`.
+                let trailing = !g.is_synthesized
+                    && g.byte_range
+                        .is_some_and(|b| b.start >= self.visible_byte_end);
                 if trailing {
+                    if g.is_hanging {
+                        return Err(E::TrailingWhitespaceMarkedHanging { run, glyph });
+                    }
                     if collapsible {
                         if g.advance != 0.0 {
                             return Err(E::TrailingWhitespaceNotCollapsed { run, glyph });
                         }
-                    } else if g.advance != 0.0 && !on_far_edge(g.x.min(end), g.x.max(end)) {
+                    } else if g.advance != 0.0 && !on_far_edge(lo, hi) {
                         return Err(E::TrailingWhitespaceOnWrongSide { run, glyph });
                     }
                     continue;
@@ -648,23 +701,25 @@ impl PositionedLine {
                 if g.advance == 0.0 {
                     continue;
                 }
-                let tol = tolerance(g.x.abs().max(end.abs()), vw);
+                let tol = tolerance(lo.abs().max(hi.abs()), vw);
                 if g.is_hanging {
-                    if g.x < 0.0 && end <= tol {
-                        left = left.max(-g.x);
-                    } else if g.x >= vw - tol && end > g.x {
-                        right = right.max(end - vw);
+                    if lo < 0.0 && hi <= tol {
+                        left = left.max(-lo);
+                        has_left = true;
+                    } else if lo >= vw - tol && hi > lo {
+                        right = right.max(hi - vw);
+                        has_right = true;
                     } else {
                         return Err(E::HangingGlyphInsideBlock { run, glyph });
                     }
-                } else if g.x < -tol || end > vw + tol {
+                } else if lo < -tol || hi > vw + tol {
                     return Err(E::BodyGlyphOutsideBlock { run, glyph });
                 }
             }
         }
-        for (side, expected, actual) in [
-            (HangSide::Left, left, self.hanging_left),
-            (HangSide::Right, right, self.hanging_right),
+        for (side, expected, actual, present) in [
+            (HangSide::Left, left, self.hanging_left, has_left),
+            (HangSide::Right, right, self.hanging_right, has_right),
         ] {
             if !approx_eq(expected, actual) {
                 return Err(E::HangingExtentMismatch {
@@ -673,7 +728,9 @@ impl PositionedLine {
                     actual,
                 });
             }
-            if actual > 0.0
+            // A hanging glyph is judged by its presence, not by an extent that
+            // may be zero or inside the tolerance.
+            if (present || actual > 0.0)
                 && !ctx
                     .hang_mode
                     .allows(side, ctx.base_direction, ctx.line_index == 0)
@@ -760,13 +817,18 @@ pub struct PositionedParagraph {
 
 impl PositionedParagraph {
     /// Validates every line against `ctx`, giving each its own `line_index`
-    /// (so `HangStartMode::FirstLine` applies to line 0 only).
+    /// (so `HangStartMode::FirstLine` applies to line 0 only) and this
+    /// paragraph's `base_direction`, whatever direction `ctx` carries.
     ///
     /// # Errors
     /// The index of the first invalid line and its violation.
     pub fn validate(&self, ctx: &LineContext) -> Result<(), (usize, LineInvariantError)> {
         for (i, line) in self.lines.iter().enumerate() {
-            line.validate(&ctx.for_line(i)).map_err(|e| (i, e))?;
+            let line_ctx = LineContext {
+                base_direction: self.base_direction,
+                ..ctx.for_line(i)
+            };
+            line.validate(&line_ctx).map_err(|e| (i, e))?;
         }
         Ok(())
     }
@@ -1161,5 +1223,164 @@ mod tests {
         );
         let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(e);
         assert!(!boxed.to_string().is_empty());
+    }
+
+    fn no_hang() -> LineContext {
+        LineContext {
+            strut: STRUT,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn caret_stops_and_decorations_must_be_finite() {
+        let mut l = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        l.caret_stops.push(CaretStop {
+            x: f32::NAN,
+            offset: 0,
+            affinity: crate::middleend::CaretAffinity::Downstream,
+            level: 0,
+            line: 0,
+        });
+        assert_eq!(
+            l.validate(&ctx()),
+            Err(LineInvariantError::NonFiniteCaretStop { index: 0 })
+        );
+        let mut l = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        l.decorations.push(DecorationLine {
+            kind: DecorationKind::Underline,
+            byte_range: TextRange::new(0, 1),
+            x_start: 0.0,
+            x_end: f32::INFINITY,
+            y_offset: 1.0,
+            thickness: 1.0,
+        });
+        assert_eq!(
+            l.validate(&ctx()),
+            Err(LineInvariantError::NonFiniteDecoration { index: 0 })
+        );
+    }
+
+    #[test]
+    fn overflowing_endpoints_are_rejected_before_comparison() {
+        // Each coordinate is finite, but x + advance overflows to infinity.
+        let l = line(vec![glyph(3.0e38, 3.0e38, false)], 5.0, 0.0, 0.0);
+        assert_eq!(
+            l.validate(&ctx()),
+            Err(LineInvariantError::NonFiniteGlyph { run: 0, glyph: 0 })
+        );
+        let mut b = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        b.visual_boxes.push(inline_box(3.0e38, 3.0e38));
+        assert_eq!(
+            b.validate(&ctx()),
+            Err(LineInvariantError::InvalidInlineBox { index: 0 })
+        );
+        let mut t = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        t.tabs.push(PositionedTab {
+            byte_range: TextRange::new(1, 2),
+            x: 3.0e38,
+            width: 3.0e38,
+        });
+        assert_eq!(
+            t.validate(&ctx()),
+            Err(LineInvariantError::InvalidTab { index: 0 })
+        );
+    }
+
+    #[test]
+    fn negative_advance_is_judged_by_its_normalised_extent() {
+        // Occupies [20, 25] although `x + advance` is 20: outside a 20-wide body.
+        let l = line(vec![glyph(25.0, -5.0, false)], 20.0, 0.0, 0.0);
+        assert_eq!(
+            l.validate(&ctx()),
+            Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
+        );
+        // Inside the body it is fine.
+        assert!(line(vec![glyph(10.0, -5.0, false)], 20.0, 0.0, 0.0).is_valid(&ctx()));
+    }
+
+    #[test]
+    fn synthesized_hyphen_with_an_empty_range_is_not_trailing_whitespace() {
+        // "abc" + generated hyphen whose range is empty at visible_byte_end.
+        let mut l = line(
+            vec![glyph(0.0, 15.0, false), glyph(15.0, 5.0, false)],
+            20.0,
+            0.0,
+            0.0,
+        );
+        l.byte_range = TextRange::new(0, 4);
+        l.visible_byte_end = 4;
+        l.visual_runs[0].glyphs[0].byte_range = Some(TextRange::new(0, 4));
+        l.visual_runs[0].glyphs[1] = PositionedGlyph {
+            is_synthesized: true,
+            byte_range: Some(TextRange::empty_at(4)),
+            ..glyph(15.0, 5.0, false)
+        };
+        assert_eq!(l.validate(&ctx()), Ok(()));
+        // The same glyph as ordinary text at that position *would* be trailing.
+        l.visual_runs[0].glyphs[1].is_synthesized = false;
+        assert_eq!(
+            l.validate(&ctx()),
+            Err(LineInvariantError::TrailingWhitespaceNotCollapsed { run: 0, glyph: 1 })
+        );
+    }
+
+    #[test]
+    fn trailing_whitespace_cannot_be_marked_hanging() {
+        let mut l = line(
+            vec![glyph(0.0, 20.0, false), trailing_space(20.0, 0.0)],
+            20.0,
+            0.0,
+            0.0,
+        );
+        l.visible_byte_end = 3;
+        l.visual_runs[0].glyphs[1].is_hanging = true;
+        assert_eq!(
+            l.validate(&no_hang()),
+            Err(LineInvariantError::TrailingWhitespaceMarkedHanging { run: 0, glyph: 1 })
+        );
+    }
+
+    #[test]
+    fn a_hanging_glyph_is_gated_even_when_its_extent_is_negligible() {
+        // Extent 1e-4 sits inside the tolerance, so `hanging_left` is 0.0.
+        let l = line(
+            vec![glyph(-1.0e-4, 1.0e-4, true), glyph(0.0, 20.0, false)],
+            20.0,
+            0.0,
+            0.0,
+        );
+        assert_eq!(
+            l.validate(&no_hang()),
+            Err(LineInvariantError::HangingNotAllowed {
+                side: HangSide::Left
+            })
+        );
+        assert_eq!(l.validate(&ctx()), Ok(()));
+    }
+
+    #[test]
+    fn paragraph_validation_uses_the_paragraphs_own_direction() {
+        // Preserved space left of the body is valid only in an RTL paragraph.
+        let mut l = line(
+            vec![glyph(5.0, 20.0, false), trailing_space(0.0, 5.0)],
+            20.0,
+            0.0,
+            0.0,
+        );
+        l.visible_byte_end = 3;
+        l.visual_runs[0].glyphs[0].x = 0.0;
+        l.visual_runs[0].glyphs[1].x = -5.0;
+        let mut para = PositionedParagraph::empty(BidiDirection::Rtl);
+        para.lines = vec![l];
+        // The caller's context says LTR; the paragraph's direction wins.
+        let c = LineContext {
+            whitespace: HangingWhitespaceMode::Preserved,
+            base_direction: BidiDirection::Ltr,
+            ..no_hang()
+        };
+        assert_eq!(para.validate(&c), Ok(()));
+        para.base_direction = BidiDirection::Ltr;
+        assert!(para.validate(&c).is_err());
     }
 }

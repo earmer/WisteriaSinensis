@@ -158,6 +158,9 @@ pub trait TextShaper: Send + Sync {
     ///   replacing the clusters whose `atom_range` lies inside the window.
     /// * The output clusters partition exactly the atoms inside the window, in
     ///   logical order, and never split an atom.
+    /// * A window that carries a hyphen (`AppendHyphen`, `ReplacePrefix`)
+    ///   must contain at least one atom, since the hyphen's glyphs attach to
+    ///   the window's last cluster.
     /// * The two edits are independent and act on their own edge only: a
     ///   window may carry both (the middle fragment of a word split twice) or
     ///   neither (both `None`: a plain, symmetric, text-preserving re-shape).
@@ -168,6 +171,9 @@ pub trait TextShaper: Send + Sync {
     ///   cluster, each flagged `RawShapedGlyph::is_synthesized`. For
     ///   `ReplacePrefix` and `ReplaceSuffix`, the replacement glyphs are
     ///   attributed to the cluster(s) covering the removed bytes.
+    ///   With `cut_bytes == 0` and a non-empty replacement no cluster covers
+    ///   removed bytes: the glyphs belong to the window's last cluster for
+    ///   `ReplacePrefix` and to its first cluster for `ReplaceSuffix`.
     ///   **[Design decision]**; to be refined with the HarfRust backend in
     ///   Phase 1.
     #[allow(clippy::too_many_arguments)] // signature derived from spec §4.1

@@ -138,12 +138,16 @@ pub enum WordNode {
 impl WordNode {
     /// The source bytes this node covers: the first atom's start to the last
     /// atom's end for `Word` and `PunctuationRun` (`None` when they hold no
-    /// atoms), the stored range for the other variants.
+    /// atoms or if the atoms are out of order), the stored range for the other
+    /// variants.
     #[must_use]
     pub fn byte_span(&self) -> Option<TextRange> {
         match self {
             Self::Word { atoms, .. } | Self::PunctuationRun { atoms, .. } => {
                 let (first, last) = (atoms.first()?, atoms.last()?);
+                if first.byte_range.start > last.byte_range.end {
+                    return None; // inverted: callers treat a missing span of a non-empty node as invalid
+                }
                 Some(TextRange::new(first.byte_range.start, last.byte_range.end))
             }
             Self::Glue { byte_range, .. }
