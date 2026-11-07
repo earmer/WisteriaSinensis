@@ -43,7 +43,9 @@ impl TextShaper for NoopShaper {
         &self,
         _text: &str,
         _run: &ShapingRun,
+        _atoms: &[GraphemeAtom],
         _window: TextRange,
+        _features: &FontFeatures,
         _edit: BoundaryEdit,
         _output_clusters: &mut Vec<ShapedCluster>,
     ) {

@@ -1,8 +1,7 @@
-//! Draft interactive types: caret and selection geometry (spec §6.1, §6.6).
+//! Interactive types: caret, hit-test, movement and selection data (spec §6).
 //!
-//! Only the three types the roadmap names, plus [`CaretAffinity`] and what they
-//! need. `HitResult`, `CaretVisual`, `Motion`, `Selection` and `BoxHeightStyle`
-//! arrive with the queries that use them.
+//! Data only. The queries that produce and consume them (`hit_test`,
+//! `caret_geometry`, `move_cursor`, `selection_geometry`) arrive in later phases.
 
 use crate::types::{BidiLevel, ByteIndex, Rect};
 
@@ -60,4 +59,80 @@ pub struct SelectionRect {
     pub level: BidiLevel,
     /// `true` for the optional extension drawn for a selected newline.
     pub is_line_end_extension: bool,
+}
+
+/// Result of `hit_test` (spec §6.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HitResult {
+    /// Nearest caret position.
+    pub position: CursorPosition,
+    /// `false` when the point was clamped to the first or last line, or to a
+    /// line edge (DirectWrite's `isInside` convention `[C1]`).
+    pub inside: bool,
+}
+
+/// Caret rectangles for one position (spec §6.4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaretVisual {
+    /// Base-direction insertion point (Pango/Android "strong" caret).
+    pub primary_rect: Rect,
+    /// Opposite-direction insertion point; `Some` only if its x differs from the
+    /// primary's.
+    pub secondary_rect: Option<Rect>,
+    /// Caret slant in degrees clockwise from vertical (italic fonts); 0 if upright.
+    pub slant_angle: f32,
+}
+
+/// A cursor movement request (spec §6.5). `Left`/`Right` are physical and
+/// visual; `Previous`/`Next` are logical, because Firefox's word commands mapped
+/// to the wrong direction in RTL text `[C2]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Motion {
+    /// One visual stop to the left.
+    Left,
+    /// One visual stop to the right.
+    Right,
+    /// One atom backwards in logical order.
+    Previous,
+    /// One atom forwards in logical order.
+    Next,
+    /// Previous UAX #29 word boundary, physically to the left.
+    WordLeft,
+    /// Next UAX #29 word boundary, physically to the right.
+    WordRight,
+    /// Previous UAX #29 word boundary in logical order.
+    WordPrevious,
+    /// Next UAX #29 word boundary in logical order.
+    WordNext,
+    /// Start of the visual line.
+    LineStart,
+    /// End of the visual line.
+    LineEnd,
+    /// One line up, keeping the preferred x held by the caller.
+    Up,
+    /// One line down, keeping the preferred x held by the caller.
+    Down,
+}
+
+/// A selection stored logically as anchor and focus (spec §6.5). Shift+arrow
+/// moves `focus` visually; the anchor stays put. `anchor == focus` is a caret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Selection {
+    /// The fixed end.
+    pub anchor: CursorPosition,
+    /// The moving end.
+    pub focus: CursorPosition,
+}
+
+/// Height policy for selection rectangles, after Flutter's `BoxHeightStyle`
+/// `[C1]` (spec §6.6).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum BoxHeightStyle {
+    /// Tight around the glyphs of each run.
+    #[default]
+    Tight,
+    /// The full line box height.
+    Max,
+    /// The paragraph's strut metrics (`ParagraphAst::strut_metrics`).
+    Strut,
 }

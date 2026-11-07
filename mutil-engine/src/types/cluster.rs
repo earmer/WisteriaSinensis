@@ -11,7 +11,8 @@ use smallvec::SmallVec;
 /// all provide for horizontal text. Vertical text (a `y_advance`) is out of
 /// scope for the spec so far.
 ///
-/// Layout: five 4-byte fields, 20 bytes, alignment 4.
+/// Layout: five 4-byte fields plus a `bool`, 24 bytes with 3 bytes of tail
+/// padding, alignment 4.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RawShapedGlyph {
     /// Backend glyph index within the cluster's [`FontRef`].
@@ -26,6 +27,10 @@ pub struct RawShapedGlyph {
     pub x_offset: f32,
     /// Vertical offset from the baseline.
     pub y_offset: f32,
+    /// `true` for a glyph the engine generated rather than the source text
+    /// (the hyphen appended by `BoundaryEdit`). Carried through to
+    /// `PositionedGlyph::is_synthesized`.
+    pub is_synthesized: bool,
 }
 
 /// A shaper-produced unit: one or more whole atoms and the glyphs that render
@@ -40,6 +45,23 @@ pub struct RawShapedGlyph {
 /// into words (which re-bases the indices). Each node is therefore
 /// self-contained: `atoms[cluster.atom_range.clone()]` always works.
 /// **[Design decision]**; the spec leaves the base unspecified.
+///
+/// Two invariants make this safe (checked by `WordNode::is_self_contained`):
+///
+/// 1. **A cluster belongs to exactly one `WordNode`.** Splitting a
+///    `ShapingRun` into nodes must never split a `ShapedCluster`. Split points
+///    (UAX #14 opportunities, spaces, punctuation boundaries) are therefore
+///    chosen *before* clusters are assigned to nodes. If a split point falls
+///    inside a multi-atom cluster, the frontend must re-shape that window with
+///    the split as a boundary (`TextShaper::reshape_window` with
+///    `BoundaryEdit::None`) instead of cutting the cluster.
+/// 2. **Within a node, clusters partition the atoms.** In logical order the
+///    `atom_range`s are contiguous, non-empty, start at 0 and end at
+///    `atoms.len()`, and each `byte_range` runs from its first atom's start to
+///    its last atom's end.
+///
+/// `TextShaper::reshape_window` output uses the same space as `shape_run`
+/// output (indices into the run's atom slice, not re-based to the window).
 ///
 /// ## Break-safety polarity (HarfBuzz `[B1]`)
 ///
@@ -106,7 +128,7 @@ impl ShapedCluster {
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {
-    assert!(core::mem::size_of::<RawShapedGlyph>() == 20);
+    assert!(core::mem::size_of::<RawShapedGlyph>() == 24);
     assert!(core::mem::align_of::<RawShapedGlyph>() == 4);
 };
 

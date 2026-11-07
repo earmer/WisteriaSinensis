@@ -127,6 +127,41 @@ pub enum WordNode {
     },
 }
 
+impl WordNode {
+    /// Checks the `atom_range` invariants documented on [`ShapedCluster`]:
+    /// the node's clusters partition its atoms, in order, with matching byte
+    /// ranges. Nodes without clusters (glue, tab, hard break, inline box) are
+    /// trivially self-contained.
+    #[must_use]
+    pub fn is_self_contained(&self) -> bool {
+        match self {
+            Self::Word {
+                atoms, clusters, ..
+            }
+            | Self::PunctuationRun {
+                atoms, clusters, ..
+            } => clusters_partition_atoms(atoms, clusters),
+            _ => true,
+        }
+    }
+}
+
+fn clusters_partition_atoms(atoms: &[GraphemeAtom], clusters: &[ShapedCluster]) -> bool {
+    let mut next = 0;
+    for c in clusters {
+        let r = &c.atom_range;
+        if r.start != next || r.end <= r.start || r.end > atoms.len() {
+            return false;
+        }
+        let (first, last) = (&atoms[r.start], &atoms[r.end - 1]);
+        if c.byte_range.start != first.byte_range.start || c.byte_range.end != last.byte_range.end {
+            return false;
+        }
+        next = r.end;
+    }
+    next == atoms.len()
+}
+
 /// Frontend output: everything the middle-end needs, independent of column
 /// width (spec §2.5, §1.3).
 ///

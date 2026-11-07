@@ -7,6 +7,9 @@ use crate::types::{BidiDirection, BidiLevel, ByteIndex, FontRef, Size, TextRange
 ///
 /// `x` is **line-local**: measured from the line's left edge, so a line can be
 /// moved without touching its glyphs. **[Design decision]** (spec silent).
+/// It is the final drawing origin (pen position plus the shaper's `x_offset`)
+/// and may be **negative**: hanging punctuation placed outside the left edge
+/// has `x < 0` (§5 Stage 1.3), see [`PositionedLine::hanging_left`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedGlyph {
     /// Backend glyph index in the run's font.
@@ -84,8 +87,18 @@ pub struct PositionedLine {
     pub descent: f32,
     /// Line box height.
     pub line_height: f32,
-    /// Width of the visible content.
+    /// Width of the visible content **excluding** hanging punctuation, so the
+    /// text block spans `[0, visual_width]`.
     pub visual_width: f32,
+    /// Width of punctuation hanging outside the **left** edge (glyphs there have
+    /// `x < 0`). Zero unless `HangMode` hangs something. Physical, not logical:
+    /// for RTL lines the line-start hang is on the right.
+    /// **[Design decision]**: addition to §2.6, needed so caret, hit-test and
+    /// selection geometry (§6) know the occupied extent.
+    pub hanging_left: f32,
+    /// Width of punctuation hanging outside the **right** edge (beyond
+    /// `visual_width`, possibly beyond `wrap_width`). See `hanging_left`.
+    pub hanging_right: f32,
     /// Whether justification adjusted this line.
     pub is_justified: bool,
     /// Glyph runs, screen left to right.
@@ -99,8 +112,9 @@ pub struct PositionedLine {
 /// Laid-out paragraph.
 ///
 /// **[Design decision]** The spec's §2.6 defines `PositionedLine` and
-/// `PositionedGlyph` but gives `PositionedParagraph` no fields. It holds the lines plus the direction and overall size that
-/// every consumer needs. Owns all its data (`'static`, `Send + Sync`).
+/// `PositionedGlyph` but gives `PositionedParagraph` no fields. It holds the
+/// lines plus the direction and overall size that every consumer needs. Owns
+/// all its data (`'static`, `Send + Sync`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PositionedParagraph {
     /// Paragraph base direction, copied from the AST.

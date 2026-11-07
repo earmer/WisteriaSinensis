@@ -62,12 +62,39 @@ pub trait TextShaper {
         output_clusters: &mut Vec<ShapedCluster>,
     );
 
-    /// Re-shapes a window around a break or hyphenation point (§5 Stage 1.4).
+    /// Re-shapes a window around a break, hyphenation point or word split
+    /// (§5 Stage 1.4).
+    ///
+    /// **Deviation from the §4.1 signature** (two parameters added, both
+    /// needed for a sound splice):
+    /// * `atoms`: the *same* run-local atom slice that was given to
+    ///   `shape_run` for this run;
+    /// * `features`: the *same* settings, since re-shaping with different
+    ///   features (`chws`, `locl`, variations) would not splice.
+    ///
+    /// Contract:
+    /// * `window` is in paragraph text coordinates, lies within
+    ///   `run.byte_range`, and starts and ends on atom boundaries of `atoms`.
+    /// * Output `atom_range`s index `atoms` **directly** (they are *not*
+    ///   re-based to the window), i.e. in the same coordinate space as the
+    ///   clusters `shape_run` produced for the run. The caller splices by
+    ///   replacing the clusters whose `atom_range` lies inside the window.
+    /// * The output clusters partition exactly the atoms inside the window, in
+    ///   logical order, and never split an atom.
+    /// * `edit` never changes ranges: they always describe the **original**
+    ///   text (§6.6). A synthesised hyphen is appended as glyphs of the last
+    ///   cluster, each flagged `RawShapedGlyph::is_synthesized`. For
+    ///   `ReplacePrefix`, the replacement glyphs are attributed to the
+    ///   cluster(s) covering the removed bytes. **[Design decision]**; to be
+    ///   refined with the HarfRust backend in Phase 1.
+    #[allow(clippy::too_many_arguments)] // signature derived from spec §4.1
     fn reshape_window(
         &self,
         text: &str,
         run: &ShapingRun,
+        atoms: &[GraphemeAtom],
         window: TextRange,
+        features: &FontFeatures,
         edit: BoundaryEdit,
         output_clusters: &mut Vec<ShapedCluster>,
     );

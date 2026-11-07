@@ -50,6 +50,7 @@ fn cluster(base: usize, local: usize) -> ShapedCluster {
             x_advance: ADVANCE,
             x_offset: 0.0,
             y_offset: 0.0,
+            is_synthesized: false,
         }],
         natural_width: ADVANCE,
         uncompressed_width: ADVANCE,
@@ -115,10 +116,13 @@ fn test_pipeline_types_compile() {
         &FontFeatures::new(),
         &mut out,
     );
+    let run_atoms: Vec<GraphemeAtom> = (0..TEXT.len()).map(atom).collect();
     shaper.reshape_window(
         TEXT,
         r,
+        &run_atoms,
         TextRange::new(0, 5),
+        &FontFeatures::new(),
         BoundaryEdit::AppendHyphen { hyphen: '-' },
         &mut out,
     );
@@ -172,6 +176,8 @@ fn test_pipeline_types_compile() {
         descent: ast.strut_metrics.descent,
         line_height: ast.strut_metrics.natural_line_height(),
         visual_width: pen + ADVANCE,
+        hanging_left: 0.0,
+        hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
             font: FontRef::unscaled(FontId(1)),
@@ -294,4 +300,131 @@ fn hyphen_opportunity_carries_prefix_and_suffix_replacements() {
     };
     assert_eq!(h.prefix_replacement.as_deref(), Some("a"));
     assert_eq!(h.suffix_replacement.as_deref(), Some("tje"));
+}
+
+#[test]
+fn clusters_partition_atoms_and_split_clusters_are_detected() {
+    // Fixture words satisfy both invariants.
+    assert!(word(TextRange::new(0, 5)).is_self_contained());
+
+    // A two-atom ligature cluster is fine while it stays inside one node...
+    let lig = |range: std::ops::Range<usize>, bytes: TextRange| {
+        let mut c = cluster(0, 0);
+        c.atom_range = range;
+        c.byte_range = bytes;
+        c
+    };
+    let atoms: Vec<_> = (0..3).map(atom).collect();
+    let ok = WordNode::Word {
+        run_index: 0,
+        atoms: atoms.clone(),
+        clusters: vec![
+            lig(0..2, TextRange::new(0, 2)),
+            lig(2..3, TextRange::new(2, 3)),
+        ],
+        hyphen_breaks: Vec::new(),
+        total_width: 0.0,
+    };
+    assert!(ok.is_self_contained());
+
+    // ...but cutting that ligature between two nodes leaves node A's cluster
+    // reaching past its atoms, which the check rejects (invariant 1).
+    let node_a = WordNode::Word {
+        run_index: 0,
+        atoms: atoms[..1].to_vec(),
+        clusters: vec![lig(0..2, TextRange::new(0, 2))],
+        hyphen_breaks: Vec::new(),
+        total_width: 0.0,
+    };
+    assert!(!node_a.is_self_contained());
+
+    // Gaps and byte-range mismatches (invariant 2) are rejected too.
+    let gap = WordNode::PunctuationRun {
+        run_index: 0,
+        atoms: atoms.clone(),
+        clusters: vec![lig(1..3, TextRange::new(1, 3))],
+        bind: PunctBind::WholeRun,
+    };
+    assert!(!gap.is_self_contained());
+    let bad_bytes = WordNode::Word {
+        run_index: 0,
+        atoms: atoms[..1].to_vec(),
+        clusters: vec![lig(0..1, TextRange::new(0, 2))],
+        hyphen_breaks: Vec::new(),
+        total_width: 0.0,
+    };
+    assert!(!bad_bytes.is_self_contained());
+    assert!(
+        WordNode::Tab {
+            byte_range: TextRange::new(0, 1)
+        }
+        .is_self_contained()
+    );
+}
+
+#[test]
+fn full_spec_type_surface_is_nameable() {
+    let pos = CursorPosition {
+        byte_offset: 3,
+        affinity: CaretAffinity::Downstream,
+    };
+    let hit = HitResult {
+        position: pos,
+        inside: false,
+    };
+    let sel = Selection {
+        anchor: pos,
+        focus: CursorPosition {
+            byte_offset: 7,
+            ..pos
+        },
+    };
+    let caret = CaretVisual {
+        primary_rect: Rect::new(10.0, 0.0, 1.0, 16.0),
+        secondary_rect: None,
+        slant_angle: 0.0,
+    };
+    assert!(!hit.inside && sel.anchor != sel.focus && caret.secondary_rect.is_none());
+
+    let motions = [
+        Motion::Left,
+        Motion::Right,
+        Motion::Previous,
+        Motion::Next,
+        Motion::WordLeft,
+        Motion::WordRight,
+        Motion::WordPrevious,
+        Motion::WordNext,
+        Motion::LineStart,
+        Motion::LineEnd,
+        Motion::Up,
+        Motion::Down,
+    ];
+    assert_eq!(motions.len(), 12);
+    assert_eq!(BoxHeightStyle::default(), BoxHeightStyle::Tight);
+    assert_eq!(HangMode::default(), HangMode::None);
+    assert_eq!(LineHeight::Fixed(1.5), LineHeight::Fixed(1.5));
+    assert_eq!(QuotePolicy::default(), QuotePolicy::Standard);
+    assert_ne!(QuotePolicy::CjkAware, QuotePolicy::Standard);
+}
+
+#[test]
+fn hanging_punctuation_fits_negative_x_and_synthesized_flag_round_trips() {
+    // A hanging opening bracket sits left of the line edge.
+    let hanging = PositionedGlyph {
+        glyph_id: 1,
+        x: -ADVANCE,
+        y_offset: 0.0,
+        advance: ADVANCE,
+        byte_range: Some(TextRange::new(0, 1)),
+        is_synthesized: false,
+    };
+    assert!(hanging.x < 0.0);
+
+    // The shaper-level flag exists to feed PositionedGlyph::is_synthesized.
+    let g = RawShapedGlyph {
+        is_synthesized: true,
+        ..Default::default()
+    };
+    assert!(g.is_synthesized);
 }

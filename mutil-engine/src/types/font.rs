@@ -118,33 +118,107 @@ pub struct FontFeature {
     pub value: u32,
 }
 
-/// Feature settings handed to `shape_run`. Cache-relevant (spec §4.1, §4.2 req. 5).
+/// One variable-font axis setting, for example `("wght", 650.0)` (spec §4.2
+/// req. 5: the cache key includes "variation settings").
 ///
-/// Four inline entries cover the usual `kern`/`liga`/`chws`/`locl` overrides
-/// without a heap allocation.
+/// Fields are private so that `Eq` and `Hash` are sound for `f32`: the
+/// constructor maps `-0.0` to `0.0` and NaN to `0.0` (debug builds assert
+/// instead), and hashing uses the bit pattern.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FontVariation {
+    tag: [u8; 4],
+    value: f32,
+}
+
+impl FontVariation {
+    /// Builds a setting, canonicalising `-0.0` and NaN to `0.0`.
+    #[must_use]
+    pub fn new(tag: [u8; 4], value: f32) -> Self {
+        debug_assert!(!value.is_nan(), "variation value must not be NaN");
+        let value = if value.is_nan() || value == 0.0 {
+            0.0
+        } else {
+            value
+        };
+        Self { tag, value }
+    }
+
+    /// Four-byte axis tag.
+    #[must_use]
+    pub const fn tag(&self) -> [u8; 4] {
+        self.tag
+    }
+
+    /// Axis coordinate.
+    #[must_use]
+    pub const fn value(&self) -> f32 {
+        self.value
+    }
+}
+
+impl Eq for FontVariation {}
+
+impl core::hash::Hash for FontVariation {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.tag.hash(state);
+        self.value.to_bits().hash(state);
+    }
+}
+
+/// Feature and variation settings handed to `shape_run` and `reshape_window`.
+/// Cache-relevant (spec §4.1, §4.2 req. 5).
 ///
-/// **Deferred:** variation-axis settings, which the §4.2 req. 5 cache key also
-/// needs, are not modelled here because the §4.1 signature carries only
-/// `FontFeatures`. They are a Phase 1 decision tied to the cache.
+/// **[Design decision]** Variation axes live here rather than in a new
+/// parameter because the §4.1 signature carries only `FontFeatures`. Inline
+/// capacity (4 features, 2 axes) covers the usual `kern`/`liga`/`chws`/`locl`
+/// overrides and `wght`/`wdth` without a heap allocation. Call
+/// [`FontFeatures::normalize`] before using a value as a cache key.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct FontFeatures(pub SmallVec<[FontFeature; 4]>);
+pub struct FontFeatures {
+    /// OpenType feature settings.
+    pub features: SmallVec<[FontFeature; 4]>,
+    /// Variable-font axis settings.
+    pub variations: SmallVec<[FontVariation; 2]>,
+}
 
 impl FontFeatures {
-    /// An empty feature set.
+    /// An empty set.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Appends a setting.
+    /// Appends a feature setting.
     pub fn push(&mut self, tag: [u8; 4], value: u32) {
-        self.0.push(FontFeature { tag, value });
+        self.features.push(FontFeature { tag, value });
     }
 
-    /// The settings as a slice.
+    /// Appends a variation-axis setting.
+    pub fn push_variation(&mut self, tag: [u8; 4], value: f32) {
+        self.variations.push(FontVariation::new(tag, value));
+    }
+
+    /// The feature settings as a slice.
     #[must_use]
     pub fn as_slice(&self) -> &[FontFeature] {
-        &self.0
+        &self.features
+    }
+
+    /// The variation settings as a slice.
+    #[must_use]
+    pub fn variations(&self) -> &[FontVariation] {
+        &self.variations
+    }
+
+    /// Canonical form for cache keys: sorted by tag, one entry per tag, the
+    /// **last** setting for a tag winning (as in CSS cascade order).
+    pub fn normalize(&mut self) {
+        self.features.reverse();
+        self.features.sort_by_key(|f| f.tag);
+        self.features.dedup_by_key(|f| f.tag);
+        self.variations.reverse();
+        self.variations.sort_by_key(|v| v.tag);
+        self.variations.dedup_by_key(|v| v.tag);
     }
 }
 
@@ -218,7 +292,45 @@ mod tests {
         f.push(*b"chws", 1);
         f.push(*b"kern", 0);
         assert_eq!(f.as_slice().len(), 2);
-        assert!(!f.0.spilled());
+        assert!(!f.features.spilled());
+    }
+
+    #[test]
+    fn normalize_sorts_and_keeps_last_setting_per_tag() {
+        let mut f = FontFeatures::new();
+        f.push(*b"kern", 1);
+        f.push(*b"chws", 1);
+        f.push(*b"kern", 0); // later wins
+        f.push_variation(*b"wght", 400.0);
+        f.push_variation(*b"wdth", 100.0);
+        f.push_variation(*b"wght", 650.0);
+        f.normalize();
+        assert_eq!(
+            f.as_slice(),
+            &[
+                FontFeature {
+                    tag: *b"chws",
+                    value: 1
+                },
+                FontFeature {
+                    tag: *b"kern",
+                    value: 0
+                }
+            ]
+        );
+        assert_eq!(f.variations().len(), 2);
+        assert_eq!(f.variations()[0].tag(), *b"wdth");
+        assert_eq!(f.variations()[1].value(), 650.0);
+    }
+
+    #[test]
+    fn variation_negative_zero_hashes_like_zero() {
+        use std::hash::{BuildHasher, RandomState};
+        let s = RandomState::new();
+        let a = FontVariation::new(*b"slnt", -0.0);
+        let b = FontVariation::new(*b"slnt", 0.0);
+        assert_eq!(a, b);
+        assert_eq!(s.hash_one(a), s.hash_one(b));
     }
 
     #[test]
