@@ -117,7 +117,7 @@ pub enum LineBreakClass {
 /// Per-atom boolean properties, stored as a 16-bit mask (spec §2.2).
 ///
 /// Hand-rolled instead of depending on `bitflags`, to keep the dependency
-/// surface minimal. Nine of sixteen bits are assigned; the high seven are
+/// surface minimal. Ten of sixteen bits are assigned; the high six are
 /// reserved and are masked off by [`AtomFlags::from_bits_truncate`] and `!`.
 /// Layout: 2 bytes, alignment 2.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -147,6 +147,11 @@ impl AtomFlags {
     pub const HAS_VARIATION_SELECTOR: Self = Self(1 << 7);
     /// Resolved intra-word apostrophe (§3 Step 2.4).
     pub const IS_APOSTROPHE: Self = Self(1 << 8);
+    /// The atom lies inside an `AtomicEditSpan` (mention, chip, code span; spec
+    /// §2.2, §6): caret stops strictly inside the span are suppressed and
+    /// Backspace / Delete remove the whole span. Combined by bitwise OR across
+    /// the atoms of a cluster, so it is neither a first-only nor a last-only flag.
+    pub const IN_ATOMIC_EDIT_SPAN: Self = Self(1 << 9);
 
     /// No flags set.
     pub const EMPTY: Self = Self(0);
@@ -161,10 +166,11 @@ impl AtomFlags {
             | Self::IS_OPEN_PUNCT.0
             | Self::IS_CLOSE_PUNCT.0
             | Self::HAS_VARIATION_SELECTOR.0
-            | Self::IS_APOSTROPHE.0,
+            | Self::IS_APOSTROPHE.0
+            | Self::IN_ATOMIC_EDIT_SPAN.0,
     );
 
-    const NAMES: [(Self, &'static str); 9] = [
+    const NAMES: [(Self, &'static str); 10] = [
         (Self::IS_CJK_IDEOGRAPH, "IS_CJK_IDEOGRAPH"),
         (Self::ALLOW_CJK_JUSTIFY_AFTER, "ALLOW_CJK_JUSTIFY_AFTER"),
         (Self::NO_LETTER_SPACING, "NO_LETTER_SPACING"),
@@ -174,6 +180,7 @@ impl AtomFlags {
         (Self::IS_CLOSE_PUNCT, "IS_CLOSE_PUNCT"),
         (Self::HAS_VARIATION_SELECTOR, "HAS_VARIATION_SELECTOR"),
         (Self::IS_APOSTROPHE, "IS_APOSTROPHE"),
+        (Self::IN_ATOMIC_EDIT_SPAN, "IN_ATOMIC_EDIT_SPAN"),
     ];
 
     /// Flags a cluster takes only from its **first** atom.
@@ -437,6 +444,25 @@ mod tests {
         // One atom: identity. No atoms: empty.
         assert_eq!(AtomFlags::for_cluster(&[atom_with(all)]), all);
         assert_eq!(AtomFlags::for_cluster(&[]), AtomFlags::EMPTY);
+    }
+
+    #[test]
+    fn atomic_edit_span_flag_is_ored_over_every_atom_of_a_cluster() {
+        // Present on a middle atom only: the cluster still carries it.
+        let lig = [
+            atom_with(AtomFlags::EMPTY),
+            atom_with(AtomFlags::IN_ATOMIC_EDIT_SPAN),
+            atom_with(AtomFlags::EMPTY),
+        ];
+        assert!(AtomFlags::for_cluster(&lig).contains(AtomFlags::IN_ATOMIC_EDIT_SPAN));
+        // It is neither a first-only nor a last-only flag.
+        assert!(!AtomFlags::FIRST_ATOM_ONLY.intersects(AtomFlags::IN_ATOMIC_EDIT_SPAN));
+        assert!(!AtomFlags::LAST_ATOM_ONLY.intersects(AtomFlags::IN_ATOMIC_EDIT_SPAN));
+        // Absent everywhere: absent.
+        assert!(
+            !AtomFlags::for_cluster(&[atom_with(AtomFlags::EMPTY)])
+                .contains(AtomFlags::IN_ATOMIC_EDIT_SPAN)
+        );
     }
 
     #[test]

@@ -21,5 +21,5 @@ pub use options::{
 pub use output::{
     DecorationKind, DecorationLine, HangSide, LINE_GEOMETRY_ABS_EPSILON, LINE_GEOMETRY_REL_EPSILON,
     LineContext, LineInvariantError, PositionedGlyph, PositionedInlineBox, PositionedLine,
-    PositionedParagraph, PositionedTab, VisualGlyphRun,
+    PositionedParagraph, PositionedSpanFragment, PositionedTab, VisualGlyphRun,
 };

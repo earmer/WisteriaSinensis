@@ -45,8 +45,12 @@ fn hanging_whitespace_mode() {
 #[test]
 fn line_break_strategy() {
     assert_value_type(
-        &[LineBreakStrategy::Greedy, LineBreakStrategy::GlobalOptimal],
-        LineBreakStrategy::Greedy,
+        &[
+            LineBreakStrategy::Greedy,
+            LineBreakStrategy::Balanced,
+            LineBreakStrategy::Publication,
+        ],
+        LineBreakStrategy::Balanced,
     );
 }
 

@@ -41,7 +41,7 @@ pub struct RawShapedGlyph {
 /// `byte_range` is in paragraph text coordinates. **`atom_range` is relative to
 /// the atom slice stored beside the cluster**: the `atoms` argument of
 /// `TextShaper::shape_run` for freshly shaped clusters, and `atoms` of the
-/// owning `WordNode::Word` / `PunctuationRun` once the frontend has split a run
+/// owning `BoxNode::Text` once the frontend has split a run
 /// into words (which re-bases the indices). Each node is therefore
 /// self-contained: `atoms[cluster.atom_range.clone()]` always works.
 /// **[Design decision]**; the spec leaves the base unspecified.
