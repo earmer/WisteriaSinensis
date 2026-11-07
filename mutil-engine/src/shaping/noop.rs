@@ -56,6 +56,7 @@ impl TextShaper for NoopShaper {
         _font: FontRef,
         _glyph_id: u32,
         _direction: Direction,
+        _font_size: f32,
     ) -> SmallVec<[f32; 4]> {
         SmallVec::new()
     }

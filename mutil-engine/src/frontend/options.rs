@@ -1,5 +1,7 @@
 //! Frontend options (spec §3).
 
+use crate::types::LocaleTag;
+
 /// How quotation marks and paired punctuation resolve their script
 /// (spec §3 Step 3).
 ///
@@ -30,6 +32,22 @@ pub enum AutospaceProfile {
     CssCompat,
 }
 
+/// Everything the frontend needs besides the text and its styled runs
+/// (spec §3): the single input carrier for analysis policy.
+///
+/// **Not yet included**: a line-height policy. `ParagraphAst::strut_metrics` is
+/// documented as already resolved by `LineHeight`, but `LineHeight` lives in
+/// `LayoutOptions` (Open question 30).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FrontendOptions {
+    /// Profile for `GlueKind::CjkAutospace` sizes.
+    pub autospace: AutospaceProfile,
+    /// How quotation marks resolve their script.
+    pub quote_policy: QuotePolicy,
+    /// Locale for runs that carry none (spec §1.2 fallback rules).
+    pub default_locale: LocaleTag,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37,5 +55,13 @@ mod tests {
     #[test]
     fn standard_is_the_default() {
         assert_eq!(QuotePolicy::default(), QuotePolicy::Standard);
+    }
+
+    #[test]
+    fn frontend_options_default_to_the_spec_baselines() {
+        let o = FrontendOptions::default();
+        assert_eq!(o.autospace, AutospaceProfile::Jlreq);
+        assert_eq!(o.quote_policy, QuotePolicy::Standard);
+        assert_eq!(o.default_locale.as_str(), "und");
     }
 }

@@ -1,6 +1,6 @@
 //! Middle-end output: positioned lines and glyphs (spec §2.6).
 
-use super::{CaretStop, HangingWhitespaceMode, LineHeight};
+use super::{CaretStop, HangMode, HangingWhitespaceMode, LayoutOptions, LineHeight};
 use crate::types::{
     BidiDirection, BidiLevel, ByteIndex, FontRef, Size, TextRange, VerticalMetrics,
 };
@@ -106,6 +106,23 @@ pub struct PositionedInlineBox {
     pub descent: f32,
 }
 
+/// A tab placed on a line (spec §2.4 `Tab`, §2.6).
+///
+/// A tab carries no glyph; this is where a painter (leaders, selection) and the
+/// hit-test code find its extent. **[Design decision]**; the spec left tab
+/// positions unrepresented. `width` is `next_tab_stop(x) - x`, resolved during
+/// layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PositionedTab {
+    /// Source bytes of the tab character.
+    pub byte_range: TextRange,
+    /// Left edge, line-local. Lies within `[0, visual_width]`, except for a
+    /// trailing tab under `Preserved` (trailing-whitespace rule).
+    pub x: f32,
+    /// Width (non-negative).
+    pub width: f32,
+}
+
 /// One laid-out line (spec §2.6).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PositionedLine {
@@ -140,6 +157,8 @@ pub struct PositionedLine {
     pub visual_runs: Vec<VisualGlyphRun>,
     /// Inline objects on this line, in logical order.
     pub visual_boxes: Vec<PositionedInlineBox>,
+    /// Tabs on this line, in logical order.
+    pub tabs: Vec<PositionedTab>,
     /// Caret stops in visual order (§6.1).
     pub caret_stops: Vec<CaretStop>,
     /// Decorations on this line.
@@ -171,6 +190,30 @@ pub struct LineContext {
     pub line_height: LineHeight,
     /// The active trailing-whitespace mode.
     pub whitespace: HangingWhitespaceMode,
+    /// The active hanging-punctuation mode.
+    pub hang_mode: HangMode,
+    /// The paragraph base direction. It decides which physical edge is the
+    /// line start (hanging) and where trailing whitespace lies (UAX #9 L1).
+    pub base_direction: BidiDirection,
+}
+
+impl LineContext {
+    /// Builds the context from the resolved strut, the paragraph base direction
+    /// and the layout options that produced the line.
+    #[must_use]
+    pub fn from_options(
+        strut: VerticalMetrics,
+        base_direction: BidiDirection,
+        options: &LayoutOptions,
+    ) -> Self {
+        Self {
+            strut,
+            line_height: options.line_height,
+            whitespace: options.whitespace,
+            hang_mode: options.hang_mode,
+            base_direction,
+        }
+    }
 }
 
 /// Which edge a hanging extent belongs to.
@@ -269,6 +312,41 @@ pub enum LineInvariantError {
         /// Index into `visual_boxes`.
         index: usize,
     },
+    /// An empty line has tabs.
+    EmptyLineHasTabs,
+    /// A tab has a non-finite coordinate or a negative width.
+    InvalidTab {
+        /// Index into `tabs`.
+        index: usize,
+    },
+    /// A body tab lies outside `[0, visual_width]`.
+    TabOutsideBlock {
+        /// Index into `tabs`.
+        index: usize,
+    },
+    /// A trailing tab has width although the mode is `Collapsible`.
+    TrailingTabNotCollapsed {
+        /// Index into `tabs`.
+        index: usize,
+    },
+    /// Preserved trailing whitespace is not on the far edge of the base
+    /// direction (UAX #9 L1): right of the body for LTR, left for RTL.
+    TrailingWhitespaceOnWrongSide {
+        /// Index into `visual_runs`.
+        run: usize,
+        /// Index into that run's `glyphs`.
+        glyph: usize,
+    },
+    /// A preserved trailing tab is not on the far edge of the base direction.
+    TrailingTabOnWrongSide {
+        /// Index into `tabs`.
+        index: usize,
+    },
+    /// Punctuation hangs at an edge the active `HangMode` does not allow.
+    HangingNotAllowed {
+        /// Edge concerned.
+        side: HangSide,
+    },
 }
 
 impl fmt::Display for LineInvariantError {
@@ -344,6 +422,37 @@ impl fmt::Display for LineInvariantError {
             Self::InlineBoxOutsideBlock { index } => {
                 write!(f, "inline box {index} lies outside the text block")
             }
+            Self::EmptyLineHasTabs => f.write_str("an empty line has tabs"),
+            Self::InvalidTab { index } => {
+                write!(
+                    f,
+                    "tab {index} has a non-finite coordinate or a negative width"
+                )
+            }
+            Self::TabOutsideBlock { index } => {
+                write!(f, "tab {index} lies outside the text block")
+            }
+            Self::TrailingTabNotCollapsed { index } => {
+                write!(f, "trailing tab {index} has width in Collapsible mode")
+            }
+            Self::TrailingWhitespaceOnWrongSide { run, glyph } => {
+                write!(
+                    f,
+                    "trailing whitespace glyph {glyph} of run {run} is not on the far edge of the base direction"
+                )
+            }
+            Self::TrailingTabOnWrongSide { index } => {
+                write!(
+                    f,
+                    "trailing tab {index} is not on the far edge of the base direction"
+                )
+            }
+            Self::HangingNotAllowed { side } => {
+                write!(
+                    f,
+                    "{side:?} hanging punctuation is not allowed by the hang mode"
+                )
+            }
         }
     }
 }
@@ -352,30 +461,40 @@ impl std::error::Error for LineInvariantError {}
 
 impl PositionedLine {
     /// Checks the line invariants (spec §5 Stage 1.3, 1.7 and Stage 4) against
-    /// `ctx`.
+    /// `ctx`, in three passes.
     ///
-    /// 1. **Finite metrics**, `visible_byte_end` within `byte_range`.
-    /// 2. **Line height** against the resolved strut: an empty line and every
-    ///    line under `LineHeight::Fixed` must equal
-    ///    `strut.natural_line_height()`; under `LineHeight::Normal` a line may be
-    ///    taller (fallback glyphs, §5 Stage 4.1) but never shorter.
-    /// 3. **Empty line** (`byte_range` empty): no runs, no boxes, zero
-    ///    `visual_width` and hanging extents.
-    /// 4. **Trailing whitespace** (glyphs whose `byte_range` starts at or after
-    ///    `visible_byte_end`): under `Collapsible` they must have zero advance;
-    ///    under `Preserved` they are exempt from the body-bounds check and may
-    ///    lie outside `[0, visual_width]`. They never count towards the hanging
-    ///    extents, which describe punctuation only.
-    /// 5. **`visual_width` is the body width only.** Every `is_hanging` glyph lies
-    ///    wholly outside `[0, visual_width]`, every other glyph inside it, so
-    ///    hanging punctuation cannot be counted in `visual_width`. Zero-advance
-    ///    glyphs (marks) are skipped: `x` is a drawing origin that includes
-    ///    `x_offset`. (Equality with the body width is not derivable from glyphs
-    ///    alone, since boxes and tabs occupy width; the layout stage owns it.)
-    /// 6. **`hanging_left`/`hanging_right` are positive iff** the line has
-    ///    left/right hanging glyphs, and equal the extent they occupy.
-    /// 7. **Inline boxes** have finite coordinates and non-negative sizes, and
-    ///    lie within `[0, visual_width]`.
+    /// **Pass 1, finiteness.** Every number of every entity is scanned before
+    /// anything else is judged: the line metrics and extents, every glyph (`x`,
+    /// `advance`, `y_offset`), every inline box (all coordinates and sizes) and
+    /// every tab (`x`, `width`). A NaN or infinity, or a negative extent, box or
+    /// tab size, is rejected at once. A negative glyph `advance` is *not*
+    /// rejected: kerning can produce one.
+    ///
+    /// **Pass 2, envelope.** `visible_byte_end` lies within `byte_range`. An
+    /// empty line (`byte_range` empty) has no runs, boxes or tabs, zero
+    /// `visual_width` and hanging extents, and `line_height` equal to the
+    /// resolved strut. Otherwise `line_height` equals the strut under
+    /// `LineHeight::Fixed` and is at least the strut under `LineHeight::Normal`
+    /// (fallback glyphs may enlarge it, §5 Stage 4.1).
+    ///
+    /// **Pass 3, containment and hanging.** `visual_width` is the body width,
+    /// so the body is `[0, visual_width]`:
+    /// * every non-hanging, non-trailing glyph, inline box and tab starts at
+    ///   `>= 0` and ends at `<= visual_width` (within tolerance); zero-advance
+    ///   glyphs are skipped, since `x` is a drawing origin that includes
+    ///   `x_offset`;
+    /// * every `is_hanging` glyph lies wholly outside the body;
+    /// * `hanging_left`/`hanging_right` equal the extent those glyphs occupy
+    ///   (so are positive exactly when such glyphs exist), and are zero on an
+    ///   edge that `ctx.hang_mode` does not allow for `ctx.base_direction`;
+    /// * trailing whitespace (glyphs and tabs whose `byte_range` starts at or
+    ///   after `visible_byte_end`): under `Collapsible` it has zero width; under
+    ///   `Preserved` it is exempt from containment but, by UAX #9 L1, must lie
+    ///   on the far edge of the base direction (right of the body for LTR, left
+    ///   of it for RTL). It never counts towards the hanging extents.
+    ///
+    /// This is containment, not tiling: glue produces no output entity, so the
+    /// entities need not cover `[0, visual_width]` without gaps.
     ///
     /// Comparisons use a mixed absolute and relative tolerance
     /// ([`LINE_GEOMETRY_ABS_EPSILON`], [`LINE_GEOMETRY_REL_EPSILON`]).
@@ -383,6 +502,16 @@ impl PositionedLine {
     /// # Errors
     /// The first violated invariant.
     pub fn validate(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
+        self.check_finite()?;
+        self.check_envelope(ctx)?;
+        if self.byte_range.is_empty() {
+            return Ok(());
+        }
+        self.check_containment_and_hanging(ctx)
+    }
+
+    /// Pass 1: all numbers finite, no negative extent or size.
+    fn check_finite(&self) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
         let ok = |v: f32| v.is_finite() && v >= 0.0;
         if !(ok(self.visual_width) && ok(self.hanging_left) && ok(self.hanging_right)) {
@@ -392,11 +521,36 @@ impl PositionedLine {
         if !metrics.iter().all(|v| v.is_finite()) {
             return Err(E::NonFiniteLineMetrics);
         }
+        for (run, r) in self.visual_runs.iter().enumerate() {
+            for (glyph, g) in r.glyphs.iter().enumerate() {
+                if !(g.x.is_finite() && g.advance.is_finite() && g.y_offset.is_finite()) {
+                    return Err(E::NonFiniteGlyph { run, glyph });
+                }
+            }
+        }
+        for (index, b) in self.visual_boxes.iter().enumerate() {
+            let finite = [b.x, b.y, b.width, b.ascent, b.descent]
+                .iter()
+                .all(|v| v.is_finite());
+            if !(finite && b.width >= 0.0 && b.ascent >= 0.0 && b.descent >= 0.0) {
+                return Err(E::InvalidInlineBox { index });
+            }
+        }
+        for (index, t) in self.tabs.iter().enumerate() {
+            if !(t.x.is_finite() && t.width.is_finite() && t.width >= 0.0) {
+                return Err(E::InvalidTab { index });
+            }
+        }
+        Ok(())
+    }
+
+    /// Pass 2: byte range, empty-line state, line height.
+    fn check_envelope(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
+        use LineInvariantError as E;
         let range = self.byte_range;
         if !(range.start <= self.visible_byte_end && self.visible_byte_end <= range.end) {
             return Err(E::VisibleEndOutsideRange);
         }
-
         let expected = ctx.strut.natural_line_height();
         if range.is_empty() {
             if !self.visual_runs.is_empty() {
@@ -404,6 +558,9 @@ impl PositionedLine {
             }
             if !self.visual_boxes.is_empty() {
                 return Err(E::EmptyLineHasBoxes);
+            }
+            if !self.tabs.is_empty() {
+                return Err(E::EmptyLineHasTabs);
             }
             if !approx_eq(self.line_height, expected) {
                 return Err(E::EmptyLineHeightMismatch {
@@ -434,20 +591,36 @@ impl PositionedLine {
                 }
             }
         }
+        Ok(())
+    }
 
+    /// Pass 3: containment of glyphs, boxes and tabs; hanging; trailing
+    /// whitespace.
+    fn check_containment_and_hanging(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
+        use LineInvariantError as E;
         let vw = self.visual_width;
+        let collapsible = ctx.whitespace == HangingWhitespaceMode::Collapsible;
+        // UAX #9 L1: trailing whitespace takes the paragraph level, so it lies
+        // right of the body in an LTR paragraph and left of it in an RTL one.
+        let on_far_edge = |x: f32, end: f32| match ctx.base_direction {
+            BidiDirection::Ltr => x >= vw - tolerance(x, vw),
+            BidiDirection::Rtl => end <= tolerance(end, 0.0),
+        };
+
         let (mut left, mut right) = (0.0_f32, 0.0_f32);
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
-                if !(g.x.is_finite() && g.advance.is_finite() && g.y_offset.is_finite()) {
-                    return Err(E::NonFiniteGlyph { run, glyph });
-                }
+                let end = g.x + g.advance;
                 let trailing = g
                     .byte_range
                     .is_some_and(|b| b.start >= self.visible_byte_end);
                 if trailing {
-                    if ctx.whitespace == HangingWhitespaceMode::Collapsible && g.advance != 0.0 {
-                        return Err(E::TrailingWhitespaceNotCollapsed { run, glyph });
+                    if collapsible {
+                        if g.advance != 0.0 {
+                            return Err(E::TrailingWhitespaceNotCollapsed { run, glyph });
+                        }
+                    } else if g.advance != 0.0 && !on_far_edge(g.x.min(end), g.x.max(end)) {
+                        return Err(E::TrailingWhitespaceOnWrongSide { run, glyph });
                     }
                     continue;
                 }
@@ -456,7 +629,6 @@ impl PositionedLine {
                 if g.advance == 0.0 {
                     continue;
                 }
-                let end = g.x + g.advance;
                 let tol = tolerance(g.x.abs().max(end.abs()), vw);
                 if g.is_hanging {
                     if g.x < 0.0 && end <= tol {
@@ -482,19 +654,33 @@ impl PositionedLine {
                     actual,
                 });
             }
+            if actual > 0.0 && !ctx.hang_mode.allows(side, ctx.base_direction) {
+                return Err(E::HangingNotAllowed { side });
+            }
         }
 
         for (index, b) in self.visual_boxes.iter().enumerate() {
-            let finite = [b.x, b.y, b.width, b.ascent, b.descent]
-                .iter()
-                .all(|v| v.is_finite());
-            if !(finite && b.width >= 0.0 && b.ascent >= 0.0 && b.descent >= 0.0) {
-                return Err(E::InvalidInlineBox { index });
-            }
             let end = b.x + b.width;
             let tol = tolerance(b.x.abs().max(end.abs()), vw);
             if b.x < -tol || end > vw + tol {
                 return Err(E::InlineBoxOutsideBlock { index });
+            }
+        }
+        for (index, t) in self.tabs.iter().enumerate() {
+            let end = t.x + t.width;
+            if t.byte_range.start >= self.visible_byte_end {
+                if collapsible {
+                    if t.width != 0.0 {
+                        return Err(E::TrailingTabNotCollapsed { index });
+                    }
+                } else if t.width != 0.0 && !on_far_edge(t.x, end) {
+                    return Err(E::TrailingTabOnWrongSide { index });
+                }
+                continue;
+            }
+            let tol = tolerance(t.x.abs().max(end.abs()), vw);
+            if t.x < -tol || end > vw + tol {
+                return Err(E::TabOutsideBlock { index });
             }
         }
         Ok(())
@@ -546,9 +732,14 @@ mod tests {
         line_gap: 0.0,
     };
 
+    /// Permissive on hanging so the older geometry tests stay about geometry.
     fn ctx() -> LineContext {
         LineContext {
             strut: STRUT,
+            hang_mode: HangMode {
+                start: true,
+                end: crate::middleend::HangEndMode::Force,
+            },
             ..Default::default()
         }
     }
@@ -591,6 +782,7 @@ mod tests {
                 glyphs,
             }],
             visual_boxes: vec![],
+            tabs: vec![],
             caret_stops: vec![],
             decorations: vec![],
         }

@@ -241,11 +241,13 @@ fn zero_layout_full_pipeline_assembly() {
         }],
         caret_stops: vec![],
         visual_boxes: vec![],
+        tabs: vec![],
         decorations: vec![],
     };
 
-    // Line 1: "atje" ␠ [box] ⇥ "go" and a right-hanging ",". The box, tab and
-    // space occupy width but carry no glyphs. `visual_width` stops before ",".
+    // Line 1: "atje" ␠ [box] ⇥ "go" and a right-hanging ",". The space occupies
+    // width without any output entity (glue); the box and the tab are
+    // `PositionedInlineBox` and `PositionedTab`. `visual_width` stops before ",".
     let mut pen = 0.0;
     let mut l1_glyphs = Vec::new();
     for c in word_a[3..].iter() {
@@ -288,6 +290,11 @@ fn zero_layout_full_pipeline_assembly() {
             ascent: 10.0,
             descent: 2.0,
         }],
+        tabs: vec![PositionedTab {
+            byte_range: TextRange::new(11, 12),
+            x: box_x + BOX_W,
+            width: TAB_W,
+        }],
         decorations: vec![],
     };
 
@@ -312,19 +319,31 @@ fn zero_layout_full_pipeline_assembly() {
             line: 2,
         }],
         visual_boxes: vec![],
+        tabs: vec![],
         decorations: vec![],
     };
 
     // Copy: no borrow of the AST survives
     let strut = ast.strut_metrics;
-    let ctx = LineContext {
-        strut,
+    // The context comes from the same options that would drive the layout:
+    // a right-hanging comma needs the end edge enabled.
+    let options = LayoutOptions {
+        hang_mode: HangMode {
+            start: false,
+            end: HangEndMode::Allow,
+        },
         ..Default::default()
     };
+    let ctx = LineContext::from_options(strut, ast.base_direction, &options);
     for (i, l) in [&line0, &line1, &line2].into_iter().enumerate() {
         assert_eq!(l.validate(&ctx), Ok(()), "line {i}");
     }
     assert!(line1.hanging_right > 0.0 && line0.hanging_right == 0.0);
+    assert_eq!((line1.visual_boxes.len(), line1.tabs.len()), (1, 1));
+    // The tab follows the box exactly and ends where "go" begins.
+    let (b, t) = (line1.visual_boxes[0], line1.tabs[0]);
+    assert_eq!(b.x + b.width, t.x);
+    assert_eq!(t.x + t.width, line1.visual_runs[0].glyphs[4].x);
 
     let mut para = PositionedParagraph::empty(ast.base_direction);
     para.size = Size {
@@ -432,4 +451,333 @@ fn ligature_cluster_takes_justify_after_from_its_last_atom_only() {
     let f = AtomFlags::for_cluster(&atoms);
     assert!(f.contains(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT));
     assert!(node(atoms, f).is_self_contained());
+}
+
+// ---- Counter-examples on the assembled line --------------------------------
+
+/// A one-line fixture whose body is `[0, 40]`: glyph, inline box, tab, glyph.
+fn small_line() -> PositionedLine {
+    let g = |x: f32, bytes: (usize, usize)| PositionedGlyph {
+        glyph_id: 1,
+        x,
+        y_offset: 0.0,
+        advance: 10.0,
+        byte_range: Some(TextRange::new(bytes.0, bytes.1)),
+        is_synthesized: false,
+        is_hanging: false,
+    };
+    PositionedLine {
+        byte_range: TextRange::new(0, 4),
+        visible_byte_end: 4,
+        baseline_y: 12.0,
+        ascent: 12.0,
+        descent: 4.0,
+        line_height: 16.0,
+        visual_width: 40.0,
+        hanging_left: 0.0,
+        hanging_right: 0.0,
+        is_justified: false,
+        visual_runs: vec![VisualGlyphRun {
+            font: FontRef::unscaled(FontId(1)),
+            bidi_level: 0,
+            byte_range: TextRange::new(0, 4),
+            glyphs: vec![g(0.0, (0, 1)), g(30.0, (3, 4))],
+        }],
+        visual_boxes: vec![PositionedInlineBox {
+            box_id: 7,
+            byte_range: TextRange::new(1, 2),
+            x: 10.0,
+            y: 0.0,
+            width: 10.0,
+            ascent: 10.0,
+            descent: 2.0,
+        }],
+        tabs: vec![PositionedTab {
+            byte_range: TextRange::new(2, 3),
+            x: 20.0,
+            width: 10.0,
+        }],
+        caret_stops: vec![],
+        decorations: vec![],
+    }
+}
+
+fn small_ctx() -> LineContext {
+    LineContext {
+        strut: VerticalMetrics {
+            ascent: 12.0,
+            descent: 4.0,
+            line_gap: 0.0,
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn glyph_box_and_tab_tile_the_body_and_validate() {
+    let l = small_line();
+    assert_eq!(l.validate(&small_ctx()), Ok(()));
+    // Entities abut: glyph | box | tab | glyph = [0, 40].
+    assert_eq!(l.visual_runs[0].glyphs[0].advance, l.visual_boxes[0].x);
+    assert_eq!(l.visual_boxes[0].x + l.visual_boxes[0].width, l.tabs[0].x);
+    assert_eq!(l.tabs[0].x + l.tabs[0].width, l.visual_runs[0].glyphs[1].x);
+}
+
+#[test]
+fn inline_box_with_nan_dimensions_is_intercepted() {
+    for field in 0..5 {
+        let mut l = small_line();
+        let b = &mut l.visual_boxes[0];
+        match field {
+            0 => b.x = f32::NAN,
+            1 => b.y = f32::NAN,
+            2 => b.width = f32::NAN,
+            3 => b.ascent = f32::NAN,
+            _ => b.descent = f32::NAN,
+        }
+        assert_eq!(
+            l.validate(&small_ctx()),
+            Err(LineInvariantError::InvalidInlineBox { index: 0 }),
+            "field {field}"
+        );
+    }
+}
+
+#[test]
+fn tab_beyond_visual_width_is_intercepted() {
+    let mut l = small_line();
+    l.tabs[0].x = 35.0; // ends at 45 > 40
+    assert_eq!(
+        l.validate(&small_ctx()),
+        Err(LineInvariantError::TabOutsideBlock { index: 0 })
+    );
+    let mut l = small_line();
+    l.tabs[0].x = -5.0;
+    assert_eq!(
+        l.validate(&small_ctx()),
+        Err(LineInvariantError::TabOutsideBlock { index: 0 })
+    );
+}
+
+#[test]
+fn non_finite_or_negative_tab_is_intercepted_before_other_checks() {
+    for (x, width) in [(f32::NAN, 10.0), (20.0, f32::INFINITY), (20.0, -1.0)] {
+        let mut l = small_line();
+        l.tabs[0] = PositionedTab {
+            x,
+            width,
+            ..l.tabs[0]
+        };
+        // Also break containment elsewhere: finiteness is judged first.
+        l.visual_runs[0].glyphs[1].x = 500.0;
+        assert_eq!(
+            l.validate(&small_ctx()),
+            Err(LineInvariantError::InvalidTab { index: 0 })
+        );
+    }
+}
+
+#[test]
+fn empty_line_rejects_tabs() {
+    let mut l = small_line();
+    l.byte_range = TextRange::empty_at(0);
+    l.visible_byte_end = 0;
+    l.visual_runs.clear();
+    l.visual_boxes.clear();
+    l.visual_width = 0.0;
+    l.line_height = 16.0;
+    assert_eq!(
+        l.validate(&small_ctx()),
+        Err(LineInvariantError::EmptyLineHasTabs)
+    );
+    l.tabs.clear();
+    assert_eq!(l.validate(&small_ctx()), Ok(()));
+}
+
+#[test]
+fn hang_mode_struct_gates_each_physical_edge() {
+    // A comma hangs right of the body of an LTR line.
+    let mut l = small_line();
+    l.visual_runs[0].glyphs.push(PositionedGlyph {
+        glyph_id: 2,
+        x: 40.0,
+        y_offset: 0.0,
+        advance: 10.0,
+        byte_range: Some(TextRange::new(4, 5)),
+        is_synthesized: false,
+        is_hanging: true,
+    });
+    l.byte_range = TextRange::new(0, 5);
+    l.visible_byte_end = 5;
+    l.hanging_right = 10.0;
+    let with = |hang_mode, base_direction| LineContext {
+        hang_mode,
+        base_direction,
+        ..small_ctx()
+    };
+    let end = |end| HangMode { start: false, end };
+    let start_only = HangMode {
+        start: true,
+        end: HangEndMode::None,
+    };
+    for mode in [end(HangEndMode::Allow), end(HangEndMode::Force)] {
+        assert_eq!(l.validate(&with(mode, BidiDirection::Ltr)), Ok(()));
+    }
+    for mode in [HangMode::NONE, start_only] {
+        assert_eq!(
+            l.validate(&with(mode, BidiDirection::Ltr)),
+            Err(LineInvariantError::HangingNotAllowed {
+                side: HangSide::Right
+            })
+        );
+    }
+    // In an RTL paragraph the right edge is the line *start*, so the same
+    // geometry needs `start`, and `end` no longer permits it.
+    assert_eq!(l.validate(&with(start_only, BidiDirection::Rtl)), Ok(()));
+    assert_eq!(
+        l.validate(&with(end(HangEndMode::Force), BidiDirection::Rtl)),
+        Err(LineInvariantError::HangingNotAllowed {
+            side: HangSide::Right
+        })
+    );
+    // Both edges together are expressible.
+    assert_eq!(
+        l.validate(&with(
+            HangMode {
+                start: true,
+                end: HangEndMode::Force
+            },
+            BidiDirection::Rtl
+        )),
+        Ok(())
+    );
+}
+
+/// A line "ab" + one preserved trailing space (bytes 2..3). `base` is the
+/// paragraph direction; the space is placed at `x`.
+fn trailing_space_line(x: f32) -> PositionedLine {
+    let mut l = small_line();
+    l.tabs.clear();
+    l.visual_boxes.clear();
+    l.byte_range = TextRange::new(0, 3);
+    l.visible_byte_end = 2;
+    l.visual_width = 20.0;
+    l.visual_runs[0].glyphs = vec![
+        PositionedGlyph {
+            glyph_id: 1,
+            x: 0.0,
+            y_offset: 0.0,
+            advance: 20.0,
+            byte_range: Some(TextRange::new(0, 2)),
+            is_synthesized: false,
+            is_hanging: false,
+        },
+        PositionedGlyph {
+            glyph_id: 3,
+            x,
+            y_offset: 0.0,
+            advance: 5.0,
+            byte_range: Some(TextRange::new(2, 3)),
+            is_synthesized: false,
+            is_hanging: false,
+        },
+    ];
+    l
+}
+
+#[test]
+fn l1_trailing_whitespace_sits_on_the_far_edge_of_the_base_direction() {
+    let ctx = |base_direction| LineContext {
+        whitespace: HangingWhitespaceMode::Preserved,
+        base_direction,
+        ..small_ctx()
+    };
+    let right_of_body = trailing_space_line(20.0);
+    let left_of_body = trailing_space_line(-5.0);
+    // LTR paragraph: right of the body is right; left of it is wrong.
+    assert_eq!(right_of_body.validate(&ctx(BidiDirection::Ltr)), Ok(()));
+    assert_eq!(
+        left_of_body.validate(&ctx(BidiDirection::Ltr)),
+        Err(LineInvariantError::TrailingWhitespaceOnWrongSide { run: 0, glyph: 1 })
+    );
+    // RTL paragraph: mirrored.
+    assert_eq!(left_of_body.validate(&ctx(BidiDirection::Rtl)), Ok(()));
+    assert_eq!(
+        right_of_body.validate(&ctx(BidiDirection::Rtl)),
+        Err(LineInvariantError::TrailingWhitespaceOnWrongSide { run: 0, glyph: 1 })
+    );
+    // Whitespace in the middle of the body is wrong in both directions.
+    let inside = trailing_space_line(10.0);
+    for d in [BidiDirection::Ltr, BidiDirection::Rtl] {
+        assert!(inside.validate(&ctx(d)).is_err());
+    }
+    // It never counts as hanging punctuation, on either side.
+    assert_eq!(
+        (left_of_body.hanging_left, right_of_body.hanging_right),
+        (0.0, 0.0)
+    );
+}
+
+#[test]
+fn trailing_tab_follows_the_same_l1_rule() {
+    let mut l = small_line();
+    l.visual_boxes.clear();
+    l.visual_runs[0].glyphs.truncate(1);
+    l.byte_range = TextRange::new(0, 3);
+    l.visible_byte_end = 2;
+    l.visual_width = 10.0;
+    l.tabs = vec![PositionedTab {
+        byte_range: TextRange::new(2, 3),
+        x: 10.0,
+        width: 8.0,
+    }];
+    let ctx = |whitespace, base_direction| LineContext {
+        whitespace,
+        base_direction,
+        ..small_ctx()
+    };
+    use HangingWhitespaceMode::{Collapsible, Preserved};
+    assert_eq!(l.validate(&ctx(Preserved, BidiDirection::Ltr)), Ok(()));
+    assert_eq!(
+        l.validate(&ctx(Preserved, BidiDirection::Rtl)),
+        Err(LineInvariantError::TrailingTabOnWrongSide { index: 0 })
+    );
+    // Collapsible: a trailing tab must have collapsed to nothing.
+    assert_eq!(
+        l.validate(&ctx(Collapsible, BidiDirection::Ltr)),
+        Err(LineInvariantError::TrailingTabNotCollapsed { index: 0 })
+    );
+    l.tabs[0].width = 0.0;
+    assert_eq!(l.validate(&ctx(Collapsible, BidiDirection::Ltr)), Ok(()));
+}
+
+#[test]
+fn context_follows_the_layout_options() {
+    let options = LayoutOptions {
+        strategy: LineBreakStrategy::GlobalOptimal,
+        hang_mode: HangMode {
+            start: true,
+            end: HangEndMode::Force,
+        },
+        line_height: LineHeight::Fixed(1.5),
+        whitespace: HangingWhitespaceMode::Preserved,
+        copy_soft_hyphen: SoftHyphenPolicy::Strip,
+    };
+    let strut = VerticalMetrics {
+        ascent: 12.0,
+        descent: 4.0,
+        line_gap: 0.0,
+    };
+    let c = LineContext::from_options(strut, BidiDirection::Rtl, &options);
+    assert_eq!(c.hang_mode, options.hang_mode);
+    assert_eq!(c.line_height, LineHeight::Fixed(1.5));
+    assert_eq!(c.whitespace, HangingWhitespaceMode::Preserved);
+    assert_eq!(c.base_direction, BidiDirection::Rtl);
+    assert_eq!(c.strut, strut);
+    // FrontendOptions is the frontend's counterpart, with its own defaults.
+    let f = FrontendOptions {
+        default_locale: LocaleTag::new("ja-JP"),
+        ..Default::default()
+    };
+    assert_eq!(f.default_locale.as_str(), "ja-JP");
 }

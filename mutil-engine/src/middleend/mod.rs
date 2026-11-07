@@ -13,10 +13,11 @@ pub use interaction::{
     Selection, SelectionRect,
 };
 pub use options::{
-    HangMode, HangingWhitespaceMode, LineBreakStrategy, LineHeight, SoftHyphenPolicy,
+    HangEndMode, HangMode, HangingWhitespaceMode, LayoutOptions, LineBreakStrategy, LineHeight,
+    SoftHyphenPolicy,
 };
 pub use output::{
     DecorationKind, DecorationLine, HangSide, LINE_GEOMETRY_ABS_EPSILON, LINE_GEOMETRY_REL_EPSILON,
     LineContext, LineInvariantError, PositionedGlyph, PositionedInlineBox, PositionedLine,
-    PositionedParagraph, VisualGlyphRun,
+    PositionedParagraph, PositionedTab, VisualGlyphRun,
 };

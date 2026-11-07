@@ -8,5 +8,5 @@ mod options;
 mod run;
 
 pub use ast::{GlueKind, HyphenOpportunity, ParagraphAst, PunctBind, ReplacementText, WordNode};
-pub use options::{AutospaceProfile, QuotePolicy};
+pub use options::{AutospaceProfile, FrontendOptions, QuotePolicy};
 pub use run::{ShapingRun, TextDecoration};

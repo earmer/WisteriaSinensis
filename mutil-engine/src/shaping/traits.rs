@@ -8,17 +8,35 @@ use crate::types::{
 use smallvec::SmallVec;
 
 /// Edit applied at a line boundary before re-shaping (spec §4.1, §5 Stage 1.4).
+///
+/// Which edge of the `reshape_window` window an edit acts on:
+///
+/// | variant | edge |
+/// |---|---|
+/// | `None` | both, symmetrically (no text change) |
+/// | `AppendHyphen`, `ReplacePrefix` | trailing (end) edge only |
+/// | `ReplaceSuffix` | leading (start) edge only |
+///
+/// A one-sided edit leaves the other edge exactly as `None` would. One call
+/// carries one edit, so a window that needs a trailing **and** a leading edit
+/// (the middle fragment of a word split twice) cannot be expressed (Open
+/// question 31).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BoundaryEdit {
-    /// Re-shape unchanged.
+    /// Symmetric, text-preserving re-shape of the window: no text is added or
+    /// removed. It re-evaluates the contextual forms of the window's atoms after
+    /// a line break or a split ligature, and acts on both edges of the window
+    /// alike.
     None,
-    /// Append a (hyphen) character to the prefix; the glyph is synthesised.
+    /// **Trailing edge only.** Append a (hyphen) character to the end of the
+    /// window; the glyph is synthesised.
     AppendHyphen {
         /// U+002D or the locale's hyphenation character (CSS `hyphenate-character`).
         hyphen: char,
     },
-    /// Spelling change on the **prefix** side: drop `cut_bytes` from the end of
-    /// the window (the bytes immediately before the break), append
+    /// **Trailing edge only.** Spelling change on the **prefix** side: drop
+    /// `cut_bytes` from the end of the window (the bytes immediately *before*
+    /// the break point, i.e. towards the start of the text), append
     /// `replacement`, then the hyphen. Built from
     /// `HyphenOpportunity::{prefix_replacement, prefix_cut_bytes}`.
     ReplacePrefix {
@@ -29,9 +47,10 @@ pub enum BoundaryEdit {
         /// Hyphen appended after the replacement.
         hyphen: char,
     },
-    /// Spelling change on the **suffix** side, at the start of the following
-    /// line: drop `cut_bytes` from the start of the window (the bytes
-    /// immediately after the break), then prepend `replacement`. Built from
+    /// **Leading edge only.** Spelling change on the **suffix** side, at the
+    /// start of the following line: drop `cut_bytes` from the start of the window
+    /// (the bytes immediately *after* the break point, i.e. towards the end of
+    /// the text), then prepend `replacement`. Built from
     /// `HyphenOpportunity::{suffix_replacement, suffix_cut_bytes}`. It adds no
     /// hyphen (that belongs to the previous line). Ranges still describe the
     /// original text, as for every edit.
@@ -100,6 +119,18 @@ pub trait TextShaper: Send + Sync {
 
     /// Shapes one complete run. Output is in **logical** order (§4.2 req. 2);
     /// `atoms` is the run's atom slice, and `ShapedCluster::atom_range` indexes it.
+    ///
+    /// `text` is the **whole paragraph text**, with `run.byte_range` selecting
+    /// the run, so that cluster byte offsets are absolute paragraph indices and
+    /// need no translation between layers. The backend may use the text outside
+    /// the run as shaping context (e.g. HarfBuzz pre- and post-context).
+    ///
+    /// **Cross-font limit.** OpenType contextual lookups, kerning and `chws`
+    /// squeezing act only inside one physical font. When two adjacent clusters
+    /// are routed to different fonts, no passing of the full text makes the
+    /// backend kern or squeeze across the seam. Full-width punctuation
+    /// squeezing across fonts is therefore a middle-end metrics-stage fallback
+    /// (spec §4.2, §5).
     #[allow(clippy::too_many_arguments)] // signature fixed by spec §4.1
     fn shape_run(
         &self,
@@ -152,11 +183,21 @@ pub trait TextShaper: Send + Sync {
     /// GDEF ligature caret positions: `n - 1` for `n` components, empty if the
     /// font has none (§6.2). Positions are unshaped and may need kerning
     /// adjustment.
+    ///
+    /// **Units.** The backend converts from font design units itself: returned
+    /// positions are x coordinates **relative to the glyph origin**, in layout
+    /// units, i.e. the unit of `font_size` (pixels when `font_size` is in
+    /// pixels), measured along +x and increasing. `font_size` is the run's
+    /// requested size; the backend multiplies it by `font.scale` (the fallback
+    /// size correction) to get the effective size. **[Design decision]**: the
+    /// engine is unit-agnostic and does not know the device pixel ratio, so
+    /// "physical pixels" here means "the same units as `font_size`".
     fn ligature_carets(
         &self,
         font: FontRef,
         glyph_id: u32,
         direction: Direction,
+        font_size: f32,
     ) -> SmallVec<[f32; 4]>;
 }
 

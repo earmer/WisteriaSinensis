@@ -129,7 +129,7 @@ fn test_pipeline_types_compile() {
     assert!(out.is_empty());
     assert!(
         shaper
-            .ligature_carets(FontRef::unscaled(font_id), 0, r.direction())
+            .ligature_carets(FontRef::unscaled(font_id), 0, r.direction(), 16.0)
             .is_empty()
     );
 
@@ -171,6 +171,7 @@ fn test_pipeline_types_compile() {
     );
 
     let line = PositionedLine {
+        tabs: vec![],
         byte_range: TextRange::new(0, TEXT.len()),
         visible_byte_end: TEXT.len(),
         baseline_y: ast.strut_metrics.ascent,
@@ -407,8 +408,17 @@ fn full_spec_type_surface_is_nameable() {
     ];
     assert_eq!(motions.len(), 12);
     assert_eq!(BoxHeightStyle::default(), BoxHeightStyle::Tight);
-    assert_eq!(HangMode::default(), HangMode::None);
-    assert_ne!(HangMode::AllowStart, HangMode::AllowEnd);
+    assert_eq!(HangMode::default(), HangMode::NONE);
+    assert_ne!(
+        HangMode {
+            start: true,
+            end: HangEndMode::None
+        },
+        HangMode {
+            start: false,
+            end: HangEndMode::Allow
+        }
+    );
     assert_eq!(LineHeight::Fixed(1.5), LineHeight::Fixed(1.5));
     assert_eq!(QuotePolicy::default(), QuotePolicy::Standard);
     assert_ne!(QuotePolicy::CjkAware, QuotePolicy::Standard);
