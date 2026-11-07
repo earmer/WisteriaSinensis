@@ -122,8 +122,7 @@ pub struct FontFeature {
 /// req. 5: the cache key includes "variation settings").
 ///
 /// Fields are private so that `Eq` and `Hash` are sound for `f32`: the
-/// constructor maps `-0.0` to `0.0` and NaN to `0.0` (debug builds assert
-/// instead), and hashing uses the bit pattern.
+/// constructor maps `-0.0` and NaN to `0.0` in every build profile, and hashing uses the bit pattern.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FontVariation {
     tag: [u8; 4],
@@ -134,7 +133,6 @@ impl FontVariation {
     /// Builds a setting, canonicalising `-0.0` and NaN to `0.0`.
     #[must_use]
     pub fn new(tag: [u8; 4], value: f32) -> Self {
-        debug_assert!(!value.is_nan(), "variation value must not be NaN");
         let value = if value.is_nan() || value == 0.0 {
             0.0
         } else {
@@ -321,6 +319,13 @@ mod tests {
         assert_eq!(f.variations().len(), 2);
         assert_eq!(f.variations()[0].tag(), *b"wdth");
         assert_eq!(f.variations()[1].value(), 650.0);
+    }
+
+    #[test]
+    fn variation_nan_is_normalised_to_zero() {
+        let v = FontVariation::new(*b"wght", f32::NAN);
+        assert_eq!(v.value().to_bits(), 0.0_f32.to_bits());
+        assert_eq!(v, FontVariation::new(*b"wght", 0.0));
     }
 
     #[test]

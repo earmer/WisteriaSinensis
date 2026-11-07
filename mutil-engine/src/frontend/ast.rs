@@ -2,7 +2,7 @@
 
 use super::ShapingRun;
 use crate::types::{
-    BidiDirection, ByteIndex, GraphemeAtom, ShapedCluster, TextRange, VerticalMetrics,
+    AtomFlags, BidiDirection, ByteIndex, GraphemeAtom, ShapedCluster, TextRange, VerticalMetrics,
 };
 
 /// Replacement text for spelling-change hyphenation.
@@ -16,14 +16,22 @@ pub type ReplacementText = Box<str>;
 /// (spec §2.4). Example: Dutch "omaatje" becomes "oma-tje".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HyphenOpportunity {
-    /// Byte offset of the break in the paragraph text.
+    /// The break position in the **original** text: the prefix ends and the
+    /// suffix begins here, before any replacement is applied.
     pub byte_offset: ByteIndex,
-    /// Text replacing the end of the prefix, if the spelling changes.
+    /// Text replacing the bytes cut from the end of the prefix, if the
+    /// spelling changes.
     pub prefix_replacement: Option<ReplacementText>,
-    /// Text replacing the start of the suffix, if the spelling changes.
+    /// Text replacing the bytes cut from the start of the suffix, if the
+    /// spelling changes.
     pub suffix_replacement: Option<ReplacementText>,
-    /// Original bytes removed by the replacement.
-    pub cut_bytes: u32,
+    /// Original bytes removed immediately **before** `byte_offset`. Must end on
+    /// an atom boundary. A cut that straddles the break is split between the
+    /// two counts.
+    pub prefix_cut_bytes: u32,
+    /// Original bytes removed immediately **after** `byte_offset`. Must end on
+    /// an atom boundary.
+    pub suffix_cut_bytes: u32,
     /// Break penalty (feeds Strategy B, §5 Stage 1).
     pub penalty: i32,
 }
@@ -157,6 +165,10 @@ fn clusters_partition_atoms(atoms: &[GraphemeAtom], clusters: &[ShapedCluster]) 
         if c.byte_range.start != first.byte_range.start || c.byte_range.end != last.byte_range.end {
             return false;
         }
+        // Invariant 3: the cluster's flags are the per-flag aggregate of its atoms.
+        if c.flags != AtomFlags::for_cluster(&atoms[r.clone()]) {
+            return false;
+        }
         next = r.end;
     }
     next == atoms.len()
@@ -172,7 +184,11 @@ fn clusters_partition_atoms(atoms: &[GraphemeAtom], clusters: &[ShapedCluster]) 
 pub struct ParagraphAst {
     /// Resolved paragraph base direction (UAX #9 P2/P3 or the caller's override).
     pub base_direction: BidiDirection,
-    /// Metrics for empty and fixed-height lines (§5 Stage 4).
+    /// The **resolved** strut (§5 Stage 4): font metrics already adjusted for
+    /// the active `LineHeight` policy, with half-leading folded into ascent and
+    /// descent (see `LineHeight::resolve_strut`). It is the height of an empty
+    /// line and of every line under `LineHeight::Fixed`, and a lower bound under
+    /// `LineHeight::Normal`.
     pub strut_metrics: VerticalMetrics,
     /// Shaping runs in logical order.
     pub runs: Vec<ShapingRun>,

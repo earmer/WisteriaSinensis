@@ -60,6 +60,9 @@ pub struct RawShapedGlyph {
 ///    `atoms.len()`, and each `byte_range` runs from its first atom's start to
 ///    its last atom's end.
 ///
+/// 3. **Flags aggregate per flag.** `flags == AtomFlags::for_cluster(atoms[atom_range])`
+///    (also checked by `WordNode::is_self_contained`).
+///
 /// `TextShaper::reshape_window` output uses the same space as `shape_run`
 /// output (indices into the run's atom slice, not re-based to the window).
 ///
@@ -81,7 +84,10 @@ pub struct ShapedCluster {
     pub font: FontRef,
     /// Bidi level; a cluster never straddles two levels (§3 Step 2.3).
     pub bidi_level: BidiLevel,
-    /// Union of the covered atoms' flags.
+    /// Per-flag aggregate of the covered atoms' flags, as computed by
+    /// `AtomFlags::for_cluster`: open-punctuation from the first atom,
+    /// `ALLOW_CJK_JUSTIFY_AFTER` and close-punctuation from the last, all other
+    /// flags ORed.
     pub flags: AtomFlags,
     /// Glyphs in **logical** order, including the order within the cluster.
     /// Backends that return visual order for RTL must reverse (§4.2 req. 2).

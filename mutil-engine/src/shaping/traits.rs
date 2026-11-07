@@ -1,6 +1,6 @@
 //! The abstract shaping bridge (spec §4.1).
 
-use crate::frontend::ShapingRun;
+use crate::frontend::{HyphenOpportunity, ShapingRun};
 use crate::types::{
     Direction, FontFamily, FontFeatures, FontId, FontMetrics, FontRef, FontStyle, GraphemeAtom,
     LocaleTag, ScriptTag, ShapedCluster, TextRange,
@@ -17,9 +17,10 @@ pub enum BoundaryEdit {
         /// U+002D or the locale's hyphenation character (CSS `hyphenate-character`).
         hyphen: char,
     },
-    /// Spelling-change hyphenation: drop `cut_bytes` from the end of the
-    /// prefix, append `replacement`, then the hyphen. Mirrors
-    /// `HyphenOpportunity` (libhyphen `rep`/`cut`).
+    /// Spelling change on the **prefix** side: drop `cut_bytes` from the end of
+    /// the window (the bytes immediately before the break), append
+    /// `replacement`, then the hyphen. Built from
+    /// `HyphenOpportunity::{prefix_replacement, prefix_cut_bytes}`.
     ReplacePrefix {
         /// Replacement text.
         replacement: Box<str>,
@@ -28,11 +29,12 @@ pub enum BoundaryEdit {
         /// Hyphen appended after the replacement.
         hyphen: char,
     },
-    /// Spelling-change at the **start of the following line**: drop
-    /// `cut_bytes` from the start of the window, then prepend `replacement`.
-    /// The mirror of `ReplacePrefix` for `HyphenOpportunity::suffix_replacement`;
-    /// it adds no hyphen (that belongs to the previous line). Ranges still
-    /// describe the original text, as for every edit.
+    /// Spelling change on the **suffix** side, at the start of the following
+    /// line: drop `cut_bytes` from the start of the window (the bytes
+    /// immediately after the break), then prepend `replacement`. Built from
+    /// `HyphenOpportunity::{suffix_replacement, suffix_cut_bytes}`. It adds no
+    /// hyphen (that belongs to the previous line). Ranges still describe the
+    /// original text, as for every edit.
     ReplaceSuffix {
         /// Replacement text.
         replacement: Box<str>,
@@ -41,13 +43,50 @@ pub enum BoundaryEdit {
     },
 }
 
+impl BoundaryEdit {
+    /// The edit for the line **ending** at `opportunity`: `ReplacePrefix` if the
+    /// opportunity changes the prefix spelling (a replacement text or a cut),
+    /// otherwise `AppendHyphen`. A cut without replacement text is a pure
+    /// deletion (empty `replacement`).
+    #[must_use]
+    pub fn prefix_for(opportunity: &HyphenOpportunity, hyphen: char) -> Self {
+        if opportunity.prefix_replacement.is_some() || opportunity.prefix_cut_bytes > 0 {
+            Self::ReplacePrefix {
+                replacement: opportunity.prefix_replacement.clone().unwrap_or_default(),
+                cut_bytes: opportunity.prefix_cut_bytes,
+                hyphen,
+            }
+        } else {
+            Self::AppendHyphen { hyphen }
+        }
+    }
+
+    /// The edit for the line **starting** at `opportunity`: `ReplaceSuffix` if
+    /// the suffix spelling changes, otherwise `None`. Symmetric with
+    /// [`BoundaryEdit::prefix_for`]: each side reads only its own replacement
+    /// and cut count.
+    #[must_use]
+    pub fn suffix_for(opportunity: &HyphenOpportunity) -> Self {
+        if opportunity.suffix_replacement.is_some() || opportunity.suffix_cut_bytes > 0 {
+            Self::ReplaceSuffix {
+                replacement: opportunity.suffix_replacement.clone().unwrap_or_default(),
+                cut_bytes: opportunity.suffix_cut_bytes,
+            }
+        } else {
+            Self::None
+        }
+    }
+}
+
 /// Contract between the engine and a shaping backend (HarfRust, CoreText,
 /// DirectWrite, a test double). Object-safe, so a backend can be chosen at run
-/// time as `&dyn TextShaper`.
+/// time as `&dyn TextShaper`. `Send + Sync`: methods take `&self`, so one
+/// backend can serve several layout threads; implementations needing interior
+/// mutability (caches) must synchronise it themselves.
 ///
 /// Output vectors are **appended to, never cleared**: callers own the buffer
 /// and may reuse its capacity.
-pub trait TextShaper {
+pub trait TextShaper: Send + Sync {
     /// Resolves the primary font for a style and returns its identifier and
     /// complete metrics (§4.5). Used for the paragraph strut.
     fn resolve_primary_font_metrics(
@@ -158,6 +197,74 @@ mod tests {
             unreachable!()
         };
         assert_eq!((&*replacement, cut_bytes), ("tje", 1));
+    }
+
+    fn opportunity(
+        prefix: Option<&str>,
+        prefix_cut: u32,
+        suffix: Option<&str>,
+        suffix_cut: u32,
+    ) -> HyphenOpportunity {
+        HyphenOpportunity {
+            byte_offset: 3,
+            prefix_replacement: prefix.map(Into::into),
+            suffix_replacement: suffix.map(Into::into),
+            prefix_cut_bytes: prefix_cut,
+            suffix_cut_bytes: suffix_cut,
+            penalty: 0,
+        }
+    }
+
+    #[test]
+    fn each_side_reads_only_its_own_replacement_and_cut() {
+        let o = opportunity(Some("a"), 2, Some("tje"), 1);
+        assert_eq!(
+            BoundaryEdit::prefix_for(&o, '-'),
+            BoundaryEdit::ReplacePrefix {
+                replacement: "a".into(),
+                cut_bytes: 2,
+                hyphen: '-'
+            }
+        );
+        assert_eq!(
+            BoundaryEdit::suffix_for(&o),
+            BoundaryEdit::ReplaceSuffix {
+                replacement: "tje".into(),
+                cut_bytes: 1
+            }
+        );
+        // Prefix-only change leaves the suffix side untouched, and vice versa.
+        let p = opportunity(Some("a"), 1, None, 0);
+        assert_eq!(BoundaryEdit::suffix_for(&p), BoundaryEdit::None);
+        let s = opportunity(None, 0, Some("k"), 1);
+        assert_eq!(
+            BoundaryEdit::prefix_for(&s, '-'),
+            BoundaryEdit::AppendHyphen { hyphen: '-' }
+        );
+        // A cut with no replacement text is a pure deletion on that side.
+        let d = opportunity(None, 1, None, 1);
+        assert_eq!(
+            BoundaryEdit::prefix_for(&d, '-'),
+            BoundaryEdit::ReplacePrefix {
+                replacement: "".into(),
+                cut_bytes: 1,
+                hyphen: '-'
+            }
+        );
+        assert_eq!(
+            BoundaryEdit::suffix_for(&d),
+            BoundaryEdit::ReplaceSuffix {
+                replacement: "".into(),
+                cut_bytes: 1
+            }
+        );
+    }
+
+    #[test]
+    fn shaper_trait_objects_are_send_and_sync() {
+        fn check<T: Send + Sync + ?Sized>() {}
+        check::<dyn TextShaper>();
+        check::<Box<dyn TextShaper>>();
     }
 
     #[test]

@@ -104,7 +104,8 @@ fn zero_layout_full_pipeline_assembly() {
         byte_offset: 3,
         prefix_replacement: Some("a".into()),
         suffix_replacement: Some("tje".into()),
-        cut_bytes: 1,
+        prefix_cut_bytes: 1,
+        suffix_cut_bytes: 2,
         penalty: 50,
     };
     let ast = ParagraphAst {
@@ -162,15 +163,24 @@ fn zero_layout_full_pipeline_assembly() {
     let r = &ast.runs[0];
     let run_atoms: Vec<_> = (0..TEXT.len()).map(atom).collect();
     let features = FontFeatures::new();
-    let prefix_edit = BoundaryEdit::ReplacePrefix {
-        replacement: opportunity.prefix_replacement.clone().unwrap(),
-        cut_bytes: opportunity.cut_bytes,
-        hyphen: '-',
-    };
-    let suffix_edit = BoundaryEdit::ReplaceSuffix {
-        replacement: opportunity.suffix_replacement.clone().unwrap(),
-        cut_bytes: opportunity.cut_bytes,
-    };
+    // Each side reads only its own replacement and cut count.
+    let prefix_edit = BoundaryEdit::prefix_for(&opportunity, '-');
+    let suffix_edit = BoundaryEdit::suffix_for(&opportunity);
+    assert_eq!(
+        prefix_edit,
+        BoundaryEdit::ReplacePrefix {
+            replacement: "a".into(),
+            cut_bytes: 1,
+            hyphen: '-'
+        }
+    );
+    assert_eq!(
+        suffix_edit,
+        BoundaryEdit::ReplaceSuffix {
+            replacement: "tje".into(),
+            cut_bytes: 2
+        }
+    );
     let mut out = Vec::new();
     shaper.reshape_window(
         TEXT,
@@ -230,6 +240,7 @@ fn zero_layout_full_pipeline_assembly() {
             glyphs: l0_glyphs,
         }],
         caret_stops: vec![],
+        visual_boxes: vec![],
         decorations: vec![],
     };
 
@@ -241,7 +252,9 @@ fn zero_layout_full_pipeline_assembly() {
         l1_glyphs.push(glyph(c, pen, false));
         pen += c.natural_width;
     }
-    pen += SPACE_W + BOX_W + TAB_W;
+    pen += SPACE_W;
+    let box_x = pen;
+    pen += BOX_W + TAB_W;
     for c in word_b {
         l1_glyphs.push(glyph(c, pen, false));
         pen += c.natural_width;
@@ -266,6 +279,15 @@ fn zero_layout_full_pipeline_assembly() {
             glyphs: l1_glyphs,
         }],
         caret_stops: vec![],
+        visual_boxes: vec![PositionedInlineBox {
+            box_id: 42,
+            byte_range: TextRange::new(8, 11),
+            x: box_x,
+            y: 0.0,
+            width: BOX_W,
+            ascent: 10.0,
+            descent: 2.0,
+        }],
         decorations: vec![],
     };
 
@@ -289,12 +311,18 @@ fn zero_layout_full_pipeline_assembly() {
             level: 0,
             line: 2,
         }],
+        visual_boxes: vec![],
         decorations: vec![],
     };
 
-    let strut = ast.strut_metrics; // Copy: no borrow of the AST survives
+    // Copy: no borrow of the AST survives
+    let strut = ast.strut_metrics;
+    let ctx = LineContext {
+        strut,
+        ..Default::default()
+    };
     for (i, l) in [&line0, &line1, &line2].into_iter().enumerate() {
-        assert_eq!(l.validate(&strut), Ok(()), "line {i}");
+        assert_eq!(l.validate(&ctx), Ok(()), "line {i}");
     }
     assert!(line1.hanging_right > 0.0 && line0.hanging_right == 0.0);
 
@@ -319,7 +347,7 @@ fn zero_layout_full_pipeline_assembly() {
     bad.visual_width += ADV;
     bad.hanging_right = 0.0;
     assert!(matches!(
-        bad.validate(&strut),
+        bad.validate(&ctx),
         Err(LineInvariantError::HangingGlyphInsideBlock { .. })
     ));
 }
@@ -360,4 +388,48 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
         next = c.byte_range.end;
     }
     assert_eq!(next, text_len);
+}
+
+#[test]
+fn ligature_cluster_takes_justify_after_from_its_last_atom_only() {
+    let atom_with = |off: usize, flags: AtomFlags| GraphemeAtom { flags, ..atom(off) };
+    let node = |atoms: Vec<GraphemeAtom>, flags: AtomFlags| {
+        let mut c = cluster(0, 0);
+        c.atom_range = 0..atoms.len();
+        c.byte_range = TextRange::new(0, atoms.len());
+        c.flags = flags;
+        WordNode::Word {
+            run_index: 0,
+            atoms,
+            clusters: vec![c],
+            hyphen_breaks: vec![],
+            total_width: 0.0,
+        }
+    };
+    let allow = AtomFlags::ALLOW_CJK_JUSTIFY_AFTER;
+
+    // Only the last atom has the opportunity: the cluster has it.
+    let atoms = vec![atom_with(0, AtomFlags::EMPTY), atom_with(1, allow)];
+    let aggregated = AtomFlags::for_cluster(&atoms);
+    assert!(aggregated.contains(allow));
+    assert!(node(atoms.clone(), aggregated).is_self_contained());
+    // A naive OR is the same here, but the cluster flags must equal the aggregate.
+    assert!(!node(atoms, AtomFlags::EMPTY).is_self_contained());
+
+    // Only the first atom has it: the opportunity lies *inside* the ligature,
+    // so the cluster must not have it, and a naive OR is rejected.
+    let atoms = vec![atom_with(0, allow), atom_with(1, AtomFlags::EMPTY)];
+    let aggregated = AtomFlags::for_cluster(&atoms);
+    assert!(!aggregated.contains(allow));
+    assert!(node(atoms.clone(), aggregated).is_self_contained());
+    assert!(!node(atoms.clone(), allow).is_self_contained());
+
+    // Open punctuation from the first atom, close punctuation from the last.
+    let atoms = vec![
+        atom_with(0, AtomFlags::IS_OPEN_PUNCT),
+        atom_with(1, AtomFlags::IS_CLOSE_PUNCT),
+    ];
+    let f = AtomFlags::for_cluster(&atoms);
+    assert!(f.contains(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT));
+    assert!(node(atoms, f).is_self_contained());
 }

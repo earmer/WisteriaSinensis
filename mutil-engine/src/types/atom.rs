@@ -176,6 +176,29 @@ impl AtomFlags {
         (Self::IS_APOSTROPHE, "IS_APOSTROPHE"),
     ];
 
+    /// Flags a cluster takes only from its **first** atom.
+    pub const FIRST_ATOM_ONLY: Self = Self::IS_OPEN_PUNCT;
+    /// Flags a cluster takes only from its **last** atom: the justification
+    /// opportunity *after* a ligature is the one after its last component, and
+    /// a closing mark closes at the end.
+    pub const LAST_ATOM_ONLY: Self = Self(Self::ALLOW_CJK_JUSTIFY_AFTER.0 | Self::IS_CLOSE_PUNCT.0);
+
+    /// Aggregates the flags of the atoms a cluster covers (spec §2.3):
+    /// [`FIRST_ATOM_ONLY`](Self::FIRST_ATOM_ONLY) from the first atom,
+    /// [`LAST_ATOM_ONLY`](Self::LAST_ATOM_ONLY) from the last, and every other
+    /// flag as the bitwise OR of all atoms. An empty slice gives
+    /// [`EMPTY`](Self::EMPTY).
+    #[must_use]
+    pub fn for_cluster(atoms: &[GraphemeAtom]) -> Self {
+        let (Some(first), Some(last)) = (atoms.first(), atoms.last()) else {
+            return Self::EMPTY;
+        };
+        let ored = atoms.iter().fold(Self::EMPTY, |acc, a| acc | a.flags);
+        (ored - Self::FIRST_ATOM_ONLY - Self::LAST_ATOM_ONLY)
+            | (first.flags & Self::FIRST_ATOM_ONLY)
+            | (last.flags & Self::LAST_ATOM_ONLY)
+    }
+
     /// The raw bits.
     #[inline]
     #[must_use]
@@ -362,6 +385,58 @@ mod tests {
             AtomFlags::ALLOW_CJK_JUSTIFY_AFTER
         );
         assert!(AtomFlags::EMPTY.is_empty());
+    }
+
+    fn atom_with(flags: AtomFlags) -> GraphemeAtom {
+        GraphemeAtom {
+            byte_range: TextRange::new(0, 1),
+            script: ScriptTag::LATIN,
+            bidi_level: 0,
+            linebreak_class: LineBreakClass::Al,
+            flags,
+        }
+    }
+
+    #[test]
+    fn cluster_flags_inherit_per_flag_from_first_last_or_all() {
+        let all = AtomFlags::ALL;
+        // A three-atom ligature: only the outer atoms carry position-dependent flags.
+        let lig = [
+            atom_with(AtomFlags::IS_OPEN_PUNCT | AtomFlags::ALLOW_CJK_JUSTIFY_AFTER),
+            atom_with(
+                AtomFlags::IS_OPEN_PUNCT
+                    | AtomFlags::IS_CLOSE_PUNCT
+                    | AtomFlags::ALLOW_CJK_JUSTIFY_AFTER
+                    | AtomFlags::KASHIDA_CAPABLE,
+            ),
+            atom_with(AtomFlags::IS_CLOSE_PUNCT | AtomFlags::IS_EMOJI_SEQUENCE),
+        ];
+        let f = AtomFlags::for_cluster(&lig);
+        // ALLOW_CJK_JUSTIFY_AFTER: last atom has it not, so the cluster does not,
+        // although the first and middle atoms do.
+        assert!(!f.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER));
+        // IS_OPEN_PUNCT: from the first atom only.
+        assert!(f.contains(AtomFlags::IS_OPEN_PUNCT));
+        // IS_CLOSE_PUNCT: from the last atom only.
+        assert!(f.contains(AtomFlags::IS_CLOSE_PUNCT));
+        // Everything else is ORed.
+        assert!(f.contains(AtomFlags::KASHIDA_CAPABLE | AtomFlags::IS_EMOJI_SEQUENCE));
+
+        // Reverse the roles: first has no open mark, middle atoms do; last has
+        // the justification opportunity but no close mark.
+        let lig = [
+            atom_with(AtomFlags::IS_CLOSE_PUNCT),
+            atom_with(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT),
+            atom_with(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER),
+        ];
+        let f = AtomFlags::for_cluster(&lig);
+        assert!(f.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER));
+        assert!(!f.contains(AtomFlags::IS_OPEN_PUNCT)); // first atom lacks it
+        assert!(!f.contains(AtomFlags::IS_CLOSE_PUNCT)); // last atom lacks it
+
+        // One atom: identity. No atoms: empty.
+        assert_eq!(AtomFlags::for_cluster(&[atom_with(all)]), all);
+        assert_eq!(AtomFlags::for_cluster(&[]), AtomFlags::EMPTY);
     }
 
     #[test]

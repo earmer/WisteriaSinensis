@@ -1,5 +1,7 @@
 //! Layout options (spec §5 Stage 1.3 and Stage 4).
 
+use crate::types::{FontMetrics, VerticalMetrics};
+
 /// Hanging punctuation mode (spec §5 Stage 1.3; JLReq 2.5.1, CSS Text 4
 /// `hanging-punctuation` `[W4][W2]`). At most one character hangs at each edge.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -7,6 +9,9 @@ pub enum HangMode {
     /// No hanging.
     #[default]
     None,
+    /// An opening mark hangs at the **leading** edge of a line (CSS `first`),
+    /// outside the text block. Physical side: left for LTR lines, right for RTL.
+    AllowStart,
     /// A stop or comma hangs only if it would otherwise have to move to the
     /// next line.
     AllowEnd,
@@ -24,6 +29,31 @@ pub enum LineHeight {
     /// A multiple of the font size taken from the first available font only;
     /// fallback glyphs may overflow the line box (standard CSS behaviour).
     Fixed(f32),
+}
+
+impl LineHeight {
+    /// Resolves the paragraph strut for `font` at `font_size` (spec §5 Stage 4.1).
+    ///
+    /// * `Normal`: the font's own ascent, descent and line gap.
+    /// * `Fixed(m)`: total height `m * font_size`; the leading
+    ///   `total - (ascent + descent)` (possibly negative) is split in half above
+    ///   and below, and the line gap becomes 0 (CSS half-leading).
+    ///
+    /// `natural_line_height()` of the result is the line height of an empty line.
+    #[must_use]
+    pub fn resolve_strut(self, font: &FontMetrics, font_size: f32) -> VerticalMetrics {
+        match self {
+            Self::Normal => VerticalMetrics::from_font_metrics(font),
+            Self::Fixed(multiplier) => {
+                let leading = multiplier * font_size - (font.ascent + font.descent);
+                VerticalMetrics {
+                    ascent: font.ascent + leading / 2.0,
+                    descent: font.descent + leading / 2.0,
+                    line_gap: 0.0,
+                }
+            }
+        }
+    }
 }
 
 /// Trailing whitespace handling at a soft wrap (spec §5 Stage 1.7).
@@ -68,6 +98,27 @@ pub enum SoftHyphenPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strut_resolution_folds_half_leading() {
+        let font = FontMetrics {
+            ascent: 8.0,
+            descent: 2.0,
+            line_gap: 1.0,
+            ..Default::default()
+        };
+        let normal = LineHeight::Normal.resolve_strut(&font, 10.0);
+        assert_eq!(normal.natural_line_height(), 11.0);
+        let fixed = LineHeight::Fixed(1.5).resolve_strut(&font, 10.0);
+        assert_eq!(
+            (fixed.ascent, fixed.descent, fixed.line_gap),
+            (10.5, 4.5, 0.0)
+        );
+        assert_eq!(fixed.natural_line_height(), 15.0);
+        // A line height below the glyph extent gives negative leading.
+        let tight = LineHeight::Fixed(0.5).resolve_strut(&font, 10.0);
+        assert_eq!(tight.natural_line_height(), 5.0);
+    }
 
     #[test]
     fn defaults_follow_the_spec_baselines() {

@@ -52,11 +52,24 @@ impl ScriptTag {
     /// `Bopo`.
     pub const BOPOMOFO: Self = Self(*b"Bopo");
 
-    /// Wraps four raw bytes without validation.
+    /// Wraps four bytes in ISO 15924 canonical case: ASCII letters are
+    /// normalised (first upper case, the rest lower case) so that
+    /// `from_bytes(*b"LATN") == ScriptTag::LATIN` and `is_unresolved` matches
+    /// `ZYYY`. Other bytes are kept as given; no further validation is done.
     #[inline]
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 4]) -> Self {
-        Self(bytes)
+        let mut b = bytes;
+        let mut i = 0;
+        while i < 4 {
+            b[i] = if i == 0 {
+                b[i].to_ascii_uppercase()
+            } else {
+                b[i].to_ascii_lowercase()
+            };
+            i += 1;
+        }
+        Self(b)
     }
 
     /// Parses a four-letter ASCII tag in any case, normalising to the ISO 15924
@@ -167,6 +180,18 @@ mod tests {
         assert_eq!(ScriptTag::parse("ZSYE"), Some(ScriptTag::EMOJI));
         assert_eq!(ScriptTag::parse("Lat"), None);
         assert_eq!(ScriptTag::parse("La1n"), None);
+    }
+
+    #[test]
+    fn from_bytes_canonicalises_case() {
+        assert_eq!(ScriptTag::from_bytes(*b"LATN"), ScriptTag::LATIN);
+        assert_eq!(ScriptTag::from_bytes(*b"zyyy"), ScriptTag::COMMON);
+        assert!(ScriptTag::from_bytes(*b"ZINH").is_unresolved());
+        assert_eq!(ScriptTag::from_bytes(*b"Zsye"), ScriptTag::EMOJI);
+        assert_eq!(
+            ScriptTag::from_bytes([b'1', b'a', 0xFF, b'Z']).as_bytes(),
+            [b'1', b'a', 0xFF, b'z']
+        );
     }
 
     #[test]

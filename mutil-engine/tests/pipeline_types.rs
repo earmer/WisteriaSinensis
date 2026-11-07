@@ -194,6 +194,7 @@ fn test_pipeline_types_compile() {
             level: 0,
             line: 0,
         }],
+        visual_boxes: vec![],
         decorations: vec![],
     };
 
@@ -297,11 +298,13 @@ fn hyphen_opportunity_carries_prefix_and_suffix_replacements() {
         byte_offset: 3,
         prefix_replacement: Some("a".into()),
         suffix_replacement: Some("tje".into()),
-        cut_bytes: 1,
+        prefix_cut_bytes: 1,
+        suffix_cut_bytes: 2,
         penalty: 50,
     };
     assert_eq!(h.prefix_replacement.as_deref(), Some("a"));
     assert_eq!(h.suffix_replacement.as_deref(), Some("tje"));
+    assert_eq!((h.prefix_cut_bytes, h.suffix_cut_bytes), (1, 2));
 }
 
 #[test]
@@ -405,6 +408,7 @@ fn full_spec_type_surface_is_nameable() {
     assert_eq!(motions.len(), 12);
     assert_eq!(BoxHeightStyle::default(), BoxHeightStyle::Tight);
     assert_eq!(HangMode::default(), HangMode::None);
+    assert_ne!(HangMode::AllowStart, HangMode::AllowEnd);
     assert_eq!(LineHeight::Fixed(1.5), LineHeight::Fixed(1.5));
     assert_eq!(QuotePolicy::default(), QuotePolicy::Standard);
     assert_ne!(QuotePolicy::CjkAware, QuotePolicy::Standard);

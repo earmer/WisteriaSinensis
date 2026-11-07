@@ -16,6 +16,7 @@ pub use options::{
     HangMode, HangingWhitespaceMode, LineBreakStrategy, LineHeight, SoftHyphenPolicy,
 };
 pub use output::{
-    DecorationKind, DecorationLine, HangSide, LINE_GEOMETRY_EPSILON, LineInvariantError,
-    PositionedGlyph, PositionedLine, PositionedParagraph, VisualGlyphRun,
+    DecorationKind, DecorationLine, HangSide, LINE_GEOMETRY_ABS_EPSILON, LINE_GEOMETRY_REL_EPSILON,
+    LineContext, LineInvariantError, PositionedGlyph, PositionedInlineBox, PositionedLine,
+    PositionedParagraph, VisualGlyphRun,
 };
