@@ -6,4 +6,4 @@ mod traits;
 
 pub use noop::NoopShaper;
 pub use profile::ShaperProfile;
-pub use traits::{BoundaryEdit, TextShaper};
+pub use traits::{LeadingEdit, TextShaper, TrailingEdit};

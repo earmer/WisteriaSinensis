@@ -28,7 +28,7 @@ pub struct RawShapedGlyph {
     /// Vertical offset from the baseline.
     pub y_offset: f32,
     /// `true` for a glyph the engine generated rather than the source text
-    /// (the hyphen appended by `BoundaryEdit`). Carried through to
+    /// (the hyphen appended by `TrailingEdit`). Carried through to
     /// `PositionedGlyph::is_synthesized`.
     pub is_synthesized: bool,
 }
@@ -54,7 +54,7 @@ pub struct RawShapedGlyph {
 ///    chosen *before* clusters are assigned to nodes. If a split point falls
 ///    inside a multi-atom cluster, the frontend must re-shape that window with
 ///    the split as a boundary (`TextShaper::reshape_window` with
-///    `BoundaryEdit::None`) instead of cutting the cluster.
+///    `LeadingEdit::None` and `TrailingEdit::None`) instead of cutting the cluster.
 /// 2. **Within a node, clusters partition the atoms.** In logical order the
 ///    `atom_range`s are contiguous, non-empty, start at 0 and end at
 ///    `atoms.len()`, and each `byte_range` runs from its first atom's start to

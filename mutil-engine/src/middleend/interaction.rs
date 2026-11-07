@@ -133,6 +133,6 @@ pub enum BoxHeightStyle {
     Tight,
     /// The full line box height.
     Max,
-    /// The paragraph's strut metrics (`ParagraphAst::strut_metrics`).
+    /// The paragraph's resolved strut (`ParagraphAst::strut_metrics` after `LineHeight::resolve_strut`).
     Strut,
 }

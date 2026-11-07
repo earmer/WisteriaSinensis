@@ -110,11 +110,13 @@ fn zero_layout_full_pipeline_assembly() {
     };
     let ast = ParagraphAst {
         base_direction: BidiDirection::Ltr,
-        strut_metrics: VerticalMetrics {
+        // Raw primary-font metrics: the frontend never resolves a line height.
+        strut_metrics: FontMetrics {
             ascent: 12.0,
             descent: 4.0,
-            line_gap: 0.0,
+            ..Default::default()
         },
+        strut_font_size: 16.0,
         runs: vec![run()],
         items: vec![
             word(0, 7, vec![opportunity.clone()]),
@@ -158,37 +160,64 @@ fn zero_layout_full_pipeline_assembly() {
         .sum();
     assert_eq!(covered, 7 + 2 + 1); // "omaatje" + "go" + ","
 
+    // Layout policy and the validation context. The strut is resolved here, in
+    // the middle-end, from the AST's raw metrics and the line-height policy.
+    let options = LayoutOptions {
+        hang_mode: HangMode {
+            start: HangStartMode::None,
+            end: HangEndMode::Allow,
+        },
+        ..Default::default()
+    };
+    let ctx = LineContext::from_options(
+        &ast.strut_metrics,
+        ast.strut_font_size,
+        ast.base_direction,
+        &options,
+    );
+    assert_eq!(ctx.strut.natural_line_height(), 16.0);
+    let constraints = LayoutConstraints {
+        wrap_width: 200.0,
+        tab_stops: TabStops { step: 8.0 },
+    };
+    assert_eq!(
+        check_layout_inputs(&ast, TEXT, &constraints, &options),
+        Ok(ctx)
+    );
+
     // ---- Shaping bridge: both spelling edits through the trait ----------
     let shaper: &dyn TextShaper = &NoopShaper;
     let r = &ast.runs[0];
     let run_atoms: Vec<_> = (0..TEXT.len()).map(atom).collect();
     let features = FontFeatures::new();
     // Each side reads only its own replacement and cut count.
-    let prefix_edit = BoundaryEdit::prefix_for(&opportunity, '-');
-    let suffix_edit = BoundaryEdit::suffix_for(&opportunity);
+    let trailing_edit = TrailingEdit::for_opportunity(&opportunity, '-');
+    let leading_edit = LeadingEdit::for_opportunity(&opportunity);
     assert_eq!(
-        prefix_edit,
-        BoundaryEdit::ReplacePrefix {
+        trailing_edit,
+        TrailingEdit::ReplacePrefix {
             replacement: "a".into(),
             cut_bytes: 1,
             hyphen: '-'
         }
     );
     assert_eq!(
-        suffix_edit,
-        BoundaryEdit::ReplaceSuffix {
+        leading_edit,
+        LeadingEdit::ReplaceSuffix {
             replacement: "tje".into(),
             cut_bytes: 2
         }
     );
     let mut out = Vec::new();
+    // Regular break: line 0 ends at the break, line 1 starts after it.
     shaper.reshape_window(
         TEXT,
         r,
         &run_atoms,
         TextRange::new(0, 3),
         &features,
-        prefix_edit,
+        LeadingEdit::None,
+        trailing_edit.clone(),
         &mut out,
     );
     shaper.reshape_window(
@@ -197,7 +226,19 @@ fn zero_layout_full_pipeline_assembly() {
         &run_atoms,
         TextRange::new(3, 7),
         &features,
-        suffix_edit,
+        leading_edit.clone(),
+        TrailingEdit::None,
+        &mut out,
+    );
+    // Extreme middle fragment: both edges edited in one call.
+    shaper.reshape_window(
+        TEXT,
+        r,
+        &run_atoms,
+        TextRange::new(3, 7),
+        &features,
+        leading_edit,
+        trailing_edit,
         &mut out,
     );
     assert!(out.is_empty());
@@ -305,7 +346,7 @@ fn zero_layout_full_pipeline_assembly() {
         baseline_y: 48.0,
         ascent: 12.0,
         descent: 4.0,
-        line_height: ast.strut_metrics.natural_line_height(),
+        line_height: ctx.strut.natural_line_height(),
         visual_width: 0.0,
         hanging_left: 0.0,
         hanging_right: 0.0,
@@ -323,18 +364,6 @@ fn zero_layout_full_pipeline_assembly() {
         decorations: vec![],
     };
 
-    // Copy: no borrow of the AST survives
-    let strut = ast.strut_metrics;
-    // The context comes from the same options that would drive the layout:
-    // a right-hanging comma needs the end edge enabled.
-    let options = LayoutOptions {
-        hang_mode: HangMode {
-            start: false,
-            end: HangEndMode::Allow,
-        },
-        ..Default::default()
-    };
-    let ctx = LineContext::from_options(strut, ast.base_direction, &options);
     for (i, l) in [&line0, &line1, &line2].into_iter().enumerate() {
         assert_eq!(l.validate(&ctx), Ok(()), "line {i}");
     }
@@ -355,7 +384,8 @@ fn zero_layout_full_pipeline_assembly() {
     // ---- Ownership: the output stands alone ------------------------------
     assert_send_sync_static::<ParagraphAst>();
     assert_send_sync_static::<PositionedParagraph>();
-    assert_send_sync_static::<BoundaryEdit>();
+    assert_send_sync_static::<LeadingEdit>();
+    assert_send_sync_static::<TrailingEdit>();
     let ast_copy = ast.clone();
     drop(ast); // the layout holds no borrow of the AST
     assert!(ast_copy.items.iter().all(WordNode::is_self_contained));
@@ -615,9 +645,12 @@ fn hang_mode_struct_gates_each_physical_edge() {
         base_direction,
         ..small_ctx()
     };
-    let end = |end| HangMode { start: false, end };
+    let end = |end| HangMode {
+        start: HangStartMode::None,
+        end,
+    };
     let start_only = HangMode {
-        start: true,
+        start: HangStartMode::AllLines,
         end: HangEndMode::None,
     };
     for mode in [end(HangEndMode::Allow), end(HangEndMode::Force)] {
@@ -644,7 +677,7 @@ fn hang_mode_struct_gates_each_physical_edge() {
     assert_eq!(
         l.validate(&with(
             HangMode {
-                start: true,
+                start: HangStartMode::AllLines,
                 end: HangEndMode::Force
             },
             BidiDirection::Rtl
@@ -756,28 +789,176 @@ fn context_follows_the_layout_options() {
     let options = LayoutOptions {
         strategy: LineBreakStrategy::GlobalOptimal,
         hang_mode: HangMode {
-            start: true,
+            start: HangStartMode::FirstLine,
             end: HangEndMode::Force,
         },
         line_height: LineHeight::Fixed(1.5),
         whitespace: HangingWhitespaceMode::Preserved,
         copy_soft_hyphen: SoftHyphenPolicy::Strip,
     };
-    let strut = VerticalMetrics {
+    let raw = FontMetrics {
         ascent: 12.0,
         descent: 4.0,
-        line_gap: 0.0,
+        ..Default::default()
     };
-    let c = LineContext::from_options(strut, BidiDirection::Rtl, &options);
+    let c = LineContext::from_options(&raw, 10.0, BidiDirection::Rtl, &options);
     assert_eq!(c.hang_mode, options.hang_mode);
     assert_eq!(c.line_height, LineHeight::Fixed(1.5));
     assert_eq!(c.whitespace, HangingWhitespaceMode::Preserved);
     assert_eq!(c.base_direction, BidiDirection::Rtl);
-    assert_eq!(c.strut, strut);
+    // Fixed(1.5) at size 10 resolves to a 15-unit strut with 12/4 raw: leading -1.
+    assert_eq!(c.strut.natural_line_height(), 15.0);
+    assert_eq!(c.line_index, 0);
+    assert_eq!(c.for_line(3).line_index, 3);
     // FrontendOptions is the frontend's counterpart, with its own defaults.
     let f = FrontendOptions {
         default_locale: LocaleTag::new("ja-JP"),
         ..Default::default()
     };
     assert_eq!(f.default_locale.as_str(), "ja-JP");
+}
+
+#[test]
+fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
+    // An opening bracket hangs at the physical left of line 0 (LTR).
+    let mut l = small_line();
+    l.byte_range = TextRange::new(0, 5);
+    l.visible_byte_end = 5;
+    l.visual_runs[0].glyphs.insert(
+        0,
+        PositionedGlyph {
+            glyph_id: 9,
+            x: -10.0,
+            y_offset: 0.0,
+            advance: 10.0,
+            byte_range: Some(TextRange::new(4, 5)),
+            is_synthesized: false,
+            is_hanging: true,
+        },
+    );
+    l.hanging_left = 10.0;
+    let ctx = |start, dir, index| {
+        LineContext {
+            hang_mode: HangMode {
+                start,
+                end: HangEndMode::None,
+            },
+            base_direction: dir,
+            ..small_ctx()
+        }
+        .for_line(index)
+    };
+    use HangStartMode::{AllLines, FirstLine, None as NoStart};
+    assert_eq!(l.validate(&ctx(FirstLine, BidiDirection::Ltr, 0)), Ok(()));
+    let denied = Err(LineInvariantError::HangingNotAllowed {
+        side: HangSide::Left,
+    });
+    assert_eq!(l.validate(&ctx(FirstLine, BidiDirection::Ltr, 1)), denied);
+    assert_eq!(l.validate(&ctx(NoStart, BidiDirection::Ltr, 0)), denied);
+    assert_eq!(l.validate(&ctx(AllLines, BidiDirection::Ltr, 5)), Ok(()));
+    // In an RTL paragraph the left edge is the line *end*: `start` never allows it.
+    assert_eq!(l.validate(&ctx(AllLines, BidiDirection::Rtl, 0)), denied);
+
+    // The paragraph-level check supplies the index per line.
+    let para = PositionedParagraph {
+        base_direction: BidiDirection::Ltr,
+        size: Size::default(),
+        lines: vec![l.clone(), l],
+    };
+    let c = ctx(FirstLine, BidiDirection::Ltr, 0);
+    assert_eq!(
+        para.validate(&c),
+        Err((
+            1,
+            LineInvariantError::HangingNotAllowed {
+                side: HangSide::Left
+            }
+        ))
+    );
+}
+
+#[test]
+fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
+    let stop = |x: f32, offset: usize, level: u8, affinity| CaretStop {
+        x,
+        offset,
+        affinity,
+        level,
+        line: 0,
+    };
+    use CaretAffinity::{Downstream, Upstream};
+    // LTR paragraph "ab" + RTL run "אב" (bytes 2..6, two bytes per letter).
+    // Visually: a | b | ב | א. The right edge is the *start* of the RTL run
+    // (offset 2); visible_byte_end (6) is at the run's left edge, mid-line.
+    let mut mixed = small_line();
+    mixed.byte_range = TextRange::new(0, 6);
+    mixed.visible_byte_end = 6;
+    mixed.caret_stops = vec![
+        stop(0.0, 0, 0, Downstream),
+        stop(10.0, 1, 0, Downstream),
+        stop(20.0, 2, 0, Downstream),
+        stop(20.0, 6, 1, Upstream), // two stops share x = 20
+        stop(30.0, 4, 1, Downstream),
+        stop(40.0, 2, 1, Upstream),
+    ];
+    let right = mixed.extreme_caret_stop(HangSide::Right).unwrap();
+    assert_eq!((right.x, right.offset), (40.0, 2));
+    assert_ne!(right.offset, mixed.visible_byte_end);
+    let left = mixed.extreme_caret_stop(HangSide::Left).unwrap();
+    assert_eq!((left.x, left.offset), (0.0, 0));
+
+    // Pure LTR line: the right extreme is (visible_byte_end, Upstream).
+    let mut ltr = small_line();
+    ltr.caret_stops = vec![
+        stop(0.0, 0, 0, Downstream),
+        stop(20.0, 2, 0, Downstream),
+        stop(40.0, 4, 0, Upstream),
+    ];
+    let end = ltr.extreme_caret_stop(HangSide::Right).unwrap();
+    assert_eq!((end.offset, end.affinity), (ltr.visible_byte_end, Upstream));
+
+    // Pure RTL line in an RTL paragraph: logical end is the *left* extreme.
+    let mut rtl = small_line();
+    rtl.visual_runs[0].bidi_level = 1;
+    rtl.caret_stops = vec![
+        stop(0.0, 4, 1, Upstream),
+        stop(20.0, 2, 1, Downstream),
+        stop(40.0, 0, 1, Downstream),
+    ];
+    let end = rtl.extreme_caret_stop(HangSide::Left).unwrap();
+    assert_eq!((end.offset, end.affinity), (rtl.visible_byte_end, Upstream));
+    let start = rtl.extreme_caret_stop(HangSide::Right).unwrap();
+    assert_eq!(start.offset, 0);
+
+    // Tie-break by visual order: equal x picks the last stop on the right.
+    let tie = [stop(5.0, 1, 0, Downstream), stop(5.0, 9, 1, Upstream)];
+    let mut t = small_line();
+    t.caret_stops = tie.to_vec();
+    assert_eq!(t.extreme_caret_stop(HangSide::Right).unwrap().offset, 9);
+    assert_eq!(t.extreme_caret_stop(HangSide::Left).unwrap().offset, 1);
+    assert!(small_line().extreme_caret_stop(HangSide::Left).is_none());
+}
+
+#[test]
+fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
+    let ast = ParagraphAst {
+        base_direction: BidiDirection::Rtl,
+        strut_metrics: FontMetrics {
+            ascent: 8.0,
+            descent: 2.0,
+            ..Default::default()
+        },
+        strut_font_size: 10.0,
+        runs: vec![],
+        items: vec![],
+    };
+    let constraints = LayoutConstraints {
+        wrap_width: 120.0,
+        tab_stops: TabStops { step: 16.0 },
+    };
+    let options = LayoutOptions::default();
+    let shaper: &dyn TextShaper = &NoopShaper;
+    let p = layout_paragraph(&ast, "", shaper, &constraints, &options);
+    assert_eq!(p, PositionedParagraph::empty(BidiDirection::Rtl));
+    assert!(check_layout_inputs(&ast, "", &constraints, &options).is_ok());
 }

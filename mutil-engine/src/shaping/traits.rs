@@ -7,53 +7,21 @@ use crate::types::{
 };
 use smallvec::SmallVec;
 
-/// Edit applied at a line boundary before re-shaping (spec §4.1, §5 Stage 1.4).
+/// Edit at the **leading** (start) edge of a `reshape_window` window: the break
+/// point *before* this window (spec §4.1, §5 Stage 1.4).
 ///
-/// Which edge of the `reshape_window` window an edit acts on:
-///
-/// | variant | edge |
-/// |---|---|
-/// | `None` | both, symmetrically (no text change) |
-/// | `AppendHyphen`, `ReplacePrefix` | trailing (end) edge only |
-/// | `ReplaceSuffix` | leading (start) edge only |
-///
-/// A one-sided edit leaves the other edge exactly as `None` would. One call
-/// carries one edit, so a window that needs a trailing **and** a leading edit
-/// (the middle fragment of a word split twice) cannot be expressed (Open
-/// question 31).
+/// Orthogonal to [`TrailingEdit`]: a window takes one of each, so a middle
+/// fragment of a word split twice can carry a leading and a trailing edit at
+/// the same time. Ranges always describe the original text.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BoundaryEdit {
-    /// Symmetric, text-preserving re-shape of the window: no text is added or
-    /// removed. It re-evaluates the contextual forms of the window's atoms after
-    /// a line break or a split ligature, and acts on both edges of the window
-    /// alike.
+pub enum LeadingEdit {
+    /// No change at the leading edge.
     None,
-    /// **Trailing edge only.** Append a (hyphen) character to the end of the
-    /// window; the glyph is synthesised.
-    AppendHyphen {
-        /// U+002D or the locale's hyphenation character (CSS `hyphenate-character`).
-        hyphen: char,
-    },
-    /// **Trailing edge only.** Spelling change on the **prefix** side: drop
-    /// `cut_bytes` from the end of the window (the bytes immediately *before*
-    /// the break point, i.e. towards the start of the text), append
-    /// `replacement`, then the hyphen. Built from
-    /// `HyphenOpportunity::{prefix_replacement, prefix_cut_bytes}`.
-    ReplacePrefix {
-        /// Replacement text.
-        replacement: Box<str>,
-        /// Original bytes removed.
-        cut_bytes: u32,
-        /// Hyphen appended after the replacement.
-        hyphen: char,
-    },
-    /// **Leading edge only.** Spelling change on the **suffix** side, at the
-    /// start of the following line: drop `cut_bytes` from the start of the window
-    /// (the bytes immediately *after* the break point, i.e. towards the end of
-    /// the text), then prepend `replacement`. Built from
-    /// `HyphenOpportunity::{suffix_replacement, suffix_cut_bytes}`. It adds no
-    /// hyphen (that belongs to the previous line). Ranges still describe the
-    /// original text, as for every edit.
+    /// Spelling change on the **suffix** side of a break: drop `cut_bytes` from
+    /// the start of the window (the bytes immediately *after* the break point,
+    /// towards the end of the text), then prepend `replacement`. Built from
+    /// `HyphenOpportunity::{suffix_replacement, suffix_cut_bytes}`. Adds no
+    /// hyphen (that belongs to the previous line).
     ReplaceSuffix {
         /// Replacement text.
         replacement: Box<str>,
@@ -62,13 +30,57 @@ pub enum BoundaryEdit {
     },
 }
 
-impl BoundaryEdit {
-    /// The edit for the line **ending** at `opportunity`: `ReplacePrefix` if the
-    /// opportunity changes the prefix spelling (a replacement text or a cut),
-    /// otherwise `AppendHyphen`. A cut without replacement text is a pure
-    /// deletion (empty `replacement`).
+/// Edit at the **trailing** (end) edge of a `reshape_window` window: the break
+/// point *after* this window. See [`LeadingEdit`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrailingEdit {
+    /// No change at the trailing edge.
+    None,
+    /// Append a (hyphen) character to the end of the window; the glyph is
+    /// synthesised. U+002D or the locale's hyphenation character (CSS
+    /// `hyphenate-character`).
+    AppendHyphen {
+        /// The hyphen character.
+        hyphen: char,
+    },
+    /// Spelling change on the **prefix** side of a break: drop `cut_bytes` from
+    /// the end of the window (the bytes immediately *before* the break point,
+    /// towards the start of the text), append `replacement`, then the hyphen.
+    /// Built from `HyphenOpportunity::{prefix_replacement, prefix_cut_bytes}`.
+    ReplacePrefix {
+        /// Replacement text.
+        replacement: Box<str>,
+        /// Original bytes removed.
+        cut_bytes: u32,
+        /// Hyphen appended after the replacement.
+        hyphen: char,
+    },
+}
+
+impl LeadingEdit {
+    /// The edit for the line **starting** at `opportunity`: `ReplaceSuffix` if
+    /// the suffix spelling changes (a replacement text or a cut; a cut without
+    /// replacement is a pure deletion), otherwise `None`. Reads only the suffix
+    /// side.
     #[must_use]
-    pub fn prefix_for(opportunity: &HyphenOpportunity, hyphen: char) -> Self {
+    pub fn for_opportunity(opportunity: &HyphenOpportunity) -> Self {
+        if opportunity.suffix_replacement.is_some() || opportunity.suffix_cut_bytes > 0 {
+            Self::ReplaceSuffix {
+                replacement: opportunity.suffix_replacement.clone().unwrap_or_default(),
+                cut_bytes: opportunity.suffix_cut_bytes,
+            }
+        } else {
+            Self::None
+        }
+    }
+}
+
+impl TrailingEdit {
+    /// The edit for the line **ending** at `opportunity`: `ReplacePrefix` if the
+    /// prefix spelling changes, otherwise `AppendHyphen`. Reads only the prefix
+    /// side.
+    #[must_use]
+    pub fn for_opportunity(opportunity: &HyphenOpportunity, hyphen: char) -> Self {
         if opportunity.prefix_replacement.is_some() || opportunity.prefix_cut_bytes > 0 {
             Self::ReplacePrefix {
                 replacement: opportunity.prefix_replacement.clone().unwrap_or_default(),
@@ -77,22 +89,6 @@ impl BoundaryEdit {
             }
         } else {
             Self::AppendHyphen { hyphen }
-        }
-    }
-
-    /// The edit for the line **starting** at `opportunity`: `ReplaceSuffix` if
-    /// the suffix spelling changes, otherwise `None`. Symmetric with
-    /// [`BoundaryEdit::prefix_for`]: each side reads only its own replacement
-    /// and cut count.
-    #[must_use]
-    pub fn suffix_for(opportunity: &HyphenOpportunity) -> Self {
-        if opportunity.suffix_replacement.is_some() || opportunity.suffix_cut_bytes > 0 {
-            Self::ReplaceSuffix {
-                replacement: opportunity.suffix_replacement.clone().unwrap_or_default(),
-                cut_bytes: opportunity.suffix_cut_bytes,
-            }
-        } else {
-            Self::None
         }
     }
 }
@@ -162,12 +158,18 @@ pub trait TextShaper: Send + Sync {
     ///   replacing the clusters whose `atom_range` lies inside the window.
     /// * The output clusters partition exactly the atoms inside the window, in
     ///   logical order, and never split an atom.
-    /// * `edit` never changes ranges: they always describe the **original**
-    ///   text (§6.6). A synthesised hyphen is appended as glyphs of the last
+    /// * The two edits are independent and act on their own edge only: a
+    ///   window may carry both (the middle fragment of a word split twice) or
+    ///   neither (both `None`: a plain, symmetric, text-preserving re-shape).
+    ///   Their cuts must not overlap: `leading cut + trailing cut` must not
+    ///   exceed the window length, and each cut ends on an atom boundary.
+    /// * Edits never change ranges: they always describe the **original** text
+    ///   (§6.6). A synthesised hyphen is appended as glyphs of the last
     ///   cluster, each flagged `RawShapedGlyph::is_synthesized`. For
-    ///   `ReplacePrefix`, the replacement glyphs are attributed to the
-    ///   cluster(s) covering the removed bytes. **[Design decision]**; to be
-    ///   refined with the HarfRust backend in Phase 1.
+    ///   `ReplacePrefix` and `ReplaceSuffix`, the replacement glyphs are
+    ///   attributed to the cluster(s) covering the removed bytes.
+    ///   **[Design decision]**; to be refined with the HarfRust backend in
+    ///   Phase 1.
     #[allow(clippy::too_many_arguments)] // signature derived from spec §4.1
     fn reshape_window(
         &self,
@@ -176,7 +178,8 @@ pub trait TextShaper: Send + Sync {
         atoms: &[GraphemeAtom],
         window: TextRange,
         features: &FontFeatures,
-        edit: BoundaryEdit,
+        leading_edit: LeadingEdit,
+        trailing_edit: TrailingEdit,
         output_clusters: &mut Vec<ShapedCluster>,
     );
 
@@ -184,10 +187,10 @@ pub trait TextShaper: Send + Sync {
     /// font has none (§6.2). Positions are unshaped and may need kerning
     /// adjustment.
     ///
-    /// **Units.** The backend converts from font design units itself: returned
-    /// positions are x coordinates **relative to the glyph origin**, in layout
-    /// units, i.e. the unit of `font_size` (pixels when `font_size` is in
-    /// pixels), measured along +x and increasing. `font_size` is the run's
+    /// **Units.** The return value is in layout coordinates, never font design
+    /// units: the backend has already applied the font size and the fallback
+    /// scale. Positions are x offsets **relative to the glyph origin**, in the
+    /// unit of `font_size`, measured along +x and increasing. `font_size` is the run's
     /// requested size; the backend multiplies it by `font.scale` (the fallback
     /// size correction) to get the effective size. **[Design decision]**: the
     /// engine is unit-agnostic and does not know the device pixel ratio, so
@@ -206,31 +209,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn boundary_edit_is_compact_and_aligned() {
-        // Largest payload: Box<str> (16) + u32 + char (or u32) on 64-bit.
+    fn edits_are_compact_and_aligned() {
+        // Largest payload: Box<str> (16) + u32 + char on 64-bit.
         #[cfg(target_pointer_width = "64")]
         {
-            assert_eq!(core::mem::align_of::<BoundaryEdit>(), 8);
-            assert!(core::mem::size_of::<BoundaryEdit>() <= 32);
+            assert_eq!(core::mem::align_of::<TrailingEdit>(), 8);
+            assert!(core::mem::size_of::<TrailingEdit>() <= 32);
+            assert!(core::mem::size_of::<LeadingEdit>() <= 32);
         }
     }
 
     #[test]
     fn replace_suffix_constructs_clones_and_compares() {
-        let e = BoundaryEdit::ReplaceSuffix {
+        let e = LeadingEdit::ReplaceSuffix {
             replacement: "tje".into(),
             cut_bytes: 1,
         };
         assert_eq!(e.clone(), e);
         assert_ne!(
             e,
-            BoundaryEdit::ReplaceSuffix {
+            LeadingEdit::ReplaceSuffix {
                 replacement: "tje".into(),
                 cut_bytes: 2
             }
         );
-        assert_ne!(e, BoundaryEdit::None);
-        let BoundaryEdit::ReplaceSuffix {
+        assert_ne!(e, LeadingEdit::None);
+        let LeadingEdit::ReplaceSuffix {
             replacement,
             cut_bytes,
         } = e
@@ -260,45 +264,56 @@ mod tests {
     fn each_side_reads_only_its_own_replacement_and_cut() {
         let o = opportunity(Some("a"), 2, Some("tje"), 1);
         assert_eq!(
-            BoundaryEdit::prefix_for(&o, '-'),
-            BoundaryEdit::ReplacePrefix {
+            TrailingEdit::for_opportunity(&o, '-'),
+            TrailingEdit::ReplacePrefix {
                 replacement: "a".into(),
                 cut_bytes: 2,
                 hyphen: '-'
             }
         );
         assert_eq!(
-            BoundaryEdit::suffix_for(&o),
-            BoundaryEdit::ReplaceSuffix {
+            LeadingEdit::for_opportunity(&o),
+            LeadingEdit::ReplaceSuffix {
                 replacement: "tje".into(),
                 cut_bytes: 1
             }
         );
-        // Prefix-only change leaves the suffix side untouched, and vice versa.
         let p = opportunity(Some("a"), 1, None, 0);
-        assert_eq!(BoundaryEdit::suffix_for(&p), BoundaryEdit::None);
+        assert_eq!(LeadingEdit::for_opportunity(&p), LeadingEdit::None);
         let s = opportunity(None, 0, Some("k"), 1);
         assert_eq!(
-            BoundaryEdit::prefix_for(&s, '-'),
-            BoundaryEdit::AppendHyphen { hyphen: '-' }
+            TrailingEdit::for_opportunity(&s, '-'),
+            TrailingEdit::AppendHyphen { hyphen: '-' }
         );
         // A cut with no replacement text is a pure deletion on that side.
         let d = opportunity(None, 1, None, 1);
         assert_eq!(
-            BoundaryEdit::prefix_for(&d, '-'),
-            BoundaryEdit::ReplacePrefix {
+            TrailingEdit::for_opportunity(&d, '-'),
+            TrailingEdit::ReplacePrefix {
                 replacement: "".into(),
                 cut_bytes: 1,
                 hyphen: '-'
             }
         );
         assert_eq!(
-            BoundaryEdit::suffix_for(&d),
-            BoundaryEdit::ReplaceSuffix {
+            LeadingEdit::for_opportunity(&d),
+            LeadingEdit::ReplaceSuffix {
                 replacement: "".into(),
                 cut_bytes: 1
             }
         );
+    }
+
+    #[test]
+    fn middle_fragment_takes_both_edits_from_two_consecutive_breaks() {
+        // "pro-gram-ming": the middle line "gram" starts after break 1 and ends at
+        // break 2, so it needs a leading and a trailing edit at once.
+        let first = opportunity(None, 0, Some("g"), 1);
+        let second = opportunity(Some("m"), 1, None, 0);
+        let leading = LeadingEdit::for_opportunity(&first);
+        let trailing = TrailingEdit::for_opportunity(&second, '-');
+        assert!(matches!(leading, LeadingEdit::ReplaceSuffix { .. }));
+        assert!(matches!(trailing, TrailingEdit::ReplacePrefix { .. }));
     }
 
     #[test]
@@ -306,21 +321,5 @@ mod tests {
         fn check<T: Send + Sync + ?Sized>() {}
         check::<dyn TextShaper>();
         check::<Box<dyn TextShaper>>();
-    }
-
-    #[test]
-    fn prefix_and_suffix_edits_are_symmetric_in_shape() {
-        let p = BoundaryEdit::ReplacePrefix {
-            replacement: "a".into(),
-            cut_bytes: 1,
-            hyphen: '-',
-        };
-        let s = BoundaryEdit::ReplaceSuffix {
-            replacement: "a".into(),
-            cut_bytes: 1,
-        };
-        // Same payload except that only the prefix side carries the hyphen.
-        assert!(matches!(p, BoundaryEdit::ReplacePrefix { hyphen: '-', .. }));
-        assert!(matches!(s, BoundaryEdit::ReplaceSuffix { .. }));
     }
 }

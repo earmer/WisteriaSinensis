@@ -35,9 +35,8 @@ pub enum AutospaceProfile {
 /// Everything the frontend needs besides the text and its styled runs
 /// (spec §3): the single input carrier for analysis policy.
 ///
-/// **Not yet included**: a line-height policy. `ParagraphAst::strut_metrics` is
-/// documented as already resolved by `LineHeight`, but `LineHeight` lives in
-/// `LayoutOptions` (Open question 30).
+/// Deliberately has no line-height policy: the frontend records raw strut
+/// metrics and never applies `LineHeight` (that is the middle-end's job).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FrontendOptions {
     /// Profile for `GlueKind::CjkAutospace` sizes.

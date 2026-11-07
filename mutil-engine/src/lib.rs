@@ -10,8 +10,8 @@
 //!
 //! ```text
 //! types  <-  frontend  <-  shaping
-//!   ^           ^
-//!   +-----  middleend
+//!   ^           ^           ^
+//!   +-----  middleend  -----+
 //! ```
 //!
 //! Everything public is re-exported at the crate root.

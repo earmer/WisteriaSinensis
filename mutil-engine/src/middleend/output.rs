@@ -2,7 +2,7 @@
 
 use super::{CaretStop, HangMode, HangingWhitespaceMode, LayoutOptions, LineHeight};
 use crate::types::{
-    BidiDirection, BidiLevel, ByteIndex, FontRef, Size, TextRange, VerticalMetrics,
+    BidiDirection, BidiLevel, ByteIndex, FontMetrics, FontRef, Size, TextRange, VerticalMetrics,
 };
 use core::fmt;
 
@@ -182,9 +182,13 @@ fn approx_eq(a: f32, b: f32) -> bool {
 }
 
 /// What a line is validated against.
+///
+/// Paragraph-wide fields plus `line_index`; use [`LineContext::for_line`] to
+/// derive the context of each line from one paragraph context.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LineContext {
-    /// The paragraph's resolved strut (`ParagraphAst::strut_metrics`).
+    /// The **resolved** strut: the raw `ParagraphAst::strut_metrics` after
+    /// `LineHeight::resolve_strut`, half-leading included.
     pub strut: VerticalMetrics,
     /// The active line-height policy.
     pub line_height: LineHeight,
@@ -195,24 +199,39 @@ pub struct LineContext {
     /// The paragraph base direction. It decides which physical edge is the
     /// line start (hanging) and where trailing whitespace lies (UAX #9 L1).
     pub base_direction: BidiDirection,
+    /// Index of the line within the paragraph; `0` is the first line, which
+    /// `HangStartMode::FirstLine` refers to.
+    pub line_index: usize,
 }
 
 impl LineContext {
-    /// Builds the context from the resolved strut, the paragraph base direction
-    /// and the layout options that produced the line.
+    /// Builds the paragraph context: resolves the active strut from the **raw**
+    /// primary-font metrics (`ParagraphAst::strut_metrics`) and the font size
+    /// they were requested at (`ParagraphAst::strut_font_size`), using
+    /// `options.line_height`. `line_index` is 0.
     #[must_use]
     pub fn from_options(
-        strut: VerticalMetrics,
+        raw_strut: &FontMetrics,
+        strut_font_size: f32,
         base_direction: BidiDirection,
         options: &LayoutOptions,
     ) -> Self {
         Self {
-            strut,
+            strut: options
+                .line_height
+                .resolve_strut(raw_strut, strut_font_size),
             line_height: options.line_height,
             whitespace: options.whitespace,
             hang_mode: options.hang_mode,
             base_direction,
+            line_index: 0,
         }
+    }
+
+    /// The same context for line `line_index`.
+    #[must_use]
+    pub const fn for_line(self, line_index: usize) -> Self {
+        Self { line_index, ..self }
     }
 }
 
@@ -654,7 +673,11 @@ impl PositionedLine {
                     actual,
                 });
             }
-            if actual > 0.0 && !ctx.hang_mode.allows(side, ctx.base_direction) {
+            if actual > 0.0
+                && !ctx
+                    .hang_mode
+                    .allows(side, ctx.base_direction, ctx.line_index == 0)
+            {
                 return Err(E::HangingNotAllowed { side });
             }
         }
@@ -686,6 +709,32 @@ impl PositionedLine {
         Ok(())
     }
 
+    /// The extreme caret stop towards the physical `side` (spec §6.3 rule 3):
+    /// where a click beyond that edge of the line's visual content converges.
+    ///
+    /// `caret_stops` are in visual order, so equal-`x` ties (a bidi boundary
+    /// has two stops at one `x`) resolve by that order: the first for `Left`,
+    /// the last for `Right`. `None` if the line has no stops.
+    ///
+    /// When the content at that edge flows in the paragraph's base direction the
+    /// stop is `(visible_byte_end, Upstream)`; when it is written in the
+    /// opposite direction the stop is the outer edge of that text, never
+    /// `visible_byte_end` as a blanket rule (which would jump the caret to the
+    /// middle of the line).
+    #[must_use]
+    pub fn extreme_caret_stop(&self, side: HangSide) -> Option<&CaretStop> {
+        let mut best: Option<&CaretStop> = None;
+        for stop in &self.caret_stops {
+            best = match (best, side) {
+                (None, _) => Some(stop),
+                (Some(b), HangSide::Left) if stop.x < b.x => Some(stop),
+                (Some(b), HangSide::Right) if stop.x >= b.x => Some(stop),
+                (b, _) => b,
+            };
+        }
+        best
+    }
+
     /// `true` when [`PositionedLine::validate`] succeeds.
     #[must_use]
     pub fn is_valid(&self, ctx: &LineContext) -> bool {
@@ -710,6 +759,18 @@ pub struct PositionedParagraph {
 }
 
 impl PositionedParagraph {
+    /// Validates every line against `ctx`, giving each its own `line_index`
+    /// (so `HangStartMode::FirstLine` applies to line 0 only).
+    ///
+    /// # Errors
+    /// The index of the first invalid line and its violation.
+    pub fn validate(&self, ctx: &LineContext) -> Result<(), (usize, LineInvariantError)> {
+        for (i, line) in self.lines.iter().enumerate() {
+            line.validate(&ctx.for_line(i)).map_err(|e| (i, e))?;
+        }
+        Ok(())
+    }
+
     /// A paragraph with no lines and zero size.
     #[must_use]
     pub fn empty(base_direction: BidiDirection) -> Self {
@@ -737,7 +798,7 @@ mod tests {
         LineContext {
             strut: STRUT,
             hang_mode: HangMode {
-                start: true,
+                start: crate::middleend::HangStartMode::AllLines,
                 end: crate::middleend::HangEndMode::Force,
             },
             ..Default::default()

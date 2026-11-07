@@ -18,42 +18,61 @@ pub enum HangEndMode {
     Force,
 }
 
+/// Hanging at the leading edge of a line (spec §5 Stage 1.3; CSS Text 4
+/// `hanging-punctuation: first` `[W2]`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum HangStartMode {
+    /// Nothing hangs at the line start.
+    #[default]
+    None,
+    /// An opening mark may hang at the start of the **first line of the
+    /// paragraph** only (CSS `first`). "First line" is line index 0; a line
+    /// after a hard break is not a first line.
+    FirstLine,
+    /// An opening mark may hang at the start of **every** line.
+    AllLines,
+}
+
 /// Hanging punctuation configuration (spec §5 Stage 1.3; JLReq 2.5.1, CSS Text
 /// 4 `hanging-punctuation` `[W4][W2]`). At most one character hangs at each
 /// edge.
 ///
-/// The two edges are independent, hence a struct rather than one enum. They are
-/// **logical** (start and end of the line in the paragraph's base direction),
-/// whereas `PositionedLine::hanging_left` and `hanging_right` are **physical**:
-/// the start edge is the left one for an LTR paragraph and the right one for an
-/// RTL paragraph, the end edge the opposite. [`HangMode::allows`] is that
-/// mapping, and `PositionedLine::validate` enforces it.
+/// The two edges are independent. They are **logical** (start and end of the
+/// line in the paragraph's base direction), whereas
+/// `PositionedLine::hanging_left` and `hanging_right` are **physical**: the
+/// start edge is the left one for an LTR paragraph and the right one for an RTL
+/// paragraph, the end edge the opposite. [`HangMode::allows`] is that mapping
+/// (plus the first-line rule), and `PositionedLine::validate` enforces it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct HangMode {
-    /// An opening mark may hang at the **start** of a line, outside the text
-    /// block (CSS `first`).
-    pub start: bool,
-    /// Hanging at the **end** of a line.
+    /// Hanging at the start of a line.
+    pub start: HangStartMode,
+    /// Hanging at the end of a line.
     pub end: HangEndMode,
 }
 
 impl HangMode {
     /// Nothing hangs anywhere (the default).
     pub const NONE: Self = Self {
-        start: false,
+        start: HangStartMode::None,
         end: HangEndMode::None,
     };
 
     /// Whether punctuation may hang at the physical `side` of a line in a
-    /// paragraph of the given base `direction`.
+    /// paragraph of the given base `direction`; `is_first_line` is whether the
+    /// line is the paragraph's first (line index 0).
     #[must_use]
-    pub const fn allows(self, side: HangSide, direction: Direction) -> bool {
+    pub const fn allows(self, side: HangSide, direction: Direction, is_first_line: bool) -> bool {
         let at_start = matches!(
             (side, direction),
             (HangSide::Left, Direction::Ltr) | (HangSide::Right, Direction::Rtl)
         );
         if at_start {
-            self.start
+            match self.start {
+                HangStartMode::None => false,
+                HangStartMode::FirstLine => is_first_line,
+                HangStartMode::AllLines => true,
+            }
         } else {
             !matches!(self.end, HangEndMode::None)
         }
@@ -136,12 +155,58 @@ pub enum SoftHyphenPolicy {
     Strip,
 }
 
-/// Everything the middle-end needs besides the AST (spec §5, §6.6): the single
-/// input carrier for layout policy.
-///
-/// **Not yet included** (Open question 29): the wrap width (`wrap_width` in the
-/// spec's prose), tab stops, and a base-direction override. Without the width
-/// a layout entry point cannot be called, so none is defined in Phase 0.
+/// Tab-stop configuration: stops at every multiple of `step` from the line's
+/// left edge. **[Design decision]**: the spec names `next_tab_stop(x)` without
+/// defining the stops; a uniform step is the minimal configuration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabStops {
+    /// Distance between stops, in layout units. Must be finite and positive.
+    pub step: f32,
+}
+
+impl TabStops {
+    /// `true` when `step` is finite and positive.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.step.is_finite() && self.step > 0.0
+    }
+
+    /// The first stop strictly right of `x` (`x` on a stop moves to the next).
+    /// Returns `x` unchanged if the configuration is invalid.
+    #[must_use]
+    pub fn next_stop(&self, x: f32) -> f32 {
+        if !self.is_valid() {
+            return x;
+        }
+        ((x / self.step).floor() + 1.0) * self.step
+    }
+}
+
+/// Geometric constraints of the container: what the layout must fit into, as
+/// opposed to the policy ([`LayoutOptions`]) deciding how.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayoutConstraints {
+    /// Available layout width of the container, in layout units. Must be finite
+    /// and non-negative. Hanging punctuation and `Preserved` trailing
+    /// whitespace may extend beyond it, and an unbreakable word wider than it
+    /// overflows (§5 Stage 1.6), so a line's `visual_width` is not validated
+    /// against it.
+    pub wrap_width: f32,
+    /// Tab stops.
+    pub tab_stops: TabStops,
+}
+
+impl LayoutConstraints {
+    /// `true` when the width is finite and non-negative and the tab stops are
+    /// valid.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.wrap_width.is_finite() && self.wrap_width >= 0.0 && self.tab_stops.is_valid()
+    }
+}
+
+/// Layout **policy** (spec §5, §6.6): a pure collection of strategies. The
+/// geometry lives in [`LayoutConstraints`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LayoutOptions {
     /// Line-breaking strategy.
@@ -193,51 +258,63 @@ mod tests {
     }
 
     #[test]
-    fn hang_mode_combines_both_edges_independently() {
+    fn hang_mode_grades_start_and_end_independently() {
         use Direction::{Ltr, Rtl};
         const L: HangSide = HangSide::Left;
         const R: HangSide = HangSide::Right;
-        let modes = [
-            (HangMode::NONE, [false; 4]),
-            // start only: left edge in LTR, right edge in RTL
-            (
-                HangMode {
-                    start: true,
-                    end: HangEndMode::None,
-                },
-                [true, false, false, true],
-            ),
-            // end only (Allow and Force alike): the opposite edges
-            (
-                HangMode {
-                    start: false,
-                    end: HangEndMode::Allow,
-                },
-                [false, true, true, false],
-            ),
-            (
-                HangMode {
-                    start: false,
-                    end: HangEndMode::Force,
-                },
-                [false, true, true, false],
-            ),
-            // both edges at once, which the old single enum could not express
-            (
-                HangMode {
-                    start: true,
-                    end: HangEndMode::Force,
-                },
-                [true; 4],
-            ),
+        let mode = |start, end| HangMode { start, end };
+        use HangEndMode as E;
+        use HangStartMode as S;
+        // (mode, direction, first line?) -> (left allowed, right allowed)
+        let cases = [
+            (HangMode::NONE, Ltr, true, (false, false)),
+            (mode(S::FirstLine, E::None), Ltr, true, (true, false)),
+            (mode(S::FirstLine, E::None), Ltr, false, (false, false)),
+            (mode(S::FirstLine, E::None), Rtl, true, (false, true)),
+            (mode(S::FirstLine, E::None), Rtl, false, (false, false)),
+            (mode(S::AllLines, E::None), Ltr, false, (true, false)),
+            (mode(S::AllLines, E::None), Rtl, false, (false, true)),
+            // The end edge ignores the line index.
+            (mode(S::None, E::Allow), Ltr, false, (false, true)),
+            (mode(S::None, E::Force), Rtl, false, (true, false)),
+            // Both edges at once.
+            (mode(S::FirstLine, E::Force), Ltr, true, (true, true)),
+            (mode(S::FirstLine, E::Force), Ltr, false, (false, true)),
+            (mode(S::AllLines, E::Allow), Rtl, false, (true, true)),
         ];
-        for (mode, [ltr_left, ltr_right, rtl_left, rtl_right]) in modes {
-            assert_eq!(mode.allows(L, Ltr), ltr_left, "{mode:?} LTR left");
-            assert_eq!(mode.allows(R, Ltr), ltr_right, "{mode:?} LTR right");
-            assert_eq!(mode.allows(L, Rtl), rtl_left, "{mode:?} RTL left");
-            assert_eq!(mode.allows(R, Rtl), rtl_right, "{mode:?} RTL right");
+        for (m, d, first, (left, right)) in cases {
+            assert_eq!(
+                m.allows(L, d, first),
+                left,
+                "{m:?} {d:?} first={first} left"
+            );
+            assert_eq!(
+                m.allows(R, d, first),
+                right,
+                "{m:?} {d:?} first={first} right"
+            );
         }
         assert_ne!(HangEndMode::Allow, HangEndMode::Force);
         assert_eq!(HangEndMode::default(), HangEndMode::None);
+        assert_eq!(HangStartMode::default(), HangStartMode::None);
+    }
+
+    #[test]
+    fn tab_stops_step_and_validity() {
+        let t = TabStops { step: 8.0 };
+        assert_eq!(t.next_stop(0.0), 8.0);
+        assert_eq!(t.next_stop(7.9), 8.0);
+        assert_eq!(t.next_stop(8.0), 16.0); // on a stop: advance to the next
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(!TabStops { step: bad }.is_valid());
+        }
+        let c = LayoutConstraints {
+            wrap_width: 100.0,
+            tab_stops: t,
+        };
+        assert!(c.is_valid());
+        for w in [-1.0, f32::NAN, f32::INFINITY] {
+            assert!(!LayoutConstraints { wrap_width: w, ..c }.is_valid());
+        }
     }
 }

@@ -2,7 +2,7 @@
 
 use super::ShapingRun;
 use crate::types::{
-    AtomFlags, BidiDirection, ByteIndex, GraphemeAtom, ShapedCluster, TextRange, VerticalMetrics,
+    AtomFlags, BidiDirection, ByteIndex, FontMetrics, GraphemeAtom, ShapedCluster, TextRange,
 };
 
 /// Replacement text for spelling-change hyphenation.
@@ -136,6 +136,23 @@ pub enum WordNode {
 }
 
 impl WordNode {
+    /// The source bytes this node covers: the first atom's start to the last
+    /// atom's end for `Word` and `PunctuationRun` (`None` when they hold no
+    /// atoms), the stored range for the other variants.
+    #[must_use]
+    pub fn byte_span(&self) -> Option<TextRange> {
+        match self {
+            Self::Word { atoms, .. } | Self::PunctuationRun { atoms, .. } => {
+                let (first, last) = (atoms.first()?, atoms.last()?);
+                Some(TextRange::new(first.byte_range.start, last.byte_range.end))
+            }
+            Self::Glue { byte_range, .. }
+            | Self::Tab { byte_range }
+            | Self::HardBreak { byte_range }
+            | Self::InlineBox { byte_range, .. } => Some(*byte_range),
+        }
+    }
+
     /// Checks the `atom_range` invariants documented on [`ShapedCluster`]:
     /// the node's clusters partition its atoms, in order, with matching byte
     /// ranges. Nodes without clusters (glue, tab, hard break, inline box) are
@@ -184,12 +201,15 @@ fn clusters_partition_atoms(atoms: &[GraphemeAtom], clusters: &[ShapedCluster]) 
 pub struct ParagraphAst {
     /// Resolved paragraph base direction (UAX #9 P2/P3 or the caller's override).
     pub base_direction: BidiDirection,
-    /// The **resolved** strut (§5 Stage 4): font metrics already adjusted for
-    /// the active `LineHeight` policy, with half-leading folded into ascent and
-    /// descent (see `LineHeight::resolve_strut`). It is the height of an empty
-    /// line and of every line under `LineHeight::Fixed`, and a lower bound under
-    /// `LineHeight::Normal`.
-    pub strut_metrics: VerticalMetrics,
+    /// The **raw** primary-font metrics exactly as `TextShaper::
+    /// resolve_primary_font_metrics` returned them. The frontend neither reads
+    /// `LineHeight` nor computes half-leading; the middle-end resolves the
+    /// active strut from this value with `LineHeight::resolve_strut`
+    /// (§5 Stage 4.1).
+    pub strut_metrics: FontMetrics,
+    /// The font size (layout units) the strut metrics were requested at. The
+    /// middle-end needs it to resolve a `LineHeight::Fixed` strut.
+    pub strut_font_size: f32,
     /// Shaping runs in logical order.
     pub runs: Vec<ShapingRun>,
     /// Box-and-glue sequence in logical order.

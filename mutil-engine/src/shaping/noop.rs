@@ -1,7 +1,7 @@
 //! A shaper that produces nothing, to prove the trait contract closes over the
 //! pipeline types.
 
-use super::{BoundaryEdit, TextShaper};
+use super::{LeadingEdit, TextShaper, TrailingEdit};
 use crate::frontend::ShapingRun;
 use crate::types::{
     Direction, FontFamily, FontFeatures, FontId, FontMetrics, FontRef, FontStyle, GraphemeAtom,
@@ -46,7 +46,8 @@ impl TextShaper for NoopShaper {
         _atoms: &[GraphemeAtom],
         _window: TextRange,
         _features: &FontFeatures,
-        _edit: BoundaryEdit,
+        _leading_edit: LeadingEdit,
+        _trailing_edit: TrailingEdit,
         _output_clusters: &mut Vec<ShapedCluster>,
     ) {
     }

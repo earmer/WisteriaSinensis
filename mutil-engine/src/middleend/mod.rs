@@ -5,6 +5,7 @@
 //! arrive in later phases.
 
 mod interaction;
+mod layout;
 mod options;
 mod output;
 
@@ -12,9 +13,10 @@ pub use interaction::{
     BoxHeightStyle, CaretAffinity, CaretStop, CaretVisual, CursorPosition, HitResult, Motion,
     Selection, SelectionRect,
 };
+pub use layout::{LayoutInputError, check_layout_inputs, layout_paragraph};
 pub use options::{
-    HangEndMode, HangMode, HangingWhitespaceMode, LayoutOptions, LineBreakStrategy, LineHeight,
-    SoftHyphenPolicy,
+    HangEndMode, HangMode, HangStartMode, HangingWhitespaceMode, LayoutConstraints, LayoutOptions,
+    LineBreakStrategy, LineHeight, SoftHyphenPolicy, TabStops,
 };
 pub use output::{
     DecorationKind, DecorationLine, HangSide, LINE_GEOMETRY_ABS_EPSILON, LINE_GEOMETRY_REL_EPSILON,

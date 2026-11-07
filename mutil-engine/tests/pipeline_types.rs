@@ -79,11 +79,12 @@ fn test_pipeline_types_compile() {
     // Frontend: a pseudo ParagraphAst of Word, Glue, Word.
     let ast = ParagraphAst {
         base_direction: BidiDirection::Ltr,
-        strut_metrics: VerticalMetrics {
+        strut_metrics: FontMetrics {
             ascent: 12.0,
             descent: 4.0,
-            line_gap: 0.0,
+            ..Default::default()
         },
+        strut_font_size: 16.0,
         runs: vec![run()],
         items: vec![
             word(TextRange::new(0, 5)),
@@ -123,7 +124,8 @@ fn test_pipeline_types_compile() {
         &run_atoms,
         TextRange::new(0, 5),
         &FontFeatures::new(),
-        BoundaryEdit::AppendHyphen { hyphen: '-' },
+        LeadingEdit::None,
+        TrailingEdit::AppendHyphen { hyphen: '-' },
         &mut out,
     );
     assert!(out.is_empty());
@@ -177,7 +179,7 @@ fn test_pipeline_types_compile() {
         baseline_y: ast.strut_metrics.ascent,
         ascent: ast.strut_metrics.ascent,
         descent: ast.strut_metrics.descent,
-        line_height: ast.strut_metrics.natural_line_height(),
+        line_height: VerticalMetrics::from_font_metrics(&ast.strut_metrics).natural_line_height(),
         visual_width: pen + ADVANCE,
         hanging_left: 0.0,
         hanging_right: 0.0,
@@ -411,11 +413,11 @@ fn full_spec_type_surface_is_nameable() {
     assert_eq!(HangMode::default(), HangMode::NONE);
     assert_ne!(
         HangMode {
-            start: true,
+            start: HangStartMode::FirstLine,
             end: HangEndMode::None
         },
         HangMode {
-            start: false,
+            start: HangStartMode::None,
             end: HangEndMode::Allow
         }
     );
