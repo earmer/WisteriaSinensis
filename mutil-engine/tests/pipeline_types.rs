@@ -147,6 +147,7 @@ fn test_pipeline_types_compile() {
                     advance: g.x_advance,
                     byte_range: Some(c.byte_range),
                     is_synthesized: false,
+                    is_hanging: false,
                 });
                 pen += c.natural_width;
             }
@@ -160,6 +161,7 @@ fn test_pipeline_types_compile() {
         advance: ADVANCE,
         byte_range: None,
         is_synthesized: true,
+        is_hanging: false,
     });
     assert_eq!(line_glyphs.len(), 11);
     assert!(
@@ -418,6 +420,7 @@ fn hanging_punctuation_fits_negative_x_and_synthesized_flag_round_trips() {
         advance: ADVANCE,
         byte_range: Some(TextRange::new(0, 1)),
         is_synthesized: false,
+        is_hanging: true,
     };
     assert!(hanging.x < 0.0);
 

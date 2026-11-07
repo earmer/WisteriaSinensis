@@ -12,8 +12,10 @@ pub use interaction::{
     BoxHeightStyle, CaretAffinity, CaretStop, CaretVisual, CursorPosition, HitResult, Motion,
     Selection, SelectionRect,
 };
-pub use options::{HangMode, LineHeight};
+pub use options::{
+    HangMode, HangingWhitespaceMode, LineBreakStrategy, LineHeight, SoftHyphenPolicy,
+};
 pub use output::{
-    DecorationKind, DecorationLine, PositionedGlyph, PositionedLine, PositionedParagraph,
-    VisualGlyphRun,
+    DecorationKind, DecorationLine, HangSide, LINE_GEOMETRY_EPSILON, LineInvariantError,
+    PositionedGlyph, PositionedLine, PositionedParagraph, VisualGlyphRun,
 };

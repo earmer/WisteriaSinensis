@@ -28,6 +28,17 @@ pub enum BoundaryEdit {
         /// Hyphen appended after the replacement.
         hyphen: char,
     },
+    /// Spelling-change at the **start of the following line**: drop
+    /// `cut_bytes` from the start of the window, then prepend `replacement`.
+    /// The mirror of `ReplacePrefix` for `HyphenOpportunity::suffix_replacement`;
+    /// it adds no hyphen (that belongs to the previous line). Ranges still
+    /// describe the original text, as for every edit.
+    ReplaceSuffix {
+        /// Replacement text.
+        replacement: Box<str>,
+        /// Original bytes removed from the start of the window.
+        cut_bytes: u32,
+    },
 }
 
 /// Contract between the engine and a shaping backend (HarfRust, CoreText,
@@ -108,4 +119,60 @@ pub trait TextShaper {
         glyph_id: u32,
         direction: Direction,
     ) -> SmallVec<[f32; 4]>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boundary_edit_is_compact_and_aligned() {
+        // Largest payload: Box<str> (16) + u32 + char (or u32) on 64-bit.
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(core::mem::align_of::<BoundaryEdit>(), 8);
+            assert!(core::mem::size_of::<BoundaryEdit>() <= 32);
+        }
+    }
+
+    #[test]
+    fn replace_suffix_constructs_clones_and_compares() {
+        let e = BoundaryEdit::ReplaceSuffix {
+            replacement: "tje".into(),
+            cut_bytes: 1,
+        };
+        assert_eq!(e.clone(), e);
+        assert_ne!(
+            e,
+            BoundaryEdit::ReplaceSuffix {
+                replacement: "tje".into(),
+                cut_bytes: 2
+            }
+        );
+        assert_ne!(e, BoundaryEdit::None);
+        let BoundaryEdit::ReplaceSuffix {
+            replacement,
+            cut_bytes,
+        } = e
+        else {
+            unreachable!()
+        };
+        assert_eq!((&*replacement, cut_bytes), ("tje", 1));
+    }
+
+    #[test]
+    fn prefix_and_suffix_edits_are_symmetric_in_shape() {
+        let p = BoundaryEdit::ReplacePrefix {
+            replacement: "a".into(),
+            cut_bytes: 1,
+            hyphen: '-',
+        };
+        let s = BoundaryEdit::ReplaceSuffix {
+            replacement: "a".into(),
+            cut_bytes: 1,
+        };
+        // Same payload except that only the prefix side carries the hyphen.
+        assert!(matches!(p, BoundaryEdit::ReplacePrefix { hyphen: '-', .. }));
+        assert!(matches!(s, BoundaryEdit::ReplaceSuffix { .. }));
+    }
 }

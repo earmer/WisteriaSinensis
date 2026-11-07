@@ -26,6 +26,45 @@ pub enum LineHeight {
     Fixed(f32),
 }
 
+/// Trailing whitespace handling at a soft wrap (spec §5 Stage 1.7).
+/// **[Design decision]** in the spec; CSS Text 3 `white-space` is the model `[W1]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum HangingWhitespaceMode {
+    /// CSS `normal`-like: trailing `WordSpace` and `CjkAutospace` collapse to
+    /// zero visual width. They stay in `PositionedLine::byte_range`;
+    /// `visible_byte_end` marks the last visible cluster.
+    #[default]
+    Collapsible,
+    /// CSS `pre-wrap`-like: trailing spaces hang outside the line width but keep
+    /// selectable, caret-reachable slots. An editor normally uses this on the
+    /// line containing the caret.
+    Preserved,
+}
+
+/// Line-breaking strategy (spec §5 Stage 1.6). The pair is the standard
+/// dichotomy (Typst `Simple`/`Optimized`, Android `SIMPLE`/`HIGH_QUALITY`) `[L3][L6]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LineBreakStrategy {
+    /// Strategy A: first-fit greedy with the overflow ladder. Each line depends
+    /// only on its start, which allows resynchronising incremental relayout.
+    #[default]
+    Greedy,
+    /// Strategy B: global optimisation over the whole paragraph or a bounded
+    /// window (Knuth-Plass demerits, §5 Stage 1.6).
+    GlobalOptimal,
+}
+
+/// Clipboard policy for an actual U+00AD in the source text (spec §6.6, the
+/// `copy_soft_hyphen` flag). The *generated* hyphen is never copied regardless.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SoftHyphenPolicy {
+    /// Copy U+00AD as it is in the source (Firefox's behaviour `[C4]`).
+    #[default]
+    Keep,
+    /// Drop U+00AD from copied text.
+    Strip,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

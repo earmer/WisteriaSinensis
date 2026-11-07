@@ -18,6 +18,18 @@ pub enum QuotePolicy {
     CjkAware,
 }
 
+/// Size profile for `GlueKind::CjkAutospace` (spec §2.4 table).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum AutospaceProfile {
+    /// JLReq 3.8.3/3.8.4 `[W4]`: natural 1/4 em, shrinking to 1/8 em, stretching
+    /// to 1/2 em (1/3 em in some styles). Default for `ja`.
+    #[default]
+    Jlreq,
+    /// CSS Text 4 `text-autospace` `[W2]`: 0.125 ic (1/8 of the CJK advance);
+    /// shrink and stretch bounds are not specified.
+    CssCompat,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
