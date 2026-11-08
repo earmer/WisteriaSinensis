@@ -1,6 +1,7 @@
 //! Middle-end output: positioned lines and glyphs (spec §2.6).
 
 use super::{CaretStop, HangMode, HangingWhitespaceMode, LayoutOptions, LineHeight};
+use crate::frontend::BoxOverflowPolicy;
 use crate::types::{
     BidiDirection, BidiLevel, ByteIndex, FontMetrics, FontRef, Size, TextRange, VerticalMetrics,
 };
@@ -112,6 +113,10 @@ pub struct PositionedInlineBox {
     pub ascent: f32,
     /// Extent below the object's baseline (non-negative).
     pub descent: f32,
+    /// The object's `BoxNode::InlineObject::overflow_policy`, so validation can
+    /// tell a legitimate `AllowOverflow` from a `Clip` or `ScaleToFit` box that
+    /// was not made to fit.
+    pub overflow_policy: BoxOverflowPolicy,
 }
 
 /// A tab placed on a line (spec §2.4 `Tab`, §2.6).
@@ -440,6 +445,11 @@ pub enum LineInvariantError {
         /// Index into `visual_boxes`.
         index: usize,
     },
+    /// A `Clip` or `ScaleToFit` inline box ends beyond `ctx.wrap_width`.
+    InlineBoxWiderThanWrapWidth {
+        /// Index into `visual_boxes`.
+        index: usize,
+    },
     /// The line is wider than `ctx.wrap_width` although it is not a single
     /// overflowing entity.
     LineWiderThanWrapWidth {
@@ -601,6 +611,9 @@ impl fmt::Display for LineInvariantError {
                     "inline box {index} lies outside every fragment of span {span_id}"
                 )
             }
+            Self::InlineBoxWiderThanWrapWidth { index } => {
+                write!(f, "inline box {index} exceeds the wrap width")
+            }
             Self::LineWiderThanWrapWidth {
                 visual_width,
                 wrap_width,
@@ -691,13 +704,15 @@ impl PositionedLine {
     ///   Hanging glyphs, trailing whitespace and synthesized glyphs are exempt.
     ///   A line holding a single `AllowOverflow` object wider than `wrap_width`
     ///   is valid because its `visual_width` equals the object's width;
-    /// * `visual_width <= ctx.wrap_width` (within tolerance), unless the line
-    ///   is in the **single-entity overflow state**: it holds exactly one inline
-    ///   box (the only way to reach this is `BoxOverflowPolicy::AllowOverflow`,
-    ///   as `Clip` and `ScaleToFit` make the box fit), or exactly one
-    ///   indivisible cluster (all its non-trailing glyphs share one non-empty
-    ///   `byte_range`; the emergency fallback), and `visual_width` equals that
-    ///   entity's width within tolerance;
+    /// * every `Clip` or `ScaleToFit` inline box ends at or before
+    ///   `ctx.wrap_width` (within tolerance);
+    /// * `visual_width <= ctx.wrap_width` (within tolerance), with two
+    ///   single-entity exemptions. **A:** no visual runs, no tabs and exactly one
+    ///   inline box, whose policy is `AllowOverflow`, with `x == 0` and
+    ///   `visual_width == width`. **B:** no inline boxes, no tabs, and glyphs
+    ///   that all belong to one indivisible cluster (they share one non-empty
+    ///   `byte_range`; the emergency cluster break), with `visual_width` equal to
+    ///   the sum of their advances;
     /// * every `is_hanging` glyph lies wholly outside the body;
     /// * `hanging_left`/`hanging_right` equal the extent those glyphs occupy
     ///   (so are positive exactly when such glyphs exist), and are zero on an
@@ -952,48 +967,41 @@ impl PositionedLine {
         self.check_wrap_width(ctx)
     }
 
-    /// Whether the line is one indivisible entity: a lone inline box, or a lone
-    /// cluster (its non-trailing, non-hanging glyphs share one non-empty
-    /// `byte_range`), whose extent is `[0, visual_width]` within tolerance.
+    /// Exemption A: nothing but one `AllowOverflow` box at `x == 0` as wide as
+    /// the line. Exemption B: nothing but the glyphs of one indivisible cluster
+    /// (a shared non-empty `byte_range`) whose advances sum to the line width.
     fn is_single_entity_overflow(&self) -> bool {
         let vw = self.visual_width;
-        let spans_body = |lo: f32, hi: f32| lo.abs() <= tolerance(lo, vw) && approx_eq(hi, vw);
-        let live_tab = self
-            .tabs
-            .iter()
-            .any(|t| t.byte_range.start < self.visible_byte_end);
-        if live_tab {
+        if !self.tabs.is_empty() {
             return false;
         }
-        let glyphs = || {
-            self.visual_runs
-                .iter()
-                .flat_map(|r| r.glyphs.iter())
-                .filter(|g| {
-                    !g.is_hanging
-                        && !g.is_synthesized
-                        && !g
-                            .byte_range
-                            .is_some_and(|b| b.start >= self.visible_byte_end)
-                })
-        };
         match self.visual_boxes.as_slice() {
-            [b] => glyphs().next().is_none() && spans_body(b.x, b.x + b.width),
+            [b] => {
+                self.visual_runs.is_empty()
+                    && b.overflow_policy == BoxOverflowPolicy::AllowOverflow
+                    && b.x.abs() <= tolerance(b.x, vw)
+                    && approx_eq(b.width, vw)
+            }
             [] => {
+                let glyphs = || {
+                    self.visual_runs
+                        .iter()
+                        .flat_map(|r| r.glyphs.iter())
+                        .filter(|g| {
+                            !g.is_hanging
+                                && !g.is_synthesized
+                                && !g
+                                    .byte_range
+                                    .is_some_and(|b| b.start >= self.visible_byte_end)
+                        })
+                };
                 let mut ranges = glyphs().map(|g| g.byte_range);
                 let Some(first @ Some(r)) = ranges.next() else {
                     return false;
                 };
-                if r.is_empty() || ranges.any(|o| o != first) {
-                    return false;
-                }
-                let lo = glyphs()
-                    .map(|g| g.x.min(g.x + g.advance))
-                    .fold(f32::INFINITY, f32::min);
-                let hi = glyphs()
-                    .map(|g| g.x.max(g.x + g.advance))
-                    .fold(f32::NEG_INFINITY, f32::max);
-                spans_body(lo, hi)
+                !r.is_empty()
+                    && ranges.all(|o| o == first)
+                    && approx_eq(glyphs().map(|g| g.advance).sum::<f32>(), vw)
             }
             _ => false,
         }
@@ -1001,6 +1009,13 @@ impl PositionedLine {
 
     /// Pass 3, last check: width against `ctx.wrap_width`.
     fn check_wrap_width(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
+        for (index, b) in self.visual_boxes.iter().enumerate() {
+            let rigid = b.overflow_policy != BoxOverflowPolicy::AllowOverflow;
+            let end = b.x + b.width;
+            if rigid && end > ctx.wrap_width + tolerance(end, ctx.wrap_width) {
+                return Err(LineInvariantError::InlineBoxWiderThanWrapWidth { index });
+            }
+        }
         let vw = self.visual_width;
         if vw <= ctx.wrap_width + tolerance(vw, ctx.wrap_width) || self.is_single_entity_overflow()
         {
@@ -1240,6 +1255,7 @@ mod tests {
             width,
             ascent: 10.0,
             descent: 2.0,
+            overflow_policy: BoxOverflowPolicy::Clip,
         }
     }
 
@@ -1944,7 +1960,7 @@ mod tests {
 
     #[test]
     fn a_single_wide_inline_box_may_overflow() {
-        let object = |x: f32, width: f32| PositionedInlineBox {
+        let object = |x: f32, width: f32, policy| PositionedInlineBox {
             box_id: 1,
             byte_range: TextRange::new(0, 1),
             x,
@@ -1952,26 +1968,52 @@ mod tests {
             width,
             ascent: 5.0,
             descent: 1.0,
+            overflow_policy: policy,
         };
+        let allow = BoxOverflowPolicy::AllowOverflow;
+        // Exemption A: no visual runs, no tabs, one AllowOverflow box at x = 0
+        // that is as wide as the line.
         let mut l = line(vec![], 50.0, 0.0, 0.0);
         l.byte_range = TextRange::new(0, 1);
         l.visible_byte_end = 1;
-        l.visual_boxes = vec![object(0.0, 50.0)];
+        l.visual_runs.clear();
+        l.visual_boxes = vec![object(0.0, 50.0, allow)];
         assert!(l.validate(&wrap(30.0)).is_ok());
-        // Not when it shares the line with a glyph or a second box.
-        let mut with_glyph = l.clone();
-        with_glyph.visual_runs =
-            line(vec![word_glyph(50.0, 0.0, (1, 2))], 50.0, 0.0, 0.0).visual_runs;
-        with_glyph.visual_runs[0].glyphs[0].advance = 5.0;
-        with_glyph.visual_width = 55.0;
-        assert!(with_glyph.validate(&wrap(30.0)).is_err());
+        // A rigid policy must fit: Clip and ScaleToFit boxes wider than the line
+        // are rejected, by the box rule and then by the width rule.
+        for policy in [BoxOverflowPolicy::Clip, BoxOverflowPolicy::ScaleToFit] {
+            let mut rigid = l.clone();
+            rigid.visual_boxes = vec![object(0.0, 50.0, policy)];
+            assert_eq!(
+                rigid.validate(&wrap(30.0)),
+                Err(LineInvariantError::InlineBoxWiderThanWrapWidth { index: 0 })
+            );
+            // A rigid box that fits is fine.
+            rigid.visual_boxes = vec![object(0.0, 30.0, policy)];
+            rigid.visual_width = 30.0;
+            assert!(rigid.validate(&wrap(30.0)).is_ok());
+        }
+        // Not when it shares the line with a glyph run, a tab or a second box.
+        let mut with_run = l.clone();
+        with_run.visual_runs = line(vec![], 50.0, 0.0, 0.0).visual_runs;
+        assert!(with_run.validate(&wrap(30.0)).is_err());
+        let mut with_tab = l.clone();
+        with_tab.tabs = vec![PositionedTab {
+            byte_range: TextRange::new(0, 1),
+            x: 50.0,
+            width: 0.0,
+        }];
+        assert!(with_tab.validate(&wrap(30.0)).is_err());
         let mut two = l.clone();
-        two.visual_boxes = vec![object(0.0, 25.0), object(25.0, 25.0)];
+        two.visual_boxes = vec![object(0.0, 25.0, allow), object(25.0, 25.0, allow)];
         assert!(two.validate(&wrap(30.0)).is_err());
-        // The box width must be the line width.
-        let mut narrow = l;
-        narrow.visual_boxes = vec![object(0.0, 20.0)];
+        // The box must start at 0 and be as wide as the line.
+        let mut narrow = l.clone();
+        narrow.visual_boxes = vec![object(0.0, 20.0, allow)];
         assert!(narrow.validate(&wrap(30.0)).is_err());
+        let mut shifted = l;
+        shifted.visual_boxes = vec![object(5.0, 45.0, allow)];
+        assert!(shifted.validate(&wrap(30.0)).is_err());
     }
 
     #[test]
@@ -1999,6 +2041,7 @@ mod tests {
         f.bidi_level = 1;
         assert!(!f.snaps_to_logical_start(105.0)); // RTL: halves swap
         assert!(f.snaps_to_logical_start(115.0));
+        assert!(f.snaps_to_logical_start(110.0)); // the midpoint is the physical right half
         f.bidi_level = 2;
         assert!(f.snaps_to_logical_start(105.0));
         // A narrow second-line fragment keeps its own start reachable: its left

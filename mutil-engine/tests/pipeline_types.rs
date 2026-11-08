@@ -327,10 +327,7 @@ fn every_word_node_variant_is_constructible() {
             suffix_cut_bytes: 0,
             penalty: 135,
         }),
-        BreakAction::CjkPunctAdjust {
-            trailing_advance_override: Some(8.0),
-            leading_advance_override: None,
-        },
+        BreakAction::CjkPunctAdjust,
         BreakAction::MathOperator {
             repeat_glyph_id: Some(9),
         },
@@ -340,7 +337,7 @@ fn every_word_node_variant_is_constructible() {
             BreakAction::Direct
             | BreakAction::HardBreak { .. }
             | BreakAction::Hyphenate(_)
-            | BreakAction::CjkPunctAdjust { .. }
+            | BreakAction::CjkPunctAdjust
             | BreakAction::MathOperator { .. } => {}
         }
     }

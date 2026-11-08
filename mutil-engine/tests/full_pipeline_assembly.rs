@@ -373,6 +373,7 @@ fn zero_layout_full_pipeline_assembly() {
             width: BOX_W,
             ascent: 10.0,
             descent: 2.0,
+            overflow_policy: BoxOverflowPolicy::Clip,
         }],
         tabs: vec![PositionedTab {
             byte_range: TextRange::new(11, 12),
@@ -567,6 +568,7 @@ fn small_line() -> PositionedLine {
             width: 10.0,
             ascent: 10.0,
             descent: 2.0,
+            overflow_policy: BoxOverflowPolicy::Clip,
         }],
         tabs: vec![PositionedTab {
             byte_range: TextRange::new(2, 3),

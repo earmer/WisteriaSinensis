@@ -196,27 +196,30 @@ pub enum BreakAction {
     /// Zero-cost break between words, Han ideographs or Thai words.
     Direct,
     /// Mandatory line termination (`penalty == MANDATORY_BREAK_PENALTY`).
+    ///
+    /// `is_paragraph_end == false` is an explicit UAX #14 terminator present in
+    /// the text (`\n`, `\r\n`, U+2028, ...): its `byte_range` is non-empty and
+    /// is exactly those bytes. `is_paragraph_end == true` is the synthetic
+    /// end-of-paragraph sentinel: its `byte_range` is the empty range
+    /// `text.len()..text.len()` and it is the **last** discretionary of the
+    /// paragraph, at most once. Text ending in `\n` therefore ends with a real
+    /// hard break followed by the sentinel (the trailing blank line).
     HardBreak {
-        /// `true` for the end of the paragraph, `false` for `\n`, `\r\n`
-        /// and U+2028 inside it.
+        /// `true` for the sentinel, `false` for a terminator in the text.
         is_paragraph_end: bool,
     },
     /// Hyphenation: `TextShaper::reshape_window` runs at materialisation.
     Hyphenate(HyphenOpportunity),
     /// Restore or trim `chws`-compressed CJK punctuation at the line edges.
     ///
-    /// The overrides are **geometric**, not indices: each replaces the advance
-    /// of the one cluster next to the discretionary. `trailing_advance_override`
-    /// applies to the last cluster of the preceding [`BoxNode::Text`] (the end
-    /// of line `k`), `leading_advance_override` to the first cluster of the
-    /// following one (the start of line `k + 1`). `None` leaves a side as
-    /// shaped.
-    CjkPunctAdjust {
-        /// Replacement advance of the last cluster before the break.
-        trailing_advance_override: Option<f32>,
-        /// Replacement advance of the first cluster after the break.
-        leading_advance_override: Option<f32>,
-    },
+    /// A unit variant: the data already lives in the node's widths.
+    /// `pre_break_width` is the signed delta added to the `natural_width` of the
+    /// last cluster of the immediately preceding [`BoxNode::Text`] (the end of
+    /// line `k`); `post_break_width` the delta added to the first cluster of the
+    /// immediately following one (the start of line `k + 1`). A non-zero delta
+    /// needs that text box, and the cluster's width plus the delta must stay
+    /// non-negative.
+    CjkPunctAdjust,
     /// Break after a top-level math relation (`=`) or binary operator (`+`).
     MathOperator {
         /// Glyph repeated at the start of the next line, if any.
@@ -299,9 +302,9 @@ impl DiscretionaryNode {
         }
     }
 
-    /// A mandatory break that owns `newline`, the exact bytes of the line
-    /// terminator (`\n`, `\r\n`, U+2028, ...), or an empty range at the end of
-    /// the paragraph.
+    /// A mandatory break. For `is_paragraph_end == false`, `newline` is the exact
+    /// non-empty range of the line terminator (`\n`, `\r\n`, U+2028, ...); for
+    /// `true` it is the empty range `text.len()..text.len()`.
     #[must_use]
     pub fn hard_break(newline: TextRange, is_paragraph_end: bool) -> Self {
         Self {
