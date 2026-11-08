@@ -85,9 +85,9 @@ pub enum LayoutInputError {
         item: usize,
     },
     /// A hyphenation discretionary is not `flagged`, does not sit between two
-    /// non-empty text boxes at its `byte_offset`, disagrees with its
-    /// `HyphenOpportunity`, or has a cut that leaves its same-run hyphen chain
-    /// or ends off an atom boundary.
+    /// non-empty text boxes of the same `run_index` at its `byte_offset`,
+    /// disagrees with its `HyphenOpportunity`, or has a cut that leaves its
+    /// same-run hyphen chain or ends off an atom boundary.
     InvalidHyphenOpportunity {
         /// Index into `ParagraphAst::items`.
         item: usize,
@@ -332,23 +332,29 @@ fn hyphen_chain(
 
 /// Whether a hyphenation discretionary at `items[index]` is well formed: its
 /// `HyphenOpportunity` agrees with it, it sits between two non-empty text
-/// boxes that meet at its offset, and each cut stays within, and ends on an
-/// atom boundary of, the contiguous same-run hyphen-connected chain of text
-/// boxes on its side (see [`hyphen_chain`]). A cut may therefore cross an
-/// unchosen hyphenation point of the same word (a spelling change reaching two
-/// bytes back across a point one byte away) but never a run or span boundary.
+/// boxes that meet at its offset **and share one `run_index`** (a word is split
+/// within a single `ShapingRun`, and the hyphen glyph and
+/// `TextShaper::reshape_window` are scoped to one), and each cut stays within,
+/// and ends on an atom boundary of, the contiguous same-run hyphen-connected
+/// chain of text boxes on its side (see [`hyphen_chain`]). A cut may therefore
+/// cross an unchosen hyphenation point of the same word (a spelling change
+/// reaching two bytes back across a point one byte away) but never a run or
+/// span boundary.
 fn hyphen_valid(
     items: &[WordNode],
     index: usize,
     d: &DiscretionaryNode,
     h: &HyphenOpportunity,
 ) -> bool {
-    let (Some((_, prev, _)), Some((_, next, _))) = (
+    let (Some((prev_run, prev, _)), Some((next_run, next, _))) = (
         text_at(items, index.checked_sub(1)),
         text_at(items, index.checked_add(1)),
     ) else {
         return false;
     };
+    if prev_run != next_run {
+        return false;
+    }
     let off = h.byte_offset;
     if d.byte_range != TextRange::empty_at(off) || prev.end != off || next.start != off {
         return false;
@@ -1453,14 +1459,50 @@ mod tests {
         assert!(check(&three_part_word(hyphen_at_1(), (1, 0))).is_ok());
         let direct = WordNode::Discretionary(DiscretionaryNode::direct(1));
         assert_eq!(check(&three_part_word(direct, (2, 0))), bad);
-        // A change of shaping run ends it too: one reshape window, one run.
-        let mut a = three_part_word(hyphen_at_1(), (2, 0));
+        assert!(check(&three_part_word(hyphen_at_1(), (1, 0))).is_ok());
+    }
+
+    #[test]
+    fn a_hyphenation_needs_the_same_run_on_both_sides() {
+        let o = LayoutOptions::default();
+        // "ab" | "é" around a hyphenation point at 2, in two different runs: a
+        // word is split within one ShapingRun, and the hyphen glyph and
+        // reshape_window are scoped to one.
+        let split = |tail_run: usize| {
+            let mut a = hyphenated(opportunity(2, 0, 0));
+            a.runs.push(run());
+            if let WordNode::Box(BoxNode::Text { run_index, .. }) = &mut a.items[2] {
+                *run_index = tail_run;
+            }
+            check_layout_inputs(&a, "abé", &constraints(), &o)
+        };
+        assert!(split(0).is_ok());
+        assert_eq!(
+            split(1),
+            Err(LayoutInputError::InvalidHyphenOpportunity { item: 1 })
+        );
+        // The same holds inside a longer chain: the first point already splits runs.
+        let mut a = three_part_word(
+            WordNode::Discretionary(DiscretionaryNode {
+                byte_range: TextRange::empty_at(1),
+                penalty: DiscretionaryNode::HYPHEN_PENALTY,
+                flagged: true,
+                pre_break_width: 5.0,
+                post_break_width: 0.0,
+                no_break_width: 0.0,
+                action: BreakAction::Hyphenate(opportunity(1, 0, 0)),
+                cloned_spans: Default::default(),
+            }),
+            (0, 0),
+        );
         a.runs.push(run());
         if let WordNode::Box(BoxNode::Text { run_index, .. }) = &mut a.items[0] {
             *run_index = 1;
         }
-        assert_eq!(check(&a), bad);
-        assert!(check(&three_part_word(hyphen_at_1(), (1, 0))).is_ok());
+        assert_eq!(
+            check_layout_inputs(&a, "abcd", &constraints(), &o),
+            Err(LayoutInputError::InvalidHyphenOpportunity { item: 1 })
+        );
     }
 
     #[test]

@@ -210,10 +210,12 @@ pub enum BreakAction {
         /// `true` for the sentinel, `false` for a terminator in the text.
         is_paragraph_end: bool,
     },
-    /// Hyphenation: `TextShaper::reshape_window` runs at materialisation. The
-    /// widths minus the cloned padding are the net prefix and suffix shaping
-    /// deltas; the cuts stay within the contiguous same-run chain of text boxes
-    /// joined by hyphenation points (`check_layout_inputs`).
+    /// Hyphenation: `TextShaper::reshape_window` runs at materialisation. Both
+    /// neighbouring text boxes share one `run_index` (a word is split within a
+    /// single `ShapingRun`). The widths minus the cloned padding are the net
+    /// prefix and suffix shaping deltas; the cuts stay within the contiguous
+    /// same-run chain of text boxes joined by hyphenation points
+    /// (`check_layout_inputs`).
     Hyphenate(HyphenOpportunity),
     /// Restore or trim `chws`-compressed CJK punctuation at the line edges.
     ///

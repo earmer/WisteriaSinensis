@@ -725,12 +725,15 @@ impl PositionedLine {
     ///   `width`, or the sum of the glyph advances) and `[entity_start_x,
     ///   entity_end_x]` its extent. Without span fragments, `entity_start_x == 0`
     ///   and `visual_width == entity_width`. With span fragments (the entity sits
-    ///   in padded decoration spans), every fragment's `byte_range` equals the
-    ///   entity's, the entity lies within `[0, visual_width]`, and the fragments
-    ///   reach both edges of the body (`min x == 0`, `max (x + width) ==
-    ///   visual_width`). The padding thus lets a 40-wide cluster with 3 units on
-    ///   each side pass at `wrap_width = 30`, while an unpadded entity cannot
-    ///   inflate `visual_width`;
+    ///   in padded decoration spans), every fragment starts where the entity
+    ///   starts and ends at or after the entity's end, the entity ends at or
+    ///   after `visible_byte_end` (so any bytes a fragment owns past the entity
+    ///   are trailing whitespace, since fragments stay inside the line), the
+    ///   entity lies within `[0, visual_width]`, and the fragments reach both
+    ///   edges of the body (`min x == 0`, `max (x + width) == visual_width`).
+    ///   The padding thus lets a 40-wide cluster with 3 units on each side pass
+    ///   at `wrap_width = 30`, while an unpadded entity cannot inflate
+    ///   `visual_width`;
     /// * every `is_hanging` glyph lies wholly outside the body;
     /// * `hanging_left`/`hanging_right` equal the extent those glyphs occupy
     ///   (so are positive exactly when such glyphs exist), and are zero on an
@@ -995,10 +998,13 @@ impl PositionedLine {
     /// * No span fragments: the entity starts at `0` and `visual_width` equals
     ///   `entity_width`.
     /// * Span fragments: they are the padding around the one entity. Every
-    ///   fragment covers exactly the entity's `byte_range`, the entity lies
-    ///   inside the body, and the fragments reach both edges of the body
-    ///   (`min x == 0`, `max end == visual_width`). Unpadded entities cannot
-    ///   inflate `visual_width` this way.
+    ///   fragment starts at the entity's start and ends at or after its end;
+    ///   the entity ends at or after `visible_byte_end`, so the extra bytes lie
+    ///   in the trailing whitespace (`check_span_fragments` keeps fragments
+    ///   inside the line). The entity lies inside the body and the fragments
+    ///   reach both edges of the body (`min x == 0`, `max end ==
+    ///   visual_width`). Unpadded entities cannot inflate `visual_width` this
+    ///   way.
     fn is_single_entity_overflow(&self) -> bool {
         let vw = self.visual_width;
         if !self.tabs.is_empty() {
@@ -1060,7 +1066,10 @@ impl PositionedLine {
             .iter()
             .map(|f| f.x + f.width)
             .fold(f32::NEG_INFINITY, f32::max);
-        self.span_fragments.iter().all(|f| f.byte_range == range)
+        self.span_fragments
+            .iter()
+            .all(|f| f.byte_range.start == range.start && f.byte_range.end >= range.end)
+            && range.end >= self.visible_byte_end
             && start >= -tolerance(start, vw)
             && end <= vw + tolerance(end, vw)
             && left.abs() <= tolerance(left, vw)
@@ -2096,6 +2105,8 @@ mod tests {
                 0.0,
             );
             l.span_fragments = vec![fragment(1, 0.0, left + 26.0 + right, (0, 3))];
+            // Byte 3 is the line's trailing whitespace.
+            l.visible_byte_end = 3;
             l
         };
         // 3 + 26 + 3 = 32 > 30: legal, the padding rides with the cluster.
@@ -2114,10 +2125,27 @@ mod tests {
                 Err(LineInvariantError::LineWiderThanWrapWidth { .. })
             )
         };
-        // A fragment over other bytes than the entity's.
-        let mut other = wide((3.0, 3.0));
-        other.span_fragments[0].byte_range = TextRange::new(0, 4);
-        assert!(too_wide(&other));
+        // A fragment may run on over the trailing whitespace ...
+        let mut trailing = wide((3.0, 3.0));
+        trailing.span_fragments[0].byte_range = TextRange::new(0, 4);
+        assert!(trailing.validate(&wrap(30.0)).is_ok());
+        // ... but not over a visible byte the entity does not own,
+        let mut visible = trailing.clone();
+        visible.visible_byte_end = 4;
+        assert!(too_wide(&visible));
+        // not start elsewhere or stop short of the entity,
+        for bytes in [(1, 3), (0, 2)] {
+            let mut other = wide((3.0, 3.0));
+            other.span_fragments[0].byte_range = TextRange::new(bytes.0, bytes.1);
+            assert!(too_wide(&other), "{bytes:?}");
+        }
+        // and not leave the line (Pass 3(g)).
+        let mut beyond = wide((3.0, 3.0));
+        beyond.span_fragments[0].byte_range = TextRange::new(0, 5);
+        assert_eq!(
+            beyond.validate(&wrap(30.0)),
+            Err(LineInvariantError::SpanFragmentOutsideLine { index: 0 })
+        );
         // Fragments that stop short of an edge of the body.
         let mut short = wide((3.0, 3.0));
         short.span_fragments = vec![fragment(1, 0.0, 29.0, (0, 3))];
@@ -2148,12 +2176,16 @@ mod tests {
             overflow_policy: BoxOverflowPolicy::AllowOverflow,
         };
         let mut l = line(vec![], 32.0, 0.0, 0.0);
-        l.byte_range = TextRange::new(0, 1);
+        l.byte_range = TextRange::new(0, 2);
         l.visible_byte_end = 1;
         l.visual_runs.clear();
         l.visual_boxes = vec![object(3.0, 26.0)];
         l.span_fragments = vec![fragment(1, 0.0, 32.0, (0, 1))];
         assert!(l.validate(&wrap(30.0)).is_ok());
+        // Trailing whitespace inside the fragment is fine; stopping short is not.
+        let mut trailing = l.clone();
+        trailing.span_fragments[0].byte_range = TextRange::new(0, 2);
+        assert!(trailing.validate(&wrap(30.0)).is_ok());
         let mut other = l.clone();
         other.span_fragments[0].byte_range = TextRange::new(0, 0);
         assert!(too_wide(&other));
