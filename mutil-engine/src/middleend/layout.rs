@@ -77,8 +77,9 @@ pub enum LayoutInputError {
         item: usize,
     },
     /// A span boundary is not an empty range, has a non-finite or negative
-    /// width, a `bidi_level` that differs from the level of the first (for a
-    /// `Leading` edge) or last (`Trailing`) atom inside its span, or an order
+    /// width, not at its span's `byte_range.start` (`Leading`) or `.end`
+    /// (`Trailing`), a `bidi_level` that differs from the level of the first (for
+    /// a `Leading` edge) or last (`Trailing`) atom inside its span, or an order
     /// that breaks LIFO nesting (a `Trailing` edge closing a span that is not the
     /// innermost open one, a repeated `Leading`, or, for two spans with equal
     /// ranges, the higher-index span not nested inside the lower-index one).
@@ -99,6 +100,16 @@ pub enum LayoutInputError {
     /// must be proper containment; equal ranges are allowed, the lower index
     /// being the outer span) or nests deeper than `MAX_DECORATION_NESTING_DEPTH`.
     InvalidDecorationSpan {
+        /// Index into `ParagraphAst::decoration_spans`.
+        span: usize,
+    },
+    /// `ParagraphAst::items` does not end with the paragraph-end sentinel
+    /// `HardBreak { is_paragraph_end: true }` (an empty paragraph included).
+    MissingParagraphEnd,
+    /// A decoration span lacks its `Leading` boundary at `byte_range.start` or
+    /// its `Trailing` boundary at `byte_range.end` in `items` (both are
+    /// mandatory, even with zero padding).
+    MissingSpanBoundary {
         /// Index into `ParagraphAst::decoration_spans`.
         span: usize,
     },
@@ -149,6 +160,15 @@ impl fmt::Display for LayoutInputError {
             }
             Self::InvalidDecorationSpan { span } => {
                 write!(f, "decoration span {span} is invalid or duplicated")
+            }
+            Self::MissingParagraphEnd => {
+                f.write_str("the items do not end with the paragraph-end sentinel")
+            }
+            Self::MissingSpanBoundary { span } => {
+                write!(
+                    f,
+                    "decoration span {span} lacks a leading or trailing boundary"
+                )
             }
             Self::InvalidAtomicSpan { span } => {
                 write!(f, "atomic span {span} is invalid or duplicated")
@@ -333,30 +353,37 @@ fn edge_cluster_width(items: &[WordNode], index: Option<usize>, last: bool) -> O
     }
 }
 
-/// Span-boundary order: strict LIFO nesting of the boundary nodes, and for two
-/// decoration spans with equal ranges the lower index is the outer span (its
-/// `Leading` first, its `Trailing` last). Returns the offending item.
-fn check_boundary_order(ast: &ParagraphAst) -> Result<(), usize> {
+/// Span boundaries: every decoration span has exactly one `Leading` and one
+/// `Trailing` node, in strict LIFO nesting order, and for two decoration spans
+/// with equal ranges the lower index is the outer span (its `Leading` first, its
+/// `Trailing` last).
+fn check_boundary_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
+    use LayoutInputError as E;
     let mut open: Vec<u64> = Vec::new();
+    let mut opened: Vec<u64> = Vec::new();
     for (item, n) in ast.items.iter().enumerate() {
         let WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. }) = n else {
             continue;
         };
         match edge {
             SpanEdge::Leading => {
-                if open.contains(span_id) {
-                    return Err(item);
+                if opened.contains(span_id) {
+                    return Err(E::InvalidSpanBoundary { item });
                 }
+                opened.push(*span_id);
                 open.push(*span_id);
             }
             SpanEdge::Trailing => {
-                if let Some(pos) = open.iter().rposition(|id| id == span_id) {
-                    if pos + 1 != open.len() {
-                        return Err(item);
-                    }
-                    open.pop();
+                if open.last() != Some(span_id) {
+                    return Err(E::InvalidSpanBoundary { item });
                 }
+                open.pop();
             }
+        }
+    }
+    for (span, s) in ast.decoration_spans.iter().enumerate() {
+        if !opened.contains(&s.span_id) || open.contains(&s.span_id) {
+            return Err(E::MissingSpanBoundary { span });
         }
     }
     let position = |id: u64, wanted: SpanEdge| {
@@ -376,7 +403,7 @@ fn check_boundary_order(ast: &ParagraphAst) -> Result<(), usize> {
             );
             if let (Some(o), Some(n)) = leading {
                 if o > n {
-                    return Err(n);
+                    return Err(E::InvalidSpanBoundary { item: n });
                 }
             }
             let trailing = (
@@ -385,7 +412,7 @@ fn check_boundary_order(ast: &ParagraphAst) -> Result<(), usize> {
             );
             if let (Some(o), Some(n)) = trailing {
                 if n > o {
-                    return Err(o);
+                    return Err(E::InvalidSpanBoundary { item: o });
                 }
             }
         }
@@ -474,8 +501,15 @@ pub fn check_layout_inputs(
                 if !(byte_range.is_empty() && width.is_finite() && *width >= 0.0) {
                     return Err(E::InvalidSpanBoundary { item });
                 }
-                if !ast.decoration_spans.iter().any(|s| s.span_id == *span_id) {
+                let Some(span) = ast.decoration_spans.iter().find(|s| s.span_id == *span_id) else {
                     return Err(E::UnknownSpan { item });
+                };
+                let anchor = match edge {
+                    SpanEdge::Leading => span.byte_range.start,
+                    SpanEdge::Trailing => span.byte_range.end,
+                };
+                if byte_range.start != anchor {
+                    return Err(E::InvalidSpanBoundary { item });
                 }
                 if expected_boundary_level(ast, *span_id, *edge).is_some_and(|l| l != *bidi_level) {
                     return Err(E::InvalidSpanBoundary { item });
@@ -566,7 +600,17 @@ pub fn check_layout_inputs(
             WordNode::Tab { .. } => {}
         }
     }
-    check_boundary_order(ast).map_err(|item| E::InvalidSpanBoundary { item })?;
+    match ast.items.last() {
+        Some(WordNode::Discretionary(d))
+            if matches!(
+                d.action,
+                BreakAction::HardBreak {
+                    is_paragraph_end: true
+                }
+            ) => {}
+        _ => return Err(E::MissingParagraphEnd),
+    }
+    check_boundary_order(ast)?;
     let context = LineContext::from_options(
         m,
         ast.strut_font_size,
@@ -633,7 +677,7 @@ mod tests {
             },
             strut_font_size: 10.0,
             runs: vec![],
-            items: vec![hard_break()],
+            items: vec![hard_break(), sentinel(1)],
             decoration_spans: vec![],
             atomic_spans: vec![],
         }
@@ -642,6 +686,14 @@ mod tests {
     /// A mandatory break that owns the one-byte paragraph "\n".
     fn hard_break() -> WordNode {
         WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(0, 1), false))
+    }
+
+    /// The paragraph-end sentinel for a text of `len` bytes.
+    fn sentinel(len: usize) -> WordNode {
+        WordNode::Discretionary(DiscretionaryNode::hard_break(
+            TextRange::empty_at(len),
+            true,
+        ))
     }
 
     #[test]
@@ -776,12 +828,46 @@ mod tests {
         }
     }
 
-    fn with_items(items: Vec<WordNode>) -> ParagraphAst {
+    /// `items` exactly as given (the caller supplies the sentinel).
+    fn with_raw_items(items: Vec<WordNode>) -> ParagraphAst {
         ParagraphAst {
             runs: vec![run()],
             items,
             ..ast()
         }
+    }
+
+    /// `items` followed by the sentinel of a `len`-byte text.
+    fn with_items_for(len: usize, mut items: Vec<WordNode>) -> ParagraphAst {
+        items.push(sentinel(len));
+        with_raw_items(items)
+    }
+
+    /// `items` followed by the sentinel of the four-byte text most tests use.
+    fn with_items(items: Vec<WordNode>) -> ParagraphAst {
+        with_items_for(4, items)
+    }
+
+    /// Adds the mandatory `Leading` / `Trailing` boundary pair of every
+    /// decoration span: all leading edges first (in slice order), all trailing
+    /// edges last (reversed), the sentinel staying final.
+    fn closed(mut a: ParagraphAst) -> ParagraphAst {
+        let mut items: Vec<WordNode> = a
+            .decoration_spans
+            .iter()
+            .map(|s| bnd(s.span_id, SpanEdge::Leading, s.byte_range.start))
+            .collect();
+        let end = a.items.pop().expect("a sentinel");
+        items.append(&mut a.items);
+        items.extend(
+            a.decoration_spans
+                .iter()
+                .rev()
+                .map(|s| bnd(s.span_id, SpanEdge::Trailing, s.byte_range.end)),
+        );
+        items.push(end);
+        a.items = items;
+        a
     }
 
     #[test]
@@ -842,7 +928,6 @@ mod tests {
         };
         let bad = Err(LayoutInputError::InvalidDiscretionary { item: 0 });
         assert!(check(DiscretionaryNode::direct(2)).is_ok());
-        assert!(check(DiscretionaryNode::hard_break(TextRange::empty_at(4), true)).is_ok());
         // A negative width is a legal delta (trim); a non-finite one is not.
         let mut d = DiscretionaryNode::direct(2);
         d.pre_break_width = -2.5;
@@ -992,7 +1077,13 @@ mod tests {
             a.decoration_spans = vec![chip(5, mode)];
             a
         };
-        let ok = with_span(vec![boundary(2.0, TextRange::empty_at(1))], Slice);
+        let ok = with_span(
+            vec![
+                boundary(2.0, TextRange::empty_at(1)),
+                bnd(5, SpanEdge::Trailing, 3),
+            ],
+            Slice,
+        );
         assert!(check_layout_inputs(&ok, "abcd", &constraints(), &o).is_ok());
         let unknown = with_items(vec![boundary(2.0, TextRange::empty_at(1))]);
         assert_eq!(
@@ -1014,13 +1105,13 @@ mod tests {
             let mut d = DiscretionaryNode::direct(2);
             d.penalty = DiscretionaryNode::CLONED_SPAN_PENALTY;
             d.cloned_spans.push(5);
-            with_span(vec![WordNode::Discretionary(d)], mode)
+            closed(with_span(vec![WordNode::Discretionary(d)], mode))
         };
         assert!(check_layout_inputs(&clone_pad(Clone), "abcd", &constraints(), &o).is_ok());
         // Padding is cloned only by a span that was declared to clone it.
         assert_eq!(
             check_layout_inputs(&clone_pad(Slice), "abcd", &constraints(), &o),
-            Err(LayoutInputError::UnknownSpan { item: 0 })
+            Err(LayoutInputError::UnknownSpan { item: 1 }) // item 0 is the Leading edge
         );
     }
 
@@ -1037,6 +1128,7 @@ mod tests {
             d.cloned_spans.push(5);
             d.penalty += DiscretionaryNode::CLONED_SPAN_PENALTY;
         }
+        let a = closed(a);
         assert!(check_layout_inputs(&a, "abé", &constraints(), &o).is_ok());
         // A break on the span's edge is not inside it; a repeated id is wrong.
         for (cloned, at) in [(vec![5], 1), (vec![5], 3), (vec![5, 5], 2)] {
@@ -1044,7 +1136,16 @@ mod tests {
             d.cloned_spans.extend(cloned);
             let mut b = with_items(vec![WordNode::Discretionary(d)]);
             b.decoration_spans = vec![chip(5, Clone)];
-            assert!(check_layout_inputs(&b, "abcd", &constraints(), &o).is_err());
+            let b = closed(b);
+            let r = check_layout_inputs(&b, "abcd", &constraints(), &o);
+            assert!(
+                matches!(
+                    r,
+                    Err(LayoutInputError::UnknownSpan { .. }
+                        | LayoutInputError::InvalidDiscretionary { .. })
+                ),
+                "{r:?}"
+            );
         }
     }
 
@@ -1052,7 +1153,7 @@ mod tests {
     fn soft_breaks_own_nothing_and_hard_breaks_own_their_terminator() {
         let o = LayoutOptions::default();
         let check = |text: &str, d: DiscretionaryNode| {
-            let mut a = with_items(vec![WordNode::Discretionary(d)]);
+            let mut a = with_items_for(text.len(), vec![WordNode::Discretionary(d)]);
             a.runs[0].byte_range = TextRange::new(0, text.len());
             check_layout_inputs(&a, text, &constraints(), &o)
         };
@@ -1086,13 +1187,6 @@ mod tests {
                 DiscretionaryNode::hard_break(TextRange::empty_at(1), false)
             ),
             bad
-        );
-        assert!(
-            check(
-                "abcd",
-                DiscretionaryNode::hard_break(TextRange::empty_at(4), true)
-            )
-            .is_ok()
         );
         // A soft opportunity owns nothing.
         let mut soft = DiscretionaryNode::direct(1);
@@ -1151,12 +1245,12 @@ mod tests {
             Err(LayoutInputError::InvalidDiscretionary { item: 0 })
         );
         let mut a = adjust(0.0, -1.0);
-        a.items.pop();
+        a.items.remove(2);
         assert_eq!(check(a), bad);
         // With zero deltas no neighbour is needed.
         let mut a = adjust(0.0, 0.0);
+        a.items.remove(2);
         a.items.remove(0);
-        a.items.pop();
         assert!(check(a).is_ok());
     }
 
@@ -1223,17 +1317,16 @@ mod tests {
     fn the_paragraph_end_sentinel_is_empty_last_and_unique() {
         let o = LayoutOptions::default();
         let check = |text: &str, items: Vec<WordNode>| {
-            let mut a = with_items(items);
+            let mut a = with_raw_items(items);
             a.runs[0].byte_range = TextRange::new(0, text.len());
             check_layout_inputs(&a, text, &constraints(), &o)
-        };
-        let sentinel = |at: usize| {
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::empty_at(at), true))
         };
         let newline = |a: usize, b: usize| {
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(a, b), false))
         };
         assert!(check("abcd", vec![sentinel(4)]).is_ok());
+        // An empty paragraph is just the sentinel.
+        assert!(check("", vec![sentinel(0)]).is_ok());
         // Text ending in a newline: the real break, then the sentinel.
         assert!(check("ab\n", vec![newline(2, 3), sentinel(3)]).is_ok());
         let bad = |item| Err(LayoutInputError::InvalidDiscretionary { item });
@@ -1249,6 +1342,72 @@ mod tests {
         let mut owning = DiscretionaryNode::hard_break(TextRange::new(2, 3), true);
         owning.byte_range = TextRange::new(2, 3);
         assert_eq!(check("ab\n", vec![WordNode::Discretionary(owning)]), bad(0));
+    }
+
+    #[test]
+    fn the_items_must_end_with_the_sentinel() {
+        let o = LayoutOptions::default();
+        let check = |text: &str, items: Vec<WordNode>| {
+            let mut a = with_raw_items(items);
+            a.runs[0].byte_range = TextRange::new(0, text.len());
+            check_layout_inputs(&a, text, &constraints(), &o)
+        };
+        let missing = Err(LayoutInputError::MissingParagraphEnd);
+        // No items at all, even for an empty paragraph.
+        assert_eq!(check("", vec![]), missing);
+        // A real hard break is not the sentinel: "ab\n" needs both.
+        let newline =
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(2, 3), false));
+        assert_eq!(check("ab\n", vec![newline]), missing);
+        // A soft opportunity or a box last.
+        let soft = WordNode::Discretionary(DiscretionaryNode::direct(2));
+        assert_eq!(check("abcd", vec![soft]), missing);
+        let text = text_box(vec![atom(0, 1)]);
+        assert_eq!(check("abcd", vec![sentinel(4), text]), missing);
+        // Four traces from the line-emission rule: N newlines, N + 1 mandatory
+        // breaks, so N + 1 lines.
+        let mandatory = |items: &[WordNode]| {
+            items
+                .iter()
+                .filter(|n| matches!(n, WordNode::Discretionary(d) if d.is_mandatory()))
+                .count()
+        };
+        let nl = |a: usize, b: usize| {
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(a, b), false))
+        };
+        let cases: [(&str, Vec<WordNode>); 4] = [
+            ("", vec![sentinel(0)]),
+            (
+                "abc",
+                vec![
+                    text_box(vec![atom(0, 1), atom(1, 2), atom(2, 3)]),
+                    sentinel(3),
+                ],
+            ),
+            (
+                "abc\n",
+                vec![
+                    text_box(vec![atom(0, 1), atom(1, 2), atom(2, 3)]),
+                    nl(3, 4),
+                    sentinel(4),
+                ],
+            ),
+            (
+                "a\n\nb",
+                vec![
+                    text_box(vec![atom(0, 1)]),
+                    nl(1, 2),
+                    nl(2, 3),
+                    text_box(vec![atom(3, 4)]),
+                    sentinel(4),
+                ],
+            ),
+        ];
+        for (text, items) in cases {
+            let newlines = text.matches('\n').count();
+            assert_eq!(mandatory(&items), newlines + 1, "{text:?}");
+            assert!(check(text, items).is_ok(), "{text:?}");
+        }
     }
 
     #[test]
@@ -1288,17 +1447,22 @@ mod tests {
         let o = LayoutOptions::default();
         let mut inner = atom(1, 2);
         inner.bidi_level = 1;
-        let build = |edge, level| {
+        // Edge `edge` carries `level`; the other edge carries its correct level.
+        let build = |edge: SpanEdge, level: u8| {
+            let boundary = |e: SpanEdge, correct: u8, at: usize| {
+                WordNode::Box(BoxNode::SpanBoundary {
+                    byte_range: TextRange::empty_at(at),
+                    span_id: 5,
+                    edge: e,
+                    width: 2.0,
+                    bidi_level: if e == edge { level } else { correct },
+                })
+            };
             let mut a = with_items(vec![
                 text_box(vec![atom(0, 1)]),
-                WordNode::Box(BoxNode::SpanBoundary {
-                    byte_range: TextRange::empty_at(1),
-                    span_id: 5,
-                    edge,
-                    width: 2.0,
-                    bidi_level: level,
-                }),
+                boundary(SpanEdge::Leading, 1, 1),
                 text_box(vec![inner.clone(), atom(2, 3)]),
+                boundary(SpanEdge::Trailing, 0, 3),
             ]);
             a.decoration_spans = vec![chip(5, Slice)]; // bytes 1..3
             a
@@ -1307,9 +1471,58 @@ mod tests {
         // First atom inside the span is level 1, the last is level 0.
         assert!(check(build(SpanEdge::Leading, 1)).is_ok());
         assert!(check(build(SpanEdge::Trailing, 0)).is_ok());
-        let bad = Err(LayoutInputError::InvalidSpanBoundary { item: 1 });
-        assert_eq!(check(build(SpanEdge::Leading, 0)), bad);
-        assert_eq!(check(build(SpanEdge::Trailing, 1)), bad);
+        assert_eq!(
+            check(build(SpanEdge::Leading, 0)),
+            Err(LayoutInputError::InvalidSpanBoundary { item: 1 })
+        );
+        assert_eq!(
+            check(build(SpanEdge::Trailing, 1)),
+            Err(LayoutInputError::InvalidSpanBoundary { item: 3 })
+        );
+    }
+
+    #[test]
+    fn every_decoration_span_needs_both_boundaries_even_without_padding() {
+        use crate::frontend::BoxDecorationBreak::Slice;
+        use SpanEdge::{Leading as L, Trailing as T};
+        let o = LayoutOptions::default();
+        let zero = |id: u64| {
+            let mut s = chip(id, Slice);
+            s.start_padding = 0.0;
+            s.end_padding = 0.0;
+            s
+        };
+        let build = |boundaries: Vec<WordNode>| {
+            let mut items = vec![text_box(vec![atom(0, 1), atom(1, 2), atom(2, 3)])];
+            items.extend(boundaries);
+            let mut a = with_items(items);
+            a.decoration_spans = vec![zero(5)]; // bytes 1..3
+            a
+        };
+        let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
+        assert!(check(build(vec![bnd(5, L, 1), bnd(5, T, 3)])).is_ok());
+        // Zero padding does not excuse a missing node.
+        let missing = Err(LayoutInputError::MissingSpanBoundary { span: 0 });
+        assert_eq!(check(build(vec![])), missing);
+        assert_eq!(check(build(vec![bnd(5, L, 1)])), missing);
+        // A Trailing with no open Leading is a misplaced boundary.
+        assert_eq!(
+            check(build(vec![bnd(5, T, 3)])),
+            Err(LayoutInputError::InvalidSpanBoundary { item: 1 })
+        );
+        // Exactly one of each, at the span's own edges.
+        for wrong in [
+            vec![bnd(5, L, 0), bnd(5, T, 3)],
+            vec![bnd(5, L, 1), bnd(5, T, 2)],
+            vec![bnd(5, L, 1), bnd(5, L, 1), bnd(5, T, 3)],
+            vec![bnd(5, L, 1), bnd(5, T, 3), bnd(5, T, 3)],
+            vec![bnd(5, L, 1), bnd(5, T, 3), bnd(5, L, 1), bnd(5, T, 3)],
+        ] {
+            assert!(matches!(
+                check(build(wrong)),
+                Err(LayoutInputError::InvalidSpanBoundary { .. })
+            ));
+        }
     }
 
     #[test]
@@ -1325,7 +1538,7 @@ mod tests {
             ])]);
             a.decoration_spans = deco;
             a.atomic_spans = atomic;
-            check_layout_inputs(&a, "abcd", &constraints(), &o)
+            check_layout_inputs(&closed(a), "abcd", &constraints(), &o)
         };
         let atomic = |id, r: TextRange| AtomicEditSpan {
             span_id: id,
@@ -1452,11 +1665,14 @@ mod tests {
         };
         // "ab", two spaces as one glue (2..4), "cd".
         let build = |kind: &str, ws_range: (usize, usize), span: (usize, usize)| {
-            let mut a = with_items(vec![
-                text_box(vec![atom(0, 1), atom(1, 2)]),
-                ws(kind, ws_range),
-                text_box(vec![atom(4, 5), atom(5, 6)]),
-            ]);
+            let mut a = with_items_for(
+                6,
+                vec![
+                    text_box(vec![atom(0, 1), atom(1, 2)]),
+                    ws(kind, ws_range),
+                    text_box(vec![atom(4, 5), atom(5, 6)]),
+                ],
+            );
             a.atomic_spans = vec![AtomicEditSpan {
                 span_id: 1,
                 byte_range: TextRange::new(span.0, span.1),

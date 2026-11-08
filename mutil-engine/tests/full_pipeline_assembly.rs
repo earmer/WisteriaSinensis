@@ -161,11 +161,14 @@ fn zero_layout_full_pipeline_assembly() {
             word(14, 15),
             // The hard break owns the newline's bytes: the next line starts at 16.
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(15, 16), false)),
+            // Every paragraph ends with the sentinel: it terminates the blank line
+            // after the trailing newline, so N newlines give N + 1 lines.
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::empty_at(16), true)),
         ],
         decoration_spans: vec![],
         atomic_spans: vec![],
     };
-    assert_eq!(ast.items.len(), 10);
+    assert_eq!(ast.items.len(), 11);
     assert!(ast.items.iter().all(WordNode::is_self_contained));
     // Nodes tile the text exactly: no cluster was split or lost.
     let covered: usize = ast
@@ -1002,7 +1005,11 @@ fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
         },
         strut_font_size: 10.0,
         runs: vec![],
-        items: vec![],
+        // An empty paragraph is just the sentinel.
+        items: vec![WordNode::Discretionary(DiscretionaryNode::hard_break(
+            TextRange::empty_at(0),
+            true,
+        ))],
         decoration_spans: vec![],
         atomic_spans: vec![],
     };

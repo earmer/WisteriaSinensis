@@ -86,6 +86,13 @@ fn boundary(edge: SpanEdge, at: usize) -> WordNode {
     })
 }
 
+fn sentinel(len: usize) -> WordNode {
+    WordNode::Discretionary(DiscretionaryNode::hard_break(
+        TextRange::empty_at(len),
+        true,
+    ))
+}
+
 fn run() -> ShapingRun {
     ShapingRun {
         byte_range: TextRange::new(0, TEXT.len()),
@@ -136,6 +143,7 @@ fn chip_ast() -> ParagraphAst {
             space(11),
             WordNode::Discretionary(DiscretionaryNode::direct(12)),
             text(12, 14),
+            sentinel(TEXT.len()),
         ],
         decoration_spans: vec![InlineDecorationSpan {
             span_id: SPAN_ID,
@@ -257,7 +265,7 @@ fn chip_inputs_are_accepted_and_atoms_carry_the_atomic_flag() {
         .filter(|(_, n)| n.is_break_opportunity())
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(breaks, vec![2, 5, 9]);
+    assert_eq!(breaks, vec![2, 5, 9, 11]); // the last is the sentinel
     // Padding is cloned only on the break that is inside the chip.
     assert!(!ast.decoration_spans[0].forbids_cjk_autospace_at(5));
     assert!(ast.decoration_spans[0].forbids_cjk_autospace_at(CHIP.start));
@@ -407,6 +415,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
             obj(4, 3),
             op_break(4, DiscretionaryNode::MATH_RELATION_PENALTY),
             obj(5, 4),
+            sentinel(5),
         ],
         ..chip_ast()
     };
