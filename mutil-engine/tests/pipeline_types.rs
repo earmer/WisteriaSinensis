@@ -88,8 +88,7 @@ fn test_pipeline_types_compile() {
         runs: vec![run()],
         items: vec![
             word(TextRange::new(0, 5)),
-            // A breakable space: the break opportunity precedes the glue.
-            WordNode::Discretionary(DiscretionaryNode::direct(5)),
+            // A breakable space: the break opportunity follows the glue.
             WordNode::Glue(GlueNode {
                 byte_range: TextRange::new(5, 6),
                 kind: GlueKind::WordSpace,
@@ -98,6 +97,7 @@ fn test_pipeline_types_compile() {
                 max_stretch: 2.0,
                 max_shrink: 1.0,
             }),
+            WordNode::Discretionary(DiscretionaryNode::direct(6)),
             word(TextRange::new(6, 11)),
         ],
         decoration_spans: vec![],
@@ -275,6 +275,7 @@ fn every_word_node_variant_is_constructible() {
             span_id: 3,
             edge: SpanEdge::Leading,
             width: 6.0,
+            bidi_level: 1,
         }),
         WordNode::Glue(GlueNode {
             byte_range: TextRange::empty_at(5),
@@ -285,7 +286,7 @@ fn every_word_node_variant_is_constructible() {
             max_shrink: 2.0,
         }),
         WordNode::Discretionary(DiscretionaryNode::direct(5)),
-        WordNode::Discretionary(DiscretionaryNode::hard_break(6, false)),
+        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(6, 7), false)),
         WordNode::Tab {
             byte_range: TextRange::new(5, 6),
         },
@@ -308,8 +309,10 @@ fn every_word_node_variant_is_constructible() {
         );
     }
     assert_eq!(nodes.len(), 7);
-    // A discretionary covers no bytes: its span is empty at the break.
+    // A soft discretionary owns no bytes: its span is empty at the break. A
+    // hard break owns its newline.
     assert_eq!(nodes[4].byte_span(), Some(TextRange::empty_at(5)));
+    assert_eq!(nodes[5].byte_span(), Some(TextRange::new(6, 7)));
     // Break actions are exhaustive too.
     let actions = [
         BreakAction::Direct,
@@ -325,10 +328,9 @@ fn every_word_node_variant_is_constructible() {
             penalty: 135,
         }),
         BreakAction::CjkPunctAdjust {
-            trailing_cluster_index: 0,
-            leading_cluster_index: 0,
+            trailing_advance_override: Some(8.0),
+            leading_advance_override: None,
         },
-        BreakAction::CloneSpanPadding { span_id: 3 },
         BreakAction::MathOperator {
             repeat_glyph_id: Some(9),
         },
@@ -339,7 +341,6 @@ fn every_word_node_variant_is_constructible() {
             | BreakAction::HardBreak { .. }
             | BreakAction::Hyphenate(_)
             | BreakAction::CjkPunctAdjust { .. }
-            | BreakAction::CloneSpanPadding { .. }
             | BreakAction::MathOperator { .. } => {}
         }
     }
@@ -361,10 +362,15 @@ fn canonical_penalty_scale_is_ordered_and_tiers_are_ranked() {
         D::FORBIDDEN_BREAK_PENALTY,
     ];
     assert!(scale.windows(2).all(|w| w[0] < w[1]));
-    assert!(D::hard_break(0, true).is_mandatory());
+    assert!(D::hard_break(TextRange::EMPTY, true).is_mandatory());
     assert!(!D::direct(0).is_mandatory());
     assert!(GlueTier::Tier0 < GlueTier::Tier1 && GlueTier::Tier1 < GlueTier::Tier2);
     assert_eq!(GlueKind::WordSpace.default_tier(), GlueTier::Tier0);
+    assert_eq!(GlueKind::CjkAutospace.default_tier(), GlueTier::Tier1);
+    assert_eq!(
+        GlueKind::CjkPunctCompression.default_tier(),
+        GlueTier::Tier0
+    );
     assert_eq!(GlueTier::Tier2 as u8, 2);
 }
 

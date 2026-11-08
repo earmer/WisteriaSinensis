@@ -4,11 +4,13 @@
 //! inputs, but lays nothing out.
 
 use super::{LayoutConstraints, LayoutOptions, LineContext, PositionedParagraph};
+use crate::frontend::MAX_DECORATION_NESTING_DEPTH;
 use crate::frontend::{
-    BoxDecorationBreak, BoxNode, BreakAction, DiscretionaryNode, HyphenOpportunity, ParagraphAst,
-    WordNode,
+    BoxDecorationBreak, BoxNode, BreakAction, DiscretionaryNode, GlueKind, GlueTier,
+    HyphenOpportunity, ParagraphAst, SpanEdge, WordNode,
 };
 use crate::shaping::TextShaper;
+use crate::types::{BidiLevel, GraphemeAtom, TextRange};
 use core::fmt;
 
 /// An input that [`check_layout_inputs`] rejects.
@@ -46,14 +48,21 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A glue node has a non-finite or negative width, stretch or shrink.
+    /// A glue node has a non-finite or negative width, stretch or shrink, is
+    /// `Tier2` (derived from cluster flags, never emitted), or a
+    /// `CjkPunctCompression` node that is not `Tier0` with zero natural width
+    /// and zero stretch.
     InvalidGlue {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
     /// A discretionary node has a non-finite width, a forbidden penalty
-    /// (`>= FORBIDDEN_BREAK_PENALTY`; a forbidden break is an omitted node), or
-    /// a `HardBreak` action that disagrees with a mandatory penalty.
+    /// (`>= FORBIDDEN_BREAK_PENALTY`; a forbidden break is an omitted node), a
+    /// `HardBreak` action that disagrees with a mandatory penalty, a
+    /// `byte_range` that breaks the ownership rule (soft: empty; hard break: a
+    /// line terminator, or empty at the paragraph end), a repeated id in
+    /// `cloned_spans`, or a `CjkPunctAdjust` override that is not a finite,
+    /// non-negative advance or has no text box beside it to apply to.
     InvalidDiscretionary {
         /// Index into `ParagraphAst::items`.
         item: usize,
@@ -65,25 +74,32 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A span boundary is not an empty range or has a non-finite or negative
-    /// width.
+    /// A span boundary is not an empty range, has a non-finite or negative
+    /// width, or a `bidi_level` that differs from the level of the first (for a
+    /// `Leading` edge) or last (`Trailing`) atom inside its span.
     InvalidSpanBoundary {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// An item names a span (`SpanBoundary`, or `CloneSpanPadding` which also
-    /// requires `BoxDecorationBreak::Clone`) that `decoration_spans` lacks.
+    /// An item names a span (`SpanBoundary`, or an entry of
+    /// `DiscretionaryNode::cloned_spans`, which must also be
+    /// `BoxDecorationBreak::Clone` and contain the break strictly inside) that
+    /// `decoration_spans` lacks.
     UnknownSpan {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A decoration span has an invalid padding or range, does not fit the text
-    /// or repeats a `span_id`.
+    /// A decoration span has an invalid padding or range, does not fit the text,
+    /// repeats a `span_id`, partially overlaps another decoration span (nesting
+    /// must be proper containment) or nests deeper than
+    /// `MAX_DECORATION_NESTING_DEPTH`.
     InvalidDecorationSpan {
         /// Index into `ParagraphAst::decoration_spans`.
         span: usize,
     },
-    /// An atomic span is empty, does not fit the text or repeats a `span_id`.
+    /// An atomic span is empty, does not fit the text, repeats a `span_id`,
+    /// overlaps or nests with another atomic span, or has an end that is not a
+    /// grapheme atom boundary.
     InvalidAtomicSpan {
         /// Index into `ParagraphAst::atomic_spans`.
         span: usize,
@@ -158,13 +174,13 @@ fn hyphen_valid(
         return false;
     };
     let off = h.byte_offset;
-    if off != d.byte_offset || prev.end != off || next.start != off {
+    if d.byte_range != TextRange::empty_at(off) || prev.end != off || next.start != off {
         return false;
     }
     if prev.is_empty() || next.is_empty() {
         return false;
     }
-    let boundary = |atoms: &[crate::types::GraphemeAtom], pos: usize, end: usize| {
+    let boundary = |atoms: &[GraphemeAtom], pos: usize, end: usize| {
         pos == end || atoms.iter().any(|a| a.byte_range.start == pos)
     };
     let prefix = off.checked_sub(h.prefix_cut_bytes as usize);
@@ -180,28 +196,105 @@ fn fits(text: &str, r: crate::types::TextRange) -> bool {
         && text.is_char_boundary(r.end)
 }
 
-/// Validates the two span streams: ranges fit the text, ids are unique within
-/// a stream, decoration paddings are finite and non-negative, atomic spans are
-/// non-empty.
+/// Whether `offset` is a legal edge for an atomic span: not strictly inside a
+/// grapheme atom of a text box, an inline object or a line terminator. Offsets
+/// inside a glue run are accepted (a glue node carries no atoms).
+fn is_atom_boundary(ast: &ParagraphAst, offset: usize) -> bool {
+    let inside = |r: &TextRange| r.start < offset && offset < r.end;
+    ast.items.iter().all(|n| match n {
+        WordNode::Box(BoxNode::Text { atoms, .. }) => !atoms.iter().any(|a| inside(&a.byte_range)),
+        WordNode::Box(BoxNode::InlineObject { byte_range, .. }) => !inside(byte_range),
+        WordNode::Discretionary(d) => !inside(&d.byte_range),
+        _ => true,
+    })
+}
+
+/// Validates the two span streams.
+///
+/// * Both: ranges fit the text, ids are unique within the stream.
+/// * Decoration spans: finite, non-negative paddings; **proper nesting**
+///   (two spans are disjoint or one contains the other, never a partial
+///   overlap) no deeper than [`MAX_DECORATION_NESTING_DEPTH`].
+/// * Atomic spans: non-empty, **strictly disjoint**, both ends on grapheme
+///   atom boundaries.
 fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
     use LayoutInputError as E;
     for (span, s) in ast.decoration_spans.iter().enumerate() {
-        let duplicate = ast.decoration_spans[..span]
+        let earlier = &ast.decoration_spans[..span];
+        let duplicate = earlier.iter().any(|o| o.span_id == s.span_id);
+        let crossing = earlier.iter().any(|o| {
+            let (a, b) = (o.byte_range, s.byte_range);
+            a.start < b.end && b.start < a.end && !a.contains_range(b) && !b.contains_range(a)
+        });
+        let depth = 1 + ast
+            .decoration_spans
             .iter()
-            .any(|o| o.span_id == s.span_id);
-        if duplicate || !s.is_valid() || !fits(text, s.byte_range) {
+            .enumerate()
+            .filter(|(i, o)| *i != span && o.byte_range.contains_range(s.byte_range))
+            .count();
+        if duplicate
+            || crossing
+            || depth > MAX_DECORATION_NESTING_DEPTH
+            || !s.is_valid()
+            || !fits(text, s.byte_range)
+        {
             return Err(E::InvalidDecorationSpan { span });
         }
     }
     for (span, s) in ast.atomic_spans.iter().enumerate() {
-        let duplicate = ast.atomic_spans[..span]
-            .iter()
-            .any(|o| o.span_id == s.span_id);
-        if duplicate || s.byte_range.is_empty() || !fits(text, s.byte_range) {
+        let earlier = &ast.atomic_spans[..span];
+        let duplicate = earlier.iter().any(|o| o.span_id == s.span_id);
+        let overlapping = earlier.iter().any(|o| {
+            o.byte_range.start < s.byte_range.end && s.byte_range.start < o.byte_range.end
+        });
+        if duplicate
+            || overlapping
+            || s.byte_range.is_empty()
+            || !fits(text, s.byte_range)
+            || !is_atom_boundary(ast, s.byte_range.start)
+            || !is_atom_boundary(ast, s.byte_range.end)
+        {
             return Err(E::InvalidAtomicSpan { span });
         }
     }
     Ok(())
+}
+
+/// The UAX #14 mandatory line terminators (BK, CR, LF, NL): the only text a
+/// non-empty hard-break `byte_range` may cover.
+fn is_line_terminator(s: &str) -> bool {
+    matches!(
+        s,
+        "\n" | "\r" | "\r\n" | "\u{b}" | "\u{c}" | "\u{85}" | "\u{2028}" | "\u{2029}"
+    )
+}
+
+/// The bidi level a span boundary must carry: the first (`Leading`) or last
+/// (`Trailing`) atom whose bytes lie inside the span. `None` when the span
+/// holds no text atom (only objects), so there is nothing to compare with.
+fn expected_boundary_level(ast: &ParagraphAst, span_id: u64, edge: SpanEdge) -> Option<BidiLevel> {
+    let span = ast.decoration_spans.iter().find(|s| s.span_id == span_id)?;
+    let mut inside = ast
+        .items
+        .iter()
+        .filter_map(|n| match n {
+            WordNode::Box(BoxNode::Text { atoms, .. }) => Some(atoms.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|a| span.byte_range.contains_range(a.byte_range));
+    match edge {
+        SpanEdge::Leading => inside.next().map(|a| a.bidi_level),
+        SpanEdge::Trailing => inside.next_back().map(|a| a.bidi_level),
+    }
+}
+
+/// Whether item `index` is a text box with at least one cluster.
+fn has_clusters(items: &[WordNode], index: Option<usize>) -> bool {
+    matches!(
+        index.and_then(|i| items.get(i)),
+        Some(WordNode::Box(BoxNode::Text { clusters, .. })) if !clusters.is_empty()
+    )
 }
 
 /// Checks the inputs of [`layout_paragraph`] and assembles the paragraph-level
@@ -277,8 +370,9 @@ pub fn check_layout_inputs(
             WordNode::Box(BoxNode::SpanBoundary {
                 byte_range,
                 span_id,
+                edge,
                 width,
-                ..
+                bidi_level,
             }) => {
                 if !(byte_range.is_empty() && width.is_finite() && *width >= 0.0) {
                     return Err(E::InvalidSpanBoundary { item });
@@ -286,12 +380,21 @@ pub fn check_layout_inputs(
                 if !ast.decoration_spans.iter().any(|s| s.span_id == *span_id) {
                     return Err(E::UnknownSpan { item });
                 }
+                if expected_boundary_level(ast, *span_id, *edge).is_some_and(|l| l != *bidi_level) {
+                    return Err(E::InvalidSpanBoundary { item });
+                }
             }
             WordNode::Glue(g) => {
-                if ![g.natural_width, g.max_stretch, g.max_shrink]
+                let sizes_ok = [g.natural_width, g.max_stretch, g.max_shrink]
                     .iter()
-                    .all(|v| v.is_finite() && *v >= 0.0)
-                {
+                    .all(|v| v.is_finite() && *v >= 0.0);
+                // Tier 2 is derived from cluster flags; the compression pool
+                // is shrink only and belongs to Tier 0.
+                let pool_ok = g.kind != GlueKind::CjkPunctCompression
+                    || (g.tier == GlueTier::Tier0
+                        && g.natural_width == 0.0
+                        && g.max_stretch == 0.0);
+                if !(sizes_ok && g.tier != GlueTier::Tier2 && pool_ok) {
                     return Err(E::InvalidGlue { item });
                 }
             }
@@ -300,22 +403,62 @@ pub fn check_layout_inputs(
                     .iter()
                     .all(|v| v.is_finite());
                 let hard = matches!(d.action, BreakAction::HardBreak { .. });
+                // Ownership: a soft opportunity owns nothing; a hard break owns
+                // its terminator, except that the paragraph end may own nothing.
+                let range_ok = match d.action {
+                    BreakAction::HardBreak { is_paragraph_end } => {
+                        (d.byte_range.is_empty() && is_paragraph_end)
+                            || is_line_terminator(&text[d.byte_range.start..d.byte_range.end])
+                    }
+                    _ => d.byte_range.is_empty(),
+                };
+                let clones_unique = d
+                    .cloned_spans
+                    .iter()
+                    .enumerate()
+                    .all(|(i, id)| !d.cloned_spans[..i].contains(id));
                 if !(widths_ok
                     && d.penalty < DiscretionaryNode::FORBIDDEN_BREAK_PENALTY
-                    && hard == d.is_mandatory())
+                    && hard == d.is_mandatory()
+                    && range_ok
+                    && clones_unique)
                 {
                     return Err(E::InvalidDiscretionary { item });
+                }
+                for id in &d.cloned_spans {
+                    // A clone only makes sense for a Clone-mode span the break
+                    // falls strictly inside.
+                    let off = d.byte_offset();
+                    if !ast.decoration_spans.iter().any(|s| {
+                        s.span_id == *id
+                            && s.break_mode == BoxDecorationBreak::Clone
+                            && s.byte_range.start < off
+                            && off < s.byte_range.end
+                    }) {
+                        return Err(E::UnknownSpan { item });
+                    }
                 }
                 match &d.action {
                     BreakAction::Hyphenate(h) if !hyphen_valid(&ast.items, item, d, h) => {
                         return Err(E::InvalidHyphenOpportunity { item });
                     }
-                    BreakAction::CloneSpanPadding { span_id }
-                        if !ast.decoration_spans.iter().any(|s| {
-                            s.span_id == *span_id && s.break_mode == BoxDecorationBreak::Clone
-                        }) =>
-                    {
-                        return Err(E::UnknownSpan { item });
+                    BreakAction::CjkPunctAdjust {
+                        trailing_advance_override,
+                        leading_advance_override,
+                    } => {
+                        let advance_ok =
+                            |o: &Option<f32>| o.is_none_or(|v| v.is_finite() && v >= 0.0);
+                        let trailing_ok = trailing_advance_override.is_none()
+                            || has_clusters(&ast.items, item.checked_sub(1));
+                        let leading_ok = leading_advance_override.is_none()
+                            || has_clusters(&ast.items, item.checked_add(1));
+                        if !(advance_ok(trailing_advance_override)
+                            && advance_ok(leading_advance_override)
+                            && trailing_ok
+                            && leading_ok)
+                        {
+                            return Err(E::InvalidDiscretionary { item });
+                        }
                     }
                     _ => {}
                 }
@@ -323,7 +466,13 @@ pub fn check_layout_inputs(
             WordNode::Tab { .. } => {}
         }
     }
-    let context = LineContext::from_options(m, ast.strut_font_size, ast.base_direction, options);
+    let context = LineContext::from_options(
+        m,
+        ast.strut_font_size,
+        ast.base_direction,
+        options,
+        constraints.wrap_width,
+    );
     let r = &context.strut;
     if ![r.ascent, r.descent, r.line_gap, r.natural_line_height()]
         .iter()
@@ -383,15 +532,15 @@ mod tests {
             },
             strut_font_size: 10.0,
             runs: vec![],
-            items: vec![hard_break(1)],
+            items: vec![hard_break()],
             decoration_spans: vec![],
             atomic_spans: vec![],
         }
     }
 
-    /// A mandatory break after the one-byte paragraph "\n".
-    fn hard_break(offset: usize) -> WordNode {
-        WordNode::Discretionary(DiscretionaryNode::hard_break(offset, true))
+    /// A mandatory break that owns the one-byte paragraph "\n".
+    fn hard_break() -> WordNode {
+        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(0, 1), false))
     }
 
     #[test]
@@ -435,7 +584,7 @@ mod tests {
         );
         // Splitting a UTF-8 sequence is outside the text.
         let mut a = ast();
-        a.items = vec![hard_break(1)];
+        a.items = vec![hard_break()];
         assert_eq!(
             check_layout_inputs(&a, "é", &constraints(), &o),
             Err(LayoutInputError::ItemOutsideText { item: 0 })
@@ -592,7 +741,7 @@ mod tests {
         };
         let bad = Err(LayoutInputError::InvalidDiscretionary { item: 0 });
         assert!(check(DiscretionaryNode::direct(2)).is_ok());
-        assert!(check(DiscretionaryNode::hard_break(4, true)).is_ok());
+        assert!(check(DiscretionaryNode::hard_break(TextRange::empty_at(4), true)).is_ok());
         // A negative width is a legal delta (trim); a non-finite one is not.
         let mut d = DiscretionaryNode::direct(2);
         d.pre_break_width = -2.5;
@@ -604,7 +753,7 @@ mod tests {
         d.penalty = DiscretionaryNode::FORBIDDEN_BREAK_PENALTY;
         assert_eq!(check(d), bad);
         // HardBreak and a mandatory penalty go together.
-        let mut d = DiscretionaryNode::hard_break(4, false);
+        let mut d = DiscretionaryNode::hard_break(TextRange::empty_at(4), true);
         d.penalty = 0;
         assert_eq!(check(d), bad);
         let mut d = DiscretionaryNode::direct(2);
@@ -630,13 +779,14 @@ mod tests {
         let (head, tail): (Vec<_>, Vec<_>) =
             atoms.into_iter().partition(|a| a.byte_range.end <= at);
         let d = DiscretionaryNode {
-            byte_offset: at,
+            byte_range: TextRange::empty_at(at),
             penalty: DiscretionaryNode::HYPHEN_PENALTY,
             flagged: true,
             pre_break_width: 5.0,
             post_break_width: 0.0,
             no_break_width: 0.0,
             action: BreakAction::Hyphenate(opportunity),
+            cloned_spans: Default::default(),
         };
         with_items(vec![
             text_box(head),
@@ -671,7 +821,7 @@ mod tests {
         // The discretionary and the opportunity must agree on the offset.
         let mut a = hyphenated(opportunity(1, 0, 0));
         if let WordNode::Discretionary(d) = &mut a.items[1] {
-            d.byte_offset = 2;
+            d.byte_range = TextRange::empty_at(2);
         }
         assert_eq!(check_layout_inputs(&a, "abé", &constraints(), &o), bad);
         // It needs a text box on each side.
@@ -733,6 +883,7 @@ mod tests {
                 span_id: 5,
                 edge: SpanEdge::Leading,
                 width,
+                bidi_level: 0,
             })
         };
         let with_span = |items, mode| {
@@ -761,7 +912,7 @@ mod tests {
         let clone_pad = |mode| {
             let mut d = DiscretionaryNode::direct(2);
             d.penalty = DiscretionaryNode::CLONED_SPAN_PENALTY;
-            d.action = BreakAction::CloneSpanPadding { span_id: 5 };
+            d.cloned_spans.push(5);
             with_span(vec![WordNode::Discretionary(d)], mode)
         };
         assert!(check_layout_inputs(&clone_pad(Clone), "abcd", &constraints(), &o).is_ok());
@@ -770,6 +921,179 @@ mod tests {
             check_layout_inputs(&clone_pad(Slice), "abcd", &constraints(), &o),
             Err(LayoutInputError::UnknownSpan { item: 0 })
         );
+    }
+
+    #[test]
+    fn cloned_spans_are_orthogonal_to_the_action_and_must_enclose_the_break() {
+        use crate::frontend::BoxDecorationBreak::Clone;
+        let o = LayoutOptions::default();
+        // A hyphenation break at 2 inside a cloning chip over 1..3: both apply.
+        let mut a = hyphenated(opportunity(2, 0, 0));
+        let mut over = chip(5, Clone);
+        over.byte_range = TextRange::new(1, 4); // "b" and "é"
+        a.decoration_spans = vec![over];
+        if let WordNode::Discretionary(d) = &mut a.items[1] {
+            d.cloned_spans.push(5);
+            d.penalty += DiscretionaryNode::CLONED_SPAN_PENALTY;
+        }
+        assert!(check_layout_inputs(&a, "abé", &constraints(), &o).is_ok());
+        // A break on the span's edge is not inside it; a repeated id is wrong.
+        for (cloned, at) in [(vec![5], 1), (vec![5], 3), (vec![5, 5], 2)] {
+            let mut d = DiscretionaryNode::direct(at);
+            d.cloned_spans.extend(cloned);
+            let mut b = with_items(vec![WordNode::Discretionary(d)]);
+            b.decoration_spans = vec![chip(5, Clone)];
+            assert!(check_layout_inputs(&b, "abcd", &constraints(), &o).is_err());
+        }
+    }
+
+    #[test]
+    fn soft_breaks_own_nothing_and_hard_breaks_own_their_terminator() {
+        let o = LayoutOptions::default();
+        let check = |text: &str, d: DiscretionaryNode| {
+            let mut a = with_items(vec![WordNode::Discretionary(d)]);
+            a.runs[0].byte_range = TextRange::new(0, text.len());
+            check_layout_inputs(&a, text, &constraints(), &o)
+        };
+        let bad = Err(LayoutInputError::InvalidDiscretionary { item: 0 });
+        for (text, len) in [("a\nb", 1), ("a\r\nb", 2), ("a\u{2028}b", 3)] {
+            let nl = TextRange::new(1, 1 + len);
+            let r = check(text, DiscretionaryNode::hard_break(nl, false));
+            assert!(r.is_ok(), "{text:?}: {r:?}");
+            // The terminator is the whole range: a shorter one splits `\r\n`
+            // or a code point, a longer one swallows text.
+            assert!(
+                check(
+                    text,
+                    DiscretionaryNode::hard_break(TextRange::new(1, 2 + len), false)
+                )
+                .is_err()
+            );
+        }
+        // Not a terminator.
+        assert_eq!(
+            check(
+                "abcd",
+                DiscretionaryNode::hard_break(TextRange::new(1, 2), false)
+            ),
+            bad
+        );
+        // A mid-paragraph hard break must own its newline; only the end may not.
+        assert_eq!(
+            check(
+                "abcd",
+                DiscretionaryNode::hard_break(TextRange::empty_at(1), false)
+            ),
+            bad
+        );
+        assert!(
+            check(
+                "abcd",
+                DiscretionaryNode::hard_break(TextRange::empty_at(4), true)
+            )
+            .is_ok()
+        );
+        // A soft opportunity owns nothing.
+        let mut soft = DiscretionaryNode::direct(1);
+        soft.byte_range = TextRange::new(1, 2);
+        assert_eq!(check("abcd", soft), bad);
+        assert_eq!(DiscretionaryNode::direct(3).byte_offset(), 3);
+    }
+
+    #[test]
+    fn cjk_punct_adjust_overrides_are_geometric_and_need_a_neighbour() {
+        let o = LayoutOptions::default();
+        let adjust = |t, l| {
+            let mut d = DiscretionaryNode::direct(2);
+            d.action = BreakAction::CjkPunctAdjust {
+                trailing_advance_override: t,
+                leading_advance_override: l,
+            };
+            with_items(vec![
+                text_box(vec![atom(0, 2)]),
+                WordNode::Discretionary(d),
+                text_box(vec![atom(2, 4)]),
+            ])
+        };
+        let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
+        assert!(check(adjust(Some(5.0), Some(0.0))).is_ok());
+        assert!(check(adjust(None, None)).is_ok());
+        let bad = Err(LayoutInputError::InvalidDiscretionary { item: 1 });
+        for (t, l) in [
+            (Some(-1.0), None),
+            (None, Some(f32::NAN)),
+            (Some(f32::INFINITY), None),
+        ] {
+            assert_eq!(check(adjust(t, l)), bad);
+        }
+        // An override needs the text box it overrides.
+        let mut a = adjust(Some(1.0), None);
+        a.items.remove(0);
+        assert_eq!(
+            check(a),
+            Err(LayoutInputError::InvalidDiscretionary { item: 0 })
+        );
+    }
+
+    #[test]
+    fn glue_tiers_and_the_compression_pool_follow_the_kind() {
+        let o = LayoutOptions::default();
+        let node = |kind, tier, natural, stretch, shrink| {
+            WordNode::Glue(GlueNode {
+                byte_range: TextRange::empty_at(1),
+                kind,
+                tier,
+                natural_width: natural,
+                max_stretch: stretch,
+                max_shrink: shrink,
+            })
+        };
+        let check = |g| check_layout_inputs(&with_items(vec![g]), "abcd", &constraints(), &o);
+        assert_eq!(
+            GlueKind::CjkPunctCompression.default_tier(),
+            GlueTier::Tier0
+        );
+        let pool = |t, n, st, sh| node(GlueKind::CjkPunctCompression, t, n, st, sh);
+        assert!(check(pool(GlueTier::Tier0, 0.0, 0.0, 5.0)).is_ok());
+        let bad = Err(LayoutInputError::InvalidGlue { item: 0 });
+        assert_eq!(check(pool(GlueTier::Tier1, 0.0, 0.0, 5.0)), bad);
+        assert_eq!(check(pool(GlueTier::Tier0, 1.0, 0.0, 5.0)), bad);
+        assert_eq!(check(pool(GlueTier::Tier0, 0.0, 1.0, 5.0)), bad);
+        // Tier 2 is derived from cluster flags, never emitted as glue.
+        assert_eq!(
+            check(node(GlueKind::CjkAutospace, GlueTier::Tier2, 0.0, 1.0, 0.0)),
+            bad
+        );
+    }
+
+    #[test]
+    fn span_boundary_bidi_level_follows_the_atom_inside_the_span() {
+        use crate::frontend::BoxDecorationBreak::Slice;
+        let o = LayoutOptions::default();
+        let mut inner = atom(1, 2);
+        inner.bidi_level = 1;
+        let build = |edge, level| {
+            let mut a = with_items(vec![
+                text_box(vec![atom(0, 1)]),
+                WordNode::Box(BoxNode::SpanBoundary {
+                    byte_range: TextRange::empty_at(1),
+                    span_id: 5,
+                    edge,
+                    width: 2.0,
+                    bidi_level: level,
+                }),
+                text_box(vec![inner.clone(), atom(2, 3)]),
+            ]);
+            a.decoration_spans = vec![chip(5, Slice)]; // bytes 1..3
+            a
+        };
+        let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
+        // First atom inside the span is level 1, the last is level 0.
+        assert!(check(build(SpanEdge::Leading, 1)).is_ok());
+        assert!(check(build(SpanEdge::Trailing, 0)).is_ok());
+        let bad = Err(LayoutInputError::InvalidSpanBoundary { item: 1 });
+        assert_eq!(check(build(SpanEdge::Leading, 0)), bad);
+        assert_eq!(check(build(SpanEdge::Trailing, 1)), bad);
     }
 
     #[test]
@@ -802,6 +1126,49 @@ mod tests {
                 Err(LayoutInputError::InvalidDecorationSpan { span: index })
             );
         }
+        // Nesting: containment is fine (also at equal edges), a crossing is not,
+        // nor is going deeper than the limit.
+        let span = |id, a, b| {
+            let mut s = chip(id, Slice);
+            s.byte_range = TextRange::new(a, b);
+            s
+        };
+        assert!(check(vec![span(1, 0, 4), span(2, 1, 3), span(3, 1, 2)], vec![]).is_ok());
+        assert!(check(vec![span(1, 0, 2), span(2, 2, 4)], vec![]).is_ok());
+        assert_eq!(
+            check(vec![span(1, 0, 3), span(2, 1, 4)], vec![]),
+            Err(LayoutInputError::InvalidDecorationSpan { span: 1 })
+        );
+        let too_deep: Vec<_> = (0..=crate::frontend::MAX_DECORATION_NESTING_DEPTH)
+            .map(|i| span(i as u64, 0, 4))
+            .collect();
+        assert!(matches!(
+            check(too_deep, vec![]),
+            Err(LayoutInputError::InvalidDecorationSpan { .. })
+        ));
+        // Atomic spans are strictly disjoint: touching is fine, nesting is not.
+        assert!(
+            check(
+                vec![],
+                vec![
+                    atomic(1, TextRange::new(0, 2)),
+                    atomic(2, TextRange::new(2, 4))
+                ]
+            )
+            .is_ok()
+        );
+        for (a, b) in [((0, 3), (2, 4)), ((0, 4), (1, 2))] {
+            assert_eq!(
+                check(
+                    vec![],
+                    vec![
+                        atomic(1, TextRange::new(a.0, a.1)),
+                        atomic(2, TextRange::new(b.0, b.1))
+                    ]
+                ),
+                Err(LayoutInputError::InvalidAtomicSpan { span: 1 })
+            );
+        }
         // Atomic: empty, outside the text, duplicate id.
         for (list, index) in [
             (vec![atomic(1, TextRange::empty_at(2))], 0),
@@ -819,6 +1186,38 @@ mod tests {
                 Err(LayoutInputError::InvalidAtomicSpan { span: index })
             );
         }
+    }
+
+    #[test]
+    fn atomic_span_edges_must_be_atom_boundaries() {
+        let o = LayoutOptions::default();
+        let build = |start, end| {
+            let mut a = with_items(vec![text_box(vec![atom(0, 1), atom(1, 4)])]);
+            a.atomic_spans = vec![AtomicEditSpan {
+                span_id: 1,
+                byte_range: TextRange::new(start, end),
+            }];
+            a
+        };
+        let check = |a: ParagraphAst| check_layout_inputs(&a, "aéb", &constraints(), &o);
+        assert!(check(build(1, 4)).is_ok());
+        // Offset 2 is inside the atom 1..4 (a char boundary of "é" is 1 and 3,
+        // so use 3: still strictly inside the atom).
+        assert_eq!(
+            check(build(1, 3)),
+            Err(LayoutInputError::InvalidAtomicSpan { span: 0 })
+        );
+        assert_eq!(
+            check(build(3, 4)),
+            Err(LayoutInputError::InvalidAtomicSpan { span: 0 })
+        );
+    }
+
+    #[test]
+    fn wrap_width_reaches_the_line_context() {
+        let c =
+            check_layout_inputs(&ast(), "\n", &constraints(), &LayoutOptions::default()).unwrap();
+        assert_eq!(c.wrap_width, constraints().wrap_width);
     }
 
     #[test]

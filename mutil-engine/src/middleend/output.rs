@@ -156,6 +156,27 @@ pub struct PositionedSpanFragment {
     pub is_first_fragment: bool,
     /// `true` if the fragment contains the logical end of `span_id`.
     pub is_last_fragment: bool,
+    /// UAX #9 level of the text in this fragment. Its parity decides which half
+    /// of the fragment snaps to the logical start (see
+    /// [`PositionedSpanFragment::snaps_to_logical_start`]).
+    pub bidi_level: BidiLevel,
+}
+
+impl PositionedSpanFragment {
+    /// Hit-test rule for a click inside a fragment of an **atomic** span (spec
+    /// §6.3, ruling 7): `true` when `point_x` snaps to the span's logical start
+    /// (`byte_range.start`, `Downstream`), `false` for its logical end
+    /// (`byte_range.end`, `Upstream`).
+    ///
+    /// The midpoint is that of **this fragment**, not of the whole wrapped
+    /// span, or the leading edge of a narrow second-line fragment would be
+    /// unreachable. At an even level the left half is the start; at an odd level
+    /// the halves swap. A point exactly on the midpoint counts as the right half.
+    #[must_use]
+    pub fn snaps_to_logical_start(&self, point_x: f32) -> bool {
+        let in_left_half = point_x < self.x + 0.5 * self.width;
+        in_left_half == (self.bidi_level & 1 == 0)
+    }
 }
 
 /// One laid-out line (spec §2.6).
@@ -222,7 +243,7 @@ fn approx_eq(a: f32, b: f32) -> bool {
 ///
 /// Paragraph-wide fields plus `line_index`; use [`LineContext::for_line`] to
 /// derive the context of each line from one paragraph context.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LineContext {
     /// The **resolved** strut: the raw `ParagraphAst::strut_metrics` after
     /// `LineHeight::resolve_strut`, half-leading included.
@@ -239,19 +260,39 @@ pub struct LineContext {
     /// Index of the line within the paragraph; `0` is the first line, which
     /// `HangStartMode::FirstLine` refers to.
     pub line_index: usize,
+    /// The paragraph's `LayoutConstraints::wrap_width`. A line wider than this
+    /// is valid only in the single-entity overflow state (see
+    /// [`PositionedLine::validate`]). [`Default`] is `f32::INFINITY` (no limit).
+    pub wrap_width: f32,
+}
+
+impl Default for LineContext {
+    fn default() -> Self {
+        Self {
+            strut: VerticalMetrics::default(),
+            line_height: LineHeight::default(),
+            whitespace: HangingWhitespaceMode::default(),
+            hang_mode: HangMode::default(),
+            base_direction: BidiDirection::default(),
+            line_index: 0,
+            wrap_width: f32::INFINITY,
+        }
+    }
 }
 
 impl LineContext {
     /// Builds the paragraph context: resolves the active strut from the **raw**
     /// primary-font metrics (`ParagraphAst::strut_metrics`) and the font size
     /// they were requested at (`ParagraphAst::strut_font_size`), using
-    /// `options.line_height`. `line_index` is 0.
+    /// `options.line_height`. `wrap_width` is
+    /// `LayoutConstraints::wrap_width`. `line_index` is 0.
     #[must_use]
     pub fn from_options(
         raw_strut: &FontMetrics,
         strut_font_size: f32,
         base_direction: BidiDirection,
         options: &LayoutOptions,
+        wrap_width: f32,
     ) -> Self {
         Self {
             strut: options
@@ -262,6 +303,7 @@ impl LineContext {
             hang_mode: options.hang_mode,
             base_direction,
             line_index: 0,
+            wrap_width,
         }
     }
 
@@ -397,6 +439,14 @@ pub enum LineInvariantError {
         span_id: u64,
         /// Index into `visual_boxes`.
         index: usize,
+    },
+    /// The line is wider than `ctx.wrap_width` although it is not a single
+    /// overflowing entity.
+    LineWiderThanWrapWidth {
+        /// The line's `visual_width`.
+        visual_width: f32,
+        /// `LineContext::wrap_width`.
+        wrap_width: f32,
     },
     /// A tab has a non-finite coordinate or a negative width.
     InvalidTab {
@@ -551,6 +601,15 @@ impl fmt::Display for LineInvariantError {
                     "inline box {index} lies outside every fragment of span {span_id}"
                 )
             }
+            Self::LineWiderThanWrapWidth {
+                visual_width,
+                wrap_width,
+            } => {
+                write!(
+                    f,
+                    "line width {visual_width} exceeds the wrap width {wrap_width} and is not a single overflowing entity"
+                )
+            }
             Self::InvalidTab { index } => {
                 write!(
                     f,
@@ -632,6 +691,13 @@ impl PositionedLine {
     ///   Hanging glyphs, trailing whitespace and synthesized glyphs are exempt.
     ///   A line holding a single `AllowOverflow` object wider than `wrap_width`
     ///   is valid because its `visual_width` equals the object's width;
+    /// * `visual_width <= ctx.wrap_width` (within tolerance), unless the line
+    ///   is in the **single-entity overflow state**: it holds exactly one inline
+    ///   box (the only way to reach this is `BoxOverflowPolicy::AllowOverflow`,
+    ///   as `Clip` and `ScaleToFit` make the box fit), or exactly one
+    ///   indivisible cluster (all its non-trailing glyphs share one non-empty
+    ///   `byte_range`; the emergency fallback), and `visual_width` equals that
+    ///   entity's width within tolerance;
     /// * every `is_hanging` glyph lies wholly outside the body;
     /// * `hanging_left`/`hanging_right` equal the extent those glyphs occupy
     ///   (so are positive exactly when such glyphs exist), and are zero on an
@@ -699,7 +765,8 @@ impl PositionedLine {
             let finite = [f.x, f.width, f.ascent, f.descent, f.x + f.width]
                 .iter()
                 .all(|v| v.is_finite());
-            if !(finite && f.width >= 0.0 && f.ascent >= 0.0 && f.descent >= 0.0) {
+            let level_ok = f.bidi_level <= crate::types::BIDI_MAX_DEPTH + 1;
+            if !(finite && level_ok && f.width >= 0.0 && f.ascent >= 0.0 && f.descent >= 0.0) {
                 return Err(E::InvalidSpanFragment { index });
             }
         }
@@ -881,7 +948,68 @@ impl PositionedLine {
                 return Err(E::TabOutsideBlock { index });
             }
         }
-        self.check_span_fragments()
+        self.check_span_fragments()?;
+        self.check_wrap_width(ctx)
+    }
+
+    /// Whether the line is one indivisible entity: a lone inline box, or a lone
+    /// cluster (its non-trailing, non-hanging glyphs share one non-empty
+    /// `byte_range`), whose extent is `[0, visual_width]` within tolerance.
+    fn is_single_entity_overflow(&self) -> bool {
+        let vw = self.visual_width;
+        let spans_body = |lo: f32, hi: f32| lo.abs() <= tolerance(lo, vw) && approx_eq(hi, vw);
+        let live_tab = self
+            .tabs
+            .iter()
+            .any(|t| t.byte_range.start < self.visible_byte_end);
+        if live_tab {
+            return false;
+        }
+        let glyphs = || {
+            self.visual_runs
+                .iter()
+                .flat_map(|r| r.glyphs.iter())
+                .filter(|g| {
+                    !g.is_hanging
+                        && !g.is_synthesized
+                        && !g
+                            .byte_range
+                            .is_some_and(|b| b.start >= self.visible_byte_end)
+                })
+        };
+        match self.visual_boxes.as_slice() {
+            [b] => glyphs().next().is_none() && spans_body(b.x, b.x + b.width),
+            [] => {
+                let mut ranges = glyphs().map(|g| g.byte_range);
+                let Some(first @ Some(r)) = ranges.next() else {
+                    return false;
+                };
+                if r.is_empty() || ranges.any(|o| o != first) {
+                    return false;
+                }
+                let lo = glyphs()
+                    .map(|g| g.x.min(g.x + g.advance))
+                    .fold(f32::INFINITY, f32::min);
+                let hi = glyphs()
+                    .map(|g| g.x.max(g.x + g.advance))
+                    .fold(f32::NEG_INFINITY, f32::max);
+                spans_body(lo, hi)
+            }
+            _ => false,
+        }
+    }
+
+    /// Pass 3, last check: width against `ctx.wrap_width`.
+    fn check_wrap_width(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
+        let vw = self.visual_width;
+        if vw <= ctx.wrap_width + tolerance(vw, ctx.wrap_width) || self.is_single_entity_overflow()
+        {
+            return Ok(());
+        }
+        Err(LineInvariantError::LineWiderThanWrapWidth {
+            visual_width: vw,
+            wrap_width: ctx.wrap_width,
+        })
     }
 
     /// Span containment (spec §2.6, row 77): fragments inside the body, and
@@ -1418,6 +1546,7 @@ mod tests {
             descent: 4.0,
             is_first_fragment: true,
             is_last_fragment: true,
+            bidi_level: 0,
         }
     }
 
@@ -1732,5 +1861,163 @@ mod tests {
         assert_eq!(para.validate(&c), Ok(()));
         para.base_direction = BidiDirection::Ltr;
         assert!(para.validate(&c).is_err());
+    }
+
+    // ---- wrap width (ruling 8) and fragment hit-testing (ruling 7) ----
+
+    fn wrap(w: f32) -> LineContext {
+        LineContext {
+            wrap_width: w,
+            ..ctx()
+        }
+    }
+
+    fn word_glyph(x: f32, advance: f32, bytes: (usize, usize)) -> PositionedGlyph {
+        let mut g = glyph(x, advance, false);
+        g.byte_range = Some(TextRange::new(bytes.0, bytes.1));
+        g
+    }
+
+    #[test]
+    fn a_line_must_fit_the_wrap_width() {
+        // Two clusters, 30 wide: fits 30 (and within tolerance), not 29.
+        let two = || {
+            line(
+                vec![
+                    word_glyph(0.0, 10.0, (0, 1)),
+                    word_glyph(10.0, 20.0, (1, 2)),
+                ],
+                30.0,
+                0.0,
+                0.0,
+            )
+        };
+        assert!(two().validate(&wrap(30.0)).is_ok());
+        assert!(two().validate(&wrap(30.0 - 1e-4)).is_ok());
+        assert_eq!(
+            two().validate(&wrap(29.0)),
+            Err(LineInvariantError::LineWiderThanWrapWidth {
+                visual_width: 30.0,
+                wrap_width: 29.0
+            })
+        );
+        // The default context imposes no limit.
+        assert!(two().validate(&ctx()).is_ok());
+        assert!(LineContext::default().wrap_width.is_infinite());
+    }
+
+    #[test]
+    fn a_single_wide_cluster_may_overflow() {
+        // One cluster of two glyphs (base + mark share the byte range).
+        let l = line(
+            vec![
+                word_glyph(0.0, 25.0, (0, 3)),
+                word_glyph(25.0, 15.0, (0, 3)),
+            ],
+            40.0,
+            0.0,
+            0.0,
+        );
+        assert!(l.validate(&wrap(30.0)).is_ok());
+        // Two different clusters are divisible, so they must wrap.
+        let l = line(
+            vec![
+                word_glyph(0.0, 25.0, (0, 3)),
+                word_glyph(25.0, 15.0, (3, 6)),
+            ],
+            40.0,
+            0.0,
+            0.0,
+        );
+        assert!(matches!(
+            l.validate(&wrap(30.0)),
+            Err(LineInvariantError::LineWiderThanWrapWidth { .. })
+        ));
+        // A lone cluster whose extent is not the line width is not the overflow
+        // state either (the line is wider than what it holds).
+        let l = line(vec![word_glyph(0.0, 25.0, (0, 3))], 40.0, 0.0, 0.0);
+        assert!(matches!(
+            l.validate(&wrap(30.0)),
+            Err(LineInvariantError::LineWiderThanWrapWidth { .. })
+        ));
+    }
+
+    #[test]
+    fn a_single_wide_inline_box_may_overflow() {
+        let object = |x: f32, width: f32| PositionedInlineBox {
+            box_id: 1,
+            byte_range: TextRange::new(0, 1),
+            x,
+            y: 0.0,
+            width,
+            ascent: 5.0,
+            descent: 1.0,
+        };
+        let mut l = line(vec![], 50.0, 0.0, 0.0);
+        l.byte_range = TextRange::new(0, 1);
+        l.visible_byte_end = 1;
+        l.visual_boxes = vec![object(0.0, 50.0)];
+        assert!(l.validate(&wrap(30.0)).is_ok());
+        // Not when it shares the line with a glyph or a second box.
+        let mut with_glyph = l.clone();
+        with_glyph.visual_runs =
+            line(vec![word_glyph(50.0, 0.0, (1, 2))], 50.0, 0.0, 0.0).visual_runs;
+        with_glyph.visual_runs[0].glyphs[0].advance = 5.0;
+        with_glyph.visual_width = 55.0;
+        assert!(with_glyph.validate(&wrap(30.0)).is_err());
+        let mut two = l.clone();
+        two.visual_boxes = vec![object(0.0, 25.0), object(25.0, 25.0)];
+        assert!(two.validate(&wrap(30.0)).is_err());
+        // The box width must be the line width.
+        let mut narrow = l;
+        narrow.visual_boxes = vec![object(0.0, 20.0)];
+        assert!(narrow.validate(&wrap(30.0)).is_err());
+    }
+
+    #[test]
+    fn paragraph_validation_applies_the_wrap_width_to_every_line() {
+        let mut p = PositionedParagraph::empty(BidiDirection::Ltr);
+        p.lines = vec![line(
+            vec![
+                word_glyph(0.0, 10.0, (0, 1)),
+                word_glyph(10.0, 20.0, (1, 2)),
+            ],
+            30.0,
+            0.0,
+            0.0,
+        )];
+        assert!(p.validate(&wrap(30.0)).is_ok());
+        assert_eq!(p.validate(&wrap(10.0)).map_err(|(i, _)| i), Err(0));
+    }
+
+    #[test]
+    fn fragment_snapping_uses_its_own_midpoint_and_bidi_parity() {
+        let mut f = fragment(1, 100.0, 20.0, (0, 4)); // [100, 120], mid 110
+        assert!(f.snaps_to_logical_start(105.0)); // LTR left half: start
+        assert!(!f.snaps_to_logical_start(115.0)); // right half: end
+        assert!(!f.snaps_to_logical_start(110.0)); // the midpoint is the right half
+        f.bidi_level = 1;
+        assert!(!f.snaps_to_logical_start(105.0)); // RTL: halves swap
+        assert!(f.snaps_to_logical_start(115.0));
+        f.bidi_level = 2;
+        assert!(f.snaps_to_logical_start(105.0));
+        // A narrow second-line fragment keeps its own start reachable: its left
+        // half is judged against its own edges, not those of the whole span.
+        let narrow = fragment(1, 0.0, 6.0, (3, 4));
+        assert!(narrow.snaps_to_logical_start(1.0));
+    }
+
+    #[test]
+    fn fragment_bidi_level_is_range_checked() {
+        let mut l = spanned_line();
+        let mut f = fragment(1, 0.0, 30.0, (0, 4));
+        f.bidi_level = crate::types::BIDI_MAX_DEPTH + 1;
+        l.span_fragments = vec![f];
+        assert!(l.validate(&ctx()).is_ok());
+        l.span_fragments[0].bidi_level = crate::types::BIDI_MAX_DEPTH + 2;
+        assert_eq!(
+            l.validate(&ctx()),
+            Err(LineInvariantError::InvalidSpanFragment { index: 0 })
+        );
     }
 }

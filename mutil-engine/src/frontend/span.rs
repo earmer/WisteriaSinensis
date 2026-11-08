@@ -8,6 +8,11 @@
 
 use crate::types::{ByteIndex, TextRange};
 
+/// Deepest proper nesting `check_layout_inputs` accepts for decoration spans
+/// (a span inside a span inside ...). **[Design decision]**: ruling 6 says
+/// "bounded" without a number; 8 is generous for rich text and cheap to check.
+pub const MAX_DECORATION_NESTING_DEPTH: usize = 8;
+
 /// How a decoration is drawn when its span breaks across lines (CSS
 /// Fragmentation 3 `box-decoration-break`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

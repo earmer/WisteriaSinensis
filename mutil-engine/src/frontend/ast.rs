@@ -2,8 +2,10 @@
 
 use super::{AtomicEditSpan, InlineDecorationSpan, ShapingRun};
 use crate::types::{
-    AtomFlags, BidiDirection, ByteIndex, FontMetrics, GraphemeAtom, ShapedCluster, TextRange,
+    AtomFlags, BidiDirection, BidiLevel, ByteIndex, FontMetrics, GraphemeAtom, ShapedCluster,
+    TextRange,
 };
+use smallvec::SmallVec;
 
 /// Replacement text for spelling-change hyphenation.
 ///
@@ -44,16 +46,23 @@ pub enum GlueKind {
     /// Automatic CJK / non-CJK spacing; sizes come from the active profile
     /// (`Jlreq` or `CssCompat`, §2.4).
     CjkAutospace,
+    /// The compressible margin of CJK full-width punctuation that `chws` has
+    /// not already squeezed, or that JLReq / CLREQ mid-line compression frees
+    /// (spec §2.4, ruling 3). It is the **punctuation compression pool** of
+    /// [`GlueTier::Tier0`]: `natural_width == 0`, `max_stretch == 0`, and
+    /// `max_shrink` up to `0.5 * ic`.
+    CjkPunctCompression,
 }
 
 impl GlueKind {
-    /// The tier the frontend assigns by default: `WordSpace` to
-    /// [`GlueTier::Tier0`], `CjkAutospace` to [`GlueTier::Tier1`]. Tier 2 has no
-    /// kind of its own yet (Open question 33).
+    /// The tier the frontend assigns: `WordSpace` and `CjkPunctCompression` to
+    /// [`GlueTier::Tier0`], `CjkAutospace` to [`GlueTier::Tier1`]. **No kind
+    /// maps to [`GlueTier::Tier2`]**: inter-ideographic stretch is derived from
+    /// `ALLOW_CJK_JUSTIFY_AFTER` on the clusters, not from glue nodes (ruling 3).
     #[must_use]
     pub const fn default_tier(self) -> GlueTier {
         match self {
-            Self::WordSpace => GlueTier::Tier0,
+            Self::WordSpace | Self::CjkPunctCompression => GlueTier::Tier0,
             Self::CjkAutospace => GlueTier::Tier1,
         }
     }
@@ -71,21 +80,26 @@ pub enum GlueTier {
     /// CJK / non-CJK autospace (`GlueKind::CjkAutospace`).
     Tier1 = 1,
     /// Inter-ideographic expansion (`ALLOW_CJK_JUSTIFY_AFTER` gaps); zero
-    /// natural width, stretch only.
+    /// natural width, stretch only. A tier of the middle-end's prefix-sum
+    /// tables: a `GlueNode` never carries it (`check_layout_inputs` rejects
+    /// one), because explicit Tier 2 glue would inflate a CJK paragraph's node
+    /// count by a third.
     Tier2 = 2,
 }
 
 /// Stretchable, shrinkable space (spec §2.4).
 ///
-/// Glue is **never** an implicit break point: a breakable space is preceded by
+/// Glue is **never** an implicit break point: a breakable space is followed by
 /// a [`DiscretionaryNode`] emitted by the frontend (see [`WordNode`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlueNode {
-    /// Source bytes (empty for `CjkAutospace`, which has `start == end`).
+    /// Source bytes (empty for `CjkAutospace` and `CjkPunctCompression`, which
+    /// have `start == end`).
     pub byte_range: TextRange,
     /// Space kind.
     pub kind: GlueKind,
-    /// Priority tier.
+    /// Priority tier: `Tier0` or `Tier1` (never `Tier2`). A
+    /// `CjkPunctCompression` node is `Tier0`.
     pub tier: GlueTier,
     /// Natural width.
     pub natural_width: f32,
@@ -167,6 +181,10 @@ pub enum BoxNode {
         edge: SpanEdge,
         /// `start_padding` or `end_padding` of the span.
         width: f32,
+        /// UAX #9 level of the boundary: a `Leading` edge takes the level of
+        /// the first [`GraphemeAtom`] inside the span, a `Trailing` edge that
+        /// of the last. Needed to place the padding after bidi reordering.
+        bidi_level: BidiLevel,
     },
 }
 
@@ -186,17 +204,18 @@ pub enum BreakAction {
     /// Hyphenation: `TextShaper::reshape_window` runs at materialisation.
     Hyphenate(HyphenOpportunity),
     /// Restore or trim `chws`-compressed CJK punctuation at the line edges.
+    ///
+    /// The overrides are **geometric**, not indices: each replaces the advance
+    /// of the one cluster next to the discretionary. `trailing_advance_override`
+    /// applies to the last cluster of the preceding [`BoxNode::Text`] (the end
+    /// of line `k`), `leading_advance_override` to the first cluster of the
+    /// following one (the start of line `k + 1`). `None` leaves a side as
+    /// shaped.
     CjkPunctAdjust {
-        /// Cluster at the end of line `k`.
-        trailing_cluster_index: usize,
-        /// Cluster at the start of line `k + 1`.
-        leading_cluster_index: usize,
-    },
-    /// Inject cloned padding when breaking inside a
-    /// `BoxDecorationBreak::Clone` span.
-    CloneSpanPadding {
-        /// The span whose padding is cloned.
-        span_id: u64,
+        /// Replacement advance of the last cluster before the break.
+        trailing_advance_override: Option<f32>,
+        /// Replacement advance of the first cluster after the break.
+        leading_advance_override: Option<f32>,
     },
     /// Break after a top-level math relation (`=`) or binary operator (`+`).
     MathOperator {
@@ -214,8 +233,13 @@ pub enum BreakAction {
 /// Widths are signed deltas (a trim or restore may be negative) but finite.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiscretionaryNode {
-    /// Break position in the original text.
-    pub byte_offset: ByteIndex,
+    /// Bytes this opportunity owns. An **empty** range at the break position
+    /// for every soft opportunity (after a space, between ideographs,
+    /// hyphenation, a math operator); for a [`BreakAction::HardBreak`] the exact
+    /// newline sequence (`\n` 1 byte, `\r\n` 2, U+2028 3), or an empty range
+    /// at the end of the paragraph. The next line starts at `byte_range.end`, so
+    /// no byte is left unowned.
+    pub byte_range: TextRange,
     /// Knuth-Plass penalty; see the associated constants for the canonical scale.
     pub penalty: i32,
     /// `true` for hyphenation breaks (triggers the alpha demerits).
@@ -228,6 +252,13 @@ pub struct DiscretionaryNode {
     pub no_break_width: f32,
     /// Work done when the break is chosen.
     pub action: BreakAction,
+    /// Ids of the [`BoxDecorationBreak::Clone`](super::BoxDecorationBreak::Clone)
+    /// spans this break falls strictly inside. Cloning padding is orthogonal to
+    /// `action` (a hyphenation break inside a chip is both): when the line
+    /// breaks here, each listed span gets its cloned `end_padding` on line `k`
+    /// (inside `pre_break_width`) and its cloned `start_padding` on line `k + 1`
+    /// (inside `post_break_width`).
+    pub cloned_spans: SmallVec<[u64; 2]>,
 }
 
 impl DiscretionaryNode {
@@ -253,32 +284,43 @@ impl DiscretionaryNode {
     /// this penalty or more is rejected by `check_layout_inputs`.
     pub const FORBIDDEN_BREAK_PENALTY: i32 = 10_000;
 
-    /// A zero-cost, zero-width natural break at `byte_offset`.
+    /// A zero-cost, zero-width natural break at `byte_offset` (an empty range).
     #[must_use]
-    pub const fn direct(byte_offset: ByteIndex) -> Self {
+    pub fn direct(byte_offset: ByteIndex) -> Self {
         Self {
-            byte_offset,
+            byte_range: TextRange::empty_at(byte_offset),
             penalty: Self::NATURAL_PENALTY,
             flagged: false,
             pre_break_width: 0.0,
             post_break_width: 0.0,
             no_break_width: 0.0,
             action: BreakAction::Direct,
+            cloned_spans: SmallVec::new(),
         }
     }
 
-    /// A mandatory break at `byte_offset`.
+    /// A mandatory break that owns `newline`, the exact bytes of the line
+    /// terminator (`\n`, `\r\n`, U+2028, ...), or an empty range at the end of
+    /// the paragraph.
     #[must_use]
-    pub const fn hard_break(byte_offset: ByteIndex, is_paragraph_end: bool) -> Self {
+    pub fn hard_break(newline: TextRange, is_paragraph_end: bool) -> Self {
         Self {
-            byte_offset,
+            byte_range: newline,
             penalty: Self::MANDATORY_BREAK_PENALTY,
             flagged: false,
             pre_break_width: 0.0,
             post_break_width: 0.0,
             no_break_width: 0.0,
             action: BreakAction::HardBreak { is_paragraph_end },
+            cloned_spans: SmallVec::new(),
         }
+    }
+
+    /// The break position: where line `k` ends and, for a soft opportunity,
+    /// line `k + 1` begins (`byte_range.start`).
+    #[must_use]
+    pub const fn byte_offset(&self) -> ByteIndex {
+        self.byte_range.start
     }
 
     /// `true` when the break is mandatory (`penalty <= MANDATORY_BREAK_PENALTY`).
@@ -295,8 +337,12 @@ impl DiscretionaryNode {
 /// `no_line_end_words`, hyphenation, `chws`) to these primitives; the
 /// middle-end is a language-agnostic solver. **Invariant:** the line breaker
 /// may end a line only at a [`WordNode::Discretionary`] (bar the emergency
-/// cluster break). A breakable space is `[Box, Discretionary, Glue]`; a
-/// non-breaking one (NBSP, Czech `v `) is `[Box, Glue]`.
+/// cluster break). A breakable space is `[Box, Glue, Discretionary]`: the
+/// discretionary comes **after** the glue run, so on a break the spaces stay on
+/// the trailing edge of line `k` (spec §2.6: `byte_range` includes trailing
+/// whitespace, `visible_byte_end` does not). Several consecutive spaces share
+/// one discretionary at the end of the run. A non-breaking space (NBSP, Czech
+/// `v `) is `[Box, Glue]`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WordNode {
     /// A rigid item.
@@ -313,10 +359,11 @@ pub enum WordNode {
 }
 
 impl WordNode {
-    /// The source bytes this node covers: the stored range for `Box`, `Glue`
-    /// and `Tab`, an empty range at `byte_offset` for a `Discretionary`. Always
-    /// `Some`; the `Option` is kept for call-site compatibility with earlier
-    /// revisions in which atom-derived spans could be missing.
+    /// The source bytes this node covers: the stored range for every variant
+    /// (a `Discretionary` owns its `byte_range`: empty for a soft opportunity,
+    /// the newline for a hard break). Always `Some`; the `Option` is kept for
+    /// call-site compatibility with earlier revisions in which atom-derived
+    /// spans could be missing.
     #[must_use]
     pub fn byte_span(&self) -> Option<TextRange> {
         Some(match self {
@@ -325,7 +372,7 @@ impl WordNode {
             | Self::Box(BoxNode::SpanBoundary { byte_range, .. })
             | Self::Glue(GlueNode { byte_range, .. })
             | Self::Tab { byte_range } => *byte_range,
-            Self::Discretionary(d) => TextRange::empty_at(d.byte_offset),
+            Self::Discretionary(d) => d.byte_range,
         })
     }
 

@@ -14,4 +14,6 @@ pub use ast::{
 };
 pub use options::{AutospaceProfile, FrontendOptions, QuotePolicy};
 pub use run::{ShapingRun, TextDecoration};
-pub use span::{AtomicEditSpan, BoxDecorationBreak, InlineDecorationSpan};
+pub use span::{
+    AtomicEditSpan, BoxDecorationBreak, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH,
+};

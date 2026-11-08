@@ -124,17 +124,18 @@ fn zero_layout_full_pipeline_assembly() {
         items: vec![
             word(0, 3),
             WordNode::Discretionary(DiscretionaryNode {
-                byte_offset: 3,
+                byte_range: TextRange::empty_at(3),
                 penalty: DiscretionaryNode::HYPHEN_PENALTY,
                 flagged: true,
                 pre_break_width: ADV,
                 post_break_width: 0.0,
                 no_break_width: 0.0,
                 action: BreakAction::Hyphenate(opportunity.clone()),
+                cloned_spans: Default::default(),
             }),
             word(3, 7),
-            // A breakable space: the opportunity precedes the glue.
-            WordNode::Discretionary(DiscretionaryNode::direct(7)),
+            // A breakable space: the opportunity follows the glue, so the space
+            // stays on the trailing edge of the line that breaks after it.
             WordNode::Glue(GlueNode {
                 byte_range: TextRange::new(7, 8),
                 kind: GlueKind::WordSpace,
@@ -143,6 +144,7 @@ fn zero_layout_full_pipeline_assembly() {
                 max_stretch: 2.0,
                 max_shrink: 1.0,
             }),
+            WordNode::Discretionary(DiscretionaryNode::direct(8)),
             WordNode::Box(BoxNode::InlineObject {
                 byte_range: TextRange::new(8, 11),
                 box_id: 42,
@@ -157,8 +159,8 @@ fn zero_layout_full_pipeline_assembly() {
             word(12, 14),
             // "," is fused to "go" by the absence of a discretionary.
             word(14, 15),
-            // The newline itself belongs to no node; the break sits before it.
-            WordNode::Discretionary(DiscretionaryNode::hard_break(15, false)),
+            // The hard break owns the newline's bytes: the next line starts at 16.
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(15, 16), false)),
         ],
         decoration_spans: vec![],
         atomic_spans: vec![],
@@ -188,6 +190,7 @@ fn zero_layout_full_pipeline_assembly() {
         ast.strut_font_size,
         ast.base_direction,
         &options,
+        200.0,
     );
     assert_eq!(ctx.strut.natural_line_height(), 16.0);
     let constraints = LayoutConstraints {
@@ -847,7 +850,7 @@ fn context_follows_the_layout_options() {
         descent: 4.0,
         ..Default::default()
     };
-    let c = LineContext::from_options(&raw, 10.0, BidiDirection::Rtl, &options);
+    let c = LineContext::from_options(&raw, 10.0, BidiDirection::Rtl, &options, 123.0);
     assert_eq!(c.hang_mode, options.hang_mode);
     assert_eq!(c.line_height, LineHeight::Fixed(1.5));
     assert_eq!(c.whitespace, HangingWhitespaceMode::Preserved);

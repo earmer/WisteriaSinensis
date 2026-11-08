@@ -82,6 +82,7 @@ fn boundary(edge: SpanEdge, at: usize) -> WordNode {
         span_id: SPAN_ID,
         edge,
         width: PAD,
+        bidi_level: 0,
     })
 }
 
@@ -100,15 +101,17 @@ fn run() -> ShapingRun {
 
 fn chip_ast() -> ParagraphAst {
     // Inside a `Clone` span every interior break carries +300, the padding on
-    // both sides, and `CloneSpanPadding` (Revision 2.1, rule 5).
+    // both sides, and lists the span in `cloned_spans` (ruling 5): cloning is
+    // orthogonal to the action, which stays `Direct` here.
     let interior_break = DiscretionaryNode {
-        byte_offset: 8,
+        byte_range: TextRange::empty_at(8),
         penalty: DiscretionaryNode::NATURAL_PENALTY + DiscretionaryNode::CLONED_SPAN_PENALTY,
         flagged: false,
         pre_break_width: PAD,
         post_break_width: PAD,
         no_break_width: 0.0,
-        action: BreakAction::CloneSpanPadding { span_id: SPAN_ID },
+        action: BreakAction::Direct,
+        cloned_spans: smallvec::smallvec![SPAN_ID],
     };
     ParagraphAst {
         base_direction: BidiDirection::Ltr,
@@ -121,15 +124,17 @@ fn chip_ast() -> ParagraphAst {
         runs: vec![run()],
         items: vec![
             text(0, 2),
-            WordNode::Discretionary(DiscretionaryNode::direct(2)),
+            // A breakable space is [Glue, Discretionary] (ruling 1): the space
+            // stays on the trailing edge of the line that breaks after it.
             space(2),
+            WordNode::Discretionary(DiscretionaryNode::direct(3)),
             boundary(SpanEdge::Leading, 3),
             text(3, 8), // "@Ann-"
             WordNode::Discretionary(interior_break),
             text(8, 11), // "Lee"
             boundary(SpanEdge::Trailing, 11),
-            WordNode::Discretionary(DiscretionaryNode::direct(11)),
             space(11),
+            WordNode::Discretionary(DiscretionaryNode::direct(12)),
             text(12, 14),
         ],
         decoration_spans: vec![InlineDecorationSpan {
@@ -175,6 +180,7 @@ fn fragment(
         descent: 4.0,
         is_first_fragment: first,
         is_last_fragment: last,
+        bidi_level: 0,
     }
 }
 
@@ -251,7 +257,7 @@ fn chip_inputs_are_accepted_and_atoms_carry_the_atomic_flag() {
         .filter(|(_, n)| n.is_break_opportunity())
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(breaks, vec![1, 5, 8]);
+    assert_eq!(breaks, vec![2, 5, 9]);
     // Padding is cloned only on the break that is inside the chip.
     assert!(!ast.decoration_spans[0].forbids_cjk_autospace_at(5));
     assert!(ast.decoration_spans[0].forbids_cjk_autospace_at(CHIP.start));
@@ -319,6 +325,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         ast.strut_font_size,
         ast.base_direction,
         &LayoutOptions::default(),
+        100.0,
     );
     let mut para = PositionedParagraph::empty(ast.base_direction);
     para.size = Size {
@@ -371,7 +378,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     };
     let op_break = |offset: usize, penalty: i32| {
         WordNode::Discretionary(DiscretionaryNode {
-            byte_offset: offset,
+            byte_range: TextRange::empty_at(offset),
             penalty,
             flagged: false,
             pre_break_width: 0.0,
@@ -380,6 +387,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
             action: BreakAction::MathOperator {
                 repeat_glyph_id: None,
             },
+            cloned_spans: Default::default(),
         })
     };
     // "a+b=c": a, + | b, = | c
@@ -412,7 +420,8 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
             &ast.strut_metrics,
             ast.strut_font_size,
             ast.base_direction,
-            &LayoutOptions::default()
+            &LayoutOptions::default(),
+            100.0
         ))
     );
 }
