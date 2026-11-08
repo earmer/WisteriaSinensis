@@ -74,7 +74,9 @@ impl LineFit {
 /// Badness of a line whose natural width is `wrap_width - slack`.
 ///
 /// `slack = wrap_width - W(a, b)`: positive when the line is short. Five
-/// exhaustive cases, continuous (C0) across the stretch boundaries:
+/// exhaustive cases, continuous (C0) across the stretch boundaries except one:
+/// with no Tier 2 capacity, case C ends at 100 and case E starts at 400, the
+/// ruled step (spec row 97).
 ///
 /// * **A** `|slack| <= FIT_EPSILON`: ratio 0, badness 0.
 /// * **B** `slack < 0`: with `Z = Z_0 + Z_1`, overfull (`Z <= CAPACITY_EPSILON`
