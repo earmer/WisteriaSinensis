@@ -129,6 +129,10 @@ pub struct Selection {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum BoxHeightStyle {
     /// Union of selected font-instance ascent/descent, excluding gap and leading.
+    ///
+    /// **Forward contract (Phase 1/2).** Selection geometry is not computed in
+    /// Phase 0; when it lands it must query `TextShaper::font_metrics` for every
+    /// selected instance and union their ascent/descent.
     #[default]
     Tight,
     /// Includes line gap and maximum inline-box height.
@@ -137,22 +141,8 @@ pub enum BoxHeightStyle {
     Strut,
 }
 
-/// Visual fragment of an atomic edit span, independent of decorations.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct AtomicFragment {
-    /// Atomic span id (independent id space).
-    pub atomic_id: u64,
-    /// Entire atomic logical range.
-    pub full_byte_range: crate::types::TextRange,
-    /// Source bytes on this visual fragment.
-    pub fragment_byte_range: crate::types::TextRange,
-    /// Physical left edge.
-    pub x_start: f32,
-    /// Physical right edge.
-    pub x_end: f32,
-    /// Resolved fragment direction.
-    pub bidi_level: BidiLevel,
-}
+use super::output::AtomicFragment;
+
 impl AtomicFragment {
     /// Snaps to the entire span's outer endpoints by midpoint rule.
     /// Even level: left half → start/Downstream, right half → end/Upstream.

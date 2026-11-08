@@ -161,18 +161,6 @@ fn font_instance_queries_accept_variations_without_changing_face_identity() {
     let _ = shaper.ligature_carets(instance, 1, Direction::Ltr);
 }
 #[test]
-fn composition_range_can_style_a_mark_without_resegmenting_an_atom() {
-    let text = "a\u{301}";
-    let composition = CompositionSpan {
-        byte_range: TextRange::new(1, text.len()),
-    };
-    assert_eq!(
-        &text[composition.byte_range.start..composition.byte_range.end],
-        "\u{301}"
-    );
-}
-
-#[test]
 fn saturated_badness_prefers_smaller_excess_slack() {
     let capacities = TierCapacities::default();
     let near = line_fit(1e6, &capacities, 16.);

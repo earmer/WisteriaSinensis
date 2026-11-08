@@ -836,11 +836,19 @@ fn glue_only_source_must_cover_every_byte() {
 }
 #[test]
 fn hanging_requires_overflow_beyond_tolerance() {
-    let mut l = line();
     let mut c = ctx();
     c.hang_mode.end = HangEndMode::Allow;
-    for (x, advance) in [(99., 1.00001), (50., 0.)] {
-        l.visual_runs = vec![run(glyph(x, advance, true))];
-        assert!(l.validate(&c).is_err());
-    }
+    // A non-zero-advance hanging glyph inside the block is still rejected.
+    let mut l = line();
+    l.visual_runs = vec![run(glyph(99., 1.00001, true))];
+    assert!(l.validate(&c).is_err());
+    // Zero-advance marks are exempt from containment and hanging.
+    let mut l = line();
+    l.visual_runs = vec![run(glyph(50., 0., true))];
+    assert_eq!(l.validate(&c), Ok(()));
+    // But they cannot fake a declared hanging extent.
+    let mut l = line();
+    l.hanging_right = 5.;
+    l.visual_runs = vec![run(glyph(99., 0., true))];
+    assert!(l.validate(&c).is_err());
 }

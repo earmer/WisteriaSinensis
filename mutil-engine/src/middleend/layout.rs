@@ -751,13 +751,16 @@ pub fn check_layout_inputs(
         }
     }
     check_spans(ast, text)?;
-    // Reject items outside the text before indexing spans against them.
+    // Reject out-of-order and out-of-text items before indexing spans against
+    // them, so the index is built on ordered ranges and cannot scan or clone
+    // unboundedly for a malformed AST.
     for (item, node) in ast.items.iter().enumerate() {
         match node.byte_span() {
             Some(span) if fits(text, span) => {}
             _ => return Err(E::ItemOutsideText { item }),
         }
     }
+    check_item_order(ast)?;
     let span_index = SpanIndex::new(ast);
     let mut atomic_at = 0;
     let last_disc = ast.items.iter().rposition(|n| n.is_break_opportunity());
@@ -1073,7 +1076,6 @@ pub fn check_layout_inputs(
             return Err(E::InvalidStrut);
         }
     }
-    check_item_order(ast)?;
     check_boundary_order(ast)?;
     check_span_enclosure(ast, &span_index)?;
     // Item order makes each empty range a boundary of the coverage cursor.
@@ -1545,7 +1547,12 @@ mod tests {
         if let WordNode::Discretionary(d) = &mut a.items[1] {
             d.byte_range = TextRange::empty_at(2);
         }
-        assert_eq!(check_layout_inputs(&a, "abé", &constraints(), &o), bad);
+        // The discretionary now sits at offset 2, inside the tail box, so item
+        // order rejects it before the hyphen rules run.
+        assert_eq!(
+            check_layout_inputs(&a, "abé", &constraints(), &o),
+            Err(LayoutInputError::ItemsOutOfOrder { item: 2 })
+        );
         // It needs a text box on each side.
         let mut a = hyphenated(opportunity(1, 0, 0));
         a.items.remove(2);
@@ -2215,7 +2222,11 @@ mod tests {
         let soft = WordNode::Discretionary(DiscretionaryNode::direct(2));
         assert_eq!(check("abcd", vec![soft]), missing);
         let text = text_box(vec![atom(0, 1)]);
-        assert_eq!(check("abcd", vec![sentinel(4), text]), missing);
+        // Text after the sentinel is out of order before the sentinel check.
+        assert_eq!(
+            check("abcd", vec![sentinel(4), text]),
+            Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
+        );
         // Four traces from the line-emission rule: N newlines, N + 1 mandatory
         // breaks, so N + 1 lines.
         let mandatory = |items: &[WordNode]| {
@@ -2732,9 +2743,13 @@ mod tests {
             check(build(vec![zb(5, T, 3)])),
             Err(LayoutInputError::InvalidSpanBoundary { item: 1 })
         );
+        // A boundary before the preceding box starts is out of order.
+        assert_eq!(
+            check(build(vec![zb(5, L, 0), zb(5, T, 3)])),
+            Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
+        );
         // Exactly one of each, at the span's own edges.
         for wrong in [
-            vec![zb(5, L, 0), zb(5, T, 3)],
             vec![zb(5, L, 1), zb(5, T, 2)],
             vec![zb(5, L, 1), zb(5, L, 1), zb(5, T, 3)],
             vec![zb(5, L, 1), zb(5, T, 3), zb(5, T, 3)],

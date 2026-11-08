@@ -188,11 +188,31 @@ impl PositionedSpanFragment {
     }
 }
 
+/// Visual fragment of an atomic edit span, independent of decorations.
+///
+/// Lives in the output layer because it is part of a [`PositionedLine`]'s
+/// geometry; hit-testing behaviour is implemented in the interaction layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AtomicFragment {
+    /// Atomic span id (independent id space).
+    pub atomic_id: u64,
+    /// Entire atomic logical range.
+    pub full_byte_range: TextRange,
+    /// Source bytes on this visual fragment.
+    pub fragment_byte_range: TextRange,
+    /// Physical left edge.
+    pub x_start: f32,
+    /// Physical right edge.
+    pub x_end: f32,
+    /// Resolved fragment direction.
+    pub bidi_level: BidiLevel,
+}
+
 /// One laid-out line (spec §2.6).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PositionedLine {
     /// Atomic editing geometry, independent of decoration ids.
-    pub atomic_fragments: Vec<super::AtomicFragment>,
+    pub atomic_fragments: Vec<AtomicFragment>,
     /// Source bytes, **including** trailing whitespace.
     pub byte_range: TextRange,
     /// End of the last visible cluster (trailing whitespace excluded). Glyphs
@@ -995,12 +1015,12 @@ impl PositionedLine {
                 }
                 let tol = tolerance(lo.abs().max(hi.abs()), vw);
                 // A zero-advance glyph (combining mark) attaches to a base and
-                // has no extent, but its pen position must still lie in the
-                // body unless it rides on a hanging base.
-                if g.advance == 0.0 && !g.is_hanging {
-                    if !g.is_hanging && (g.x < -tol || g.x > vw + tol) {
-                        return Err(E::BodyGlyphOutsideBlock { run, glyph });
-                    }
+                // has no horizontal extent of its own. It is exempt from both
+                // containment and hanging: it neither overflows nor contributes
+                // a hanging extent. A line that declares hanging extent must
+                // still be backed by a non-zero-advance hanging glyph (checked
+                // below), so zero-width marks cannot fake it.
+                if g.advance == 0.0 {
                     continue;
                 }
                 if g.is_hanging {
@@ -1027,6 +1047,15 @@ impl PositionedLine {
             (HangSide::Right, right, self.hanging_right, has_right),
         ] {
             if !approx_eq(expected, actual) {
+                return Err(E::HangingExtentMismatch {
+                    side,
+                    expected,
+                    actual,
+                });
+            }
+            // A declared extent must come from at least one non-zero-advance
+            // hanging glyph, not from zero-width marks or arithmetic.
+            if actual > 0.0 && !present {
                 return Err(E::HangingExtentMismatch {
                     side,
                     expected,
@@ -1684,17 +1713,10 @@ mod tests {
         let mut far = glyph(5.0, 10.0, false);
         far.x_offset = -50.0;
         assert!(line(vec![far], 20.0, 0.0, 0.0).is_valid(&ctx()));
-        // A pen position outside the body is wrong even for a zero advance.
-        let l = line(vec![glyph(-3.0, 0.0, false)], 20.0, 0.0, 0.0);
-        assert_eq!(
-            l.validate(&ctx()),
-            Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
-        );
-        let l = line(vec![glyph(25.0, 0.0, false)], 20.0, 0.0, 0.0);
-        assert!(matches!(
-            l.validate(&ctx()),
-            Err(LineInvariantError::BodyGlyphOutsideBlock { .. })
-        ));
+        // A zero advance has no horizontal extent, so its pen position is
+        // exempt from containment even outside the body.
+        assert!(line(vec![glyph(-3.0, 0.0, false)], 20.0, 0.0, 0.0).is_valid(&ctx()));
+        assert!(line(vec![glyph(25.0, 0.0, false)], 20.0, 0.0, 0.0).is_valid(&ctx()));
         // A zero-advance mark on a hanging base is flagged hanging and skipped.
         let l = line(
             vec![

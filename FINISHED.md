@@ -5,7 +5,7 @@ Status: full test suite green; legacy fixtures migrated; release span-scaling be
 ## Green
 
 - `tests/phase_zero_regressions.rs` — 66 pass, 1 ignored (5k-span benchmark)
-- `tests/api_contracts.rs` — 19 pass
+- `tests/api_contracts.rs` — 18 pass
 - `badness` unit suite 12 pass, `output` hanging/line-height fixed
 
 `cargo test --test phase_zero_regressions --test api_contracts` : ok.
@@ -57,7 +57,7 @@ Status: full test suite green; legacy fixtures migrated; release span-scaling be
 
 ## Verification after review fixes
 
-- `cargo test --no-fail-fast --quiet`: 226 passed, 1 ignored; no warnings.
+- `cargo test --no-fail-fast --quiet`: 224 passed, 1 ignored; no warnings.
 - Release 1250/5000-span benchmark: 0.495 ms / 1.938 ms (3.92× time for 4× input), passes.
 - `cargo fmt` and `git diff --check` pass.
 - Added probes for glue-only incomplete coverage and sub-tolerance/zero-advance fake hanging.
@@ -85,9 +85,20 @@ Fixed in this pass:
 - Regression tests added for NBSP glue, atom tiling, separator set, callers,
   atomic fragments, visual runs, and zero-width placement.
 
-Left for design discussion: worst-case bounds in `SpanIndex`, zero-advance
-hanging-mark semantics, and consumers for `BoxHeightStyle::Tight` /
-`LocalePolicy::ExperimentalHeuristics` (no frontend pass exists yet).
+Second review round:
+
+- Zero-advance glyphs are exempt from horizontal containment and hanging
+  extents; a declared extent must still be backed by a non-zero-advance
+  hanging glyph, so zero-width marks cannot fake hanging.
+- `check_item_order` runs before `SpanIndex::new`, so indexing is built on
+  ordered, in-text items; three unit tests now expect the earlier
+  `ItemsOutOfOrder` variant.
+- `AtomicFragment` moved into the output module (hit-testing stays in the
+  interaction layer); `output` no longer depends on `interaction`.
+- `BoxHeightStyle::Tight` and `LocalePolicy::ExperimentalHeuristics` are
+  documented as Phase 1/2 forward contracts.
+- The tautological composition-range test was removed; a real test arrives
+  with the pre-edit styling layer.
 
 Timing is empirical scaling evidence, not a deterministic operation-count proof. Real shapers and the layout algorithm remain outside Phase 0.
 

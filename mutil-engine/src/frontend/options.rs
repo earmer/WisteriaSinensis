@@ -56,5 +56,9 @@ pub enum LocalePolicy {
     #[default]
     ExplicitOnly,
     /// Experimental script-based inference.
+    ///
+    /// **Forward contract (Phase 1/2).** No locale-resolution pass exists in
+    /// Phase 0, so selecting this policy currently has no effect; it is
+    /// reserved for the script-based rules in spec §3 Step 4.
     ExperimentalHeuristics,
 }
