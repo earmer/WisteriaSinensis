@@ -10,7 +10,7 @@ use crate::frontend::{
     HyphenOpportunity, ParagraphAst, SpanEdge, WordNode, is_paragraph_separator,
 };
 use crate::shaping::TextShaper;
-use crate::types::{AtomFlags, BIDI_MAX_DEPTH, BidiLevel, GraphemeAtom, TextRange};
+use crate::types::{AtomFlags, BIDI_MAX_DEPTH, BidiLevel, GraphemeAtom, ShapedCluster, TextRange};
 use core::fmt;
 
 /// An input that [`check_layout_inputs`] rejects.
@@ -488,6 +488,17 @@ fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
     Ok(())
 }
 
+/// `true` when every measurement a cluster hands downstream is finite and the
+/// fallback scale is positive.
+fn cluster_measurements_are_valid(cluster: &ShapedCluster) -> bool {
+    let font_ok = cluster.font.scale.is_finite() && cluster.font.scale > 0.0;
+    let widths_ok = cluster.natural_width.is_finite() && cluster.uncompressed_width.is_finite();
+    let glyphs_ok = cluster.glyphs.iter().all(|glyph| {
+        glyph.x_advance.is_finite() && glyph.x_offset.is_finite() && glyph.y_offset.is_finite()
+    });
+    font_ok && widths_ok && glyphs_ok
+}
+
 /// Indexed span membership for item checks; nesting is bounded by eight.
 struct SpanIndex {
     by_id: std::collections::HashMap<u64, usize>,
@@ -797,17 +808,7 @@ pub fn check_layout_inputs(
                 if clusters.iter().any(|c| !c.safety_flags_consistent()) {
                     return Err(E::ItemNotSelfContained { item });
                 }
-                if clusters.iter().any(|c| {
-                    !c.font.scale.is_finite()
-                        || c.font.scale <= 0.0
-                        || !c.natural_width.is_finite()
-                        || !c.uncompressed_width.is_finite()
-                        || c.glyphs.iter().any(|g| {
-                            !g.x_advance.is_finite()
-                                || !g.x_offset.is_finite()
-                                || !g.y_offset.is_finite()
-                        })
-                }) {
+                if clusters.iter().any(|c| !cluster_measurements_are_valid(c)) {
                     return Err(E::InvalidTextWidth { item });
                 }
                 // IN_ATOMIC_EDIT_SPAN mirrors `atomic_spans` exactly.

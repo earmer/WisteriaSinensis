@@ -1,6 +1,6 @@
 //! Middle-end output: positioned lines and glyphs (spec §2.6).
 
-use super::{CaretStop, HangMode, HangingWhitespaceMode, LayoutOptions, LineHeight};
+use super::{HangMode, HangingWhitespaceMode, LayoutOptions, LineHeight};
 use crate::frontend::BoxOverflowPolicy;
 use crate::types::{
     BidiDirection, BidiLevel, ByteIndex, FontMetrics, FontRef, Size, TextRange, VerticalMetrics,
@@ -188,6 +188,37 @@ impl PositionedSpanFragment {
     }
 }
 
+/// Which side of an ambiguous boundary a caret belongs to (spec §6.1).
+///
+/// Flutter's definition: upstream leans toward the start of the string. At a
+/// soft wrap, upstream is the end of the first line and downstream the start of
+/// the second; affinity also resolves a bidi boundary. Explicit newlines are
+/// unambiguous `[C1]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CaretAffinity {
+    /// Leans toward the following text.
+    #[default]
+    Downstream,
+    /// Leans toward the preceding text.
+    Upstream,
+}
+
+/// One visual boundary on a line, in visual order (spec §6.1). Two stops sit at
+/// each direction boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaretStop {
+    /// Line-local x position.
+    pub x: f32,
+    /// Logical byte offset at this stop.
+    pub offset: ByteIndex,
+    /// Affinity this stop represents.
+    pub affinity: CaretAffinity,
+    /// Bidi level of the slot.
+    pub level: BidiLevel,
+    /// Index into `PositionedParagraph::lines`.
+    pub line: usize,
+}
+
 /// Visual fragment of an atomic edit span, independent of decorations.
 ///
 /// Lives in the output layer because it is part of a [`PositionedLine`]'s
@@ -206,6 +237,21 @@ pub struct AtomicFragment {
     pub x_end: f32,
     /// Resolved fragment direction.
     pub bidi_level: BidiLevel,
+}
+
+/// `true` when a fragment's geometry is finite and ordered, its ranges nest,
+/// and its bidi level is representable.
+fn atomic_fragment_measurements_are_valid(fragment: &AtomicFragment) -> bool {
+    let geometry_ok = fragment.x_start.is_finite()
+        && fragment.x_end.is_finite()
+        && fragment.x_start <= fragment.x_end;
+    let ranges_ok = fragment.full_byte_range.start <= fragment.full_byte_range.end
+        && fragment.fragment_byte_range.start <= fragment.fragment_byte_range.end
+        && fragment
+            .full_byte_range
+            .contains_range(fragment.fragment_byte_range);
+    let level_ok = fragment.bidi_level <= crate::types::BIDI_MAX_DEPTH + 1;
+    geometry_ok && ranges_ok && level_ok
 }
 
 /// One laid-out line (spec §2.6).
@@ -871,18 +917,12 @@ impl PositionedLine {
                 return Err(E::InvalidSpanFragment { index });
             }
         }
-        for (index, f) in self.atomic_fragments.iter().enumerate() {
-            let finite = f.x_start.is_finite() && f.x_end.is_finite();
-            let ranges_ok = f.full_byte_range.start <= f.full_byte_range.end
-                && f.fragment_byte_range.start <= f.fragment_byte_range.end
-                && f.full_byte_range.contains_range(f.fragment_byte_range);
-            if !(finite
-                && ranges_ok
-                && f.x_start <= f.x_end
-                && f.bidi_level <= crate::types::BIDI_MAX_DEPTH + 1)
-            {
-                return Err(E::InvalidAtomicFragment { index });
-            }
+        if let Some(index) = self
+            .atomic_fragments
+            .iter()
+            .position(|fragment| !atomic_fragment_measurements_are_valid(fragment))
+        {
+            return Err(E::InvalidAtomicFragment { index });
         }
         for (index, c) in self.caret_stops.iter().enumerate() {
             if !c.x.is_finite() {
@@ -1046,16 +1086,10 @@ impl PositionedLine {
             (HangSide::Left, left, self.hanging_left, has_left),
             (HangSide::Right, right, self.hanging_right, has_right),
         ] {
-            if !approx_eq(expected, actual) {
-                return Err(E::HangingExtentMismatch {
-                    side,
-                    expected,
-                    actual,
-                });
-            }
-            // A declared extent must come from at least one non-zero-advance
-            // hanging glyph, not from zero-width marks or arithmetic.
-            if actual > 0.0 && !present {
+            // A declared extent must match the glyphs and come from at least
+            // one non-zero-advance hanging glyph, never from zero-width marks.
+            let extent_is_backed = actual <= 0.0 || present;
+            if !approx_eq(expected, actual) || !extent_is_backed {
                 return Err(E::HangingExtentMismatch {
                     side,
                     expected,

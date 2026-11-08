@@ -427,13 +427,13 @@ impl WordNode {
                     }
                     _ => byte_range.is_empty(),
                 };
-                // Atoms tile the box: each one starts where the previous
-                // ended, so no source byte is left unrepresented.
-                let ordered = atoms
+                let atoms_tile_range = atoms
                     .windows(2)
-                    .all(|w| w[0].byte_range.end == w[1].byte_range.start)
-                    && atoms.iter().all(|a| a.byte_range.start <= a.byte_range.end);
-                span_ok && ordered && clusters_partition_atoms(atoms, clusters)
+                    .all(|pair| pair[0].byte_range.end == pair[1].byte_range.start)
+                    && atoms
+                        .iter()
+                        .all(|atom| atom.byte_range.start <= atom.byte_range.end);
+                span_ok && atoms_tile_range && clusters_partition_atoms(atoms, clusters)
             }
             _ => true,
         }

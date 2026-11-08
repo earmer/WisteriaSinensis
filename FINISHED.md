@@ -93,8 +93,9 @@ Second review round:
 - `check_item_order` runs before `SpanIndex::new`, so indexing is built on
   ordered, in-text items; three unit tests now expect the earlier
   `ItemsOutOfOrder` variant.
-- `AtomicFragment` moved into the output module (hit-testing stays in the
-  interaction layer); `output` no longer depends on `interaction`.
+- `AtomicFragment`, `CaretStop` and `CaretAffinity` moved into the output
+  module (hit-testing stays in the interaction layer); `output` no longer
+  depends on `interaction`. Crate-root re-exports are unchanged.
 - `BoxHeightStyle::Tight` and `LocalePolicy::ExperimentalHeuristics` are
   documented as Phase 1/2 forward contracts.
 - The tautological composition-range test was removed; a real test arrives

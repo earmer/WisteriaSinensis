@@ -47,42 +47,43 @@ pub fn is_paragraph_separator(c: char) -> bool {
 /// empty slice; trailing separator yields a final empty slice.
 pub fn split_paragraphs(text: &str) -> Vec<ParagraphSlice> {
     let bytes = text.as_bytes();
-    let mut out = Vec::new();
+    let mut paragraphs = Vec::new();
     let mut content_start = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let (len, is_sep) = match bytes[i] {
-            b'\n' => (1, true),
-            b'\r' => {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                    (2, true)
-                } else {
-                    (1, true)
-                }
-            }
-            0x0B | 0x0C | 0x1C..=0x1E => (1, true),
-            0xC2 if i + 1 < bytes.len() && bytes[i + 1] == 0x85 => (2, true),
-            0xE2 if i + 2 < bytes.len() && bytes[i + 1] == 0x80 && bytes[i + 2] == 0xA9 => {
-                (3, true)
-            }
-            _ => (1, false),
-        };
-        if is_sep {
-            out.push(ParagraphSlice {
-                content: crate::types::TextRange::new(content_start, i),
-                separator: crate::types::TextRange::new(i, i + len),
+    let mut offset = 0usize;
+
+    while offset < bytes.len() {
+        if let Some(separator_len) = separator_len_at(bytes, offset) {
+            paragraphs.push(ParagraphSlice {
+                content: crate::types::TextRange::new(content_start, offset),
+                separator: crate::types::TextRange::new(offset, offset + separator_len),
             });
-            i += len;
-            content_start = i;
-        } else {
-            // advance by one UTF-8 code point
-            let ch_len = text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-            i += ch_len;
+            offset += separator_len;
+            content_start = offset;
+            continue;
         }
+
+        let char_len = text[offset..].chars().next().map_or(1, char::len_utf8);
+        offset += char_len;
     }
-    out.push(ParagraphSlice {
+
+    paragraphs.push(ParagraphSlice {
         content: crate::types::TextRange::new(content_start, text.len()),
         separator: crate::types::TextRange::empty_at(text.len()),
     });
-    out
+    paragraphs
+}
+
+/// Length in bytes of the separator starting at `offset`, or `None` when the
+/// byte there is ordinary content. CRLF is a single two-byte separator.
+fn separator_len_at(bytes: &[u8], offset: usize) -> Option<usize> {
+    match bytes[offset] {
+        b'\n' | 0x0B | 0x0C | 0x1C..=0x1E => Some(1),
+        b'\r' if bytes.get(offset + 1) == Some(&b'\n') => Some(2),
+        b'\r' => Some(1),
+        0xC2 if bytes.get(offset + 1) == Some(&0x85) => Some(2),
+        0xE2 if bytes.get(offset + 1) == Some(&0x80) && bytes.get(offset + 2) == Some(&0xA9) => {
+            Some(3)
+        }
+        _ => None,
+    }
 }
