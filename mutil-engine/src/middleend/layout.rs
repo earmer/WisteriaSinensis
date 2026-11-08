@@ -1118,8 +1118,8 @@ pub fn check_layout_inputs(
 /// * `constraints`: container geometry; `options`: layout policy.
 ///
 /// **Phase 0 skeleton.** It runs [`check_layout_inputs`] and performs no
-/// layout: the result has the AST's base direction and no lines. Validation errors are returned to the caller.
-#[must_use]
+/// layout: the result has the AST's base direction and no lines. Validation
+/// errors are returned to the caller.
 pub fn layout_paragraph(
     ast: &ParagraphAst,
     text: &str,
@@ -1964,27 +1964,26 @@ mod tests {
             check_layout_inputs(&a, text, &constraints(), &o)
         };
         let bad = Err(LayoutInputError::InvalidDiscretionary { item: 0 });
-        for (text, len) in [("a\u{2028}b", 3)] {
-            let nl = TextRange::new(1, 1 + len);
-            let mut a = tiled(with_items_for(
-                text.len(),
-                vec![WordNode::Discretionary(DiscretionaryNode::hard_break(
-                    nl, false,
-                ))],
-            ));
-            a.runs[0].byte_range = TextRange::new(0, text.len());
-            let r = check_layout_inputs(&a, text, &constraints(), &o);
-            assert!(r.is_ok(), "{text:?}: {r:?}");
-            // The terminator is the whole range: a shorter one splits `\r\n`
-            // or a code point, a longer one swallows text.
-            assert!(
-                check(
-                    text,
-                    DiscretionaryNode::hard_break(TextRange::new(1, 2 + len), false)
-                )
-                .is_err()
-            );
-        }
+        let text = "a\u{2028}b";
+        let separator_len = 3;
+        let newline = TextRange::new(1, 1 + separator_len);
+        let mut a = tiled(with_items_for(
+            text.len(),
+            vec![WordNode::Discretionary(DiscretionaryNode::hard_break(
+                newline, false,
+            ))],
+        ));
+        a.runs[0].byte_range = TextRange::new(0, text.len());
+        let result = check_layout_inputs(&a, text, &constraints(), &o);
+        assert!(result.is_ok(), "{text:?}: {result:?}");
+        // The terminator must be the whole range: a longer one swallows text.
+        assert!(
+            check(
+                text,
+                DiscretionaryNode::hard_break(TextRange::new(1, 2 + separator_len), false)
+            )
+            .is_err()
+        );
         // Not a terminator.
         assert_eq!(
             check(
