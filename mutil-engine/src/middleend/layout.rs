@@ -578,16 +578,18 @@ fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     }
     // Offset of the break opportunity seen in the current run of zero-width
     // nodes, if any.
-    let mut break_at: Option<usize> = None;
-    for (item, n) in ast.items.iter().enumerate() {
-        let Some(r) = n.byte_span() else { continue };
-        if !r.is_empty() || break_at != Some(r.start) {
-            break_at = None;
+    let mut break_opportunity_offset: Option<usize> = None;
+    for (item, node) in ast.items.iter().enumerate() {
+        let Some(range) = node.byte_span() else {
+            continue;
+        };
+        if !range.is_empty() || break_opportunity_offset != Some(range.start) {
+            break_opportunity_offset = None;
         }
-        if n.is_break_opportunity() && r.is_empty() {
-            break_at = Some(r.start);
-        } else if matches!(n, WordNode::Glue(g) if g.kind == GlueKind::CjkAutospace)
-            && break_at == Some(r.start)
+        if node.is_break_opportunity() && range.is_empty() {
+            break_opportunity_offset = Some(range.start);
+        } else if matches!(node, WordNode::Glue(glue) if glue.kind == GlueKind::CjkAutospace)
+            && break_opportunity_offset == Some(range.start)
         {
             return Err(LayoutInputError::ItemsOutOfOrder { item });
         }
@@ -611,48 +613,81 @@ fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
 /// * every other item inside `[s, e]` is strictly between `lead` and `trail`,
 ///   every item outside is not between them, and none straddles an edge.
 fn check_span_enclosure(ast: &ParagraphAst, index: &SpanIndex) -> Result<(), LayoutInputError> {
-    let mut positions = vec![(0, 0); ast.decoration_spans.len()];
-    for (item, n) in ast.items.iter().enumerate() {
-        if let WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. }) = n {
-            let pos = &mut positions[index.by_id[span_id]];
+    let mut boundary_positions = vec![(0, 0); ast.decoration_spans.len()];
+    for (item, node) in ast.items.iter().enumerate() {
+        if let WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. }) = node {
+            let positions = &mut boundary_positions[index.by_id[span_id]];
             match edge {
-                SpanEdge::Leading => pos.0 = item,
-                SpanEdge::Trailing => pos.1 = item,
+                SpanEdge::Leading => positions.0 = item,
+                SpanEdge::Trailing => positions.1 = item,
             }
         }
     }
-    for (item, n) in ast.items.iter().enumerate() {
-        let r = n.byte_span().unwrap();
-        for &span in &index.touching[item] {
-            let s = &ast.decoration_spans[span];
-            if matches!(n, WordNode::Box(BoxNode::SpanBoundary { span_id, .. }) if *span_id == s.span_id)
+    for (item, node) in ast.items.iter().enumerate() {
+        let item_range = node.byte_span().unwrap();
+        for &span_index in &index.touching[item] {
+            let span = &ast.decoration_spans[span_index];
+            if matches!(node, WordNode::Box(BoxNode::SpanBoundary { span_id, .. }) if *span_id == span.span_id)
             {
                 continue;
             }
-            let (lead, trail) = positions[span];
-            let (start, end) = (s.byte_range.start, s.byte_range.end);
-            let between = lead < item && item < trail;
-            let zero = r.is_empty();
-            let autospace = matches!(n, WordNode::Glue(g) if g.kind == GlueKind::CjkAutospace);
-            let ok = if zero && (n.is_break_opportunity() || autospace) && r.start == start {
-                item < lead
-            } else if zero && (n.is_break_opportunity() || autospace) && r.start == end {
-                item > trail
-            } else if zero && (r.start == start || r.start == end) {
-                true
-            } else if r.start >= start && r.end <= end {
-                between
-            } else if r.end <= start || r.start >= end {
-                !between
-            } else {
-                false
-            };
-            if !ok {
-                return Err(LayoutInputError::SpanEnclosure { span, item });
+            let (leading_item, trailing_item) = boundary_positions[span_index];
+            let is_allowed = span_enclosure_is_allowed(
+                node,
+                item_range,
+                span.byte_range,
+                item,
+                leading_item,
+                trailing_item,
+            );
+            if !is_allowed {
+                return Err(LayoutInputError::SpanEnclosure {
+                    span: span_index,
+                    item,
+                });
             }
         }
     }
     Ok(())
+}
+
+fn span_enclosure_is_allowed(
+    node: &WordNode,
+    item_range: TextRange,
+    span_range: TextRange,
+    item: usize,
+    leading_item: usize,
+    trailing_item: usize,
+) -> bool {
+    let is_strictly_between_boundaries = leading_item < item && item < trailing_item;
+    let is_zero_width = item_range.is_empty();
+    let is_cjk_autospace =
+        matches!(node, WordNode::Glue(glue) if glue.kind == GlueKind::CjkAutospace);
+    let sits_on_span_edge =
+        item_range.start == span_range.start || item_range.start == span_range.end;
+
+    if is_zero_width
+        && (node.is_break_opportunity() || is_cjk_autospace)
+        && item_range.start == span_range.start
+    {
+        return item < leading_item;
+    }
+    if is_zero_width
+        && (node.is_break_opportunity() || is_cjk_autospace)
+        && item_range.start == span_range.end
+    {
+        return item > trailing_item;
+    }
+    if is_zero_width && sits_on_span_edge {
+        return true;
+    }
+    if item_range.start >= span_range.start && item_range.end <= span_range.end {
+        return is_strictly_between_boundaries;
+    }
+    if item_range.end <= span_range.start || item_range.start >= span_range.end {
+        return !is_strictly_between_boundaries;
+    }
+    false
 }
 
 fn check_boundary_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
@@ -663,38 +698,40 @@ fn check_boundary_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
         .enumerate()
         .map(|(i, s)| (s.span_id, i))
         .collect();
-    let mut open = Vec::new();
-    let mut opened = std::collections::HashSet::new();
-    for (item, n) in ast.items.iter().enumerate() {
-        let WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. }) = n else {
+    let mut open_spans = Vec::new();
+    let mut seen_leading_spans = std::collections::HashSet::new();
+    for (item, node) in ast.items.iter().enumerate() {
+        let WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. }) = node else {
             continue;
         };
         match edge {
             SpanEdge::Leading => {
-                if !opened.insert(*span_id) {
+                if !seen_leading_spans.insert(*span_id) {
                     return Err(E::InvalidSpanBoundary { item });
                 }
-                if let Some(outer) = open.last() {
-                    let (o, i) = (by_id[outer], by_id[span_id]);
-                    if ast.decoration_spans[o].byte_range == ast.decoration_spans[i].byte_range
-                        && o > i
+                if let Some(outer_span_id) = open_spans.last() {
+                    let outer_index = by_id[outer_span_id];
+                    let inner_index = by_id[span_id];
+                    if ast.decoration_spans[outer_index].byte_range
+                        == ast.decoration_spans[inner_index].byte_range
+                        && outer_index > inner_index
                     {
                         return Err(E::InvalidSpanBoundary { item });
                     }
                 }
-                open.push(*span_id);
+                open_spans.push(*span_id);
             }
             SpanEdge::Trailing => {
-                if open.last() != Some(span_id) {
+                if open_spans.last() != Some(span_id) {
                     return Err(E::InvalidSpanBoundary { item });
                 }
-                open.pop();
+                open_spans.pop();
             }
         }
     }
-    for (span, s) in ast.decoration_spans.iter().enumerate() {
-        if !opened.contains(&s.span_id) || open.contains(&s.span_id) {
-            return Err(E::MissingSpanBoundary { span });
+    for (span_index, span) in ast.decoration_spans.iter().enumerate() {
+        if !seen_leading_spans.contains(&span.span_id) || open_spans.contains(&span.span_id) {
+            return Err(E::MissingSpanBoundary { span: span_index });
         }
     }
     Ok(())
@@ -731,21 +768,27 @@ pub fn check_layout_inputs(
     if text.chars().any(is_paragraph_separator) {
         return Err(E::ParagraphSeparatorInText);
     }
-    let m = &ast.strut_metrics;
-    let fixed_ok = match options.line_height {
+    let strut_metrics = &ast.strut_metrics;
+    let line_height_is_valid = match options.line_height {
         super::LineHeight::Normal => true,
-        super::LineHeight::Fixed(v) => v.is_finite() && v > 0.0,
+        super::LineHeight::Fixed(multiplier) => multiplier.is_finite() && multiplier > 0.0,
     };
-    if !([m.ascent, m.descent, m.line_gap]
-        .iter()
-        .all(|v| v.is_finite())
-        && m.ascent >= 0.0
-        && m.descent >= 0.0
-        && (m.ascent + m.descent) > 0.0
-        && ast.strut_font_size.is_finite()
-        && ast.strut_font_size > 0.0
-        && fixed_ok)
-    {
+    let strut_metrics_are_finite = [
+        strut_metrics.ascent,
+        strut_metrics.descent,
+        strut_metrics.line_gap,
+    ]
+    .iter()
+    .all(|value| value.is_finite());
+    let strut_extents_are_nonnegative = strut_metrics.ascent >= 0.0 && strut_metrics.descent >= 0.0;
+    let strut_has_positive_height = strut_metrics.ascent + strut_metrics.descent > 0.0;
+    let strut_font_size_is_valid = ast.strut_font_size.is_finite() && ast.strut_font_size > 0.0;
+    let strut_inputs_are_valid = strut_metrics_are_finite
+        && strut_extents_are_nonnegative
+        && strut_has_positive_height
+        && strut_font_size_is_valid
+        && line_height_is_valid;
+    if !strut_inputs_are_valid {
         return Err(E::InvalidStrut);
     }
     for (run, r) in ast.runs.iter().enumerate() {
@@ -764,7 +807,8 @@ pub fn check_layout_inputs(
     check_spans(ast, text)?;
     // Reject out-of-order and out-of-text items before indexing spans against
     // them, so the index is built on ordered ranges and cannot scan or clone
-    // unboundedly for a malformed AST.
+    // unboundedly for a malformed AST. The per-item loop below may assume every
+    // item already fits inside `text`.
     for (item, node) in ast.items.iter().enumerate() {
         match node.byte_span() {
             Some(span) if fits(text, span) => {}
@@ -776,10 +820,6 @@ pub fn check_layout_inputs(
     let mut atomic_at = 0;
     let last_disc = ast.items.iter().rposition(|n| n.is_break_opportunity());
     for (item, node) in ast.items.iter().enumerate() {
-        match node.byte_span() {
-            Some(span) if fits(text, span) => {}
-            _ => return Err(E::ItemOutsideText { item }),
-        }
         match node {
             WordNode::Box(BoxNode::Text {
                 run_index,
@@ -798,7 +838,6 @@ pub fn check_layout_inputs(
                 if !node.is_self_contained() {
                     return Err(E::ItemNotSelfContained { item });
                 }
-                // Cross-structure bidi, safety, and metric consistency.
                 let run_level = run.bidi_level;
                 if atoms.iter().any(|a| a.bidi_level != run_level)
                     || clusters.iter().any(|c| c.bidi_level != run_level)
@@ -1065,7 +1104,7 @@ pub fn check_layout_inputs(
     // Resolved strut must be positive height.
     {
         let trial = LineContext::from_options(
-            m,
+            strut_metrics,
             ast.strut_font_size,
             ast.base_direction,
             options,
@@ -1094,7 +1133,7 @@ pub fn check_layout_inputs(
         });
     }
     let context = LineContext::from_options(
-        m,
+        strut_metrics,
         ast.strut_font_size,
         ast.base_direction,
         options,

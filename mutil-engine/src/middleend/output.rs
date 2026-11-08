@@ -3,7 +3,8 @@
 use super::{HangMode, HangingWhitespaceMode, LayoutOptions, LineHeight};
 use crate::frontend::BoxOverflowPolicy;
 use crate::types::{
-    BidiDirection, BidiLevel, ByteIndex, FontMetrics, FontRef, Size, TextRange, VerticalMetrics,
+    BIDI_MAX_DEPTH, BidiDirection, BidiLevel, ByteIndex, FontMetrics, FontRef, Size, TextRange,
+    VerticalMetrics,
 };
 use core::fmt;
 
@@ -250,7 +251,7 @@ fn atomic_fragment_measurements_are_valid(fragment: &AtomicFragment) -> bool {
         && fragment
             .full_byte_range
             .contains_range(fragment.fragment_byte_range);
-    let level_ok = fragment.bidi_level <= crate::types::BIDI_MAX_DEPTH + 1;
+    let level_ok = fragment.bidi_level <= BIDI_MAX_DEPTH + 1;
     geometry_ok && ranges_ok && level_ok
 }
 
@@ -912,7 +913,7 @@ impl PositionedLine {
             let finite = [f.x, f.width, f.ascent, f.descent, f.x + f.width]
                 .iter()
                 .all(|v| v.is_finite());
-            let level_ok = f.bidi_level <= crate::types::BIDI_MAX_DEPTH + 1;
+            let level_ok = f.bidi_level <= BIDI_MAX_DEPTH + 1;
             if !(finite && level_ok && f.width >= 0.0 && f.ascent >= 0.0 && f.descent >= 0.0) {
                 return Err(E::InvalidSpanFragment { index });
             }
@@ -1028,8 +1029,8 @@ impl PositionedLine {
             BidiDirection::Rtl => end <= tolerance(end, 0.0),
         };
 
-        let (mut left, mut right) = (0.0_f32, 0.0_f32);
-        let (mut has_left, mut has_right) = (false, false);
+        let (mut max_left_overflow, mut max_right_overflow) = (0.0_f32, 0.0_f32);
+        let (mut has_left_overflow_glyph, mut has_right_overflow_glyph) = (false, false);
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
                 // Normalised endpoints: a negative advance (kerning) must not
@@ -1070,12 +1071,12 @@ impl PositionedLine {
                         return Err(E::HangingGlyphInsideBlock { run, glyph });
                     }
                     if over_left > 0.0 {
-                        left = left.max(over_left);
-                        has_left = true;
+                        max_left_overflow = max_left_overflow.max(over_left);
+                        has_left_overflow_glyph = true;
                     }
                     if over_right > 0.0 {
-                        right = right.max(over_right);
-                        has_right = true;
+                        max_right_overflow = max_right_overflow.max(over_right);
+                        has_right_overflow_glyph = true;
                     }
                 } else if lo < -tol || hi > vw + tol {
                     return Err(E::BodyGlyphOutsideBlock { run, glyph });
@@ -1083,8 +1084,18 @@ impl PositionedLine {
             }
         }
         for (side, expected, actual, present) in [
-            (HangSide::Left, left, self.hanging_left, has_left),
-            (HangSide::Right, right, self.hanging_right, has_right),
+            (
+                HangSide::Left,
+                max_left_overflow,
+                self.hanging_left,
+                has_left_overflow_glyph,
+            ),
+            (
+                HangSide::Right,
+                max_right_overflow,
+                self.hanging_right,
+                has_right_overflow_glyph,
+            ),
         ] {
             // A declared extent must match the glyphs and come from at least
             // one non-zero-advance hanging glyph, never from zero-width marks.
@@ -2375,10 +2386,10 @@ mod tests {
     fn fragment_bidi_level_is_range_checked() {
         let mut l = spanned_line();
         let mut f = fragment(1, 0.0, 30.0, (0, 4));
-        f.bidi_level = crate::types::BIDI_MAX_DEPTH + 1;
+        f.bidi_level = BIDI_MAX_DEPTH + 1;
         l.span_fragments = vec![f];
         assert!(l.validate(&ctx()).is_ok());
-        l.span_fragments[0].bidi_level = crate::types::BIDI_MAX_DEPTH + 2;
+        l.span_fragments[0].bidi_level = BIDI_MAX_DEPTH + 2;
         assert_eq!(
             l.validate(&ctx()),
             Err(LineInvariantError::InvalidSpanFragment { index: 0 })

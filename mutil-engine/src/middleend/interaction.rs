@@ -116,9 +116,11 @@ impl AtomicFragment {
     /// Even level: left half → start/Downstream, right half → end/Upstream.
     /// Odd level: halves swap. Midpoint itself counts as right half.
     pub fn hit_test(&self, x: f32) -> CursorPosition {
-        let in_left_half = x < self.x_start + 0.5 * (self.x_end - self.x_start);
-        // even: left→start, right→end ; odd: left→end, right→start
-        let snaps_to_start = in_left_half == (self.bidi_level & 1 == 0);
+        let midpoint = self.x_start + 0.5 * (self.x_end - self.x_start);
+        let is_in_left_half = x < midpoint;
+        let is_even_level = self.bidi_level & 1 == 0;
+        // Even levels map the left half to the start; odd levels swap halves.
+        let snaps_to_start = is_in_left_half == is_even_level;
         if snaps_to_start {
             CursorPosition {
                 byte_offset: self.full_byte_range.start,
