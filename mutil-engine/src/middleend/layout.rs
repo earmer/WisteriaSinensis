@@ -10,7 +10,7 @@ use crate::frontend::{
     HyphenOpportunity, ParagraphAst, SpanEdge, WordNode,
 };
 use crate::shaping::TextShaper;
-use crate::types::{BIDI_MAX_DEPTH, BidiLevel, GraphemeAtom, TextRange};
+use crate::types::{AtomFlags, BIDI_MAX_DEPTH, BidiLevel, GraphemeAtom, TextRange};
 use core::fmt;
 
 /// An input that [`check_layout_inputs`] rejects.
@@ -68,22 +68,26 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A discretionary node has a non-finite width, a forbidden penalty
-    /// (`>= FORBIDDEN_BREAK_PENALTY`; a forbidden break is an omitted node), a
-    /// `HardBreak` action that disagrees with a mandatory penalty, a
-    /// `byte_range` that breaks the ownership rule (soft: empty; real hard
-    /// break: exactly a non-empty line terminator; paragraph-end sentinel: the
-    /// empty range `text.len()..text.len()`, the last discretionary and at most
-    /// once), a repeated id in `cloned_spans`, or a `CjkPunctAdjust` whose
-    /// non-zero `pre_break_width` / `post_break_width` has no text box beside it
-    /// or would make that cluster's width negative.
+    /// A discretionary node is malformed:
+    /// * a non-finite width, a forbidden penalty (`>= FORBIDDEN_BREAK_PENALTY`;
+    ///   a forbidden break is an omitted node), or a `HardBreak` that disagrees
+    ///   with a mandatory penalty;
+    /// * a `byte_range` that breaks the ownership rule (soft: empty; real hard
+    ///   break: exactly a line terminator; sentinel: `text.len()..text.len()`,
+    ///   the last discretionary, at most once);
+    /// * a repeated or incomplete `cloned_spans`;
+    /// * break widths that do not match the cloned padding: `Direct`, a real
+    ///   `HardBreak` and `MathOperator { repeat_glyph_id: None }` must equal the
+    ///   clone sums, and `CjkPunctAdjust` must carry a real net delta whose
+    ///   neighbouring cluster stays non-negative.
     InvalidDiscretionary {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A hyphenation discretionary does not sit between two non-empty text
-    /// boxes at its `byte_offset`, disagrees with its `HyphenOpportunity`, or
-    /// one of the cuts does not end on an atom boundary of the box it cuts.
+    /// A hyphenation discretionary is not `flagged`, does not sit between two
+    /// non-empty text boxes at its `byte_offset`, disagrees with its
+    /// `HyphenOpportunity`, or has a cut that leaves its same-run hyphen chain
+    /// or ends off an atom boundary.
     InvalidHyphenOpportunity {
         /// Index into `ParagraphAst::items`.
         item: usize,
@@ -139,6 +143,13 @@ pub enum LayoutInputError {
     SpanEnclosure {
         /// Index into `ParagraphAst::decoration_spans`.
         span: usize,
+        /// Index into `ParagraphAst::items`.
+        item: usize,
+    },
+    /// A text box holds an atom whose `AtomFlags::IN_ATOMIC_EDIT_SPAN` disagrees
+    /// with `atomic_spans`: the flag is missing on an atom inside an atomic span,
+    /// or set on one outside every atomic span.
+    AtomicFlagMismatch {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
@@ -214,6 +225,9 @@ impl fmt::Display for LayoutInputError {
                     "decoration span {span} lacks a leading or trailing boundary"
                 )
             }
+            Self::AtomicFlagMismatch { item } => {
+                write!(f, "item {item} has an atom whose atomic-span flag is wrong")
+            }
             Self::InvalidAtomicSpan { span } => {
                 write!(f, "atomic span {span} is invalid or duplicated")
             }
@@ -223,25 +237,99 @@ impl fmt::Display for LayoutInputError {
 
 impl std::error::Error for LayoutInputError {}
 
+/// The text box at `items[index]`: `(run_index, byte_range, atoms)`.
+fn text_at(
+    items: &[WordNode],
+    index: Option<usize>,
+) -> Option<(usize, TextRange, &[GraphemeAtom])> {
+    match index.and_then(|i| items.get(i)) {
+        Some(WordNode::Box(BoxNode::Text {
+            run_index,
+            byte_range,
+            atoms,
+            ..
+        })) => Some((*run_index, *byte_range, atoms.as_slice())),
+        _ => None,
+    }
+}
+
+/// The atom boundaries a hyphenation cut may land on, on one side of the
+/// opportunity at `items[index]`: those of the **contiguous same-run word
+/// chain** that starts at the neighbouring text box (`items[index - 1]`, going
+/// backwards, or `items[index + 1]`, going forwards) and continues through
+/// further text boxes of the **same `run_index`** joined solely by
+/// `BreakAction::Hyphenate` discretionaries that meet the boxes end to end. The
+/// chain stops at glue, a tab, an inline object, a span boundary, a run change
+/// or any other discretionary: `TextShaper::reshape_window` takes one
+/// `ShapingRun`, and a box cannot straddle a span boundary.
+///
+/// Returns the chain's far byte bound (its start going backwards, its end going
+/// forwards) and its atom boundaries (starts and ends), or `None` when there is
+/// no neighbouring text box.
+fn hyphen_chain(items: &[WordNode], index: usize, backwards: bool) -> Option<(usize, Vec<usize>)> {
+    let step = |i: usize| {
+        if backwards {
+            i.checked_sub(1)
+        } else {
+            i.checked_add(1)
+        }
+    };
+    let mut cursor = step(index);
+    let (run, mut range, atoms) = text_at(items, cursor)?;
+    let mut bound = if backwards { range.start } else { range.end };
+    let mut edges: Vec<usize> = atoms
+        .iter()
+        .flat_map(|a| [a.byte_range.start, a.byte_range.end])
+        .collect();
+    // `items[cursor]` is the last text box added; look past it for a
+    // `Hyphenate` joining it to another text box of the same run.
+    while let Some(disc_at) = cursor.and_then(step) {
+        let Some(WordNode::Discretionary(d)) = items.get(disc_at) else {
+            break;
+        };
+        if !matches!(d.action, BreakAction::Hyphenate(_)) {
+            break;
+        }
+        let Some((next_run, next, next_atoms)) = text_at(items, step(disc_at)) else {
+            break;
+        };
+        let meets = if backwards {
+            next.end == d.byte_range.start && d.byte_range.end == range.start
+        } else {
+            range.end == d.byte_range.start && d.byte_range.end == next.start
+        };
+        if next_run != run || !meets {
+            break;
+        }
+        edges.extend(
+            next_atoms
+                .iter()
+                .flat_map(|a| [a.byte_range.start, a.byte_range.end]),
+        );
+        bound = if backwards { next.start } else { next.end };
+        range = next;
+        cursor = step(disc_at);
+    }
+    Some((bound, edges))
+}
+
 /// Whether a hyphenation discretionary at `items[index]` is well formed: its
 /// `HyphenOpportunity` agrees with it, it sits between two non-empty text
-/// boxes that meet at its offset, and each cut ends on an atom boundary of the
-/// box it cuts.
+/// boxes that meet at its offset, and each cut stays within, and ends on an
+/// atom boundary of, the contiguous same-run hyphen-connected chain of text
+/// boxes on its side (see [`hyphen_chain`]). A cut may therefore cross an
+/// unchosen hyphenation point of the same word (a spelling change reaching two
+/// bytes back across a point one byte away) but never a run or span boundary.
 fn hyphen_valid(
     items: &[WordNode],
     index: usize,
     d: &DiscretionaryNode,
     h: &HyphenOpportunity,
 ) -> bool {
-    let text_of = |i: Option<usize>| match i.and_then(|i| items.get(i)) {
-        Some(WordNode::Box(BoxNode::Text {
-            byte_range, atoms, ..
-        })) => Some((*byte_range, atoms)),
-        _ => None,
-    };
-    let (Some((prev, prev_atoms)), Some((next, next_atoms))) =
-        (text_of(index.checked_sub(1)), text_of(index.checked_add(1)))
-    else {
+    let (Some((_, prev, _)), Some((_, next, _))) = (
+        text_at(items, index.checked_sub(1)),
+        text_at(items, index.checked_add(1)),
+    ) else {
         return false;
     };
     let off = h.byte_offset;
@@ -251,13 +339,16 @@ fn hyphen_valid(
     if prev.is_empty() || next.is_empty() {
         return false;
     }
-    let boundary = |atoms: &[GraphemeAtom], pos: usize, end: usize| {
-        pos == end || atoms.iter().any(|a| a.byte_range.start == pos)
+    let (Some((left_bound, left_edges)), Some((right_bound, right_edges))) = (
+        hyphen_chain(items, index, true),
+        hyphen_chain(items, index, false),
+    ) else {
+        return false;
     };
     let prefix = off.checked_sub(h.prefix_cut_bytes as usize);
     let suffix = off.checked_add(h.suffix_cut_bytes as usize);
-    prefix.is_some_and(|p| p >= prev.start && boundary(prev_atoms, p, prev.end))
-        && suffix.is_some_and(|q| q <= next.end && boundary(next_atoms, q, next.end))
+    prefix.is_some_and(|p| p >= left_bound && left_edges.contains(&p))
+        && suffix.is_some_and(|q| q <= right_bound && right_edges.contains(&q))
 }
 
 fn fits(text: &str, r: crate::types::TextRange) -> bool {
@@ -540,8 +631,17 @@ fn check_boundary_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
 
 /// Checks the inputs of [`layout_paragraph`] and assembles the paragraph-level
 /// [`LineContext`]: the active strut is resolved here from the AST's **raw**
-/// strut metrics, `ParagraphAst::strut_font_size` and
-/// `options.line_height` (`LineHeight::resolve_strut`).
+/// strut metrics, `ParagraphAst::strut_font_size` and `options.line_height`
+/// (`LineHeight::resolve_strut`).
+///
+/// The checks, in order (each failure has its own [`LayoutInputError`] variant):
+/// 1. constraints, strut inputs and run ranges;
+/// 2. the span streams (`check_spans`);
+/// 3. each item on its own: text boxes (run, atoms, cached width, atomic flag),
+///    inline objects, span boundaries, glue, and discretionaries (ownership,
+///    cloned spans and their widths, hyphenation and punctuation deltas);
+/// 4. the sentinel last, monotone item order, `Leading` / `Trailing` boundary
+///    order, and span enclosure including seam spacing.
 ///
 /// # Errors
 /// The first problem found.
@@ -598,6 +698,16 @@ pub fn check_layout_inputs(
                 }
                 if !node.is_self_contained() {
                     return Err(E::ItemNotSelfContained { item });
+                }
+                // IN_ATOMIC_EDIT_SPAN mirrors `atomic_spans` exactly.
+                if atoms.iter().any(|a| {
+                    let inside = ast
+                        .atomic_spans
+                        .iter()
+                        .any(|s| s.byte_range.contains_range(a.byte_range));
+                    inside != a.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN)
+                }) {
+                    return Err(E::AtomicFlagMismatch { item });
                 }
                 if !(run.byte_range.contains_range(*byte_range)
                     && atoms
@@ -714,8 +824,11 @@ pub fn check_layout_inputs(
                 }
                 // Completeness: every Clone-mode span the break is strictly inside
                 // is listed (a chip split without its cloned padding is wrong).
+                // `cloned_spans` is exactly the set of Clone-mode spans the break is
+                // strictly inside: a chip split without its cloned padding is
+                // wrong, and so is cloning a span the break does not cut.
                 let off = d.byte_offset();
-                let inside = |sp: &&crate::frontend::InlineDecorationSpan| {
+                let cut_by_break = |sp: &crate::frontend::InlineDecorationSpan| {
                     sp.break_mode == BoxDecorationBreak::Clone
                         && sp.byte_range.start < off
                         && off < sp.byte_range.end
@@ -723,46 +836,73 @@ pub fn check_layout_inputs(
                 if ast
                     .decoration_spans
                     .iter()
-                    .filter(inside)
-                    .any(|sp| !d.cloned_spans.contains(&sp.span_id))
+                    .any(|sp| cut_by_break(sp) && !d.cloned_spans.contains(&sp.span_id))
                 {
                     return Err(E::InvalidDiscretionary { item });
                 }
                 for id in &d.cloned_spans {
-                    // A clone only makes sense for a Clone-mode span the break
-                    // falls strictly inside.
-                    let off = d.byte_offset();
-                    if !ast.decoration_spans.iter().any(|s| {
-                        s.span_id == *id
-                            && s.break_mode == BoxDecorationBreak::Clone
-                            && s.byte_range.start < off
-                            && off < s.byte_range.end
-                    }) {
+                    if !ast
+                        .decoration_spans
+                        .iter()
+                        .any(|s| s.span_id == *id && cut_by_break(s))
+                    {
                         return Err(E::UnknownSpan { item });
                     }
                 }
+                // Cloned padding is part of the break widths (line `k` gains each
+                // listed span's `end_padding`, line `k + 1` its `start_padding`);
+                // what remains (`net_*`) is the action's own delta.
+                let (mut clone_pre, mut clone_post) = (0.0_f64, 0.0_f64);
+                for id in &d.cloned_spans {
+                    if let Some(sp) = ast.decoration_spans.iter().find(|s| s.span_id == *id) {
+                        clone_pre += f64::from(sp.end_padding);
+                        clone_post += f64::from(sp.start_padding);
+                    }
+                }
+                let (pre, post) = (f64::from(d.pre_break_width), f64::from(d.post_break_width));
+                let (net_pre, net_post) = (pre - clone_pre, post - clone_post);
+                let near =
+                    |a: f64, b: f64| (a - b).abs() <= 1e-3_f64.max(1e-5 * a.abs().max(b.abs()));
                 match &d.action {
                     BreakAction::Hyphenate(h)
                         if !d.flagged || !hyphen_valid(&ast.items, item, d, h) =>
                     {
                         return Err(E::InvalidHyphenOpportunity { item });
                     }
+                    // A hyphenation's net deltas are its reshaping deltas.
+                    BreakAction::Hyphenate(_) => {}
                     BreakAction::CjkPunctAdjust => {
-                        // The deltas live in the widths: each non-zero one needs
-                        // its neighbouring text box and may not drive the edge
+                        // At least one net delta is real; each needs its
+                        // neighbouring text box and may not drive that edge
                         // cluster's width below zero.
-                        let side_ok = |delta: f32, width: Option<f32>| {
-                            delta == 0.0 || width.is_some_and(|w| w + delta >= 0.0)
+                        let live =
+                            |net: f64, width: f64| net.abs() > 1e-3_f64.max(1e-5 * width.abs());
+                        let live_pre = live(net_pre, pre);
+                        let live_post = live(net_post, post);
+                        let side_ok = |live: bool, net: f64, width: Option<f32>| {
+                            !live || width.is_some_and(|w| f64::from(w) + net >= -1e-3)
                         };
                         let trailing = edge_cluster_width(&ast.items, item.checked_sub(1), true);
                         let leading = edge_cluster_width(&ast.items, item.checked_add(1), false);
-                        if !(side_ok(d.pre_break_width, trailing)
-                            && side_ok(d.post_break_width, leading))
+                        if !((live_pre || live_post)
+                            && side_ok(live_pre, net_pre, trailing)
+                            && side_ok(live_post, net_post, leading))
                         {
                             return Err(E::InvalidDiscretionary { item });
                         }
                     }
-                    _ => {}
+                    BreakAction::Direct
+                    | BreakAction::HardBreak { .. }
+                    | BreakAction::MathOperator {
+                        repeat_glyph_id: None,
+                    } => {
+                        if !(near(pre, clone_pre) && near(post, clone_post)) {
+                            return Err(E::InvalidDiscretionary { item });
+                        }
+                    }
+                    BreakAction::MathOperator {
+                        repeat_glyph_id: Some(_),
+                    } => {}
                 }
             }
             WordNode::Tab { .. } => {}
@@ -1113,10 +1253,14 @@ mod tests {
         };
         let bad = Err(LayoutInputError::InvalidDiscretionary { item: 0 });
         assert!(check(DiscretionaryNode::direct(2)).is_ok());
-        // A negative width is a legal delta (trim); a non-finite one is not.
+        // A plain break owns no width of its own (outside a cloned span): any
+        // non-zero pre/post width, and any non-finite one, is rejected.
         let mut d = DiscretionaryNode::direct(2);
         d.pre_break_width = -2.5;
-        assert!(check(d.clone()).is_ok());
+        assert_eq!(check(d.clone()), bad);
+        d.pre_break_width = 0.0;
+        d.post_break_width = 1.0;
+        assert_eq!(check(d.clone()), bad);
         d.post_break_width = f32::NAN;
         assert_eq!(check(d), bad);
         // A forbidden break is an omitted node, never a node.
@@ -1199,6 +1343,164 @@ mod tests {
         let mut a = hyphenated(opportunity(1, 0, 0));
         a.items.remove(2);
         assert_eq!(check_layout_inputs(&a, "abé", &constraints(), &o), bad);
+    }
+
+    /// "abcd" as `"a" | "b" | "cd"`: boxes at 0..1, 1..2 and 2..4 around two
+    /// hyphenation points. `first` is the item between the first two boxes,
+    /// `second_cut` the `(prefix, suffix)` cut of the point at 2.
+    fn three_part_word(first: WordNode, second_cut: (u32, u32)) -> ParagraphAst {
+        let hyphen = |at: usize, prefix: u32, suffix: u32| {
+            WordNode::Discretionary(DiscretionaryNode {
+                byte_range: TextRange::empty_at(at),
+                penalty: DiscretionaryNode::HYPHEN_PENALTY,
+                flagged: true,
+                pre_break_width: 5.0,
+                post_break_width: 0.0,
+                no_break_width: 0.0,
+                action: BreakAction::Hyphenate(opportunity(at, prefix, suffix)),
+                cloned_spans: Default::default(),
+            })
+        };
+        with_items(vec![
+            text_box(vec![atom(0, 1)]),
+            first,
+            text_box(vec![atom(1, 2)]),
+            hyphen(2, second_cut.0, second_cut.1),
+            text_box(vec![atom(2, 3), atom(3, 4)]),
+        ])
+    }
+
+    #[test]
+    fn hyphen_cuts_stay_within_the_same_run_hyphen_chain() {
+        let o = LayoutOptions::default();
+        let hyphen_at_1 = || {
+            WordNode::Discretionary(DiscretionaryNode {
+                byte_range: TextRange::empty_at(1),
+                penalty: DiscretionaryNode::HYPHEN_PENALTY,
+                flagged: true,
+                pre_break_width: 5.0,
+                post_break_width: 0.0,
+                no_break_width: 0.0,
+                action: BreakAction::Hyphenate(opportunity(1, 0, 0)),
+                cloned_spans: Default::default(),
+            })
+        };
+        let check = |a: &ParagraphAst| check_layout_inputs(a, "abcd", &constraints(), &o);
+        let bad = Err(LayoutInputError::InvalidHyphenOpportunity { item: 3 });
+        // A 2-byte spelling-change cut crosses the unchosen point one byte away.
+        assert!(check(&three_part_word(hyphen_at_1(), (2, 1))).is_ok());
+        // ... but not the start of the word, nor a cut past its end.
+        assert_eq!(check(&three_part_word(hyphen_at_1(), (3, 0))), bad);
+        assert_eq!(check(&three_part_word(hyphen_at_1(), (0, 3))), bad);
+        // Anything but a hyphenation point ends the chain.
+        let space = WordNode::Glue(GlueNode {
+            byte_range: TextRange::empty_at(1),
+            kind: GlueKind::CjkAutospace,
+            tier: GlueTier::Tier0,
+            natural_width: 1.0,
+            max_stretch: 0.0,
+            max_shrink: 0.0,
+        });
+        assert_eq!(check(&three_part_word(space, (2, 0))), bad);
+        assert!(check(&three_part_word(hyphen_at_1(), (1, 0))).is_ok());
+        let direct = WordNode::Discretionary(DiscretionaryNode::direct(1));
+        assert_eq!(check(&three_part_word(direct, (2, 0))), bad);
+        // A change of shaping run ends it too: one reshape window, one run.
+        let mut a = three_part_word(hyphen_at_1(), (2, 0));
+        a.runs.push(run());
+        if let WordNode::Box(BoxNode::Text { run_index, .. }) = &mut a.items[0] {
+            *run_index = 1;
+        }
+        assert_eq!(check(&a), bad);
+        assert!(check(&three_part_word(hyphen_at_1(), (1, 0))).is_ok());
+    }
+
+    #[test]
+    fn break_widths_carry_the_padding_of_the_cloned_spans() {
+        use crate::frontend::BoxDecorationBreak::Clone;
+        let o = LayoutOptions::default();
+        // chip(5) spans 1..3 with 2.0 padding on each side; a break at 2 inside it.
+        let build = |action: BreakAction, pre: f32, post: f32, cloned: bool| {
+            let mut d = DiscretionaryNode::direct(2);
+            d.action = action;
+            d.pre_break_width = pre;
+            d.post_break_width = post;
+            if cloned {
+                d.cloned_spans.push(5);
+            }
+            let mut a = with_items(vec![
+                with_width(text_box(vec![atom(0, 1)])),
+                with_width(text_box(vec![atom(1, 2)])),
+                WordNode::Discretionary(d),
+                with_width(text_box(vec![atom(2, 3)])),
+                with_width(text_box(vec![atom(3, 4)])),
+            ]);
+            a.decoration_spans = vec![chip(5, Clone)];
+            closed(a)
+        };
+        let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
+        let math = |glyph| BreakAction::MathOperator {
+            repeat_glyph_id: glyph,
+        };
+        // The sums must match exactly for the plain actions.
+        for action in [BreakAction::Direct, math(None)] {
+            assert!(check(build(action.clone(), 2.0, 2.0, true)).is_ok());
+            assert!(check(build(action.clone(), 0.0, 2.0, true)).is_err());
+            assert!(check(build(action.clone(), 2.0, 0.0, true)).is_err());
+            assert!(check(build(action, 3.0, 2.0, true)).is_err());
+        }
+        // A repeated operator glyph adds its own width: not constrained here.
+        assert!(check(build(math(Some(7)), 9.0, 2.0, true)).is_ok());
+        // Without a listed span the widths are zero, and a Clone span the break
+        // is inside must be listed.
+        assert!(check(build(BreakAction::Direct, 2.0, 2.0, false)).is_err());
+        // Punctuation adjustment: the clone padding is subtracted first, and
+        // what remains must be a real, affordable delta (edge clusters are 4 wide).
+        let adjust = |pre, post| check(build(BreakAction::CjkPunctAdjust, pre, post, true));
+        assert!(adjust(1.0, 2.0).is_ok()); // net_pre = -1
+        assert!(adjust(2.0, 5.0).is_ok()); // net_post = +3
+        assert!(adjust(-2.0, 2.0).is_ok()); // net_pre = -4: exactly zero left
+        assert!(adjust(2.0, 2.0).is_err()); // padding alone adjusts nothing
+        assert!(adjust(-2.5, 2.0).is_err()); // net_pre = -4.5
+        assert!(adjust(2.0, -2.5).is_err()); // net_post = -4.5
+    }
+
+    #[test]
+    fn the_atomic_flag_mirrors_the_atomic_spans() {
+        let o = LayoutOptions::default();
+        let build = |flag_inside: bool, flag_outside: bool| {
+            let mut a = with_items(vec![text_box(vec![
+                atom(0, 1),
+                atom(1, 2),
+                atom(2, 3),
+                atom(3, 4),
+            ])]);
+            a.atomic_spans = vec![AtomicEditSpan {
+                span_id: 1,
+                byte_range: TextRange::new(1, 3),
+            }];
+            if let WordNode::Box(BoxNode::Text {
+                atoms, clusters, ..
+            }) = &mut a.items[0]
+            {
+                for (i, at) in atoms.iter_mut().enumerate() {
+                    let inside = (1..3).contains(&i);
+                    if (inside && flag_inside) || (!inside && flag_outside) {
+                        at.flags = AtomFlags::IN_ATOMIC_EDIT_SPAN;
+                    }
+                }
+                for c in clusters.iter_mut() {
+                    c.flags = AtomFlags::for_cluster(&atoms[c.atom_range.clone()]);
+                }
+            }
+            a
+        };
+        let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
+        assert!(check(build(true, false)).is_ok());
+        let bad = Err(LayoutInputError::AtomicFlagMismatch { item: 0 });
+        assert_eq!(check(build(false, false)), bad); // flag missing inside
+        assert_eq!(check(build(true, true)), bad); // flag stray outside
+        assert_eq!(check(build(false, true)), bad);
     }
 
     #[test]
@@ -1290,6 +1592,10 @@ mod tests {
             let mut d = DiscretionaryNode::direct(2);
             d.penalty = DiscretionaryNode::CLONED_SPAN_PENALTY;
             d.cloned_spans.push(5);
+            // The cloned chip's padding rides in the break widths: line k gains
+            // its end padding, line k + 1 its start padding (2.0 each).
+            d.pre_break_width = 2.0;
+            d.post_break_width = 2.0;
             closed(with_span(vec![WordNode::Discretionary(d)], mode))
         };
         assert!(check_layout_inputs(&clone_pad(Clone), "abcd", &constraints(), &o).is_ok());
@@ -1383,10 +1689,9 @@ mod tests {
         assert_eq!(DiscretionaryNode::direct(3).byte_offset(), 3);
     }
 
-    #[test]
-    fn cjk_punct_adjust_deltas_need_a_neighbour_and_stay_non_negative() {
-        let o = LayoutOptions::default();
-        let with_width = |n: WordNode| match n {
+    /// A text box with every cluster 4 wide.
+    fn with_width(n: WordNode) -> WordNode {
+        match n {
             WordNode::Box(BoxNode::Text {
                 run_index,
                 byte_range,
@@ -1405,7 +1710,12 @@ mod tests {
                 })
             }
             other => other,
-        };
+        }
+    }
+
+    #[test]
+    fn cjk_punct_adjust_deltas_need_a_neighbour_and_stay_non_negative() {
+        let o = LayoutOptions::default();
         // Two boxes whose edge clusters are 4 wide, around the break.
         let adjust = |pre: f32, post: f32| {
             let mut d = DiscretionaryNode::direct(2);
@@ -1422,8 +1732,9 @@ mod tests {
         // A trim to exactly zero is allowed; a restore is positive.
         assert!(check(adjust(-4.0, -4.0)).is_ok());
         assert!(check(adjust(2.0, 0.0)).is_ok());
-        assert!(check(adjust(0.0, 0.0)).is_ok());
         let bad = Err(LayoutInputError::InvalidDiscretionary { item: 1 });
+        // An adjustment that adjusts nothing is no adjustment.
+        assert_eq!(check(adjust(0.0, 0.0)), bad);
         assert_eq!(check(adjust(-4.5, 0.0)), bad); // last cluster would go negative
         assert_eq!(check(adjust(0.0, -4.5)), bad); // first cluster would go negative
         // A non-zero delta needs the text box it applies to.
@@ -1436,11 +1747,36 @@ mod tests {
         let mut a = adjust(0.0, -1.0);
         a.items.remove(2);
         assert_eq!(check(a), bad);
-        // With zero deltas no neighbour is needed.
-        let mut a = adjust(0.0, 0.0);
+        // A delta on one side needs no neighbour on the other.
+        let mut a = adjust(-1.0, 0.0);
         a.items.remove(2);
-        a.items.remove(0);
         assert!(check(a).is_ok());
+    }
+
+    /// Sets `IN_ATOMIC_EDIT_SPAN` on exactly the atoms inside an atomic span, as
+    /// the frontend does, and re-aggregates the cluster flags to match.
+    fn flag_atomic(a: &mut ParagraphAst) {
+        let spans = a.atomic_spans.clone();
+        for n in &mut a.items {
+            if let WordNode::Box(BoxNode::Text {
+                atoms, clusters, ..
+            }) = n
+            {
+                for at in atoms.iter_mut() {
+                    let inside = spans
+                        .iter()
+                        .any(|s| s.byte_range.contains_range(at.byte_range));
+                    at.flags = if inside {
+                        AtomFlags::IN_ATOMIC_EDIT_SPAN
+                    } else {
+                        AtomFlags::EMPTY
+                    };
+                }
+                for c in clusters.iter_mut() {
+                    c.flags = AtomFlags::for_cluster(&atoms[c.atom_range.clone()]);
+                }
+            }
+        }
     }
 
     fn bnd(id: u64, edge: SpanEdge, at: usize) -> WordNode {
@@ -2054,6 +2390,7 @@ mod tests {
             );
             a.decoration_spans = deco;
             a.atomic_spans = atomic;
+            flag_atomic(&mut a);
             check_layout_inputs(&closed(a), "abcd", &constraints(), &o)
         };
         let atomic = |id, r: TextRange| AtomicEditSpan {
@@ -2149,7 +2486,10 @@ mod tests {
             }];
             a
         };
-        let check = |a: ParagraphAst| check_layout_inputs(&a, "aéb", &constraints(), &o);
+        let check = |mut a: ParagraphAst| {
+            flag_atomic(&mut a);
+            check_layout_inputs(&a, "aéb", &constraints(), &o)
+        };
         assert!(check(build(1, 4)).is_ok());
         // Offset 2 is inside the atom 1..4 (a char boundary of "é" is 1 and 3,
         // so use 3: still strictly inside the atom).
@@ -2195,7 +2535,10 @@ mod tests {
             }];
             a
         };
-        let check = |a: ParagraphAst| check_layout_inputs(&a, "ab  cd", &constraints(), &o);
+        let check = |mut a: ParagraphAst| {
+            flag_atomic(&mut a);
+            check_layout_inputs(&a, "ab  cd", &constraints(), &o)
+        };
         let bad = Err(LayoutInputError::InvalidAtomicSpan { span: 0 });
         // Both edges at atom edges, with or without glue between them.
         assert!(check(build("glue", (2, 4), (0, 2))).is_ok());
@@ -2213,6 +2556,7 @@ mod tests {
             span_id: 1,
             byte_range: TextRange::new(1, 3),
         }];
+        flag_atomic(&mut a);
         assert_eq!(check_layout_inputs(&a, "abcd", &constraints(), &o), bad);
         // An inline object's edges count.
         let mut a = with_items(vec![
@@ -2230,6 +2574,7 @@ mod tests {
             span_id: 1,
             byte_range: TextRange::new(1, 3),
         }];
+        flag_atomic(&mut a);
         assert!(check_layout_inputs(&a, "abcd", &constraints(), &o).is_ok());
     }
 

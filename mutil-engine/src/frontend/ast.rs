@@ -27,12 +27,14 @@ pub struct HyphenOpportunity {
     /// Text replacing the bytes cut from the start of the suffix, if the
     /// spelling changes.
     pub suffix_replacement: Option<ReplacementText>,
-    /// Original bytes removed immediately **before** `byte_offset`. Must end on
-    /// an atom boundary. A cut that straddles the break is split between the
-    /// two counts.
+    /// Original bytes removed immediately **before** `byte_offset`. A cut that
+    /// straddles the break is split between the two counts. Each cut ends on an
+    /// atom boundary within the word's contiguous same-run hyphen chain, so it
+    /// may cross an unchosen hyphenation point of the same word but never a run
+    /// or span boundary.
     pub prefix_cut_bytes: u32,
-    /// Original bytes removed immediately **after** `byte_offset`. Must end on
-    /// an atom boundary.
+    /// Original bytes removed immediately **after** `byte_offset`; the same
+    /// rules apply.
     pub suffix_cut_bytes: u32,
     /// Break penalty (feeds the Knuth-Plass demerits, §5 Stage 1.6).
     pub penalty: i32,
@@ -208,16 +210,20 @@ pub enum BreakAction {
         /// `true` for the sentinel, `false` for a terminator in the text.
         is_paragraph_end: bool,
     },
-    /// Hyphenation: `TextShaper::reshape_window` runs at materialisation.
+    /// Hyphenation: `TextShaper::reshape_window` runs at materialisation. The
+    /// widths minus the cloned padding are the net prefix and suffix shaping
+    /// deltas; the cuts stay within the contiguous same-run chain of text boxes
+    /// joined by hyphenation points (`check_layout_inputs`).
     Hyphenate(HyphenOpportunity),
     /// Restore or trim `chws`-compressed CJK punctuation at the line edges.
     ///
-    /// A unit variant: the data already lives in the node's widths.
-    /// `pre_break_width` is the signed delta added to the `natural_width` of the
-    /// last cluster of the immediately preceding [`BoxNode::Text`] (the end of
-    /// line `k`); `post_break_width` the delta added to the first cluster of the
-    /// immediately following one (the start of line `k + 1`). A non-zero delta
-    /// needs that text box, and the cluster's width plus the delta must stay
+    /// A unit variant: the data already lives in the node's widths. After the
+    /// cloned padding is subtracted, `pre_break_width` is the signed delta added
+    /// to the `natural_width` of the last cluster of the immediately preceding
+    /// [`BoxNode::Text`] (the end of line `k`); `post_break_width` the delta
+    /// added to the first cluster of the immediately following one (the start
+    /// of line `k + 1`). At least one delta is non-zero; a non-zero delta needs
+    /// that text box, and the cluster's width plus the delta must stay
     /// non-negative.
     CjkPunctAdjust,
     /// Break after a top-level math relation (`=`) or binary operator (`+`).
@@ -247,9 +253,14 @@ pub struct DiscretionaryNode {
     pub penalty: i32,
     /// `true` for hyphenation breaks (triggers the alpha demerits).
     pub flagged: bool,
-    /// Width added to the end of line `k` if broken here.
+    /// Width added to the end of line `k` if broken here: the `end_padding` of
+    /// every span in `cloned_spans` plus the action's own delta (see
+    /// [`BreakAction`]); for `Direct`, a real `HardBreak` and
+    /// `MathOperator { repeat_glyph_id: None }` the padding sum alone.
     pub pre_break_width: f32,
-    /// Width added to the start of line `k + 1` if broken here.
+    /// Width added to the start of line `k + 1` if broken here: the
+    /// `start_padding` of every span in `cloned_spans` plus the action's own
+    /// delta.
     pub post_break_width: f32,
     /// Width contributed to the current line if **not** broken here.
     pub no_break_width: f32,
@@ -466,5 +477,6 @@ pub struct ParagraphAst {
     pub decoration_spans: Vec<InlineDecorationSpan>,
     /// Spans the caret and deletion treat as one unit (mentions, chips).
     /// Orthogonal to `decoration_spans`: a span may be either, both or neither.
+    /// The atoms inside carry `AtomFlags::IN_ATOMIC_EDIT_SPAN`, and no others do.
     pub atomic_spans: Vec<AtomicEditSpan>,
 }

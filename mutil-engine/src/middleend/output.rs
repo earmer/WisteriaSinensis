@@ -718,11 +718,19 @@ impl PositionedLine {
     ///   `ctx.wrap_width` (within tolerance);
     /// * `visual_width <= ctx.wrap_width` (within tolerance), with two
     ///   single-entity exemptions. **A:** no visual runs, no tabs and exactly one
-    ///   inline box, whose policy is `AllowOverflow`, with `x == 0` and
-    ///   `visual_width == width`. **B:** no inline boxes, no tabs, and glyphs
-    ///   that all belong to one indivisible cluster (they share one non-empty
-    ///   `byte_range`; the emergency cluster break), with `visual_width` equal to
-    ///   the sum of their advances;
+    ///   inline box, whose policy is `AllowOverflow`. **B:** no inline boxes, no
+    ///   tabs, and glyphs that all belong to one indivisible cluster (they share
+    ///   one non-empty `byte_range`; the emergency cluster break). Let the entity
+    ///   be that box or cluster, with `entity_width` its width (the box's
+    ///   `width`, or the sum of the glyph advances) and `[entity_start_x,
+    ///   entity_end_x]` its extent. Without span fragments, `entity_start_x == 0`
+    ///   and `visual_width == entity_width`. With span fragments (the entity sits
+    ///   in padded decoration spans), every fragment's `byte_range` equals the
+    ///   entity's, the entity lies within `[0, visual_width]`, and the fragments
+    ///   reach both edges of the body (`min x == 0`, `max (x + width) ==
+    ///   visual_width`). The padding thus lets a 40-wide cluster with 3 units on
+    ///   each side pass at `wrap_width = 30`, while an unpadded entity cannot
+    ///   inflate `visual_width`;
     /// * every `is_hanging` glyph lies wholly outside the body;
     /// * `hanging_left`/`hanging_right` equal the extent those glyphs occupy
     ///   (so are positive exactly when such glyphs exist), and are zero on an
@@ -977,20 +985,34 @@ impl PositionedLine {
         self.check_wrap_width(ctx)
     }
 
-    /// Exemption A: nothing but one `AllowOverflow` box at `x == 0` as wide as
-    /// the line. Exemption B: nothing but the glyphs of one indivisible cluster
-    /// (a shared non-empty `byte_range`) whose advances sum to the line width.
+    /// The single-entity overflow exemptions (spec §2.6, Pass 3(h)).
+    ///
+    /// **A:** nothing but one `AllowOverflow` box (no visual runs, no tabs).
+    /// **B:** nothing but the glyphs of one indivisible cluster (a shared
+    /// non-empty `byte_range`; no boxes, no tabs). The entity spans
+    /// `[entity_start_x, entity_end_x]` and is `entity_width` wide.
+    ///
+    /// * No span fragments: the entity starts at `0` and `visual_width` equals
+    ///   `entity_width`.
+    /// * Span fragments: they are the padding around the one entity. Every
+    ///   fragment covers exactly the entity's `byte_range`, the entity lies
+    ///   inside the body, and the fragments reach both edges of the body
+    ///   (`min x == 0`, `max end == visual_width`). Unpadded entities cannot
+    ///   inflate `visual_width` this way.
     fn is_single_entity_overflow(&self) -> bool {
         let vw = self.visual_width;
         if !self.tabs.is_empty() {
             return false;
         }
-        match self.visual_boxes.as_slice() {
+        // (byte_range, start_x, end_x, entity_width)
+        let entity = match self.visual_boxes.as_slice() {
             [b] => {
-                self.visual_runs.is_empty()
-                    && b.overflow_policy == BoxOverflowPolicy::AllowOverflow
-                    && b.x.abs() <= tolerance(b.x, vw)
-                    && approx_eq(b.width, vw)
+                if !(self.visual_runs.is_empty()
+                    && b.overflow_policy == BoxOverflowPolicy::AllowOverflow)
+                {
+                    return false;
+                }
+                (b.byte_range, b.x, b.x + b.width, b.width)
             }
             [] => {
                 let glyphs = || {
@@ -1009,12 +1031,40 @@ impl PositionedLine {
                 let Some(first @ Some(r)) = ranges.next() else {
                     return false;
                 };
-                !r.is_empty()
-                    && ranges.all(|o| o == first)
-                    && approx_eq(glyphs().map(|g| g.advance).sum::<f32>(), vw)
+                if r.is_empty() || !ranges.all(|o| o == first) {
+                    return false;
+                }
+                let start = glyphs().map(|g| g.x).fold(f32::INFINITY, f32::min);
+                let end = glyphs()
+                    .map(|g| g.x + g.advance)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let width = glyphs().map(|g| g.advance).sum::<f32>();
+                if !approx_eq(width, end - start) {
+                    return false;
+                }
+                (r, start, end, width)
             }
-            _ => false,
+            _ => return false,
+        };
+        let (range, start, end, width) = entity;
+        if self.span_fragments.is_empty() {
+            return start.abs() <= tolerance(start, vw) && approx_eq(width, vw);
         }
+        let left = self
+            .span_fragments
+            .iter()
+            .map(|f| f.x)
+            .fold(f32::INFINITY, f32::min);
+        let right = self
+            .span_fragments
+            .iter()
+            .map(|f| f.x + f.width)
+            .fold(f32::NEG_INFINITY, f32::max);
+        self.span_fragments.iter().all(|f| f.byte_range == range)
+            && start >= -tolerance(start, vw)
+            && end <= vw + tolerance(end, vw)
+            && left.abs() <= tolerance(left, vw)
+            && approx_eq(right, vw)
     }
 
     /// Pass 3, last check: width against `ctx.wrap_width`.
@@ -2032,6 +2082,88 @@ mod tests {
         let mut shifted = l;
         shifted.visual_boxes = vec![object(5.0, 45.0, allow)];
         assert!(shifted.validate(&wrap(30.0)).is_err());
+    }
+
+    #[test]
+    fn padded_single_entities_may_overflow_inside_their_fragments() {
+        let wide = |paddings: (f32, f32)| {
+            // One 26-wide cluster between the paddings, in a chip over its bytes.
+            let (left, right) = paddings;
+            let mut l = line(
+                vec![word_glyph(left, 26.0, (0, 3))],
+                left + 26.0 + right,
+                0.0,
+                0.0,
+            );
+            l.span_fragments = vec![fragment(1, 0.0, left + 26.0 + right, (0, 3))];
+            l
+        };
+        // 3 + 26 + 3 = 32 > 30: legal, the padding rides with the cluster.
+        assert!(wide((3.0, 3.0)).validate(&wrap(30.0)).is_ok());
+        assert!(wide((3.0, 0.0)).validate(&wrap(30.0)).is_ok());
+        assert!(wide((0.0, 3.0)).validate(&wrap(30.0)).is_ok());
+        // Nested fragments of the same bytes: all must wrap the entity.
+        let mut nested = wide((3.0, 3.0));
+        let mut inner = fragment(2, 3.0, 26.0, (0, 3));
+        inner.is_first_fragment = true;
+        nested.span_fragments.push(inner);
+        assert!(nested.validate(&wrap(30.0)).is_ok());
+        let too_wide = |l: &PositionedLine| {
+            matches!(
+                l.validate(&wrap(30.0)),
+                Err(LineInvariantError::LineWiderThanWrapWidth { .. })
+            )
+        };
+        // A fragment over other bytes than the entity's.
+        let mut other = wide((3.0, 3.0));
+        other.span_fragments[0].byte_range = TextRange::new(0, 4);
+        assert!(too_wide(&other));
+        // Fragments that stop short of an edge of the body.
+        let mut short = wide((3.0, 3.0));
+        short.span_fragments = vec![fragment(1, 0.0, 29.0, (0, 3))];
+        assert!(too_wide(&short));
+        let mut late = wide((3.0, 3.0));
+        late.span_fragments = vec![fragment(1, 3.0, 29.0, (0, 3))];
+        assert!(too_wide(&late));
+        // The padding is only a claim: the entity cannot be outside the body.
+        // (Pass 3 rejects it earlier, as containment.)
+        let mut outside = wide((3.0, 3.0));
+        outside.visual_runs[0].glyphs[0].x = 10.0;
+        assert!(outside.validate(&wrap(30.0)).is_err());
+        // Unpadded, the width must still be exactly the entity's.
+        let mut bare = line(vec![word_glyph(0.0, 26.0, (0, 3))], 32.0, 0.0, 0.0);
+        assert!(too_wide(&bare));
+        bare.visual_width = 26.0;
+        assert!(bare.validate(&wrap(30.0)).is_ok());
+
+        // Exemption A, padded: one AllowOverflow box in a chip over its bytes.
+        let object = |x: f32, width: f32| PositionedInlineBox {
+            box_id: 1,
+            byte_range: TextRange::new(0, 1),
+            x,
+            y: 0.0,
+            width,
+            ascent: 5.0,
+            descent: 1.0,
+            overflow_policy: BoxOverflowPolicy::AllowOverflow,
+        };
+        let mut l = line(vec![], 32.0, 0.0, 0.0);
+        l.byte_range = TextRange::new(0, 1);
+        l.visible_byte_end = 1;
+        l.visual_runs.clear();
+        l.visual_boxes = vec![object(3.0, 26.0)];
+        l.span_fragments = vec![fragment(1, 0.0, 32.0, (0, 1))];
+        assert!(l.validate(&wrap(30.0)).is_ok());
+        let mut other = l.clone();
+        other.span_fragments[0].byte_range = TextRange::new(0, 0);
+        assert!(too_wide(&other));
+        let mut short = l.clone();
+        short.span_fragments = vec![fragment(1, 0.0, 30.0, (0, 1))];
+        assert!(too_wide(&short));
+        // Without fragments the box must still start at 0.
+        let mut bare = l;
+        bare.span_fragments.clear();
+        assert!(too_wide(&bare));
     }
 
     #[test]
