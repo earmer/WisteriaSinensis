@@ -440,6 +440,17 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
         vec![lig(0..1, TextRange::new(0, 2))],
     );
     assert!(!bad_bytes.is_self_contained());
+    // Atoms that run backwards or overlap are not a partition of the text either,
+    // even when every cluster matches its own atoms.
+    let backwards = text_box(
+        TextRange::new(1, 1),
+        vec![atom(1), atom(0)],
+        vec![
+            lig(0..1, TextRange::new(1, 2)),
+            lig(1..2, TextRange::new(0, 1)),
+        ],
+    );
+    assert!(!backwards.is_self_contained());
     // The box's own range must run from its first atom to its last.
     let wrong_range = text_box(
         TextRange::new(0, 2),

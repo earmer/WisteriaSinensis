@@ -10,7 +10,7 @@ use crate::frontend::{
     HyphenOpportunity, ParagraphAst, SpanEdge, WordNode,
 };
 use crate::shaping::TextShaper;
-use crate::types::{BidiLevel, GraphemeAtom, TextRange};
+use crate::types::{BIDI_MAX_DEPTH, BidiLevel, GraphemeAtom, TextRange};
 use core::fmt;
 
 /// An input that [`check_layout_inputs`] rejects.
@@ -35,6 +35,18 @@ pub enum LayoutInputError {
     },
     /// An item's bytes exceed `text` or split a UTF-8 sequence.
     ItemOutsideText {
+        /// Index into `ParagraphAst::items`.
+        item: usize,
+    },
+    /// A text box (or one of its atoms) is not contained in the byte range of
+    /// the shaping run it names.
+    ItemOutsideRun {
+        /// Index into `ParagraphAst::items`.
+        item: usize,
+    },
+    /// A text box's cached `natural_width` is not finite, or differs from the
+    /// sum of its cluster widths.
+    InvalidTextWidth {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
@@ -151,6 +163,12 @@ impl fmt::Display for LayoutInputError {
                 write!(f, "item {item} refers to a run that does not exist")
             }
             Self::ItemOutsideText { item } => write!(f, "item {item} does not fit the text"),
+            Self::ItemOutsideRun { item } => {
+                write!(f, "item {item} lies outside the shaping run it names")
+            }
+            Self::InvalidTextWidth { item } => {
+                write!(f, "item {item} has a width that is not its clusters' total")
+            }
             Self::ItemNotSelfContained { item } => {
                 write!(f, "item {item} does not partition its atoms")
             }
@@ -396,11 +414,14 @@ fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
 /// of every span exist). With `lead` and `trail` the indices of a span's
 /// boundary nodes:
 ///
-/// * a break opportunity at `s..s` (`s = byte_range.start`) sits before `lead`,
-///   one at `e..e` after `trail`, so breaking before or after the chip leaves
-///   both boundaries on the chip's line;
-/// * any other zero-width node at `s` or `e` (autospace, a neighbouring span's
-///   boundary) is unconstrained;
+/// * a break opportunity or a `CjkAutospace` glue at `s..s` (`s =
+///   byte_range.start`) sits before `lead`, one at `e..e` after `trail`, so
+///   breaking before or after the chip leaves both boundaries on the chip's
+///   line and the seam spacing outside it. At a seam shared by two adjacent
+///   spans the canonical order follows from monotone order and LIFO:
+///   `[A Trailing, Glue(CjkAutospace), Discretionary, B Leading]`;
+/// * any other zero-width node at `s` or `e` (a neighbouring span's boundary)
+///   is unconstrained;
 /// * every other item inside `[s, e]` is strictly between `lead` and `trail`,
 ///   every item outside is not between them, and none straddles an edge.
 fn check_span_enclosure(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
@@ -426,9 +447,12 @@ fn check_span_enclosure(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
             let Some(r) = n.byte_span() else { continue };
             let between = lead < item && item < trail;
             let zero = r.is_empty();
-            let ok = if zero && n.is_break_opportunity() && r.start == start {
+            let autospace = matches!(n, WordNode::Glue(g) if g.kind == GlueKind::CjkAutospace);
+            // Row 101: a break opportunity or a CJK autospace at the start sits
+            // before `Leading`, at the end after `Trailing`.
+            let ok = if zero && (n.is_break_opportunity() || autospace) && r.start == start {
                 item < lead
-            } else if zero && n.is_break_opportunity() && r.start == end {
+            } else if zero && (n.is_break_opportunity() || autospace) && r.start == end {
                 item > trail
             } else if zero && (r.start == start || r.start == end) {
                 true
@@ -559,17 +583,35 @@ pub fn check_layout_inputs(
         }
         match node {
             WordNode::Box(BoxNode::Text {
-                run_index, atoms, ..
+                run_index,
+                byte_range,
+                atoms,
+                clusters,
+                natural_width,
             }) => {
-                if *run_index >= ast.runs.len() {
+                let Some(run) = ast.runs.get(*run_index) else {
                     return Err(E::RunIndexOutOfRange { item });
-                }
+                };
                 // Every atom must fit, even when the node's overall span does.
                 if !atoms.iter().all(|a| fits(text, a.byte_range)) {
                     return Err(E::ItemOutsideText { item });
                 }
                 if !node.is_self_contained() {
                     return Err(E::ItemNotSelfContained { item });
+                }
+                if !(run.byte_range.contains_range(*byte_range)
+                    && atoms
+                        .iter()
+                        .all(|a| run.byte_range.contains_range(a.byte_range)))
+                {
+                    return Err(E::ItemOutsideRun { item });
+                }
+                let total: f64 = clusters.iter().map(|c| f64::from(c.natural_width)).sum();
+                let cached = f64::from(*natural_width);
+                if !(natural_width.is_finite()
+                    && (cached - total).abs() <= 1e-3_f64.max(1e-5 * total.abs()))
+                {
+                    return Err(E::InvalidTextWidth { item });
                 }
             }
             WordNode::Box(BoxNode::InlineObject {
@@ -602,7 +644,14 @@ pub fn check_layout_inputs(
                     SpanEdge::Leading => span.byte_range.start,
                     SpanEdge::Trailing => span.byte_range.end,
                 };
-                if byte_range.start != anchor {
+                let padding = match edge {
+                    SpanEdge::Leading => span.start_padding,
+                    SpanEdge::Trailing => span.end_padding,
+                };
+                if byte_range.start != anchor
+                    || *bidi_level > BIDI_MAX_DEPTH + 1
+                    || (*width - padding).abs() > 1e-3_f32.max(1e-5 * padding.abs())
+                {
                     return Err(E::InvalidSpanBoundary { item });
                 }
                 if expected_boundary_level(ast, *span_id, *edge).is_some_and(|l| l != *bidi_level) {
@@ -619,7 +668,9 @@ pub fn check_layout_inputs(
                     || (g.tier == GlueTier::Tier0
                         && g.natural_width == 0.0
                         && g.max_stretch == 0.0);
-                if !(sizes_ok && g.tier != GlueTier::Tier2 && pool_ok) {
+                // Autospace and the compression pool are synthetic: no source bytes.
+                let range_ok = g.kind == GlueKind::WordSpace || g.byte_range.is_empty();
+                if !(sizes_ok && g.tier != GlueTier::Tier2 && pool_ok && range_ok) {
                     return Err(E::InvalidGlue { item });
                 }
             }
@@ -638,8 +689,13 @@ pub fn check_layout_inputs(
                     BreakAction::HardBreak {
                         is_paragraph_end: false,
                     } => {
-                        !d.byte_range.is_empty()
-                            && is_line_terminator(&text[d.byte_range.start..d.byte_range.end])
+                        let (a, b) = (d.byte_range.start, d.byte_range.end);
+                        // A lone CR or LF must not be half of a CRLF pair.
+                        let splits_crlf = (text.as_bytes().get(a.wrapping_sub(1)) == Some(&b'\r')
+                            && text.as_bytes().get(a) == Some(&b'\n'))
+                            || (text.as_bytes().get(b.wrapping_sub(1)) == Some(&b'\r')
+                                && text.as_bytes().get(b) == Some(&b'\n'));
+                        !d.byte_range.is_empty() && is_line_terminator(&text[a..b]) && !splits_crlf
                     }
                     _ => d.byte_range.is_empty(),
                 };
@@ -653,6 +709,22 @@ pub fn check_layout_inputs(
                     && hard == d.is_mandatory()
                     && range_ok
                     && clones_unique)
+                {
+                    return Err(E::InvalidDiscretionary { item });
+                }
+                // Completeness: every Clone-mode span the break is strictly inside
+                // is listed (a chip split without its cloned padding is wrong).
+                let off = d.byte_offset();
+                let inside = |sp: &&crate::frontend::InlineDecorationSpan| {
+                    sp.break_mode == BoxDecorationBreak::Clone
+                        && sp.byte_range.start < off
+                        && off < sp.byte_range.end
+                };
+                if ast
+                    .decoration_spans
+                    .iter()
+                    .filter(inside)
+                    .any(|sp| !d.cloned_spans.contains(&sp.span_id))
                 {
                     return Err(E::InvalidDiscretionary { item });
                 }
@@ -670,7 +742,9 @@ pub fn check_layout_inputs(
                     }
                 }
                 match &d.action {
-                    BreakAction::Hyphenate(h) if !hyphen_valid(&ast.items, item, d, h) => {
+                    BreakAction::Hyphenate(h)
+                        if !d.flagged || !hyphen_valid(&ast.items, item, d, h) =>
+                    {
                         return Err(E::InvalidHyphenOpportunity { item });
                     }
                     BreakAction::CjkPunctAdjust => {
@@ -936,7 +1010,9 @@ mod tests {
     /// `items` followed by the sentinel of a `len`-byte text.
     fn with_items_for(len: usize, mut items: Vec<WordNode>) -> ParagraphAst {
         items.push(sentinel(len));
-        with_raw_items(items)
+        let mut a = with_raw_items(items);
+        a.runs[0].byte_range = TextRange::new(0, len.max(4));
+        a
     }
 
     /// `items` followed by the sentinel of the four-byte text most tests use.
@@ -958,10 +1034,10 @@ mod tests {
                 .iter()
                 .position(|n| {
                     let r = n.byte_span().unwrap();
+                    let seam = n.is_break_opportunity()
+                        || matches!(n, WordNode::Glue(g) if g.kind == GlueKind::CjkAutospace);
                     r.start >= sp.byte_range.start
-                        && !(n.is_break_opportunity()
-                            && r.is_empty()
-                            && r.start == sp.byte_range.start)
+                        && !(seam && r.is_empty() && r.start == sp.byte_range.start)
                 })
                 .unwrap_or(a.items.len() - 1);
             a.items
@@ -1316,9 +1392,10 @@ mod tests {
                 byte_range,
                 atoms,
                 mut clusters,
-                natural_width,
+                ..
             }) => {
                 clusters.iter_mut().for_each(|c| c.natural_width = 4.0);
+                let natural_width = clusters.len() as f32 * 4.0;
                 WordNode::Box(BoxNode::Text {
                     run_index,
                     byte_range,
@@ -1715,10 +1792,215 @@ mod tests {
     }
 
     #[test]
+    fn cjk_autospace_at_a_span_edge_sits_outside_its_boundaries() {
+        use crate::frontend::BoxDecorationBreak::Slice;
+        use SpanEdge::{Leading as L, Trailing as T};
+        let o = LayoutOptions::default();
+        let autospace = |at: usize| {
+            WordNode::Glue(GlueNode {
+                byte_range: TextRange::empty_at(at),
+                kind: GlueKind::CjkAutospace,
+                tier: GlueTier::Tier1,
+                natural_width: 2.0,
+                max_stretch: 1.0,
+                max_shrink: 1.0,
+            })
+        };
+        let brk = |at: usize| WordNode::Discretionary(DiscretionaryNode::direct(at));
+        let a_ = || text_box(vec![atom(0, 1)]);
+        let b_ = || text_box(vec![atom(1, 2)]);
+        let c_ = || text_box(vec![atom(2, 3)]);
+        let d_ = || text_box(vec![atom(3, 4)]);
+        let span = |items| {
+            let mut a = with_items(items);
+            a.decoration_spans = vec![chip(5, Slice)]; // bytes 1..3
+            a
+        };
+        let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
+        // Seam spacing, then the break, then the chip; the chip's end mirrors it.
+        let good = vec![
+            a_(),
+            autospace(1),
+            brk(1),
+            bnd(5, L, 1),
+            b_(),
+            c_(),
+            bnd(5, T, 3),
+            autospace(3),
+            brk(3),
+            d_(),
+        ];
+        assert!(check(span(good.clone())).is_ok());
+        // The start seam after Leading would strand the spacing inside the chip.
+        let mut late = good.clone();
+        late.swap(1, 3);
+        late.swap(2, 3); // a_, bnd L, autospace, brk ... (autospace now after Leading)
+        assert!(matches!(
+            check(span(late)),
+            Err(LayoutInputError::SpanEnclosure { span: 0, .. })
+        ));
+        // The end seam before Trailing likewise.
+        let mut early = good.clone();
+        early.swap(6, 7);
+        assert_eq!(
+            check(span(early)),
+            Err(LayoutInputError::SpanEnclosure { span: 0, item: 6 })
+        );
+        // Two adjacent chips share the seam at 2: canonical order
+        // [A Trailing, Glue(CjkAutospace), Discretionary, B Leading].
+        let mut other = chip(6, Slice);
+        other.byte_range = TextRange::new(2, 4);
+        let mut a = with_items(vec![
+            a_(),
+            bnd(5, L, 1),
+            b_(),
+            bnd(5, T, 3),
+            autospace(3),
+            brk(3),
+            bnd(6, L, 3),
+            d_(),
+            bnd(6, T, 4),
+        ]);
+        a.decoration_spans = vec![chip(5, Slice), other];
+        // Chip 5 spans 1..3 and chip 6 starts at 2: fix the second to 3..4.
+        a.decoration_spans[1].byte_range = TextRange::new(3, 4);
+        let r = check(a.clone());
+        assert!(r.is_ok(), "{r:?}");
+        // B's Leading before the seam glue or break strands them inside B.
+        a.items.swap(5, 6);
+        assert!(check(a).is_err());
+    }
+
+    #[test]
+    fn row_checks_from_the_coderabbit_pass() {
+        use crate::frontend::BoxDecorationBreak::{Clone, Slice};
+        let o = LayoutOptions::default();
+        let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
+
+        // Hyphenation breaks are flagged.
+        let mut a = hyphenated(opportunity(1, 0, 0));
+        if let WordNode::Discretionary(d) = &mut a.items[1] {
+            d.flagged = false;
+        }
+        assert_eq!(
+            check_layout_inputs(&a, "abé", &constraints(), &o),
+            Err(LayoutInputError::InvalidHyphenOpportunity { item: 1 })
+        );
+
+        // A Clone span the break is strictly inside must be listed.
+        let mut d = DiscretionaryNode::direct(2);
+        d.penalty = DiscretionaryNode::CLONED_SPAN_PENALTY;
+        let mut a = with_items(vec![WordNode::Discretionary(d)]);
+        a.decoration_spans = vec![chip(5, Clone)]; // 1..3
+        assert_eq!(
+            check(closed(a)),
+            Err(LayoutInputError::InvalidDiscretionary { item: 1 })
+        );
+        // A Slice span needs no listing.
+        let mut a = with_items(vec![WordNode::Discretionary(DiscretionaryNode::direct(2))]);
+        a.decoration_spans = vec![chip(5, Slice)];
+        assert!(check(closed(a)).is_ok());
+
+        // Synthetic glue owns no bytes.
+        for kind in [GlueKind::CjkAutospace, GlueKind::CjkPunctCompression] {
+            let tier = kind.default_tier();
+            let a = with_items(vec![WordNode::Glue(GlueNode {
+                byte_range: TextRange::new(1, 2),
+                kind,
+                tier,
+                natural_width: 0.0,
+                max_stretch: 0.0,
+                max_shrink: 1.0,
+            })]);
+            assert_eq!(check(a), Err(LayoutInputError::InvalidGlue { item: 0 }));
+        }
+
+        // A boundary's width is its edge's padding; its level is in range even
+        // when the span holds no atom to compare with.
+        let mut inner = chip(5, Slice);
+        inner.start_padding = 2.0;
+        inner.end_padding = 6.0;
+        let build = |lead_w: f32, trail_w: f32, level: u8| {
+            let node = |edge, width, bidi_level| {
+                WordNode::Box(BoxNode::SpanBoundary {
+                    byte_range: TextRange::empty_at(if edge == SpanEdge::Leading { 1 } else { 3 }),
+                    span_id: 5,
+                    edge,
+                    width,
+                    bidi_level,
+                })
+            };
+            let mut a = with_items(vec![
+                node(SpanEdge::Leading, lead_w, level),
+                node(SpanEdge::Trailing, trail_w, level),
+            ]);
+            a.decoration_spans = vec![inner];
+            a
+        };
+        assert!(check(build(2.0, 6.0, 0)).is_ok());
+        let bad = |item| Err(LayoutInputError::InvalidSpanBoundary { item });
+        assert_eq!(check(build(6.0, 6.0, 0)), bad(0));
+        assert_eq!(check(build(2.0, 2.0, 0)), bad(1));
+        assert_eq!(check(build(2.0, 6.0, 127)), bad(0));
+
+        // Half of a CRLF pair is not a terminator.
+        let run_over = |text: &str, items: Vec<WordNode>| {
+            let mut a = with_items_for(text.len(), items);
+            a.runs[0].byte_range = TextRange::new(0, text.len());
+            check_layout_inputs(&a, text, &constraints(), &o)
+        };
+        let nl = |a: usize, b: usize| {
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(a, b), false))
+        };
+        assert!(run_over("a\r\nb", vec![nl(1, 3)]).is_ok());
+        assert!(run_over("a\r\nb", vec![nl(1, 2)]).is_err()); // lone CR of a CRLF
+        assert!(run_over("a\r\nb", vec![nl(2, 3)]).is_err()); // lone LF of a CRLF
+        assert!(run_over("a\rb", vec![nl(1, 2)]).is_ok());
+
+        // A text box lies in its run and caches the total of its clusters.
+        let mut a = with_items(vec![text_box(vec![atom(0, 1), atom(1, 2)])]);
+        a.runs[0].byte_range = TextRange::new(0, 1);
+        assert_eq!(check(a), Err(LayoutInputError::ItemOutsideRun { item: 0 }));
+        let mut a = with_items(vec![text_box(vec![atom(0, 1)])]);
+        if let WordNode::Box(BoxNode::Text { natural_width, .. }) = &mut a.items[0] {
+            *natural_width = 9.0; // the cluster is 0 wide
+        }
+        assert_eq!(
+            check(a),
+            Err(LayoutInputError::InvalidTextWidth { item: 0 })
+        );
+        let mut a = with_items(vec![text_box(vec![atom(0, 1)])]);
+        if let WordNode::Box(BoxNode::Text { natural_width, .. }) = &mut a.items[0] {
+            *natural_width = f32::NAN;
+        }
+        assert_eq!(
+            check(a),
+            Err(LayoutInputError::InvalidTextWidth { item: 0 })
+        );
+    }
+
+    #[test]
     fn every_decoration_span_needs_both_boundaries_even_without_padding() {
         use crate::frontend::BoxDecorationBreak::Slice;
         use SpanEdge::{Leading as L, Trailing as T};
         let o = LayoutOptions::default();
+        // Zero padding: the boundary nodes are zero wide.
+        let zb = |id: u64, e: SpanEdge, at: usize| match bnd(id, e, at) {
+            WordNode::Box(BoxNode::SpanBoundary {
+                byte_range,
+                span_id,
+                edge,
+                bidi_level,
+                ..
+            }) => WordNode::Box(BoxNode::SpanBoundary {
+                byte_range,
+                span_id,
+                edge,
+                width: 0.0,
+                bidi_level,
+            }),
+            other => other,
+        };
         let zero = |id: u64| {
             let mut s = chip(id, Slice);
             s.start_padding = 0.0;
@@ -1735,22 +2017,22 @@ mod tests {
             a
         };
         let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
-        assert!(check(build(vec![bnd(5, L, 1), bnd(5, T, 3)])).is_ok());
+        assert!(check(build(vec![zb(5, L, 1), zb(5, T, 3)])).is_ok());
         // Zero padding does not excuse a missing node.
         let missing = Err(LayoutInputError::MissingSpanBoundary { span: 0 });
         assert_eq!(check(build(vec![])), missing);
-        assert_eq!(check(build(vec![bnd(5, L, 1)])), missing);
+        assert_eq!(check(build(vec![zb(5, L, 1)])), missing);
         // A Trailing with no open Leading is a misplaced boundary.
         assert_eq!(
-            check(build(vec![bnd(5, T, 3)])),
+            check(build(vec![zb(5, T, 3)])),
             Err(LayoutInputError::InvalidSpanBoundary { item: 1 })
         );
         // Exactly one of each, at the span's own edges.
         for wrong in [
-            vec![bnd(5, L, 0), bnd(5, T, 3)],
-            vec![bnd(5, L, 1), bnd(5, T, 2)],
-            vec![bnd(5, L, 1), bnd(5, L, 1), bnd(5, T, 3)],
-            vec![bnd(5, L, 1), bnd(5, T, 3), bnd(5, T, 3)],
+            vec![zb(5, L, 0), zb(5, T, 3)],
+            vec![zb(5, L, 1), zb(5, T, 2)],
+            vec![zb(5, L, 1), zb(5, L, 1), zb(5, T, 3)],
+            vec![zb(5, L, 1), zb(5, T, 3), zb(5, T, 3)],
         ] {
             let r = check(build(wrong));
             assert!(

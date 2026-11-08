@@ -224,9 +224,12 @@ impl TabStops {
 pub struct LayoutConstraints {
     /// Available layout width of the container, in layout units. Must be finite
     /// and non-negative. Hanging punctuation and `Preserved` trailing
-    /// whitespace may extend beyond it, and an unbreakable word wider than it
-    /// overflows (§5 Stage 1.6), so a line's `visual_width` is not validated
-    /// against it.
+    /// whitespace may extend beyond it. `PositionedLine::validate` checks a
+    /// line's `visual_width` against it within tolerance; a line may be wider
+    /// only in the single-entity overflow state (a lone `AllowOverflow` box, or
+    /// one indivisible cluster after the emergency break, §5 Stage 1.5). A
+    /// line of several clusters wider than the width fails validation: an
+    /// unbreakable word is split by the emergency break, not left to overflow.
     pub wrap_width: f32,
     /// Tab stops.
     pub tab_stops: TabStops,

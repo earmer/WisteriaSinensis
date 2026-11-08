@@ -406,7 +406,11 @@ impl WordNode {
                     }
                     _ => byte_range.is_empty(),
                 };
-                span_ok && clusters_partition_atoms(atoms, clusters)
+                let ordered = atoms
+                    .windows(2)
+                    .all(|w| w[0].byte_range.end <= w[1].byte_range.start)
+                    && atoms.iter().all(|a| a.byte_range.start <= a.byte_range.end);
+                span_ok && ordered && clusters_partition_atoms(atoms, clusters)
             }
             _ => true,
         }

@@ -170,8 +170,10 @@ pub struct PositionedSpanFragment {
 impl PositionedSpanFragment {
     /// Hit-test rule for a click inside a fragment of an **atomic** span (spec
     /// §6.3, ruling 7): `true` when `point_x` snaps to the span's logical start
-    /// (`byte_range.start`, `Downstream`), `false` for its logical end
-    /// (`byte_range.end`, `Upstream`).
+    /// (the `AtomicEditSpan`'s `byte_range.start`, `Downstream`), `false` for
+    /// its logical end (its `byte_range.end`, `Upstream`). The endpoints belong
+    /// to the span, not to this fragment's own `byte_range`, which covers only
+    /// the part of the span on its line.
     ///
     /// The midpoint is that of **this fragment**, not of the whole wrapped
     /// span, or the leading edge of a narrow second-line fragment would be
@@ -429,6 +431,11 @@ pub enum LineInvariantError {
         /// Index into `span_fragments`.
         index: usize,
     },
+    /// A span fragment's `byte_range` is inverted or outside the line's.
+    SpanFragmentOutsideLine {
+        /// Index into `span_fragments`.
+        index: usize,
+    },
     /// A glyph belonging to a span lies outside every fragment of that span.
     GlyphOutsideSpanFragment {
         /// The span.
@@ -594,6 +601,9 @@ impl fmt::Display for LineInvariantError {
             }
             Self::SpanFragmentOutsideBlock { index } => {
                 write!(f, "span fragment {index} lies outside the text block")
+            }
+            Self::SpanFragmentOutsideLine { index } => {
+                write!(f, "span fragment {index} lies outside the line's bytes")
             }
             Self::GlyphOutsideSpanFragment {
                 span_id,
@@ -1041,6 +1051,14 @@ impl PositionedLine {
             let tol = tolerance(f.x.abs().max(end.abs()), vw);
             if f.x < -tol || end > vw + tol {
                 return Err(E::SpanFragmentOutsideBlock { index });
+            }
+            // The fragment covers part of the span on this line: a well-formed
+            // range inside the line's own bytes.
+            if f.byte_range.start > f.byte_range.end
+                || f.byte_range.start < self.byte_range.start
+                || f.byte_range.end > self.byte_range.end
+            {
+                return Err(E::SpanFragmentOutsideLine { index });
             }
         }
         for (run, r) in self.visual_runs.iter().enumerate() {
@@ -2061,6 +2079,26 @@ mod tests {
         assert_eq!(
             l.validate(&ctx()),
             Err(LineInvariantError::InvalidSpanFragment { index: 0 })
+        );
+    }
+
+    #[test]
+    fn span_fragment_bytes_stay_inside_the_line() {
+        let mut l = spanned_line();
+        l.span_fragments = vec![fragment(1, 0.0, 30.0, (0, 4))];
+        assert!(l.validate(&ctx()).is_ok());
+        // Beyond the line's bytes, or inverted.
+        l.span_fragments = vec![fragment(1, 0.0, 30.0, (0, 9))];
+        assert_eq!(
+            l.validate(&ctx()),
+            Err(LineInvariantError::SpanFragmentOutsideLine { index: 0 })
+        );
+        let mut inverted = fragment(1, 0.0, 30.0, (0, 4));
+        inverted.byte_range = TextRange { start: 3, end: 1 };
+        l.span_fragments = vec![inverted];
+        assert_eq!(
+            l.validate(&ctx()),
+            Err(LineInvariantError::SpanFragmentOutsideLine { index: 0 })
         );
     }
 }
