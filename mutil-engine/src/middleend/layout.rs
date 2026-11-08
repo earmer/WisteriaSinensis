@@ -7,10 +7,10 @@ use super::{LayoutConstraints, LayoutOptions, LineContext, PositionedParagraph};
 use crate::frontend::MAX_DECORATION_NESTING_DEPTH;
 use crate::frontend::{
     BoxDecorationBreak, BoxNode, BreakAction, DiscretionaryNode, GlueKind, GlueTier,
-    HyphenOpportunity, ParagraphAst, SpanEdge, WordNode,
+    HyphenOpportunity, ParagraphAst, SpanEdge, WordNode, is_paragraph_separator,
 };
 use crate::shaping::TextShaper;
-use crate::types::{AtomFlags, BIDI_MAX_DEPTH, BidiLevel, GraphemeAtom, TextRange};
+use crate::types::{AtomFlags, BIDI_MAX_DEPTH, BidiLevel, GraphemeAtom, ShapedCluster, TextRange};
 use core::fmt;
 
 /// An input that [`check_layout_inputs`] rejects.
@@ -20,11 +20,20 @@ pub enum LayoutInputError {
     /// `wrap_width` is negative or not finite, or the tab step is not a finite
     /// positive number.
     InvalidConstraints,
+    /// `text` contains a paragraph separator; split it with
+    /// [`frontend::split_paragraphs`](crate::frontend::split_paragraphs) first.
+    ParagraphSeparatorInText,
     /// The raw strut metrics, the strut font size or a `LineHeight::Fixed`
     /// multiplier is not finite (or the size is negative).
     InvalidStrut,
     /// A run's `byte_range` exceeds `text` or splits a UTF-8 sequence.
     RunOutsideText {
+        /// Index into `ParagraphAst::runs`.
+        run: usize,
+    },
+    /// A run's `bidi_level` exceeds the UAX #9 maximum, or one of its font
+    /// variation coordinates is not finite.
+    InvalidShapingRun {
         /// Index into `ParagraphAst::runs`.
         run: usize,
     },
@@ -44,8 +53,9 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A text box's cached `natural_width` is not finite, or differs from the
-    /// sum of its cluster widths.
+    /// A text box's cached `natural_width` is not finite, differs from the sum
+    /// of its cluster widths, or one of its clusters has a non-finite width,
+    /// font scale or raw glyph measurement.
     InvalidTextWidth {
         /// Index into `ParagraphAst::items`.
         item: usize,
@@ -168,8 +178,14 @@ impl fmt::Display for LayoutInputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidConstraints => f.write_str("invalid wrap width or tab stops"),
+            Self::ParagraphSeparatorInText => {
+                f.write_str("text contains a paragraph separator; split it first")
+            }
             Self::InvalidStrut => f.write_str("invalid strut metrics, font size or line height"),
             Self::RunOutsideText { run } => write!(f, "run {run} does not fit the text"),
+            Self::InvalidShapingRun { run } => {
+                write!(f, "run {run} has an invalid bidi level or variation")
+            }
             Self::RunIndexOutOfRange { item } => {
                 write!(f, "item {item} refers to a run that does not exist")
             }
@@ -425,45 +441,46 @@ fn concrete_content(ast: &ParagraphAst) -> Vec<TextRange> {
 ///   atom or object (a span of whitespace alone is not atomic content).
 fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
     use LayoutInputError as E;
+    let mut ids = std::collections::HashSet::new();
+    let mut stack: Vec<TextRange> = Vec::new();
     for (span, s) in ast.decoration_spans.iter().enumerate() {
-        let earlier = &ast.decoration_spans[..span];
-        let duplicate = earlier.iter().any(|o| o.span_id == s.span_id);
-        let crossing = earlier.iter().any(|o| {
-            let (a, b) = (o.byte_range, s.byte_range);
-            a.start < b.end && b.start < a.end && !a.contains_range(b) && !b.contains_range(a)
-        });
-        let depth = 1 + ast
-            .decoration_spans
-            .iter()
-            .enumerate()
-            .filter(|(i, o)| *i != span && o.byte_range.contains_range(s.byte_range))
-            .count();
-        if duplicate
-            || crossing
-            || depth > MAX_DECORATION_NESTING_DEPTH
+        let r = s.byte_range;
+        if span > 0 {
+            let prev = ast.decoration_spans[span - 1].byte_range;
+            if r.start < prev.start || (r.start == prev.start && r.end > prev.end) {
+                return Err(E::InvalidDecorationSpan { span });
+            }
+        }
+        while stack.last().is_some_and(|top| top.end <= r.start) {
+            stack.pop();
+        }
+        if !ids.insert(s.span_id)
             || !s.is_valid()
-            || !fits(text, s.byte_range)
+            || !fits(text, r)
+            || stack.last().is_some_and(|top| !top.contains_range(r))
+            || stack.len() >= MAX_DECORATION_NESTING_DEPTH
         {
             return Err(E::InvalidDecorationSpan { span });
         }
+        stack.push(r);
     }
     let edges = atomic_edges(ast);
     let content = concrete_content(ast);
+    let mut content_at = 0;
+    ids.clear();
     for (span, s) in ast.atomic_spans.iter().enumerate() {
-        let earlier = &ast.atomic_spans[..span];
-        let duplicate = earlier.iter().any(|o| o.span_id == s.span_id);
-        let overlapping = earlier.iter().any(|o| {
-            o.byte_range.start < s.byte_range.end && s.byte_range.start < o.byte_range.end
-        });
-        if duplicate
-            || overlapping
+        while content_at < content.len() && content[content_at].end <= s.byte_range.start {
+            content_at += 1;
+        }
+        if !ids.insert(s.span_id)
             || s.byte_range.is_empty()
             || !fits(text, s.byte_range)
+            || (span > 0 && ast.atomic_spans[span - 1].byte_range.end > s.byte_range.start)
             || !edges.contains(&s.byte_range.start)
             || !edges.contains(&s.byte_range.end)
             || !content
-                .iter()
-                .any(|c| !c.is_empty() && s.byte_range.contains_range(*c))
+                .get(content_at)
+                .is_some_and(|r| !r.is_empty() && s.byte_range.contains_range(*r))
         {
             return Err(E::InvalidAtomicSpan { span });
         }
@@ -471,32 +488,61 @@ fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
     Ok(())
 }
 
-/// The UAX #14 mandatory line terminators (BK, CR, LF, NL): the only text a
-/// non-empty hard-break `byte_range` may cover.
-fn is_line_terminator(s: &str) -> bool {
-    matches!(
-        s,
-        "\n" | "\r" | "\r\n" | "\u{b}" | "\u{c}" | "\u{85}" | "\u{2028}" | "\u{2029}"
-    )
+/// `true` when every measurement a cluster hands downstream is finite and the
+/// fallback scale is positive.
+fn cluster_measurements_are_valid(cluster: &ShapedCluster) -> bool {
+    let font_ok = cluster.font.scale.is_finite() && cluster.font.scale > 0.0;
+    let widths_ok = cluster.natural_width.is_finite() && cluster.uncompressed_width.is_finite();
+    let glyphs_ok = cluster.glyphs.iter().all(|glyph| {
+        glyph.x_advance.is_finite() && glyph.x_offset.is_finite() && glyph.y_offset.is_finite()
+    });
+    font_ok && widths_ok && glyphs_ok
 }
 
-/// The bidi level a span boundary must carry: the first (`Leading`) or last
-/// (`Trailing`) atom whose bytes lie inside the span. `None` when the span
-/// holds no text atom (only objects), so there is nothing to compare with.
-fn expected_boundary_level(ast: &ParagraphAst, span_id: u64, edge: SpanEdge) -> Option<BidiLevel> {
-    let span = ast.decoration_spans.iter().find(|s| s.span_id == span_id)?;
-    let mut inside = ast
-        .items
-        .iter()
-        .filter_map(|n| match n {
-            WordNode::Box(BoxNode::Text { atoms, .. }) => Some(atoms.iter()),
-            _ => None,
-        })
-        .flatten()
-        .filter(|a| span.byte_range.contains_range(a.byte_range));
-    match edge {
-        SpanEdge::Leading => inside.next().map(|a| a.bidi_level),
-        SpanEdge::Trailing => inside.next_back().map(|a| a.bidi_level),
+/// Indexed span membership for item checks; nesting is bounded by eight.
+struct SpanIndex {
+    by_id: std::collections::HashMap<u64, usize>,
+    touching: Vec<Vec<usize>>,
+    levels: Vec<(Option<BidiLevel>, Option<BidiLevel>)>,
+}
+impl SpanIndex {
+    fn new(ast: &ParagraphAst) -> Self {
+        let by_id = ast
+            .decoration_spans
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.span_id, i))
+            .collect();
+        let mut touching = Vec::with_capacity(ast.items.len());
+        let mut levels = vec![(None, None); ast.decoration_spans.len()];
+        let (mut next, mut active) = (0, Vec::<usize>::new());
+        for node in &ast.items {
+            let r = node.byte_span().unwrap_or(TextRange::EMPTY);
+            active.retain(|&i| ast.decoration_spans[i].byte_range.end >= r.start);
+            while next < ast.decoration_spans.len()
+                && ast.decoration_spans[next].byte_range.start <= r.end
+            {
+                if ast.decoration_spans[next].byte_range.end >= r.start {
+                    active.push(next);
+                }
+                next += 1;
+            }
+            if let WordNode::Box(BoxNode::Text { atoms, .. }) = node {
+                for &i in &active {
+                    let span = ast.decoration_spans[i].byte_range;
+                    for atom in atoms.iter().filter(|a| span.contains_range(a.byte_range)) {
+                        levels[i].0.get_or_insert(atom.bidi_level);
+                        levels[i].1 = Some(atom.bidi_level);
+                    }
+                }
+            }
+            touching.push(active.clone());
+        }
+        Self {
+            by_id,
+            touching,
+            levels,
+        }
     }
 }
 
@@ -532,16 +578,18 @@ fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     }
     // Offset of the break opportunity seen in the current run of zero-width
     // nodes, if any.
-    let mut break_at: Option<usize> = None;
-    for (item, n) in ast.items.iter().enumerate() {
-        let Some(r) = n.byte_span() else { continue };
-        if !r.is_empty() || break_at != Some(r.start) {
-            break_at = None;
+    let mut break_opportunity_offset: Option<usize> = None;
+    for (item, node) in ast.items.iter().enumerate() {
+        let Some(range) = node.byte_span() else {
+            continue;
+        };
+        if !range.is_empty() || break_opportunity_offset != Some(range.start) {
+            break_opportunity_offset = None;
         }
-        if n.is_break_opportunity() && r.is_empty() {
-            break_at = Some(r.start);
-        } else if matches!(n, WordNode::Glue(g) if g.kind == GlueKind::CjkAutospace)
-            && break_at == Some(r.start)
+        if node.is_break_opportunity() && range.is_empty() {
+            break_opportunity_offset = Some(range.start);
+        } else if matches!(node, WordNode::Glue(glue) if glue.kind == GlueKind::CjkAutospace)
+            && break_opportunity_offset == Some(range.start)
         {
             return Err(LayoutInputError::ItemsOutOfOrder { item });
         }
@@ -564,115 +612,126 @@ fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
 ///   is unconstrained;
 /// * every other item inside `[s, e]` is strictly between `lead` and `trail`,
 ///   every item outside is not between them, and none straddles an edge.
-fn check_span_enclosure(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
-    let find = |id: u64, wanted: SpanEdge| {
-        ast.items.iter().position(|n| {
-            matches!(n, WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. })
-                if *span_id == id && *edge == wanted)
-        })
-    };
-    for (span, s) in ast.decoration_spans.iter().enumerate() {
-        let (Some(lead), Some(trail)) = (
-            find(s.span_id, SpanEdge::Leading),
-            find(s.span_id, SpanEdge::Trailing),
-        ) else {
-            return Err(LayoutInputError::MissingSpanBoundary { span });
-        };
-        let (start, end) = (s.byte_range.start, s.byte_range.end);
-        for (item, n) in ast.items.iter().enumerate() {
-            if matches!(n, WordNode::Box(BoxNode::SpanBoundary { span_id, .. }) if *span_id == s.span_id)
+fn check_span_enclosure(ast: &ParagraphAst, index: &SpanIndex) -> Result<(), LayoutInputError> {
+    let mut boundary_positions = vec![(0, 0); ast.decoration_spans.len()];
+    for (item, node) in ast.items.iter().enumerate() {
+        if let WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. }) = node {
+            let positions = &mut boundary_positions[index.by_id[span_id]];
+            match edge {
+                SpanEdge::Leading => positions.0 = item,
+                SpanEdge::Trailing => positions.1 = item,
+            }
+        }
+    }
+    for (item, node) in ast.items.iter().enumerate() {
+        let item_range = node.byte_span().unwrap();
+        for &span_index in &index.touching[item] {
+            let span = &ast.decoration_spans[span_index];
+            if matches!(node, WordNode::Box(BoxNode::SpanBoundary { span_id, .. }) if *span_id == span.span_id)
             {
                 continue;
             }
-            let Some(r) = n.byte_span() else { continue };
-            let between = lead < item && item < trail;
-            let zero = r.is_empty();
-            let autospace = matches!(n, WordNode::Glue(g) if g.kind == GlueKind::CjkAutospace);
-            // Row 101: a break opportunity or a CJK autospace at the start sits
-            // before `Leading`, at the end after `Trailing`.
-            let ok = if zero && (n.is_break_opportunity() || autospace) && r.start == start {
-                item < lead
-            } else if zero && (n.is_break_opportunity() || autospace) && r.start == end {
-                item > trail
-            } else if zero && (r.start == start || r.start == end) {
-                true
-            } else if r.start >= start && r.end <= end {
-                between
-            } else if r.end <= start || r.start >= end {
-                !between
-            } else {
-                false
-            };
-            if !ok {
-                return Err(LayoutInputError::SpanEnclosure { span, item });
+            let (leading_item, trailing_item) = boundary_positions[span_index];
+            let is_allowed = span_enclosure_is_allowed(
+                node,
+                item_range,
+                span.byte_range,
+                item,
+                leading_item,
+                trailing_item,
+            );
+            if !is_allowed {
+                return Err(LayoutInputError::SpanEnclosure {
+                    span: span_index,
+                    item,
+                });
             }
         }
     }
     Ok(())
 }
 
-/// Span boundaries: every decoration span has exactly one `Leading` and one
-/// `Trailing` node, in strict LIFO nesting order, and for two decoration spans
-/// with equal ranges the lower index is the outer span (its `Leading` first, its
-/// `Trailing` last).
+fn span_enclosure_is_allowed(
+    node: &WordNode,
+    item_range: TextRange,
+    span_range: TextRange,
+    item: usize,
+    leading_item: usize,
+    trailing_item: usize,
+) -> bool {
+    let is_strictly_between_boundaries = leading_item < item && item < trailing_item;
+    let is_zero_width = item_range.is_empty();
+    let is_cjk_autospace =
+        matches!(node, WordNode::Glue(glue) if glue.kind == GlueKind::CjkAutospace);
+    let sits_on_span_edge =
+        item_range.start == span_range.start || item_range.start == span_range.end;
+
+    if is_zero_width
+        && (node.is_break_opportunity() || is_cjk_autospace)
+        && item_range.start == span_range.start
+    {
+        return item < leading_item;
+    }
+    if is_zero_width
+        && (node.is_break_opportunity() || is_cjk_autospace)
+        && item_range.start == span_range.end
+    {
+        return item > trailing_item;
+    }
+    if is_zero_width && sits_on_span_edge {
+        return true;
+    }
+    if item_range.start >= span_range.start && item_range.end <= span_range.end {
+        return is_strictly_between_boundaries;
+    }
+    if item_range.end <= span_range.start || item_range.start >= span_range.end {
+        return !is_strictly_between_boundaries;
+    }
+    false
+}
+
 fn check_boundary_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     use LayoutInputError as E;
-    let mut open: Vec<u64> = Vec::new();
-    let mut opened: Vec<u64> = Vec::new();
-    for (item, n) in ast.items.iter().enumerate() {
-        let WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. }) = n else {
+    let by_id: std::collections::HashMap<_, _> = ast
+        .decoration_spans
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.span_id, i))
+        .collect();
+    let mut open_spans = Vec::new();
+    let mut seen_leading_spans = std::collections::HashSet::new();
+    for (item, node) in ast.items.iter().enumerate() {
+        let WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. }) = node else {
             continue;
         };
         match edge {
             SpanEdge::Leading => {
-                if opened.contains(span_id) {
+                if !seen_leading_spans.insert(*span_id) {
                     return Err(E::InvalidSpanBoundary { item });
                 }
-                opened.push(*span_id);
-                open.push(*span_id);
+                if let Some(outer_span_id) = open_spans.last() {
+                    let outer_index = by_id[outer_span_id];
+                    let inner_index = by_id[span_id];
+                    if ast.decoration_spans[outer_index].byte_range
+                        == ast.decoration_spans[inner_index].byte_range
+                        && outer_index > inner_index
+                    {
+                        return Err(E::InvalidSpanBoundary { item });
+                    }
+                }
+                open_spans.push(*span_id);
             }
             SpanEdge::Trailing => {
-                if open.last() != Some(span_id) {
+                if open_spans.last() != Some(span_id) {
                     return Err(E::InvalidSpanBoundary { item });
                 }
-                open.pop();
+                open_spans.pop();
             }
         }
     }
-    for (span, s) in ast.decoration_spans.iter().enumerate() {
-        if !opened.contains(&s.span_id) || open.contains(&s.span_id) {
-            return Err(E::MissingSpanBoundary { span });
-        }
-    }
-    let position = |id: u64, wanted: SpanEdge| {
-        ast.items.iter().position(|n| {
-            matches!(n, WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. })
-                if *span_id == id && *edge == wanted)
-        })
-    };
-    for (i, outer) in ast.decoration_spans.iter().enumerate() {
-        for inner in &ast.decoration_spans[i + 1..] {
-            if inner.byte_range != outer.byte_range {
-                continue;
-            }
-            let leading = (
-                position(outer.span_id, SpanEdge::Leading),
-                position(inner.span_id, SpanEdge::Leading),
-            );
-            if let (Some(o), Some(n)) = leading {
-                if o > n {
-                    return Err(E::InvalidSpanBoundary { item: n });
-                }
-            }
-            let trailing = (
-                position(outer.span_id, SpanEdge::Trailing),
-                position(inner.span_id, SpanEdge::Trailing),
-            );
-            if let (Some(o), Some(n)) = trailing {
-                if n > o {
-                    return Err(E::InvalidSpanBoundary { item: o });
-                }
-            }
+    for (span_index, span) in ast.decoration_spans.iter().enumerate() {
+        if !seen_leading_spans.contains(&span.span_id) || open_spans.contains(&span.span_id) {
+            return Err(E::MissingSpanBoundary { span: span_index });
         }
     }
     Ok(())
@@ -704,32 +763,63 @@ pub fn check_layout_inputs(
     if !constraints.is_valid() {
         return Err(E::InvalidConstraints);
     }
-    let m = &ast.strut_metrics;
-    let fixed_ok = match options.line_height {
+    // Single-paragraph contract: reject paragraph separators in text.
+    // UAX #9 class B plus the application-policy separators U+000B/U+000C.
+    if text.chars().any(is_paragraph_separator) {
+        return Err(E::ParagraphSeparatorInText);
+    }
+    let strut_metrics = &ast.strut_metrics;
+    let line_height_is_valid = match options.line_height {
         super::LineHeight::Normal => true,
-        super::LineHeight::Fixed(v) => v.is_finite() && v >= 0.0,
+        super::LineHeight::Fixed(multiplier) => multiplier.is_finite() && multiplier > 0.0,
     };
-    if !([m.ascent, m.descent, m.line_gap]
-        .iter()
-        .all(|v| v.is_finite())
-        && ast.strut_font_size.is_finite()
-        && ast.strut_font_size >= 0.0
-        && fixed_ok)
-    {
+    let strut_metrics_are_finite = [
+        strut_metrics.ascent,
+        strut_metrics.descent,
+        strut_metrics.line_gap,
+    ]
+    .iter()
+    .all(|value| value.is_finite());
+    let strut_extents_are_nonnegative = strut_metrics.ascent >= 0.0 && strut_metrics.descent >= 0.0;
+    let strut_has_positive_height = strut_metrics.ascent + strut_metrics.descent > 0.0;
+    let strut_font_size_is_valid = ast.strut_font_size.is_finite() && ast.strut_font_size > 0.0;
+    let strut_inputs_are_valid = strut_metrics_are_finite
+        && strut_extents_are_nonnegative
+        && strut_has_positive_height
+        && strut_font_size_is_valid
+        && line_height_is_valid;
+    if !strut_inputs_are_valid {
         return Err(E::InvalidStrut);
     }
     for (run, r) in ast.runs.iter().enumerate() {
         if !fits(text, r.byte_range) {
             return Err(E::RunOutsideText { run });
         }
+        if !r.font_size.is_finite() || r.font_size <= 0.0 {
+            return Err(E::InvalidStrut);
+        }
+        if r.bidi_level > BIDI_MAX_DEPTH + 1
+            || r.features.variations.iter().any(|v| !v.value().is_finite())
+        {
+            return Err(E::InvalidShapingRun { run });
+        }
     }
     check_spans(ast, text)?;
-    let last_disc = ast.items.iter().rposition(|n| n.is_break_opportunity());
+    // Reject out-of-order and out-of-text items before indexing spans against
+    // them, so the index is built on ordered ranges and cannot scan or clone
+    // unboundedly for a malformed AST. The per-item loop below may assume every
+    // item already fits inside `text`.
     for (item, node) in ast.items.iter().enumerate() {
         match node.byte_span() {
             Some(span) if fits(text, span) => {}
             _ => return Err(E::ItemOutsideText { item }),
         }
+    }
+    check_item_order(ast)?;
+    let span_index = SpanIndex::new(ast);
+    let mut atomic_at = 0;
+    let last_disc = ast.items.iter().rposition(|n| n.is_break_opportunity());
+    for (item, node) in ast.items.iter().enumerate() {
         match node {
             WordNode::Box(BoxNode::Text {
                 run_index,
@@ -748,12 +838,29 @@ pub fn check_layout_inputs(
                 if !node.is_self_contained() {
                     return Err(E::ItemNotSelfContained { item });
                 }
+                let run_level = run.bidi_level;
+                if atoms.iter().any(|a| a.bidi_level != run_level)
+                    || clusters.iter().any(|c| c.bidi_level != run_level)
+                {
+                    return Err(E::ItemOutsideRun { item });
+                }
+                if clusters.iter().any(|c| !c.safety_flags_consistent()) {
+                    return Err(E::ItemNotSelfContained { item });
+                }
+                if clusters.iter().any(|c| !cluster_measurements_are_valid(c)) {
+                    return Err(E::InvalidTextWidth { item });
+                }
                 // IN_ATOMIC_EDIT_SPAN mirrors `atomic_spans` exactly.
                 if atoms.iter().any(|a| {
+                    while atomic_at < ast.atomic_spans.len()
+                        && ast.atomic_spans[atomic_at].byte_range.end <= a.byte_range.start
+                    {
+                        atomic_at += 1;
+                    }
                     let inside = ast
                         .atomic_spans
-                        .iter()
-                        .any(|s| s.byte_range.contains_range(a.byte_range));
+                        .get(atomic_at)
+                        .is_some_and(|s| s.byte_range.contains_range(a.byte_range));
                     inside != a.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN)
                 }) {
                     return Err(E::AtomicFlagMismatch { item });
@@ -797,9 +904,10 @@ pub fn check_layout_inputs(
                 if !(byte_range.is_empty() && width.is_finite() && *width >= 0.0) {
                     return Err(E::InvalidSpanBoundary { item });
                 }
-                let Some(span) = ast.decoration_spans.iter().find(|s| s.span_id == *span_id) else {
+                let Some(&span_id_index) = span_index.by_id.get(span_id) else {
                     return Err(E::UnknownSpan { item });
                 };
+                let span = &ast.decoration_spans[span_id_index];
                 let anchor = match edge {
                     SpanEdge::Leading => span.byte_range.start,
                     SpanEdge::Trailing => span.byte_range.end,
@@ -814,14 +922,20 @@ pub fn check_layout_inputs(
                 {
                     return Err(E::InvalidSpanBoundary { item });
                 }
-                if expected_boundary_level(ast, *span_id, *edge).is_some_and(|l| l != *bidi_level) {
+                if match edge {
+                    SpanEdge::Leading => span_index.levels[span_id_index].0,
+                    SpanEdge::Trailing => span_index.levels[span_id_index].1,
+                }
+                .is_some_and(|l| l != *bidi_level)
+                {
                     return Err(E::InvalidSpanBoundary { item });
                 }
             }
             WordNode::Glue(g) => {
                 let sizes_ok = [g.natural_width, g.max_stretch, g.max_shrink]
                     .iter()
-                    .all(|v| v.is_finite() && *v >= 0.0);
+                    .all(|v| v.is_finite() && *v >= 0.0)
+                    && g.bidi_level <= BIDI_MAX_DEPTH + 1;
                 // Tier 2 is derived from cluster flags; the compression pool
                 // is shrink only and belongs to Tier 0.
                 let pool_ok = g.kind != GlueKind::CjkPunctCompression
@@ -830,7 +944,20 @@ pub fn check_layout_inputs(
                         && g.max_stretch == 0.0);
                 // Autospace and the compression pool are synthetic: no source bytes.
                 let range_ok = g.kind == GlueKind::WordSpace || g.byte_range.is_empty();
-                if !(sizes_ok && g.tier != GlueTier::Tier2 && pool_ok && range_ok) {
+                // Non-collapsible spaces (NBSP etc.) must declare is_collapsible=false.
+                let nbsp_ok = if g.kind == GlueKind::WordSpace {
+                    let s = &text[g.byte_range.start..g.byte_range.end];
+                    if s.chars()
+                        .any(|c| matches!(c, '\u{00A0}' | '\u{2007}' | '\u{202F}'))
+                    {
+                        !g.is_collapsible
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                };
+                if !(sizes_ok && g.tier != GlueTier::Tier2 && pool_ok && range_ok && nbsp_ok) {
                     return Err(E::InvalidGlue { item });
                 }
             }
@@ -849,13 +976,10 @@ pub fn check_layout_inputs(
                     BreakAction::HardBreak {
                         is_paragraph_end: false,
                     } => {
-                        let (a, b) = (d.byte_range.start, d.byte_range.end);
-                        // A lone CR or LF must not be half of a CRLF pair.
-                        let splits_crlf = (text.as_bytes().get(a.wrapping_sub(1)) == Some(&b'\r')
-                            && text.as_bytes().get(a) == Some(&b'\n'))
-                            || (text.as_bytes().get(b.wrapping_sub(1)) == Some(&b'\r')
-                                && text.as_bytes().get(b) == Some(&b'\n'));
-                        !d.byte_range.is_empty() && is_line_terminator(&text[a..b]) && !splits_crlf
+                        // Single-paragraph contract: only U+2028 may be a HardBreak.
+                        d.byte_range == TextRange::new(d.byte_range.start, d.byte_range.start + 3)
+                            && !d.byte_range.is_empty()
+                            && text.get(d.byte_range.start..d.byte_range.end) == Some("\u{2028}")
                     }
                     _ => d.byte_range.is_empty(),
                 };
@@ -883,18 +1007,18 @@ pub fn check_layout_inputs(
                         && sp.byte_range.start < off
                         && off < sp.byte_range.end
                 };
-                if ast
-                    .decoration_spans
+                if span_index.touching[item]
                     .iter()
+                    .map(|&i| &ast.decoration_spans[i])
                     .any(|sp| cut_by_break(sp) && !d.cloned_spans.contains(&sp.span_id))
                 {
                     return Err(E::InvalidDiscretionary { item });
                 }
                 for id in &d.cloned_spans {
-                    if !ast
-                        .decoration_spans
-                        .iter()
-                        .any(|s| s.span_id == *id && cut_by_break(s))
+                    if !span_index
+                        .by_id
+                        .get(id)
+                        .is_some_and(|&i| cut_by_break(&ast.decoration_spans[i]))
                     {
                         return Err(E::UnknownSpan { item });
                     }
@@ -904,7 +1028,8 @@ pub fn check_layout_inputs(
                 // what remains (`net_*`) is the action's own delta.
                 let (mut clone_pre, mut clone_post) = (0.0_f64, 0.0_f64);
                 for id in &d.cloned_spans {
-                    if let Some(sp) = ast.decoration_spans.iter().find(|s| s.span_id == *id) {
+                    if let Some(&i) = span_index.by_id.get(id) {
+                        let sp = &ast.decoration_spans[i];
                         clone_pre += f64::from(sp.end_padding);
                         clone_post += f64::from(sp.start_padding);
                     }
@@ -966,11 +1091,49 @@ pub fn check_layout_inputs(
             ) => {}
         _ => return Err(E::MissingParagraphEnd),
     }
-    check_item_order(ast)?;
+    // No content at all on non-empty text is unowned source.
+    if !text.is_empty() {
+        let has_content = ast
+            .items
+            .iter()
+            .any(|n| n.byte_span().map(|r| !r.is_empty()).unwrap_or(false));
+        if !has_content {
+            return Err(E::ItemOutsideText { item: 0 });
+        }
+    }
+    // Resolved strut must be positive height.
+    {
+        let trial = LineContext::from_options(
+            strut_metrics,
+            ast.strut_font_size,
+            ast.base_direction,
+            options,
+            constraints.wrap_width,
+        );
+        if !(trial.strut.natural_line_height().is_finite()
+            && trial.strut.natural_line_height() > 0.0)
+        {
+            return Err(E::InvalidStrut);
+        }
+    }
     check_boundary_order(ast)?;
-    check_span_enclosure(ast)?;
+    check_span_enclosure(ast, &span_index)?;
+    // Item order makes each empty range a boundary of the coverage cursor.
+    let mut covered = 0;
+    for (item, node) in ast.items.iter().enumerate() {
+        let r = node.byte_span().unwrap();
+        if r.start != covered {
+            return Err(E::ItemOutsideText { item });
+        }
+        covered = r.end;
+    }
+    if covered != text.len() {
+        return Err(E::ItemOutsideText {
+            item: ast.items.len() - 1,
+        });
+    }
     let context = LineContext::from_options(
-        m,
+        strut_metrics,
         ast.strut_font_size,
         ast.base_direction,
         options,
@@ -994,20 +1157,18 @@ pub fn check_layout_inputs(
 /// * `constraints`: container geometry; `options`: layout policy.
 ///
 /// **Phase 0 skeleton.** It runs [`check_layout_inputs`] and performs no
-/// layout: the result has the AST's base direction and no lines. Because the
-/// signature returns no `Result`, invalid input is not reported either; call
-/// `check_layout_inputs` first to learn why.
-#[must_use]
+/// layout: the result has the AST's base direction and no lines. Validation
+/// errors are returned to the caller.
 pub fn layout_paragraph(
     ast: &ParagraphAst,
     text: &str,
     shaper: &dyn TextShaper,
     constraints: &LayoutConstraints,
     options: &LayoutOptions,
-) -> PositionedParagraph {
+) -> Result<PositionedParagraph, LayoutInputError> {
     let _ = shaper;
-    let _context = check_layout_inputs(ast, text, constraints, options);
-    PositionedParagraph::empty(ast.base_direction)
+    let _context = check_layout_inputs(ast, text, constraints, options)?;
+    Ok(PositionedParagraph::empty(ast.base_direction))
 }
 
 #[cfg(test)]
@@ -1035,15 +1196,15 @@ mod tests {
             },
             strut_font_size: 10.0,
             runs: vec![],
-            items: vec![hard_break(), sentinel(1)],
+            items: vec![sentinel(0)],
             decoration_spans: vec![],
             atomic_spans: vec![],
         }
     }
 
-    /// A mandatory break that owns the one-byte paragraph "\n".
+    /// Line separator break (U+2028).
     fn hard_break() -> WordNode {
-        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(0, 1), false))
+        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(0, 3), false))
     }
 
     /// The paragraph-end sentinel for a text of `len` bytes.
@@ -1057,14 +1218,14 @@ mod tests {
     #[test]
     fn context_resolves_the_strut_from_raw_metrics_and_options() {
         let normal =
-            check_layout_inputs(&ast(), "\n", &constraints(), &LayoutOptions::default()).unwrap();
+            check_layout_inputs(&ast(), "", &constraints(), &LayoutOptions::default()).unwrap();
         assert_eq!(normal.strut.natural_line_height(), 11.0);
         assert_eq!(normal.base_direction, BidiDirection::Rtl);
         let fixed_options = LayoutOptions {
             line_height: crate::middleend::LineHeight::Fixed(1.5),
             ..Default::default()
         };
-        let fixed = check_layout_inputs(&ast(), "\n", &constraints(), &fixed_options).unwrap();
+        let fixed = check_layout_inputs(&ast(), "", &constraints(), &fixed_options).unwrap();
         // 1.5 * 10 = 15, half-leading folded in, gap gone.
         assert_eq!(fixed.strut.natural_line_height(), 15.0);
         assert_eq!(fixed.strut.line_gap, 0.0);
@@ -1080,17 +1241,19 @@ mod tests {
             ..constraints()
         };
         assert_eq!(
-            check_layout_inputs(&ast(), "\n", &bad_width, &o),
+            check_layout_inputs(&ast(), "", &bad_width, &o),
             Err(LayoutInputError::InvalidConstraints)
         );
+        let mut outside = ast();
+        outside.items = vec![sentinel(1)];
         assert_eq!(
-            check_layout_inputs(&ast(), "", &constraints(), &o),
+            check_layout_inputs(&outside, "", &constraints(), &o),
             Err(LayoutInputError::ItemOutsideText { item: 0 })
         );
         let mut a = ast();
         a.strut_metrics.ascent = f32::INFINITY;
         assert_eq!(
-            check_layout_inputs(&a, "\n", &constraints(), &o),
+            check_layout_inputs(&a, "", &constraints(), &o),
             Err(LayoutInputError::InvalidStrut)
         );
         // Splitting a UTF-8 sequence is outside the text.
@@ -1107,19 +1270,19 @@ mod tests {
     fn skeleton_returns_an_empty_paragraph_with_the_ast_direction() {
         let p = layout_paragraph(
             &ast(),
-            "\n",
+            "",
             &NoopShaper,
             &constraints(),
             &LayoutOptions::default(),
         );
-        assert_eq!(p, PositionedParagraph::empty(BidiDirection::Rtl));
+        assert_eq!(p, Ok(PositionedParagraph::empty(BidiDirection::Rtl)));
         // Invalid input yields the same value; check_layout_inputs explains it.
         let bad = LayoutConstraints {
             wrap_width: -1.0,
             ..constraints()
         };
         let p = layout_paragraph(&ast(), "\n", &NoopShaper, &bad, &LayoutOptions::default());
-        assert!(p.lines.is_empty());
+        assert!(p.is_err());
     }
 
     use crate::frontend::{
@@ -1175,6 +1338,8 @@ mod tests {
 
     fn run() -> crate::frontend::ShapingRun {
         crate::frontend::ShapingRun {
+            features: Default::default(),
+
             byte_range: TextRange::new(0, 4),
             families: std::sync::Arc::from([]),
             font_size: 10.0,
@@ -1206,6 +1371,24 @@ mod tests {
     /// `items` followed by the sentinel of the four-byte text most tests use.
     fn with_items(items: Vec<WordNode>) -> ParagraphAst {
         with_items_for(4, items)
+    }
+
+    /// Complete partial fixtures with ordinary text, split at every supplied node.
+    fn tiled(mut a: ParagraphAst) -> ParagraphAst {
+        let mut items = Vec::new();
+        let mut covered = 0;
+        for node in a.items {
+            let r = node.byte_span().unwrap();
+            if r.start > covered {
+                items.push(text_box(
+                    (covered..r.start).map(|i| atom(i, i + 1)).collect(),
+                ));
+            }
+            covered = covered.max(r.end);
+            items.push(node);
+        }
+        a.items = items;
+        a
     }
 
     /// Adds the mandatory `Leading` / `Trailing` boundary pair of every
@@ -1268,6 +1451,10 @@ mod tests {
 
     fn glue(natural: f32, stretch: f32, shrink: f32) -> WordNode {
         WordNode::Glue(GlueNode {
+            original_bidi_class: crate::types::BidiClass::Ws,
+            bidi_level: 0,
+            is_collapsible: true,
+
             byte_range: TextRange::new(1, 2),
             kind: GlueKind::WordSpace,
             tier: GlueTier::Tier0,
@@ -1280,7 +1467,12 @@ mod tests {
     #[test]
     fn glue_sizes_must_be_finite_and_non_negative() {
         let o = LayoutOptions::default();
-        let check = |g| check_layout_inputs(&with_items(vec![g]), "abcd", &constraints(), &o);
+        let check = |mut g: WordNode| {
+            if let WordNode::Glue(glue) = &mut g {
+                glue.byte_range = TextRange::new(0, 4);
+            }
+            check_layout_inputs(&with_items(vec![g]), "abcd", &constraints(), &o)
+        };
         assert!(check(glue(3.0, 1.5, 1.0)).is_ok());
         let bad = Err(LayoutInputError::InvalidGlue { item: 0 });
         assert_eq!(check(glue(f32::NAN, 0.0, 0.0)), bad);
@@ -1300,7 +1492,17 @@ mod tests {
             )
         };
         let bad = Err(LayoutInputError::InvalidDiscretionary { item: 0 });
-        assert!(check(DiscretionaryNode::direct(2)).is_ok());
+        assert!(
+            check_layout_inputs(
+                &tiled(with_items(vec![WordNode::Discretionary(
+                    DiscretionaryNode::direct(2)
+                )])),
+                "abcd",
+                &constraints(),
+                &o
+            )
+            .is_ok()
+        );
         // A plain break owns no width of its own (outside a cloned span): any
         // non-zero pre/post width, and any non-finite one, is rejected.
         let mut d = DiscretionaryNode::direct(2);
@@ -1365,7 +1567,6 @@ mod tests {
             suffix_replacement: None,
             prefix_cut_bytes: prefix_cut,
             suffix_cut_bytes: suffix_cut,
-            penalty: 0,
         }
     }
 
@@ -1386,7 +1587,12 @@ mod tests {
         if let WordNode::Discretionary(d) = &mut a.items[1] {
             d.byte_range = TextRange::empty_at(2);
         }
-        assert_eq!(check_layout_inputs(&a, "abé", &constraints(), &o), bad);
+        // The discretionary now sits at offset 2, inside the tail box, so item
+        // order rejects it before the hyphen rules run.
+        assert_eq!(
+            check_layout_inputs(&a, "abé", &constraints(), &o),
+            Err(LayoutInputError::ItemsOutOfOrder { item: 2 })
+        );
         // It needs a text box on each side.
         let mut a = hyphenated(opportunity(1, 0, 0));
         a.items.remove(2);
@@ -1448,6 +1654,10 @@ mod tests {
         assert_eq!(check(&three_part_word(hyphen_at_1(), (0, 3))), bad);
         // Anything but a hyphenation point ends the chain.
         let space = WordNode::Glue(GlueNode {
+            original_bidi_class: crate::types::BidiClass::Ws,
+            bidi_level: 0,
+            is_collapsible: true,
+
             byte_range: TextRange::empty_at(1),
             kind: GlueKind::CjkAutospace,
             tier: GlueTier::Tier0,
@@ -1705,13 +1915,13 @@ mod tests {
             a.decoration_spans = vec![chip(5, mode)];
             a
         };
-        let ok = with_span(
+        let ok = tiled(with_span(
             vec![
                 boundary(2.0, TextRange::empty_at(1)),
                 bnd(5, SpanEdge::Trailing, 3),
             ],
             Slice,
-        );
+        ));
         assert!(check_layout_inputs(&ok, "abcd", &constraints(), &o).is_ok());
         let unknown = with_items(vec![boundary(2.0, TextRange::empty_at(1))]);
         assert_eq!(
@@ -1739,7 +1949,7 @@ mod tests {
             d.post_break_width = 2.0;
             closed(with_span(vec![WordNode::Discretionary(d)], mode))
         };
-        assert!(check_layout_inputs(&clone_pad(Clone), "abcd", &constraints(), &o).is_ok());
+        assert!(check_layout_inputs(&tiled(clone_pad(Clone)), "abcd", &constraints(), &o).is_ok());
         // Padding is cloned only by a span that was declared to clone it.
         assert_eq!(
             check_layout_inputs(&clone_pad(Slice), "abcd", &constraints(), &o),
@@ -1793,20 +2003,26 @@ mod tests {
             check_layout_inputs(&a, text, &constraints(), &o)
         };
         let bad = Err(LayoutInputError::InvalidDiscretionary { item: 0 });
-        for (text, len) in [("a\nb", 1), ("a\r\nb", 2), ("a\u{2028}b", 3)] {
-            let nl = TextRange::new(1, 1 + len);
-            let r = check(text, DiscretionaryNode::hard_break(nl, false));
-            assert!(r.is_ok(), "{text:?}: {r:?}");
-            // The terminator is the whole range: a shorter one splits `\r\n`
-            // or a code point, a longer one swallows text.
-            assert!(
-                check(
-                    text,
-                    DiscretionaryNode::hard_break(TextRange::new(1, 2 + len), false)
-                )
-                .is_err()
-            );
-        }
+        let text = "a\u{2028}b";
+        let separator_len = 3;
+        let newline = TextRange::new(1, 1 + separator_len);
+        let mut a = tiled(with_items_for(
+            text.len(),
+            vec![WordNode::Discretionary(DiscretionaryNode::hard_break(
+                newline, false,
+            ))],
+        ));
+        a.runs[0].byte_range = TextRange::new(0, text.len());
+        let result = check_layout_inputs(&a, text, &constraints(), &o);
+        assert!(result.is_ok(), "{text:?}: {result:?}");
+        // The terminator must be the whole range: a longer one swallows text.
+        assert!(
+            check(
+                text,
+                DiscretionaryNode::hard_break(TextRange::new(1, 2 + separator_len), false)
+            )
+            .is_err()
+        );
         // Not a terminator.
         assert_eq!(
             check(
@@ -1891,7 +2107,7 @@ mod tests {
         // A delta on one side needs no neighbour on the other.
         let mut a = adjust(-1.0, 0.0);
         a.items.remove(2);
-        assert!(check(a).is_ok());
+        assert!(check(tiled(a)).is_ok());
     }
 
     /// Sets `IN_ATOMIC_EDIT_SPAN` on exactly the atoms inside an atomic span, as
@@ -1990,11 +2206,21 @@ mod tests {
         let newline = |a: usize, b: usize| {
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(a, b), false))
         };
-        assert!(check("abcd", vec![sentinel(4)]).is_ok());
+        assert!(check("abcd", vec![sentinel(4)]).is_err());
         // An empty paragraph is just the sentinel.
         assert!(check("", vec![sentinel(0)]).is_ok());
         // Text ending in a newline: the real break, then the sentinel.
-        assert!(check("ab\n", vec![newline(2, 3), sentinel(3)]).is_ok());
+        assert!(
+            check(
+                "ab\u{2028}",
+                vec![
+                    text_box(vec![atom(0, 1), atom(1, 2)]),
+                    newline(2, 5),
+                    sentinel(5)
+                ]
+            )
+            .is_ok()
+        );
         let bad = |item| Err(LayoutInputError::InvalidDiscretionary { item });
         // The sentinel sits at the end of the text, not before it.
         assert_eq!(check("abcd", vec![sentinel(3)]), bad(0));
@@ -2004,10 +2230,16 @@ mod tests {
         // At most once.
         assert_eq!(check("abcd", vec![sentinel(4), sentinel(4)]), bad(0));
         // A sentinel owns no bytes; a real break owns some.
-        assert_eq!(check("ab\n", vec![newline(2, 3), newline(3, 3)]), bad(1));
-        let mut owning = DiscretionaryNode::hard_break(TextRange::new(2, 3), true);
-        owning.byte_range = TextRange::new(2, 3);
-        assert_eq!(check("ab\n", vec![WordNode::Discretionary(owning)]), bad(0));
+        assert_eq!(
+            check("ab\u{2028}", vec![newline(2, 5), newline(5, 5)]),
+            bad(1)
+        );
+        let mut owning = DiscretionaryNode::hard_break(TextRange::new(2, 5), true);
+        owning.byte_range = TextRange::new(2, 5);
+        assert_eq!(
+            check("ab\u{2028}", vec![WordNode::Discretionary(owning)]),
+            bad(0)
+        );
     }
 
     #[test]
@@ -2021,15 +2253,19 @@ mod tests {
         let missing = Err(LayoutInputError::MissingParagraphEnd);
         // No items at all, even for an empty paragraph.
         assert_eq!(check("", vec![]), missing);
-        // A real hard break is not the sentinel: "ab\n" needs both.
+        // A real hard break is not the sentinel: "ab\u{2028}" needs both.
         let newline =
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(2, 3), false));
-        assert_eq!(check("ab\n", vec![newline]), missing);
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(2, 5), false));
+        assert_eq!(check("ab\u{2028}", vec![newline]), missing);
         // A soft opportunity or a box last.
         let soft = WordNode::Discretionary(DiscretionaryNode::direct(2));
         assert_eq!(check("abcd", vec![soft]), missing);
         let text = text_box(vec![atom(0, 1)]);
-        assert_eq!(check("abcd", vec![sentinel(4), text]), missing);
+        // Text after the sentinel is out of order before the sentinel check.
+        assert_eq!(
+            check("abcd", vec![sentinel(4), text]),
+            Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
+        );
         // Four traces from the line-emission rule: N newlines, N + 1 mandatory
         // breaks, so N + 1 lines.
         let mandatory = |items: &[WordNode]| {
@@ -2051,26 +2287,26 @@ mod tests {
                 ],
             ),
             (
-                "abc\n",
+                "abc\u{2028}",
                 vec![
                     text_box(vec![atom(0, 1), atom(1, 2), atom(2, 3)]),
-                    nl(3, 4),
-                    sentinel(4),
+                    nl(3, 6),
+                    sentinel(6),
                 ],
             ),
             (
-                "a\n\nb",
+                "a\u{2028}\u{2028}b",
                 vec![
                     text_box(vec![atom(0, 1)]),
-                    nl(1, 2),
-                    nl(2, 3),
-                    text_box(vec![atom(3, 4)]),
-                    sentinel(4),
+                    nl(1, 4),
+                    nl(4, 7),
+                    text_box(vec![atom(7, 8)]),
+                    sentinel(8),
                 ],
             ),
         ];
         for (text, items) in cases {
-            let newlines = text.matches('\n').count();
+            let newlines = text.matches('\u{2028}').count();
             assert_eq!(mandatory(&items), newlines + 1, "{text:?}");
             assert!(check(text, items).is_ok(), "{text:?}");
         }
@@ -2081,6 +2317,10 @@ mod tests {
         let o = LayoutOptions::default();
         let node = |kind, tier, natural, stretch, shrink| {
             WordNode::Glue(GlueNode {
+                original_bidi_class: crate::types::BidiClass::Ws,
+                bidi_level: 0,
+                is_collapsible: true,
+
                 byte_range: TextRange::empty_at(1),
                 kind,
                 tier,
@@ -2095,7 +2335,15 @@ mod tests {
             GlueTier::Tier0
         );
         let pool = |t, n, st, sh| node(GlueKind::CjkPunctCompression, t, n, st, sh);
-        assert!(check(pool(GlueTier::Tier0, 0.0, 0.0, 5.0)).is_ok());
+        assert!(
+            check_layout_inputs(
+                &tiled(with_items(vec![pool(GlueTier::Tier0, 0.0, 0.0, 5.0)])),
+                "abcd",
+                &constraints(),
+                &o
+            )
+            .is_ok()
+        );
         let bad = Err(LayoutInputError::InvalidGlue { item: 0 });
         assert_eq!(check(pool(GlueTier::Tier1, 0.0, 0.0, 5.0)), bad);
         assert_eq!(check(pool(GlueTier::Tier0, 1.0, 0.0, 5.0)), bad);
@@ -2127,10 +2375,24 @@ mod tests {
             let mut a = with_items(vec![
                 text_box(vec![atom(0, 1)]),
                 boundary(SpanEdge::Leading, 1, 1),
-                text_box(vec![inner.clone(), atom(2, 3)]),
+                text_box(vec![inner.clone()]),
+                text_box(vec![atom(2, 3)]),
                 boundary(SpanEdge::Trailing, 0, 3),
+                text_box(vec![atom(3, 4)]),
             ]);
-            a.decoration_spans = vec![chip(5, Slice)]; // bytes 1..3
+            let mut rtl_run = run();
+            rtl_run.bidi_level = 1;
+            a.runs.push(rtl_run);
+            if let WordNode::Box(BoxNode::Text {
+                run_index,
+                clusters,
+                ..
+            }) = &mut a.items[2]
+            {
+                *run_index = 1;
+                clusters[0].bidi_level = 1;
+            }
+            a.decoration_spans = vec![chip(5, Slice)];
             a
         };
         let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
@@ -2143,7 +2405,7 @@ mod tests {
         );
         assert_eq!(
             check(build(SpanEdge::Trailing, 1)),
-            Err(LayoutInputError::InvalidSpanBoundary { item: 3 })
+            Err(LayoutInputError::InvalidSpanBoundary { item: 4 })
         );
     }
 
@@ -2169,7 +2431,7 @@ mod tests {
             check(with_items(vec![b_(), a_()])),
             Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
         );
-        assert!(check(with_items(vec![a_(), brk(1), b_(), brk(2), c_()])).is_ok());
+        assert!(check(with_items(vec![a_(), brk(1), b_(), brk(2), c_(), d_()])).is_ok());
         assert_eq!(
             check(with_items(vec![a_(), b_(), brk(1)])),
             Err(LayoutInputError::ItemsOutOfOrder { item: 2 })
@@ -2275,6 +2537,10 @@ mod tests {
         let o = LayoutOptions::default();
         let autospace = |at: usize| {
             WordNode::Glue(GlueNode {
+                original_bidi_class: crate::types::BidiClass::Ws,
+                bidi_level: 0,
+                is_collapsible: true,
+
                 byte_range: TextRange::empty_at(at),
                 kind: GlueKind::CjkAutospace,
                 tier: GlueTier::Tier1,
@@ -2331,6 +2597,7 @@ mod tests {
             a_(),
             bnd(5, L, 1),
             b_(),
+            c_(),
             bnd(5, T, 3),
             autospace(3),
             brk(3),
@@ -2345,13 +2612,13 @@ mod tests {
         assert!(r.is_ok(), "{r:?}");
         // The break before the seam glue is the wrong way round.
         let mut swapped = a.clone();
-        swapped.items.swap(4, 5);
+        swapped.items.swap(5, 6);
         assert_eq!(
             check(swapped),
-            Err(LayoutInputError::ItemsOutOfOrder { item: 5 })
+            Err(LayoutInputError::ItemsOutOfOrder { item: 6 })
         );
         // B's Leading before the seam glue or break strands them inside B.
-        a.items.swap(5, 6);
+        a.items.swap(6, 7);
         assert!(check(a).is_err());
     }
 
@@ -2383,12 +2650,16 @@ mod tests {
         // A Slice span needs no listing.
         let mut a = with_items(vec![WordNode::Discretionary(DiscretionaryNode::direct(2))]);
         a.decoration_spans = vec![chip(5, Slice)];
-        assert!(check(closed(a)).is_ok());
+        assert!(check(tiled(closed(a))).is_ok());
 
         // Synthetic glue owns no bytes.
         for kind in [GlueKind::CjkAutospace, GlueKind::CjkPunctCompression] {
             let tier = kind.default_tier();
             let a = with_items(vec![WordNode::Glue(GlueNode {
+                original_bidi_class: crate::types::BidiClass::Ws,
+                bidi_level: 0,
+                is_collapsible: true,
+
                 byte_range: TextRange::new(1, 2),
                 kind,
                 tier,
@@ -2421,7 +2692,7 @@ mod tests {
             a.decoration_spans = vec![inner];
             a
         };
-        assert!(check(build(2.0, 6.0, 0)).is_ok());
+        assert!(check(tiled(build(2.0, 6.0, 0))).is_ok());
         let bad = |item| Err(LayoutInputError::InvalidSpanBoundary { item });
         assert_eq!(check(build(6.0, 6.0, 0)), bad(0));
         assert_eq!(check(build(2.0, 2.0, 0)), bad(1));
@@ -2436,10 +2707,10 @@ mod tests {
         let nl = |a: usize, b: usize| {
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(a, b), false))
         };
-        assert!(run_over("a\r\nb", vec![nl(1, 3)]).is_ok());
+        assert!(run_over("a\r\nb", vec![nl(1, 3)]).is_err());
         assert!(run_over("a\r\nb", vec![nl(1, 2)]).is_err()); // lone CR of a CRLF
         assert!(run_over("a\r\nb", vec![nl(2, 3)]).is_err()); // lone LF of a CRLF
-        assert!(run_over("a\rb", vec![nl(1, 2)]).is_ok());
+        assert!(run_over("a\rb", vec![nl(1, 2)]).is_err());
 
         // A text box lies in its run and caches the total of its clusters.
         let mut a = with_items(vec![text_box(vec![atom(0, 1), atom(1, 2)])]);
@@ -2501,7 +2772,7 @@ mod tests {
             a
         };
         let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
-        assert!(check(build(vec![zb(5, L, 1), zb(5, T, 3)])).is_ok());
+        assert!(check(tiled(build(vec![zb(5, L, 1), zb(5, T, 3)]))).is_ok());
         // Zero padding does not excuse a missing node.
         let missing = Err(LayoutInputError::MissingSpanBoundary { span: 0 });
         assert_eq!(check(build(vec![])), missing);
@@ -2511,9 +2782,13 @@ mod tests {
             check(build(vec![zb(5, T, 3)])),
             Err(LayoutInputError::InvalidSpanBoundary { item: 1 })
         );
+        // A boundary before the preceding box starts is out of order.
+        assert_eq!(
+            check(build(vec![zb(5, L, 0), zb(5, T, 3)])),
+            Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
+        );
         // Exactly one of each, at the span's own edges.
         for wrong in [
-            vec![zb(5, L, 0), zb(5, T, 3)],
             vec![zb(5, L, 1), zb(5, T, 2)],
             vec![zb(5, L, 1), zb(5, L, 1), zb(5, T, 3)],
             vec![zb(5, L, 1), zb(5, T, 3), zb(5, T, 3)],
@@ -2656,6 +2931,10 @@ mod tests {
         let o = LayoutOptions::default();
         let ws = |kind: &str, range: (usize, usize)| match kind {
             "glue" => WordNode::Glue(GlueNode {
+                original_bidi_class: crate::types::BidiClass::Ws,
+                bidi_level: 0,
+                is_collapsible: true,
+
                 byte_range: TextRange::new(range.0, range.1),
                 kind: GlueKind::WordSpace,
                 tier: GlueTier::Tier0,
@@ -2723,13 +3002,12 @@ mod tests {
             byte_range: TextRange::new(1, 3),
         }];
         flag_atomic(&mut a);
-        assert!(check_layout_inputs(&a, "abcd", &constraints(), &o).is_ok());
+        assert!(check_layout_inputs(&tiled(a), "abcd", &constraints(), &o).is_ok());
     }
 
     #[test]
     fn wrap_width_reaches_the_line_context() {
-        let c =
-            check_layout_inputs(&ast(), "\n", &constraints(), &LayoutOptions::default()).unwrap();
+        let c = check_layout_inputs(&ast(), "", &constraints(), &LayoutOptions::default()).unwrap();
         assert_eq!(c.wrap_width, constraints().wrap_width);
     }
 
@@ -2740,7 +3018,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            check_layout_inputs(&ast(), "\n", &constraints(), &negative),
+            check_layout_inputs(&ast(), "", &constraints(), &negative),
             Err(LayoutInputError::InvalidStrut)
         );
         // Finite inputs whose resolved height overflows.
@@ -2751,7 +3029,7 @@ mod tests {
         let mut a = ast();
         a.strut_font_size = 10.0;
         assert_eq!(
-            check_layout_inputs(&a, "\n", &constraints(), &huge),
+            check_layout_inputs(&a, "", &constraints(), &huge),
             Err(LayoutInputError::InvalidStrut)
         );
     }

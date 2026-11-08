@@ -16,12 +16,13 @@ pub struct TextDecoration {
 /// decoration (spec §2.5). Atoms never straddle runs (§3 Step 5).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapingRun {
+    /// Complete shaping settings; the run is their single source of truth.
+    pub features: crate::types::FontFeatures,
     /// Bytes of the paragraph covered by the run.
     pub byte_range: TextRange,
     /// Ordered family stack; shared between runs by reference count.
     pub families: FamilyStack,
-    /// Font size. `TextShaper::shape_run` takes it explicitly as well, so the
-    /// bridge call site passes `run.font_size`; the cache key needs both (§4.2 req. 5).
+    /// Requested font size; shaping and reshaping both read it from this run.
     pub font_size: f32,
     /// Weight and slant.
     pub style: FontStyle,

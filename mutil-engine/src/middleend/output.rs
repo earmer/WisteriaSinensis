@@ -1,9 +1,10 @@
 //! Middle-end output: positioned lines and glyphs (spec §2.6).
 
-use super::{CaretStop, HangMode, HangingWhitespaceMode, LayoutOptions, LineHeight};
+use super::{HangMode, HangingWhitespaceMode, LayoutOptions, LineHeight};
 use crate::frontend::BoxOverflowPolicy;
 use crate::types::{
-    BidiDirection, BidiLevel, ByteIndex, FontMetrics, FontRef, Size, TextRange, VerticalMetrics,
+    BIDI_MAX_DEPTH, BidiDirection, BidiLevel, ByteIndex, FontMetrics, FontRef, Size, TextRange,
+    VerticalMetrics,
 };
 use core::fmt;
 
@@ -40,10 +41,8 @@ pub struct PositionedGlyph {
     /// (An actual U+00AD in the source is *not* synthesized.)
     pub is_synthesized: bool,
     /// `true` for punctuation hanging outside the text block (§5 Stage 1.3).
-    /// Such a glyph lies wholly outside `[0, visual_width]`: left of 0
-    /// (`x < 0`) or at or beyond `visual_width`. **[Design decision]**:
-    /// addition to §2.6, so the hanging invariants of [`PositionedLine`] are
-    /// checkable.
+    /// May straddle the body edge; its normalized pen interval must overflow
+    /// `[0, visual_width]` beyond tolerance. Only the overflow counts as hanging.
     pub is_hanging: bool,
 }
 
@@ -54,6 +53,10 @@ pub struct PositionedGlyph {
 /// face per run.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisualGlyphRun {
+    /// Requested size before fallback scaling.
+    pub font_size: f32,
+    /// Variable font instance coordinates.
+    pub variations: smallvec::SmallVec<[crate::types::FontVariation; 2]>,
     /// Font and fallback scale shared by every glyph.
     pub font: FontRef,
     /// Bidi level shared by every glyph.
@@ -186,9 +189,77 @@ impl PositionedSpanFragment {
     }
 }
 
+/// Which side of an ambiguous boundary a caret belongs to (spec §6.1).
+///
+/// Flutter's definition: upstream leans toward the start of the string. At a
+/// soft wrap, upstream is the end of the first line and downstream the start of
+/// the second; affinity also resolves a bidi boundary. Explicit newlines are
+/// unambiguous `[C1]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CaretAffinity {
+    /// Leans toward the following text.
+    #[default]
+    Downstream,
+    /// Leans toward the preceding text.
+    Upstream,
+}
+
+/// One visual boundary on a line, in visual order (spec §6.1). Two stops sit at
+/// each direction boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaretStop {
+    /// Line-local x position.
+    pub x: f32,
+    /// Logical byte offset at this stop.
+    pub offset: ByteIndex,
+    /// Affinity this stop represents.
+    pub affinity: CaretAffinity,
+    /// Bidi level of the slot.
+    pub level: BidiLevel,
+    /// Index into `PositionedParagraph::lines`.
+    pub line: usize,
+}
+
+/// Visual fragment of an atomic edit span, independent of decorations.
+///
+/// Lives in the output layer because it is part of a [`PositionedLine`]'s
+/// geometry; hit-testing behaviour is implemented in the interaction layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AtomicFragment {
+    /// Atomic span id (independent id space).
+    pub atomic_id: u64,
+    /// Entire atomic logical range.
+    pub full_byte_range: TextRange,
+    /// Source bytes on this visual fragment.
+    pub fragment_byte_range: TextRange,
+    /// Physical left edge.
+    pub x_start: f32,
+    /// Physical right edge.
+    pub x_end: f32,
+    /// Resolved fragment direction.
+    pub bidi_level: BidiLevel,
+}
+
+/// `true` when a fragment's geometry is finite and ordered, its ranges nest,
+/// and its bidi level is representable.
+fn atomic_fragment_measurements_are_valid(fragment: &AtomicFragment) -> bool {
+    let geometry_ok = fragment.x_start.is_finite()
+        && fragment.x_end.is_finite()
+        && fragment.x_start <= fragment.x_end;
+    let ranges_ok = fragment.full_byte_range.start <= fragment.full_byte_range.end
+        && fragment.fragment_byte_range.start <= fragment.fragment_byte_range.end
+        && fragment
+            .full_byte_range
+            .contains_range(fragment.fragment_byte_range);
+    let level_ok = fragment.bidi_level <= BIDI_MAX_DEPTH + 1;
+    geometry_ok && ranges_ok && level_ok
+}
+
 /// One laid-out line (spec §2.6).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PositionedLine {
+    /// Atomic editing geometry, independent of decoration ids.
+    pub atomic_fragments: Vec<AtomicFragment>,
     /// Source bytes, **including** trailing whitespace.
     pub byte_range: TextRange,
     /// End of the last visible cluster (trailing whitespace excluded). Glyphs
@@ -338,6 +409,13 @@ pub enum LineInvariantError {
     NonFiniteOrNegativeExtent,
     /// `baseline_y`, `ascent`, `descent` or `line_height` is NaN or infinite.
     NonFiniteLineMetrics,
+    /// A line height or the resolved strut height is not positive.
+    NonPositiveLineHeight {
+        /// `VerticalMetrics::natural_line_height()` of the strut.
+        expected: f32,
+        /// The line's `line_height`.
+        actual: f32,
+    },
     /// `visible_byte_end` lies outside `byte_range`.
     VisibleEndOutsideRange,
     /// An empty line (`byte_range.start == byte_range.end`) has visual runs.
@@ -366,6 +444,17 @@ pub enum LineInvariantError {
         minimum: f32,
         /// The line's `line_height`.
         actual: f32,
+    },
+    /// A visual run's font size, fallback scale or a variation coordinate is
+    /// non-finite or non-positive.
+    InvalidVisualRun {
+        /// Index into `visual_runs`.
+        run: usize,
+    },
+    /// An atomic fragment's geometry, byte ranges or bidi level is invalid.
+    InvalidAtomicFragment {
+        /// Index into `atomic_fragments`.
+        index: usize,
     },
     /// A glyph's `x`, `x_offset`, `advance` or `y_offset` is NaN or infinite.
     NonFiniteGlyph {
@@ -421,6 +510,8 @@ pub enum LineInvariantError {
     EmptyLineHasTabs,
     /// An empty line has span fragments.
     EmptyLineHasSpanFragments,
+    /// An empty line has atomic fragments.
+    EmptyLineHasAtomicFragments,
     /// A span fragment has a non-finite coordinate or a negative size.
     InvalidSpanFragment {
         /// Index into `span_fragments`.
@@ -527,6 +618,18 @@ impl fmt::Display for LineInvariantError {
             Self::NonFiniteLineMetrics => {
                 f.write_str("baseline_y, ascent, descent or line_height is not finite")
             }
+            Self::NonPositiveLineHeight { expected, actual } => {
+                write!(
+                    f,
+                    "line height {actual} or strut height {expected} is not positive"
+                )
+            }
+            Self::InvalidVisualRun { run } => {
+                write!(f, "visual run {run} has an invalid font instance")
+            }
+            Self::InvalidAtomicFragment { index } => {
+                write!(f, "atomic fragment {index} has invalid geometry or ranges")
+            }
             Self::VisibleEndOutsideRange => f.write_str("visible_byte_end lies outside byte_range"),
             Self::EmptyLineHasVisualRuns => f.write_str("an empty line has visual runs"),
             Self::EmptyLineHasBoxes => f.write_str("an empty line has inline boxes"),
@@ -593,6 +696,7 @@ impl fmt::Display for LineInvariantError {
             }
             Self::EmptyLineHasTabs => f.write_str("an empty line has tabs"),
             Self::EmptyLineHasSpanFragments => f.write_str("an empty line has span fragments"),
+            Self::EmptyLineHasAtomicFragments => f.write_str("an empty line has atomic fragments"),
             Self::InvalidSpanFragment { index } => {
                 write!(
                     f,
@@ -734,7 +838,7 @@ impl PositionedLine {
     ///   The padding thus lets a 40-wide cluster with 3 units on each side pass
     ///   at `wrap_width = 30`, while an unpadded entity cannot inflate
     ///   `visual_width`;
-    /// * every `is_hanging` glyph lies wholly outside the body;
+    /// * every `is_hanging` glyph has actual overflow (may straddle the body);
     /// * `hanging_left`/`hanging_right` equal the extent those glyphs occupy
     ///   (so are positive exactly when such glyphs exist), and are zero on an
     ///   edge that `ctx.hang_mode` does not allow for `ctx.base_direction`;
@@ -773,6 +877,14 @@ impl PositionedLine {
             return Err(E::NonFiniteLineMetrics);
         }
         for (run, r) in self.visual_runs.iter().enumerate() {
+            if !(r.font_size.is_finite()
+                && r.font_size > 0.0
+                && r.font.scale.is_finite()
+                && r.font.scale > 0.0
+                && r.variations.iter().all(|v| v.value().is_finite()))
+            {
+                return Err(E::InvalidVisualRun { run });
+            }
             for (glyph, g) in r.glyphs.iter().enumerate() {
                 let finite = g.x.is_finite()
                     && g.x_offset.is_finite()
@@ -801,10 +913,17 @@ impl PositionedLine {
             let finite = [f.x, f.width, f.ascent, f.descent, f.x + f.width]
                 .iter()
                 .all(|v| v.is_finite());
-            let level_ok = f.bidi_level <= crate::types::BIDI_MAX_DEPTH + 1;
+            let level_ok = f.bidi_level <= BIDI_MAX_DEPTH + 1;
             if !(finite && level_ok && f.width >= 0.0 && f.ascent >= 0.0 && f.descent >= 0.0) {
                 return Err(E::InvalidSpanFragment { index });
             }
+        }
+        if let Some(index) = self
+            .atomic_fragments
+            .iter()
+            .position(|fragment| !atomic_fragment_measurements_are_valid(fragment))
+        {
+            return Err(E::InvalidAtomicFragment { index });
         }
         for (index, c) in self.caret_stops.iter().enumerate() {
             if !c.x.is_finite() {
@@ -829,7 +948,26 @@ impl PositionedLine {
         if !(range.start <= self.visible_byte_end && self.visible_byte_end <= range.end) {
             return Err(E::VisibleEndOutsideRange);
         }
+        // `full_byte_range` may span the whole wrapped atomic span; only the
+        // bytes on this visual fragment must lie inside the line.
+        if let Some(index) = self
+            .atomic_fragments
+            .iter()
+            .position(|f| !range.contains_range(f.fragment_byte_range))
+        {
+            return Err(E::InvalidAtomicFragment { index });
+        }
         let expected = ctx.strut.natural_line_height();
+        if !(self.line_height.is_finite()
+            && self.line_height > 0.0
+            && expected.is_finite()
+            && expected > 0.0)
+        {
+            return Err(E::NonPositiveLineHeight {
+                expected,
+                actual: self.line_height,
+            });
+        }
         if range.is_empty() {
             if !self.visual_runs.is_empty() {
                 return Err(E::EmptyLineHasVisualRuns);
@@ -842,6 +980,9 @@ impl PositionedLine {
             }
             if !self.span_fragments.is_empty() {
                 return Err(E::EmptyLineHasSpanFragments);
+            }
+            if !self.atomic_fragments.is_empty() {
+                return Err(E::EmptyLineHasAtomicFragments);
             }
             if !approx_eq(self.line_height, expected) {
                 return Err(E::EmptyLineHeightMismatch {
@@ -888,8 +1029,8 @@ impl PositionedLine {
             BidiDirection::Rtl => end <= tolerance(end, 0.0),
         };
 
-        let (mut left, mut right) = (0.0_f32, 0.0_f32);
-        let (mut has_left, mut has_right) = (false, false);
+        let (mut max_left_overflow, mut max_right_overflow) = (0.0_f32, 0.0_f32);
+        let (mut has_left_overflow_glyph, mut has_right_overflow_glyph) = (false, false);
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
                 // Normalised endpoints: a negative advance (kerning) must not
@@ -915,23 +1056,27 @@ impl PositionedLine {
                 }
                 let tol = tolerance(lo.abs().max(hi.abs()), vw);
                 // A zero-advance glyph (combining mark) attaches to a base and
-                // has no extent, but its pen position must still lie in the
-                // body unless it rides on a hanging base.
+                // has no horizontal extent of its own. It is exempt from both
+                // containment and hanging: it neither overflows nor contributes
+                // a hanging extent. A line that declares hanging extent must
+                // still be backed by a non-zero-advance hanging glyph (checked
+                // below), so zero-width marks cannot fake it.
                 if g.advance == 0.0 {
-                    if !g.is_hanging && (g.x < -tol || g.x > vw + tol) {
-                        return Err(E::BodyGlyphOutsideBlock { run, glyph });
-                    }
                     continue;
                 }
                 if g.is_hanging {
-                    if lo < 0.0 && hi <= tol {
-                        left = left.max(-lo);
-                        has_left = true;
-                    } else if lo >= vw - tol && hi > lo {
-                        right = right.max(hi - vw);
-                        has_right = true;
-                    } else {
+                    let over_left = (0.0_f32 - lo).max(0.0);
+                    let over_right = (hi - vw).max(0.0);
+                    if over_left <= tol && over_right <= tol {
                         return Err(E::HangingGlyphInsideBlock { run, glyph });
+                    }
+                    if over_left > 0.0 {
+                        max_left_overflow = max_left_overflow.max(over_left);
+                        has_left_overflow_glyph = true;
+                    }
+                    if over_right > 0.0 {
+                        max_right_overflow = max_right_overflow.max(over_right);
+                        has_right_overflow_glyph = true;
                     }
                 } else if lo < -tol || hi > vw + tol {
                     return Err(E::BodyGlyphOutsideBlock { run, glyph });
@@ -939,10 +1084,23 @@ impl PositionedLine {
             }
         }
         for (side, expected, actual, present) in [
-            (HangSide::Left, left, self.hanging_left, has_left),
-            (HangSide::Right, right, self.hanging_right, has_right),
+            (
+                HangSide::Left,
+                max_left_overflow,
+                self.hanging_left,
+                has_left_overflow_glyph,
+            ),
+            (
+                HangSide::Right,
+                max_right_overflow,
+                self.hanging_right,
+                has_right_overflow_glyph,
+            ),
         ] {
-            if !approx_eq(expected, actual) {
+            // A declared extent must match the glyphs and come from at least
+            // one non-zero-advance hanging glyph, never from zero-width marks.
+            let extent_is_backed = actual <= 0.0 || present;
+            if !approx_eq(expected, actual) || !extent_is_backed {
                 return Err(E::HangingExtentMismatch {
                     side,
                     expected,
@@ -1028,9 +1186,7 @@ impl PositionedLine {
                         .filter(|g| {
                             !g.is_hanging
                                 && !g.is_synthesized
-                                && !g
-                                    .byte_range
-                                    .is_some_and(|b| b.start >= self.visible_byte_end)
+                                && g.byte_range.is_none_or(|b| b.start < self.visible_byte_end)
                         })
                 };
                 let mut ranges = glyphs().map(|g| g.byte_range);
@@ -1289,6 +1445,8 @@ mod tests {
 
     fn line(glyphs: Vec<PositionedGlyph>, width: f32, hang_l: f32, hang_r: f32) -> PositionedLine {
         PositionedLine {
+            atomic_fragments: vec![],
+
             byte_range: TextRange::new(0, 4),
             visible_byte_end: 4,
             baseline_y: 12.0,
@@ -1300,6 +1458,9 @@ mod tests {
             hanging_right: hang_r,
             is_justified: false,
             visual_runs: vec![VisualGlyphRun {
+                font_size: 16.0,
+                variations: Default::default(),
+
                 font: FontRef::unscaled(FontId(0)),
                 bidi_level: 0,
                 byte_range: TextRange::new(0, 4),
@@ -1597,17 +1758,10 @@ mod tests {
         let mut far = glyph(5.0, 10.0, false);
         far.x_offset = -50.0;
         assert!(line(vec![far], 20.0, 0.0, 0.0).is_valid(&ctx()));
-        // A pen position outside the body is wrong even for a zero advance.
-        let l = line(vec![glyph(-3.0, 0.0, false)], 20.0, 0.0, 0.0);
-        assert_eq!(
-            l.validate(&ctx()),
-            Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
-        );
-        let l = line(vec![glyph(25.0, 0.0, false)], 20.0, 0.0, 0.0);
-        assert!(matches!(
-            l.validate(&ctx()),
-            Err(LineInvariantError::BodyGlyphOutsideBlock { .. })
-        ));
+        // A zero advance has no horizontal extent, so its pen position is
+        // exempt from containment even outside the body.
+        assert!(line(vec![glyph(-3.0, 0.0, false)], 20.0, 0.0, 0.0).is_valid(&ctx()));
+        assert!(line(vec![glyph(25.0, 0.0, false)], 20.0, 0.0, 0.0).is_valid(&ctx()));
         // A zero-advance mark on a hanging base is flagged hanging and skipped.
         let l = line(
             vec![
@@ -1914,7 +2068,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hanging_glyph_is_gated_even_when_its_extent_is_negligible() {
+    fn a_hanging_glyph_with_negligible_overflow_is_rejected() {
         // Extent 1e-4 sits inside the tolerance, so `hanging_left` is 0.0.
         let l = line(
             vec![glyph(-1.0e-4, 1.0e-4, true), glyph(0.0, 20.0, false)],
@@ -1922,13 +2076,9 @@ mod tests {
             0.0,
             0.0,
         );
-        assert_eq!(
-            l.validate(&no_hang()),
-            Err(LineInvariantError::HangingNotAllowed {
-                side: HangSide::Left
-            })
-        );
-        assert_eq!(l.validate(&ctx()), Ok(()));
+        let expected = Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 0 });
+        assert_eq!(l.validate(&no_hang()), expected);
+        assert_eq!(l.validate(&ctx()), expected);
     }
 
     #[test]
@@ -2236,10 +2386,10 @@ mod tests {
     fn fragment_bidi_level_is_range_checked() {
         let mut l = spanned_line();
         let mut f = fragment(1, 0.0, 30.0, (0, 4));
-        f.bidi_level = crate::types::BIDI_MAX_DEPTH + 1;
+        f.bidi_level = BIDI_MAX_DEPTH + 1;
         l.span_fragments = vec![f];
         assert!(l.validate(&ctx()).is_ok());
-        l.span_fragments[0].bidi_level = crate::types::BIDI_MAX_DEPTH + 2;
+        l.span_fragments[0].bidi_level = BIDI_MAX_DEPTH + 2;
         assert_eq!(
             l.validate(&ctx()),
             Err(LineInvariantError::InvalidSpanFragment { index: 0 })

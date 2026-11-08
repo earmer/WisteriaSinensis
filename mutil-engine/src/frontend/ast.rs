@@ -36,8 +36,6 @@ pub struct HyphenOpportunity {
     /// Original bytes removed immediately **after** `byte_offset`; the same
     /// rules apply.
     pub suffix_cut_bytes: u32,
-    /// Break penalty (feeds the Knuth-Plass demerits, §5 Stage 1.6).
-    pub penalty: i32,
 }
 
 /// Kind of stretchable space (spec §2.4).
@@ -95,6 +93,12 @@ pub enum GlueTier {
 /// a [`DiscretionaryNode`] emitted by the frontend (see [`WordNode`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlueNode {
+    /// Original Unicode bidi class for L1.
+    pub original_bidi_class: crate::types::BidiClass,
+    /// Resolved level before line-local L1.
+    pub bidi_level: crate::types::BidiLevel,
+    /// Only collapsible trailing whitespace can disappear.
+    pub is_collapsible: bool,
     /// Source bytes (empty for `CjkAutospace` and `CjkPunctCompression`, which
     /// have `start == end`).
     pub byte_range: TextRange,
@@ -315,9 +319,13 @@ impl DiscretionaryNode {
         }
     }
 
-    /// A mandatory break. For `is_paragraph_end == false`, `newline` is the exact
-    /// non-empty range of the line terminator (`\n`, `\r\n`, U+2028, ...); for
-    /// `true` it is the empty range `text.len()..text.len()`.
+    /// A mandatory break. For `is_paragraph_end == false`, `newline` is the
+    /// exact non-empty range of a U+2028 line separator within a paragraph;
+    /// paragraph separators (`\n`, `\r`, `\r\n`, U+0085, U+2029, U+001C–U+001E)
+    /// are not allowed here because a paragraph AST covers one paragraph only.
+    /// Split document text with
+    /// [`split_paragraphs`](crate::frontend::split_paragraphs) first. For
+    /// `is_paragraph_end == true` the range is `text.len()..text.len()`.
     #[must_use]
     pub fn hard_break(newline: TextRange, is_paragraph_end: bool) -> Self {
         Self {
@@ -400,9 +408,9 @@ impl WordNode {
 
     /// Checks the `atom_range` invariants documented on [`ShapedCluster`] for a
     /// `Box::Text` (the clusters partition its atoms, in order, with matching
-    /// byte ranges) and that its `byte_range` runs from the first atom's start
-    /// to the last atom's end (an empty one has no atoms). Every other node is
-    /// trivially self-contained.
+    /// byte ranges) and that its atoms tile `byte_range` contiguously, running
+    /// from the first atom's start to the last atom's end (an empty one has no
+    /// atoms). Every other node is trivially self-contained.
     #[must_use]
     pub fn is_self_contained(&self) -> bool {
         match self {
@@ -419,11 +427,13 @@ impl WordNode {
                     }
                     _ => byte_range.is_empty(),
                 };
-                let ordered = atoms
+                let atoms_tile_range = atoms
                     .windows(2)
-                    .all(|w| w[0].byte_range.end <= w[1].byte_range.start)
-                    && atoms.iter().all(|a| a.byte_range.start <= a.byte_range.end);
-                span_ok && ordered && clusters_partition_atoms(atoms, clusters)
+                    .all(|pair| pair[0].byte_range.end == pair[1].byte_range.start)
+                    && atoms
+                        .iter()
+                        .all(|atom| atom.byte_range.start <= atom.byte_range.end);
+                span_ok && atoms_tile_range && clusters_partition_atoms(atoms, clusters)
             }
             _ => true,
         }

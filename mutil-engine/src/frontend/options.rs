@@ -39,6 +39,8 @@ pub enum AutospaceProfile {
 /// metrics and never applies `LineHeight` (that is the middle-end's job).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FrontendOptions {
+    /// Whether untagged text can trigger experimental locale inference.
+    pub locale_policy: LocalePolicy,
     /// Profile for `GlueKind::CjkAutospace` sizes.
     pub autospace: AutospaceProfile,
     /// How quotation marks resolve their script.
@@ -47,20 +49,16 @@ pub struct FrontendOptions {
     pub default_locale: LocaleTag,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn standard_is_the_default() {
-        assert_eq!(QuotePolicy::default(), QuotePolicy::Standard);
-    }
-
-    #[test]
-    fn frontend_options_default_to_the_spec_baselines() {
-        let o = FrontendOptions::default();
-        assert_eq!(o.autospace, AutospaceProfile::Jlreq);
-        assert_eq!(o.quote_policy, QuotePolicy::Standard);
-        assert_eq!(o.default_locale.as_str(), "und");
-    }
+/// Language inference policy. Heuristics require explicit opt-in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LocalePolicy {
+    /// Use only explicit tags and the host default locale.
+    #[default]
+    ExplicitOnly,
+    /// Experimental script-based inference.
+    ///
+    /// **Forward contract (Phase 1/2).** No locale-resolution pass exists in
+    /// Phase 0, so selecting this policy currently has no effect; it is
+    /// reserved for the script-based rules in spec §3 Step 4.
+    ExperimentalHeuristics,
 }

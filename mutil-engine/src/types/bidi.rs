@@ -64,3 +64,32 @@ mod tests {
         assert_eq!(Direction::Rtl.base_level(), 1);
     }
 }
+
+/// Original UAX #9 bidi class, retained for line-local L1 processing.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BidiClass {
+    L,
+    R,
+    Al,
+    En,
+    Es,
+    Et,
+    An,
+    Cs,
+    Nsm,
+    Bn,
+    B,
+    S,
+    Ws,
+    On,
+    Lre,
+    Lro,
+    Rle,
+    Rlo,
+    Pdf,
+    Lri,
+    Rli,
+    Fsi,
+    Pdi,
+}

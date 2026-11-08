@@ -2,7 +2,7 @@
 
 use crate::frontend::{HyphenOpportunity, ShapingRun};
 use crate::types::{
-    Direction, FontFamily, FontFeatures, FontId, FontMetrics, FontRef, FontStyle, GraphemeAtom,
+    Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, GraphemeAtom,
     LocaleTag, ScriptTag, ShapedCluster, TextRange,
 };
 use smallvec::SmallVec;
@@ -102,6 +102,8 @@ impl TrailingEdit {
 /// Output vectors are **appended to, never cleared**: callers own the buffer
 /// and may reuse its capacity.
 pub trait TextShaper: Send + Sync {
+    /// Metrics of the actual font instance, without line-height policy.
+    fn font_metrics(&self, instance: FontInstanceRef<'_>) -> FontMetrics;
     /// Resolves the primary font for a style and returns its identifier and
     /// complete metrics (§4.5). Used for the paragraph strut.
     fn resolve_primary_font_metrics(
@@ -133,9 +135,6 @@ pub trait TextShaper: Send + Sync {
         text: &str,
         run: &ShapingRun,
         atoms: &[GraphemeAtom],
-        families: &[FontFamily],
-        font_size: f32,
-        features: &FontFeatures,
         output_clusters: &mut Vec<ShapedCluster>,
     );
 
@@ -146,8 +145,7 @@ pub trait TextShaper: Send + Sync {
     /// needed for a sound splice):
     /// * `atoms`: the *same* run-local atom slice that was given to
     ///   `shape_run` for this run;
-    /// * `features`: the *same* settings, since re-shaping with different
-    ///   features (`chws`, `locl`, variations) would not splice.
+    /// * All features, variations, size and families come from `run`.
     ///
     /// Contract:
     /// * `window` is in paragraph text coordinates, lies within
@@ -183,7 +181,6 @@ pub trait TextShaper: Send + Sync {
         run: &ShapingRun,
         atoms: &[GraphemeAtom],
         window: TextRange,
-        features: &FontFeatures,
         leading_edit: LeadingEdit,
         trailing_edit: TrailingEdit,
         output_clusters: &mut Vec<ShapedCluster>,
@@ -203,10 +200,9 @@ pub trait TextShaper: Send + Sync {
     /// "physical pixels" here means "the same units as `font_size`".
     fn ligature_carets(
         &self,
-        font: FontRef,
+        instance: FontInstanceRef<'_>,
         glyph_id: u32,
         direction: Direction,
-        font_size: f32,
     ) -> SmallVec<[f32; 4]>;
 }
 
@@ -262,7 +258,6 @@ mod tests {
             suffix_replacement: suffix.map(Into::into),
             prefix_cut_bytes: prefix_cut,
             suffix_cut_bytes: suffix_cut,
-            penalty: 0,
         }
     }
 

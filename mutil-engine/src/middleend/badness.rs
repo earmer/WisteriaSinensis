@@ -19,6 +19,8 @@ pub const OVERFULL_BADNESS: f32 = 1_000_000.0;
 pub const OVERFULL_RATIO: f32 = -2.0;
 /// Ceiling of the badness of an underfull line with nothing to stretch.
 pub const UNDERFULL_BADNESS_CAP: f32 = 100_000.0;
+/// Maximum underfull badness; saturated candidates retain excess-slack ordering.
+pub const MAX_BADNESS: f32 = UNDERFULL_BADNESS_CAP;
 
 /// Stretch and shrink capacity of a candidate line, per tier.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -61,13 +63,24 @@ pub struct LineFit {
     pub badness: f32,
     /// `true` when the line cannot be compressed to `wrap_width`.
     pub overfull: bool,
+    /// `f64` bits of finite nonnegative excess slack, for saturated-score
+    /// ties. Kept at `f64` precision so distinct excesses do not collapse to
+    /// the same key.
+    pub excess_slack_bits: u64,
 }
 
 impl LineFit {
+    /// Lower keys win; excess slack breaks ties between saturated scores.
+    #[must_use]
+    pub fn comparison_key(&self) -> (u32, u64) {
+        (self.badness.to_bits(), self.excess_slack_bits)
+    }
+
     const OVERFULL: Self = Self {
         ratio: OVERFULL_RATIO,
         badness: OVERFULL_BADNESS,
         overfull: true,
+        excess_slack_bits: 0,
     };
 }
 
@@ -131,12 +144,17 @@ pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
         ratio: ratio as f32,
         badness: badness as f32,
         overfull: false,
+        excess_slack_bits: 0,
     };
-    // A: exact fit.
+    let fit_excess = |ratio: f64, badness: f64, excess: f64| LineFit {
+        ratio: ratio as f32,
+        badness: badness as f32,
+        overfull: false,
+        excess_slack_bits: excess.max(0.0).to_bits(),
+    };
     if slack.abs() <= f64::from(FIT_EPSILON) {
         return fit(0.0, 0.0);
     }
-    // B: compression.
     if slack < 0.0 {
         if z <= f64::from(CAPACITY_EPSILON) || -slack > z {
             return LineFit::OVERFULL;
@@ -144,26 +162,32 @@ pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
         let ratio = slack / z;
         return fit(ratio, 100.0 * ratio.abs().powi(3));
     }
+    let has_tier2 = stretch[2] > 0.0;
+    let has_primary = y01 > 0.0;
     if slack <= y01 {
-        // C: primary expansion (slack > FIT_EPSILON, so y01 > FIT_EPSILON).
         let r = slack / y01;
         fit(r, 100.0 * r.powi(3))
     } else if slack <= y_total {
-        // D: Tier 2 absorbs the rest (y_total > y01, so Y_2 > 0).
         let r2 = (slack - y01) / stretch[2];
-        fit(1.0 + r2, 100.0 + 300.0 * r2.powi(3))
+        if has_primary {
+            fit(1.0 + r2, 100.0 + 300.0 * r2.powi(3))
+        } else {
+            // Tier2 only: start at 0, reach 400 at top (C0 with A and E base).
+            fit(1.0 + r2, 400.0 * r2.powi(3))
+        }
     } else {
-        // E, stretch exhausted. One rule for every `y_total`, zero included: the
-        // excess no tier can absorb is measured against the font size, so the
-        // curve is C0 with D at `slack == y_total` (r = 2, b = 400), strictly
-        // monotone in the capacity (a larger `y_total` shrinks the excess) and
-        // capped below the overfull value. When Tier 2 is empty, case C ends at
-        // 100 and E starts at 400: that step is the ruled baseline (spec row 97).
+        // E: C0 base 400 (Tier2) / 100 (primary only) / 0 (none).
+        let base: f64 = if has_tier2 {
+            400.0
+        } else if has_primary {
+            100.0
+        } else {
+            0.0
+        };
         let r_excess = (slack - y_total) / f64::from(font_size).max(1.0);
-        fit(
-            2.0 + r_excess,
-            (400.0 + 400.0 * r_excess.powi(3)).min(f64::from(UNDERFULL_BADNESS_CAP)),
-        )
+        let excess = slack - y_total;
+        let bad = (base + 400.0 * r_excess.powi(3)).min(f64::from(MAX_BADNESS));
+        fit_excess(2.0 + r_excess, bad, excess)
     }
 }
 
@@ -246,8 +270,8 @@ mod tests {
     #[test]
     fn a_line_with_nothing_to_stretch_uses_the_same_rule() {
         let none = TierCapacities::default();
-        let f = line_fit(32.0, &none, 16.0); // r_excess = 2
-        assert!(close(f.ratio, 4.0) && close(f.badness, 3600.0));
+        let f = line_fit(32.0, &none, 16.0); // r_excess = 2, base 0
+        assert!(close(f.ratio, 4.0) && close(f.badness, 3200.0));
         // Tiny font sizes fall back to a unit of 1.
         assert!(close(line_fit(2.0, &none, 0.0).ratio, 4.0));
         // The cap holds, and sits below the overfull badness.
@@ -261,7 +285,8 @@ mod tests {
         // old 1e-5 threshold, and nothing exceeds the cap (so no f32 overflow).
         let slack = 100.0;
         let mut last = f32::INFINITY;
-        for y in [0.0, 5e-6, 1e-5, 2e-5, 1e-4, 1e-2, 1.0, 10.0, 50.0] {
+        for y in [5e-6, 1e-5, 2e-5, 1e-4, 1e-2, 1.0, 10.0, 50.0] {
+            // Y=0 uses base 0, not on this chain
             let cap = TierCapacities {
                 stretch: [y, 0.0, 0.0],
                 ..Default::default()

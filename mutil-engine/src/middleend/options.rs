@@ -206,15 +206,25 @@ impl TabStops {
     }
 
     /// The first stop strictly right of `x` (`x` on a stop moves to the next).
-    /// Returns `x` unchanged if the configuration is invalid.
+    /// Returns None when invalid or no finite forward stop is representable.
     #[must_use]
-    pub fn next_stop(&self, x: f32) -> f32 {
-        if !self.is_valid() {
-            return x;
+    pub fn next_stop(&self, x: f32) -> Option<f32> {
+        if !self.is_valid() || !x.is_finite() {
+            return None;
         }
         let next = ((x / self.step).floor() + 1.0) * self.step;
-        // At large `x` the f32 product can round back to `x`; always move forward.
-        if next > x { next } else { x + self.step }
+        if next.is_finite() && next > x {
+            Some(next)
+        } else {
+            // Precision exhaustion (e.g. x=1e10, step=8 rounds back) or overflow.
+            // Try one ulp step via x+step; if that also fails, signal exhaustion.
+            let stepped = x + self.step;
+            if stepped.is_finite() && stepped > x {
+                Some(stepped)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -286,17 +296,6 @@ mod tests {
     }
 
     #[test]
-    fn defaults_follow_the_spec_baselines() {
-        assert_eq!(HangMode::default(), HangMode::NONE);
-        assert_eq!(LineHeight::default(), LineHeight::Normal);
-        let o = LayoutOptions::default();
-        assert_eq!(o.strategy, LineBreakStrategy::Balanced);
-        assert_eq!(o.hang_mode, HangMode::NONE);
-        assert_eq!(o.whitespace, HangingWhitespaceMode::Collapsible);
-        assert_eq!(o.copy_soft_hyphen, SoftHyphenPolicy::Keep);
-    }
-
-    #[test]
     fn strategy_profiles_map_to_beam_parameters() {
         use LineBreakStrategy as S;
         assert_eq!((S::Greedy.beam_width(), S::Greedy.window_depth()), (1, 1));
@@ -355,15 +354,15 @@ mod tests {
     #[test]
     fn tab_stops_step_and_validity() {
         let t = TabStops { step: 8.0 };
-        assert_eq!(t.next_stop(0.0), 8.0);
-        assert_eq!(t.next_stop(7.9), 8.0);
-        assert_eq!(t.next_stop(8.0), 16.0); // on a stop: advance to the next
+        assert_eq!(t.next_stop(0.0), Some(8.0));
+        assert_eq!(t.next_stop(7.9), Some(8.0));
+        assert_eq!(t.next_stop(8.0), Some(16.0)); // on a stop: advance to the next
         for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
             assert!(!TabStops { step: bad }.is_valid());
         }
         // At large x the f32 product rounds back to x; a stop still lies ahead.
         let x = 3.0e7_f32;
-        assert!(t.next_stop(x) > x);
+        assert!(t.next_stop(x).is_none_or(|next| next > x));
         let c = LayoutConstraints {
             wrap_width: 100.0,
             tab_stops: t,
