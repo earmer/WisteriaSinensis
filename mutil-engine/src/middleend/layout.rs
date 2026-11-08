@@ -113,6 +113,23 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::decoration_spans`.
         span: usize,
     },
+    /// An item starts before the previous item ends: `items` must progress
+    /// monotonically through the text (`prev.end <= next.start`).
+    ItemsOutOfOrder {
+        /// Index into `ParagraphAst::items` of the later item.
+        item: usize,
+    },
+    /// An item is on the wrong side of a decoration span's boundaries: an item
+    /// inside `byte_range` is not strictly between the `Leading` and `Trailing`
+    /// nodes, an item outside it is between them, a break opportunity at the
+    /// span's start is not before the `Leading` node (or one at its end not
+    /// after the `Trailing` node), or an item straddles a span edge.
+    SpanEnclosure {
+        /// Index into `ParagraphAst::decoration_spans`.
+        span: usize,
+        /// Index into `ParagraphAst::items`.
+        item: usize,
+    },
     /// An atomic span is empty, does not fit the text, repeats a `span_id`,
     /// overlaps or nests with another atomic span, or has an edge that is not
     /// the start or end of a text atom or of an inline object (an edge inside
@@ -160,6 +177,15 @@ impl fmt::Display for LayoutInputError {
             }
             Self::InvalidDecorationSpan { span } => {
                 write!(f, "decoration span {span} is invalid or duplicated")
+            }
+            Self::ItemsOutOfOrder { item } => {
+                write!(f, "item {item} starts before the previous item ends")
+            }
+            Self::SpanEnclosure { span, item } => {
+                write!(
+                    f,
+                    "item {item} is misplaced relative to the boundaries of decoration span {span}"
+                )
             }
             Self::MissingParagraphEnd => {
                 f.write_str("the items do not end with the paragraph-end sentinel")
@@ -351,6 +377,74 @@ fn edge_cluster_width(items: &[WordNode], index: Option<usize>, last: bool) -> O
         }
         _ => None,
     }
+}
+
+/// Monotone progression: each item starts at or after the end of the previous
+/// one (zero-width nodes may share an offset).
+fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
+    for (i, w) in ast.items.windows(2).enumerate() {
+        if let (Some(prev), Some(next)) = (w[0].byte_span(), w[1].byte_span()) {
+            if prev.end > next.start {
+                return Err(LayoutInputError::ItemsOutOfOrder { item: i + 1 });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Enclosure of the boundaries (run after `check_boundary_order`, so both nodes
+/// of every span exist). With `lead` and `trail` the indices of a span's
+/// boundary nodes:
+///
+/// * a break opportunity at `s..s` (`s = byte_range.start`) sits before `lead`,
+///   one at `e..e` after `trail`, so breaking before or after the chip leaves
+///   both boundaries on the chip's line;
+/// * any other zero-width node at `s` or `e` (autospace, a neighbouring span's
+///   boundary) is unconstrained;
+/// * every other item inside `[s, e]` is strictly between `lead` and `trail`,
+///   every item outside is not between them, and none straddles an edge.
+fn check_span_enclosure(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
+    let find = |id: u64, wanted: SpanEdge| {
+        ast.items.iter().position(|n| {
+            matches!(n, WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. })
+                if *span_id == id && *edge == wanted)
+        })
+    };
+    for (span, s) in ast.decoration_spans.iter().enumerate() {
+        let (Some(lead), Some(trail)) = (
+            find(s.span_id, SpanEdge::Leading),
+            find(s.span_id, SpanEdge::Trailing),
+        ) else {
+            return Err(LayoutInputError::MissingSpanBoundary { span });
+        };
+        let (start, end) = (s.byte_range.start, s.byte_range.end);
+        for (item, n) in ast.items.iter().enumerate() {
+            if matches!(n, WordNode::Box(BoxNode::SpanBoundary { span_id, .. }) if *span_id == s.span_id)
+            {
+                continue;
+            }
+            let Some(r) = n.byte_span() else { continue };
+            let between = lead < item && item < trail;
+            let zero = r.is_empty();
+            let ok = if zero && n.is_break_opportunity() && r.start == start {
+                item < lead
+            } else if zero && n.is_break_opportunity() && r.start == end {
+                item > trail
+            } else if zero && (r.start == start || r.start == end) {
+                true
+            } else if r.start >= start && r.end <= end {
+                between
+            } else if r.end <= start || r.start >= end {
+                !between
+            } else {
+                false
+            };
+            if !ok {
+                return Err(LayoutInputError::SpanEnclosure { span, item });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Span boundaries: every decoration span has exactly one `Leading` and one
@@ -610,7 +704,9 @@ pub fn check_layout_inputs(
             ) => {}
         _ => return Err(E::MissingParagraphEnd),
     }
+    check_item_order(ast)?;
     check_boundary_order(ast)?;
+    check_span_enclosure(ast)?;
     let context = LineContext::from_options(
         m,
         ast.strut_font_size,
@@ -849,24 +945,37 @@ mod tests {
     }
 
     /// Adds the mandatory `Leading` / `Trailing` boundary pair of every
-    /// decoration span: all leading edges first (in slice order), all trailing
-    /// edges last (reversed), the sentinel staying final.
+    /// decoration span where the enclosure rule wants it: a `Leading` before the
+    /// first item that starts at or after the span start (a break opportunity
+    /// at the start stays before it), a `Trailing` before the first item that
+    /// starts at or after the span end. Equal edges come out nested (`Leading`s
+    /// inserted innermost first, `Trailing`s outermost last).
     fn closed(mut a: ParagraphAst) -> ParagraphAst {
-        let mut items: Vec<WordNode> = a
-            .decoration_spans
-            .iter()
-            .map(|s| bnd(s.span_id, SpanEdge::Leading, s.byte_range.start))
-            .collect();
-        let end = a.items.pop().expect("a sentinel");
-        items.append(&mut a.items);
-        items.extend(
-            a.decoration_spans
+        let spans = a.decoration_spans.clone();
+        for sp in spans.iter().rev() {
+            let at = a
+                .items
                 .iter()
-                .rev()
-                .map(|s| bnd(s.span_id, SpanEdge::Trailing, s.byte_range.end)),
-        );
-        items.push(end);
-        a.items = items;
+                .position(|n| {
+                    let r = n.byte_span().unwrap();
+                    r.start >= sp.byte_range.start
+                        && !(n.is_break_opportunity()
+                            && r.is_empty()
+                            && r.start == sp.byte_range.start)
+                })
+                .unwrap_or(a.items.len() - 1);
+            a.items
+                .insert(at, bnd(sp.span_id, SpanEdge::Leading, sp.byte_range.start));
+        }
+        for sp in &spans {
+            let at = a
+                .items
+                .iter()
+                .position(|n| n.byte_span().unwrap().start >= sp.byte_range.end)
+                .unwrap_or(a.items.len() - 1);
+            a.items
+                .insert(at, bnd(sp.span_id, SpanEdge::Trailing, sp.byte_range.end));
+        }
         a
     }
 
@@ -1121,10 +1230,13 @@ mod tests {
         let o = LayoutOptions::default();
         // A hyphenation break at 2 inside a cloning chip over 1..3: both apply.
         let mut a = hyphenated(opportunity(2, 0, 0));
+        // Boxes are split at the chip's start: "a" | "b" - "é".
+        a.items[0] = text_box(vec![atom(0, 1)]);
+        a.items.insert(1, text_box(vec![atom(1, 2)]));
         let mut over = chip(5, Clone);
         over.byte_range = TextRange::new(1, 4); // "b" and "é"
         a.decoration_spans = vec![over];
-        if let WordNode::Discretionary(d) = &mut a.items[1] {
+        if let WordNode::Discretionary(d) = &mut a.items[2] {
             d.cloned_spans.push(5);
             d.penalty += DiscretionaryNode::CLONED_SPAN_PENALTY;
         }
@@ -1482,6 +1594,127 @@ mod tests {
     }
 
     #[test]
+    fn items_progress_monotonically_and_spans_enclose_their_items() {
+        use crate::frontend::BoxDecorationBreak::Slice;
+        use SpanEdge::{Leading as L, Trailing as T};
+        let o = LayoutOptions::default();
+        let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
+        let a_ = || text_box(vec![atom(0, 1)]);
+        let b_ = || text_box(vec![atom(1, 2)]);
+        let c_ = || text_box(vec![atom(2, 3)]);
+        let d_ = || text_box(vec![atom(3, 4)]);
+        let brk = |at: usize| WordNode::Discretionary(DiscretionaryNode::direct(at));
+        let span = |a: ParagraphAst| {
+            let mut a = a;
+            a.decoration_spans = vec![chip(5, Slice)]; // bytes 1..3
+            a
+        };
+        // Monotone progression: a later item may not start before the previous
+        // one ends (zero-width nodes may share an offset).
+        assert_eq!(
+            check(with_items(vec![b_(), a_()])),
+            Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
+        );
+        assert!(check(with_items(vec![a_(), brk(1), b_(), brk(2), c_()])).is_ok());
+        assert_eq!(
+            check(with_items(vec![a_(), b_(), brk(1)])),
+            Err(LayoutInputError::ItemsOutOfOrder { item: 2 })
+        );
+        // Reopening a closed span is caught by the order check.
+        assert_eq!(
+            check(span(with_items(vec![
+                a_(),
+                bnd(5, L, 1),
+                b_(),
+                c_(),
+                bnd(5, T, 3),
+                bnd(5, L, 1),
+                bnd(5, T, 3),
+                d_(),
+            ]))),
+            Err(LayoutInputError::ItemsOutOfOrder { item: 5 })
+        );
+        // The well-formed chip: break before it, content between, break after.
+        let good = || {
+            vec![
+                a_(),
+                brk(1),
+                bnd(5, L, 1),
+                b_(),
+                brk(2),
+                c_(),
+                bnd(5, T, 3),
+                brk(3),
+                d_(),
+            ]
+        };
+        assert!(check(span(with_items(good()))).is_ok());
+        // A break at the start after Leading would strand the boundary on the
+        // previous line; one at the end before Trailing likewise.
+        let mut late = good();
+        late.swap(1, 2);
+        assert_eq!(
+            check(span(with_items(late))),
+            Err(LayoutInputError::SpanEnclosure { span: 0, item: 2 })
+        );
+        let mut early = good();
+        early.swap(6, 7);
+        assert_eq!(
+            check(span(with_items(early))),
+            Err(LayoutInputError::SpanEnclosure { span: 0, item: 6 })
+        );
+        // Content outside the chip may not sit between its boundaries, and
+        // content inside may not sit outside them.
+        let outside = span(with_items(vec![
+            a_(),
+            bnd(5, L, 1),
+            b_(),
+            c_(),
+            d_(),
+            bnd(5, T, 3),
+        ]));
+        assert!(check(outside).is_err());
+        let inside = span(with_items(vec![
+            a_(),
+            b_(),
+            bnd(5, L, 1),
+            c_(),
+            bnd(5, T, 3),
+            d_(),
+        ]));
+        assert!(check(inside).is_err());
+        // A box that straddles a span edge must have been split by the frontend.
+        let straddle = closed(span(with_items(vec![text_box(vec![
+            atom(0, 1),
+            atom(1, 2),
+        ])])));
+        // (No boundary can sit inside a box's range, so monotone order catches it.)
+        assert!(matches!(
+            check(straddle),
+            Err(LayoutInputError::ItemsOutOfOrder { .. })
+        ));
+        // Nested spans: the inner chip's nodes are inside the outer one.
+        let mut nested = with_items(vec![
+            bnd(1, L, 0),
+            a_(),
+            bnd(2, L, 1),
+            b_(),
+            bnd(2, T, 2),
+            c_(),
+            d_(),
+            bnd(1, T, 4),
+        ]);
+        let mut inner = chip(2, Slice);
+        inner.byte_range = TextRange::new(1, 2);
+        let mut outer = chip(1, Slice);
+        outer.byte_range = TextRange::new(0, 4);
+        nested.decoration_spans = vec![outer, inner];
+        // The sentinel at 4 follows Trailing(1) at 4: no stranded boundary.
+        let r = check(nested);
+        assert!(r.is_ok(), "{r:?}");
+    }
+
+    #[test]
     fn every_decoration_span_needs_both_boundaries_even_without_padding() {
         use crate::frontend::BoxDecorationBreak::Slice;
         use SpanEdge::{Leading as L, Trailing as T};
@@ -1493,8 +1726,10 @@ mod tests {
             s
         };
         let build = |boundaries: Vec<WordNode>| {
-            let mut items = vec![text_box(vec![atom(0, 1), atom(1, 2), atom(2, 3)])];
+            // "a", the boundaries (an empty chip), "d": boxes split at the edges.
+            let mut items = vec![text_box(vec![atom(0, 1)])];
             items.extend(boundaries);
+            items.push(text_box(vec![atom(3, 4)]));
             let mut a = with_items(items);
             a.decoration_spans = vec![zero(5)]; // bytes 1..3
             a
@@ -1516,12 +1751,12 @@ mod tests {
             vec![bnd(5, L, 1), bnd(5, T, 2)],
             vec![bnd(5, L, 1), bnd(5, L, 1), bnd(5, T, 3)],
             vec![bnd(5, L, 1), bnd(5, T, 3), bnd(5, T, 3)],
-            vec![bnd(5, L, 1), bnd(5, T, 3), bnd(5, L, 1), bnd(5, T, 3)],
         ] {
-            assert!(matches!(
-                check(build(wrong)),
-                Err(LayoutInputError::InvalidSpanBoundary { .. })
-            ));
+            let r = check(build(wrong));
+            assert!(
+                matches!(r, Err(LayoutInputError::InvalidSpanBoundary { .. })),
+                "{r:?}"
+            );
         }
     }
 
@@ -1530,12 +1765,11 @@ mod tests {
         use crate::frontend::BoxDecorationBreak::Slice;
         let o = LayoutOptions::default();
         let check = |deco: Vec<InlineDecorationSpan>, atomic: Vec<AtomicEditSpan>| {
-            let mut a = with_items(vec![text_box(vec![
-                atom(0, 1),
-                atom(1, 2),
-                atom(2, 3),
-                atom(3, 4),
-            ])]);
+            let mut a = with_items(
+                (0..4)
+                    .map(|i| text_box(vec![atom(i, i + 1)]))
+                    .collect::<Vec<_>>(),
+            );
             a.decoration_spans = deco;
             a.atomic_spans = atomic;
             check_layout_inputs(&closed(a), "abcd", &constraints(), &o)

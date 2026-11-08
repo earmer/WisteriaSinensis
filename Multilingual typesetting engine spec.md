@@ -139,6 +139,7 @@ Version-specific facts carry their dates. Where a source page is itself marked d
 | 96 | Atomic spans wrap content | Locked: an `AtomicEditSpan` must contain at least one text atom or inline object, besides having both edges on atom or object edges. A span of whitespace alone is invalid. | 2.5 |
 | 97 | Case E at zero stretch | Kept as implemented: with `Y_total == 0` and `Δ > ε` the line is genuinely underfull and starts at base badness 400; the jump from 0 is intended and the order among rigid underfull lines stays strict. | 5 Stage 1.6.3 |
 | 98 | Line emission | Every mandatory breakpoint, real or sentinel, terminates exactly one `PositionedLine`; N newlines give N + 1 lines. `items` must end with the sentinel (an empty paragraph included). | 5 Stage 1.6, Stage 4.2 |
+| 100 | Monotone items and span enclosure | `items` progress monotonically through the text (`prev.end <= next.start`). Items inside a span lie strictly between its `Leading` and `Trailing` nodes, items outside do not; a break opportunity at `s..s` precedes `Leading`, one at `e..e` follows `Trailing`, so breaking beside a chip never strands a boundary on the adjacent line. | 2.5 |
 | 99 | Mandatory boundary pair | Every decoration span has exactly one `Leading` boundary at `byte_range.start` and one `Trailing` at `byte_range.end` in `items`, even with zero padding, in strict LIFO order. | 2.4, 2.5, 5 Stage 2 |
 
 ---
@@ -409,6 +410,13 @@ pub struct ParagraphAst {
 //                   byte_range.start and one SpanBoundary(Trailing) at byte_range.end in items, even when the
 //                   padding is zero; they mark is_first_fragment / is_last_fragment after bidi reordering
 //                   (5 Stage 2) without cross-referencing atom offsets. Missing nodes: MissingSpanBoundary.
+//  Item order and enclosure (row 100; ItemsOutOfOrder, SpanEnclosure):
+//                   items are monotone by byte range (prev.end <= next.start; zero-width nodes may share an
+//                   offset). For a span [s, e) with boundary indices idx_lead < idx_trail: every item inside
+//                   [s, e] sits strictly between them, every item outside does not; a Discretionary at s..s has
+//                   index < idx_lead, one at e..e index > idx_trail. Other zero-width nodes at s or e (autospace
+//                   glue, a neighbouring span's boundary) are unconstrained. Frontends therefore split boxes at
+//                   span edges; a box that straddles an edge fails the monotone check.
 //  SpanBoundary order: strict LIFO. At byte_range.start the outer span's Leading precedes the inner's; at
 //                   byte_range.end the inner's Trailing precedes the outer's. check_layout_inputs rejects a
 //                   Trailing that closes a span other than the innermost open one, a repeated Leading, and
