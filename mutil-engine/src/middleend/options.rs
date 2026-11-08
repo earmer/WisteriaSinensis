@@ -131,17 +131,51 @@ pub enum HangingWhitespaceMode {
     Preserved,
 }
 
-/// Line-breaking strategy (spec §5 Stage 1.6). The pair is the standard
-/// dichotomy (Typst `Simple`/`Optimized`, Android `SIMPLE`/`HIGH_QUALITY`) `[L3][L6]`.
+/// Line-breaking strategy (spec §5 Stage 1.6.1): a **profile** of one
+/// parameterised beam-lookahead state machine, not a choice between code paths.
+///
+/// | Profile | `beam_width` | `window_depth` | Use |
+/// |---|---|---|---|
+/// | `Greedy` | 1 | 1 | monospace code, logs, UAX #14 oracle tests |
+/// | `Balanced` (default) | 2 | 2 | interactive rich-text editing |
+/// | `Publication` | 8 | 6 | static reading view, print export |
+///
+/// The pair (Typst `Simple`/`Optimized`, Android `SIMPLE`/`HIGH_QUALITY`) is the
+/// standard dichotomy `[L3][L6]`; here it is the two ends of a continuum.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LineBreakStrategy {
-    /// Strategy A: first-fit greedy with the overflow ladder. Each line depends
+    /// Beam 1, window 1: first-fit with the overflow ladder. Each line depends
     /// only on its start, which allows resynchronising incremental relayout.
-    #[default]
     Greedy,
-    /// Strategy B: global optimisation over the whole paragraph or a bounded
-    /// window (Knuth-Plass demerits, §5 Stage 1.6).
-    GlobalOptimal,
+    /// Beam 2, window 2: the engine default. Stack-only state.
+    #[default]
+    Balanced,
+    /// Beam 8, window 6, with dominator pruning: Knuth-Plass quality over a
+    /// bounded window.
+    Publication,
+}
+
+impl LineBreakStrategy {
+    /// Number of candidate paths kept alive (`K`).
+    #[must_use]
+    pub const fn beam_width(self) -> usize {
+        match self {
+            Self::Greedy => 1,
+            Self::Balanced => 2,
+            Self::Publication => 8,
+        }
+    }
+
+    /// Number of lines a candidate is looked ahead before the oldest is
+    /// committed (`W`).
+    #[must_use]
+    pub const fn window_depth(self) -> usize {
+        match self {
+            Self::Greedy => 1,
+            Self::Balanced => 2,
+            Self::Publication => 6,
+        }
+    }
 }
 
 /// Clipboard policy for an actual U+00AD in the source text (spec §6.6, the
@@ -190,9 +224,12 @@ impl TabStops {
 pub struct LayoutConstraints {
     /// Available layout width of the container, in layout units. Must be finite
     /// and non-negative. Hanging punctuation and `Preserved` trailing
-    /// whitespace may extend beyond it, and an unbreakable word wider than it
-    /// overflows (§5 Stage 1.6), so a line's `visual_width` is not validated
-    /// against it.
+    /// whitespace may extend beyond it. `PositionedLine::validate` checks a
+    /// line's `visual_width` against it within tolerance; a line may be wider
+    /// only in the single-entity overflow state (a lone `AllowOverflow` box, or
+    /// one indivisible cluster after the emergency break, §5 Stage 1.5). A
+    /// line of several clusters wider than the width fails validation: an
+    /// unbreakable word is split by the emergency break, not left to overflow.
     pub wrap_width: f32,
     /// Tab stops.
     pub tab_stops: TabStops,
@@ -253,10 +290,24 @@ mod tests {
         assert_eq!(HangMode::default(), HangMode::NONE);
         assert_eq!(LineHeight::default(), LineHeight::Normal);
         let o = LayoutOptions::default();
-        assert_eq!(o.strategy, LineBreakStrategy::Greedy);
+        assert_eq!(o.strategy, LineBreakStrategy::Balanced);
         assert_eq!(o.hang_mode, HangMode::NONE);
         assert_eq!(o.whitespace, HangingWhitespaceMode::Collapsible);
         assert_eq!(o.copy_soft_hyphen, SoftHyphenPolicy::Keep);
+    }
+
+    #[test]
+    fn strategy_profiles_map_to_beam_parameters() {
+        use LineBreakStrategy as S;
+        assert_eq!((S::Greedy.beam_width(), S::Greedy.window_depth()), (1, 1));
+        assert_eq!(
+            (S::Balanced.beam_width(), S::Balanced.window_depth()),
+            (2, 2)
+        );
+        assert_eq!(
+            (S::Publication.beam_width(), S::Publication.window_depth()),
+            (8, 6)
+        );
     }
 
     #[test]

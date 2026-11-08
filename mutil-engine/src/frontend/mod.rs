@@ -6,7 +6,14 @@
 mod ast;
 mod options;
 mod run;
+mod span;
 
-pub use ast::{GlueKind, HyphenOpportunity, ParagraphAst, PunctBind, ReplacementText, WordNode};
+pub use ast::{
+    BoxNode, BoxOverflowPolicy, BreakAction, DiscretionaryNode, GlueKind, GlueNode, GlueTier,
+    HyphenOpportunity, ParagraphAst, ReplacementText, SpanEdge, WordNode,
+};
 pub use options::{AutospaceProfile, FrontendOptions, QuotePolicy};
 pub use run::{ShapingRun, TextDecoration};
+pub use span::{
+    AtomicEditSpan, BoxDecorationBreak, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH,
+};
