@@ -27,9 +27,23 @@ pub struct ParagraphSlice {
     /// Following separator, or an empty range at document end.
     pub separator: crate::types::TextRange,
 }
+/// `true` for a character that ends a paragraph.
+///
+/// The UAX #9 class B characters are `\n`, `\r`, U+0085, U+2029 and
+/// U+001C–U+001E. U+000B and U+000C are application-policy separators (their
+/// bidi classes are `S` and `WS`), included so that a document split treats
+/// them like the other line/paragraph terminators.
+#[must_use]
+pub fn is_paragraph_separator(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{85}' | '\u{2029}' | '\u{1c}'..='\u{1e}' | '\u{b}' | '\u{c}'
+    )
+}
+
 /// Splits document text, preserving empty paragraphs and source offsets.
-/// Paragraph separators are exactly UAX #9: `\n`, `\r`, `\r\n`, U+0085,
-/// U+000B, U+000C, U+2029. U+2028 is not a separator. Empty input yields one
+/// Paragraph separators are [`is_paragraph_separator`] characters; a CRLF
+/// pair is one separator. U+2028 is not a separator. Empty input yields one
 /// empty slice; trailing separator yields a final empty slice.
 pub fn split_paragraphs(text: &str) -> Vec<ParagraphSlice> {
     let bytes = text.as_bytes();
@@ -46,7 +60,7 @@ pub fn split_paragraphs(text: &str) -> Vec<ParagraphSlice> {
                     (1, true)
                 }
             }
-            0x0B | 0x0C => (1, true),
+            0x0B | 0x0C | 0x1C..=0x1E => (1, true),
             0xC2 if i + 1 < bytes.len() && bytes[i + 1] == 0x85 => (2, true),
             0xE2 if i + 2 < bytes.len() && bytes[i + 1] == 0x80 && bytes[i + 2] == 0xA9 => {
                 (3, true)

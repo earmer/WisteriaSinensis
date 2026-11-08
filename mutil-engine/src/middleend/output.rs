@@ -342,6 +342,13 @@ pub enum LineInvariantError {
     NonFiniteOrNegativeExtent,
     /// `baseline_y`, `ascent`, `descent` or `line_height` is NaN or infinite.
     NonFiniteLineMetrics,
+    /// A line height or the resolved strut height is not positive.
+    NonPositiveLineHeight {
+        /// `VerticalMetrics::natural_line_height()` of the strut.
+        expected: f32,
+        /// The line's `line_height`.
+        actual: f32,
+    },
     /// `visible_byte_end` lies outside `byte_range`.
     VisibleEndOutsideRange,
     /// An empty line (`byte_range.start == byte_range.end`) has visual runs.
@@ -370,6 +377,17 @@ pub enum LineInvariantError {
         minimum: f32,
         /// The line's `line_height`.
         actual: f32,
+    },
+    /// A visual run's font size, fallback scale or a variation coordinate is
+    /// non-finite or non-positive.
+    InvalidVisualRun {
+        /// Index into `visual_runs`.
+        run: usize,
+    },
+    /// An atomic fragment's geometry, byte ranges or bidi level is invalid.
+    InvalidAtomicFragment {
+        /// Index into `atomic_fragments`.
+        index: usize,
     },
     /// A glyph's `x`, `x_offset`, `advance` or `y_offset` is NaN or infinite.
     NonFiniteGlyph {
@@ -425,6 +443,8 @@ pub enum LineInvariantError {
     EmptyLineHasTabs,
     /// An empty line has span fragments.
     EmptyLineHasSpanFragments,
+    /// An empty line has atomic fragments.
+    EmptyLineHasAtomicFragments,
     /// A span fragment has a non-finite coordinate or a negative size.
     InvalidSpanFragment {
         /// Index into `span_fragments`.
@@ -531,6 +551,18 @@ impl fmt::Display for LineInvariantError {
             Self::NonFiniteLineMetrics => {
                 f.write_str("baseline_y, ascent, descent or line_height is not finite")
             }
+            Self::NonPositiveLineHeight { expected, actual } => {
+                write!(
+                    f,
+                    "line height {actual} or strut height {expected} is not positive"
+                )
+            }
+            Self::InvalidVisualRun { run } => {
+                write!(f, "visual run {run} has an invalid font instance")
+            }
+            Self::InvalidAtomicFragment { index } => {
+                write!(f, "atomic fragment {index} has invalid geometry or ranges")
+            }
             Self::VisibleEndOutsideRange => f.write_str("visible_byte_end lies outside byte_range"),
             Self::EmptyLineHasVisualRuns => f.write_str("an empty line has visual runs"),
             Self::EmptyLineHasBoxes => f.write_str("an empty line has inline boxes"),
@@ -597,6 +629,7 @@ impl fmt::Display for LineInvariantError {
             }
             Self::EmptyLineHasTabs => f.write_str("an empty line has tabs"),
             Self::EmptyLineHasSpanFragments => f.write_str("an empty line has span fragments"),
+            Self::EmptyLineHasAtomicFragments => f.write_str("an empty line has atomic fragments"),
             Self::InvalidSpanFragment { index } => {
                 write!(
                     f,
@@ -777,6 +810,14 @@ impl PositionedLine {
             return Err(E::NonFiniteLineMetrics);
         }
         for (run, r) in self.visual_runs.iter().enumerate() {
+            if !(r.font_size.is_finite()
+                && r.font_size > 0.0
+                && r.font.scale.is_finite()
+                && r.font.scale > 0.0
+                && r.variations.iter().all(|v| v.value().is_finite()))
+            {
+                return Err(E::InvalidVisualRun { run });
+            }
             for (glyph, g) in r.glyphs.iter().enumerate() {
                 let finite = g.x.is_finite()
                     && g.x_offset.is_finite()
@@ -810,6 +851,19 @@ impl PositionedLine {
                 return Err(E::InvalidSpanFragment { index });
             }
         }
+        for (index, f) in self.atomic_fragments.iter().enumerate() {
+            let finite = f.x_start.is_finite() && f.x_end.is_finite();
+            let ranges_ok = f.full_byte_range.start <= f.full_byte_range.end
+                && f.fragment_byte_range.start <= f.fragment_byte_range.end
+                && f.full_byte_range.contains_range(f.fragment_byte_range);
+            if !(finite
+                && ranges_ok
+                && f.x_start <= f.x_end
+                && f.bidi_level <= crate::types::BIDI_MAX_DEPTH + 1)
+            {
+                return Err(E::InvalidAtomicFragment { index });
+            }
+        }
         for (index, c) in self.caret_stops.iter().enumerate() {
             if !c.x.is_finite() {
                 return Err(E::NonFiniteCaretStop { index });
@@ -833,13 +887,22 @@ impl PositionedLine {
         if !(range.start <= self.visible_byte_end && self.visible_byte_end <= range.end) {
             return Err(E::VisibleEndOutsideRange);
         }
+        // `full_byte_range` may span the whole wrapped atomic span; only the
+        // bytes on this visual fragment must lie inside the line.
+        if let Some(index) = self
+            .atomic_fragments
+            .iter()
+            .position(|f| !range.contains_range(f.fragment_byte_range))
+        {
+            return Err(E::InvalidAtomicFragment { index });
+        }
         let expected = ctx.strut.natural_line_height();
         if !(self.line_height.is_finite()
             && self.line_height > 0.0
             && expected.is_finite()
             && expected > 0.0)
         {
-            return Err(E::LineHeightMismatch {
+            return Err(E::NonPositiveLineHeight {
                 expected,
                 actual: self.line_height,
             });
@@ -856,6 +919,9 @@ impl PositionedLine {
             }
             if !self.span_fragments.is_empty() {
                 return Err(E::EmptyLineHasSpanFragments);
+            }
+            if !self.atomic_fragments.is_empty() {
+                return Err(E::EmptyLineHasAtomicFragments);
             }
             if !approx_eq(self.line_height, expected) {
                 return Err(E::EmptyLineHeightMismatch {

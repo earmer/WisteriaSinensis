@@ -96,6 +96,38 @@ fn valid_gdef_carets_are_preserved() {
     assert_eq!(resolve_ligature_carets(30., 3, &[8., 21.]), vec![8., 21.]);
 }
 #[test]
+fn non_finite_or_non_positive_width_yields_no_carets() {
+    for width in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0] {
+        assert!(resolve_ligature_carets(width, 3, &[8., 21.]).is_empty());
+    }
+}
+#[test]
+fn huge_width_fallback_carets_stay_finite_and_ordered() {
+    let carets = resolve_ligature_carets(f32::MAX, 4, &[]);
+    assert!(carets.iter().all(|v| v.is_finite() && *v > 0.0));
+    assert!(carets.windows(2).all(|w| w[0] < w[1]));
+}
+#[test]
+fn information_separators_split_paragraphs() {
+    for c in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{b}', '\u{c}'] {
+        let text = format!("a{c}b");
+        assert_eq!(
+            split_paragraphs(&text),
+            vec![
+                ParagraphSlice {
+                    content: TextRange::new(0, 1),
+                    separator: TextRange::new(1, 2)
+                },
+                ParagraphSlice {
+                    content: TextRange::new(2, 3),
+                    separator: TextRange::empty_at(3)
+                },
+            ],
+            "{c:?}"
+        );
+    }
+}
+#[test]
 fn tab_precision_exhaustion_returns_none() {
     assert_eq!(TabStops { step: 8. }.next_stop(1e10), None);
     assert_eq!(TabStops { step: 8. }.next_stop(f32::MAX), None);

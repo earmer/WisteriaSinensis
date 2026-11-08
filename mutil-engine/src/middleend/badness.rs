@@ -63,14 +63,16 @@ pub struct LineFit {
     pub badness: f32,
     /// `true` when the line cannot be compressed to `wrap_width`.
     pub overfull: bool,
-    /// Bits of finite nonnegative excess slack, for saturated-score ties.
-    pub excess_slack_bits: u32,
+    /// `f64` bits of finite nonnegative excess slack, for saturated-score
+    /// ties. Kept at `f64` precision so distinct excesses do not collapse to
+    /// the same key.
+    pub excess_slack_bits: u64,
 }
 
 impl LineFit {
     /// Lower keys win; excess slack breaks ties between saturated scores.
     #[must_use]
-    pub fn comparison_key(&self) -> (u32, u32) {
+    pub fn comparison_key(&self) -> (u32, u64) {
         (self.badness.to_bits(), self.excess_slack_bits)
     }
 
@@ -148,7 +150,7 @@ pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
         ratio: ratio as f32,
         badness: badness as f32,
         overfull: false,
-        excess_slack_bits: (excess.max(0.0) as f32).to_bits(),
+        excess_slack_bits: excess.max(0.0).to_bits(),
     };
     if slack.abs() <= f64::from(FIT_EPSILON) {
         return fit(0.0, 0.0);

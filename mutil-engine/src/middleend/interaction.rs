@@ -176,17 +176,18 @@ impl AtomicFragment {
 }
 /// Validates GDEF subdivisions or falls back to K equal atom slots.
 pub fn resolve_ligature_carets(width: f32, atom_count: usize, carets: &[f32]) -> Vec<f32> {
-    let fallback = || -> Vec<f32> {
-        if atom_count <= 1 || !width.is_finite() || width <= 0.0 {
-            return Vec::new();
-        }
-        (1..atom_count)
-            .map(|i| width * i as f32 / atom_count as f32)
-            .collect()
-    };
-    if atom_count <= 1 {
+    // A non-finite or non-positive width cannot describe a ligature; never
+    // accept supplied positions against it.
+    if atom_count <= 1 || !width.is_finite() || width <= 0.0 {
         return Vec::new();
     }
+    let fallback = || -> Vec<f32> {
+        (1..atom_count)
+            // Scale the index before multiplying, so a large finite width
+            // cannot overflow the intermediate.
+            .map(|i| width * (i as f32 / atom_count as f32))
+            .collect()
+    };
     if carets.len() != atom_count - 1 {
         return fallback();
     }

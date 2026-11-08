@@ -4,8 +4,8 @@ Status: full test suite green; legacy fixtures migrated; release span-scaling be
 
 ## Green
 
-- `tests/phase_zero_regressions.rs` — 57 pass, 1 ignored (5k-span benchmark)
-- `tests/api_contracts.rs` — 16 pass
+- `tests/phase_zero_regressions.rs` — 66 pass, 1 ignored (5k-span benchmark)
+- `tests/api_contracts.rs` — 19 pass
 - `badness` unit suite 12 pass, `output` hanging/line-height fixed
 
 `cargo test --test phase_zero_regressions --test api_contracts` : ok.
@@ -13,7 +13,7 @@ Status: full test suite green; legacy fixtures migrated; release span-scaling be
 ## Changed
 
 **Paragraph boundaries**
-- Implemented `fronten::split_paragraphs(text)->Vec<ParagraphSlice>{content,separator}` in `frontend/mod.rs`: CRLF single separator, empty input → one empty slice, trailing sep → final empty slice, preserves UTF-8 absolute offsets, `U+2028` does not split. Separators: `\n \r \r\n U+0085 U+000B U+000C U+2029`.
+- Implemented `fronten::split_paragraphs(text)->Vec<ParagraphSlice>{content,separator}` in `frontend/mod.rs`: CRLF single separator, empty input → one empty slice, trailing sep → final empty slice, preserves UTF-8 absolute offsets, `U+2028` does not split. Separators: `\n \r \r\n U+0085 U+001C–U+001E U+000B U+000C U+2029` (the last two are application policy, not UAX #9 class B).
 - `check_layout_inputs` rejects those separators in `text`; `HardBreak{is_paragraph_end:false}` only `U+2028` (3 bytes), sentinel only `len..len`.
 
 **Entry point**
@@ -57,12 +57,37 @@ Status: full test suite green; legacy fixtures migrated; release span-scaling be
 
 ## Verification after review fixes
 
-- `cargo test --no-fail-fast --quiet`: 213 passed, 1 ignored; no warnings.
+- `cargo test --no-fail-fast --quiet`: 226 passed, 1 ignored; no warnings.
 - Release 1250/5000-span benchmark: 0.495 ms / 1.938 ms (3.92× time for 4× input), passes.
 - `cargo fmt` and `git diff --check` pass.
 - Added probes for glue-only incomplete coverage and sub-tolerance/zero-advance fake hanging.
 - Legacy hard-break fixtures use U+2028; partial fixtures now supply full coverage. Mixed-level atoms use separate shaping runs.
 - Removed stale spec assertions retaining chunk caches, incremental relayout, diacritic clamps, composition resegmentation and premature type freezing.
+
+## Review follow-up (CodeRabbit / Sourcery)
+
+Fixed in this pass:
+
+- Text-box atoms must tile `byte_range` contiguously (`is_self_contained`), so an
+  internal byte cannot go unshaped.
+- `check_layout_inputs` rejects impossible bidi levels and non-finite font
+  variation coordinates, and validates raw cluster glyph measurements.
+- `PositionedLine::validate` now checks atomic fragments (geometry, ranges,
+  bidi level, empty lines) and visual-run font instances.
+- A non-positive line or strut height reports `NonPositiveLineHeight` instead of
+  a bogus mismatch.
+- `resolve_ligature_carets` rejects non-finite/non-positive widths and scales
+  the index before multiplying, so fallback carets cannot overflow.
+- Excess slack for saturated badness ties is stored at `f64` precision.
+- U+001C–U+001E split paragraphs and are rejected as paragraph separators;
+  `ParagraphSeparatorInText` distinguishes them from bad constraints.
+- Hard-break docs match the single-paragraph contract.
+- Regression tests added for NBSP glue, atom tiling, separator set, callers,
+  atomic fragments, visual runs, and zero-width placement.
+
+Left for design discussion: worst-case bounds in `SpanIndex`, zero-advance
+hanging-mark semantics, and consumers for `BoxHeightStyle::Tight` /
+`LocalePolicy::ExperimentalHeuristics` (no frontend pass exists yet).
 
 Timing is empirical scaling evidence, not a deterministic operation-count proof. Real shapers and the layout algorithm remain outside Phase 0.
 

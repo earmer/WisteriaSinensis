@@ -308,6 +308,57 @@ fn nbsp_remains_visible_in_collapsible_output() {
     assert_eq!(l.visual_runs[1].glyphs[0].advance, 4.);
 }
 #[test]
+fn malformed_atomic_fragments_are_rejected() {
+    let mut l = line();
+    l.atomic_fragments = vec![AtomicFragment {
+        atomic_id: 1,
+        full_byte_range: TextRange::new(0, 1),
+        fragment_byte_range: TextRange::new(0, 1),
+        x_start: 0.,
+        x_end: 10.,
+        bidi_level: 0,
+    }];
+    assert_eq!(l.validate(&ctx()), Ok(()));
+    l.atomic_fragments[0].x_end = f32::NAN;
+    assert_eq!(
+        l.validate(&ctx()),
+        Err(LineInvariantError::InvalidAtomicFragment { index: 0 })
+    );
+}
+
+#[test]
+fn invalid_visual_run_font_instance_is_rejected() {
+    let mut l = line();
+    l.visual_runs = vec![run(glyph(0., 10., false))];
+    l.visual_runs[0].font_size = 0.;
+    assert_eq!(
+        l.validate(&ctx()),
+        Err(LineInvariantError::InvalidVisualRun { run: 0 })
+    );
+    l.visual_runs[0].font_size = 16.;
+    l.visual_runs[0]
+        .variations
+        .push(FontVariation::new(*b"wght", f32::INFINITY));
+    assert_eq!(
+        l.validate(&ctx()),
+        Err(LineInvariantError::InvalidVisualRun { run: 0 })
+    );
+}
+
+#[test]
+fn non_positive_line_height_is_named() {
+    let mut l = line();
+    l.line_height = 0.;
+    assert_eq!(
+        l.validate(&ctx()),
+        Err(LineInvariantError::NonPositiveLineHeight {
+            expected: 10.,
+            actual: 0.
+        })
+    );
+}
+
+#[test]
 fn badness_has_no_primary_only_capacity_cliff() {
     let c = TierCapacities {
         stretch: [0., 10., 0.],
@@ -618,7 +669,124 @@ fn zero_width_node_cannot_be_anchored_inside_owned_content() {
     let mut a = ast("abc");
     a.items
         .insert(1, WordNode::Discretionary(DiscretionaryNode::direct(1)));
-    assert!(check(&a, "abc").is_err());
+    // The box owns `0..3`, so a zero-width node at offset 1 is inside owned
+    // content and breaks monotone item order.
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
+    );
+}
+
+#[test]
+fn zero_width_node_may_sit_on_a_content_boundary() {
+    let mut a = ast("abc");
+    a.items = vec![
+        boxed(0, 1, false),
+        WordNode::Discretionary(DiscretionaryNode::direct(1)),
+        boxed(1, 3, false),
+        end(3),
+    ];
+    assert!(check(&a, "abc").is_ok());
+}
+
+#[test]
+fn text_box_atoms_must_tile_their_byte_range() {
+    let mut a = ast("abc");
+    if let WordNode::Box(BoxNode::Text {
+        atoms,
+        clusters,
+        natural_width,
+        ..
+    }) = &mut a.items[0]
+    {
+        // Drop the middle atom (and its cluster): `0..1` + `2..3` still spans
+        // `0..3`, but byte 1 is unrepresented.
+        atoms.remove(1);
+        clusters.retain(|c| c.byte_range != TextRange::new(1, 2));
+        *natural_width = 2.;
+    }
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::ItemNotSelfContained { item: 0 })
+    );
+}
+
+#[test]
+fn nbsp_glue_must_not_be_collapsible() {
+    let mut a = ast("\u{a0}");
+    a.items = vec![
+        WordNode::Glue(GlueNode {
+            original_bidi_class: BidiClass::Cs,
+            bidi_level: 0,
+            is_collapsible: true,
+            byte_range: TextRange::new(0, 2),
+            kind: GlueKind::WordSpace,
+            tier: GlueTier::Tier0,
+            natural_width: 4.,
+            max_stretch: 0.,
+            max_shrink: 0.,
+        }),
+        end(2),
+    ];
+    assert_eq!(
+        check(&a, "\u{a0}"),
+        Err(LayoutInputError::InvalidGlue { item: 0 })
+    );
+    if let WordNode::Glue(g) = &mut a.items[0] {
+        g.is_collapsible = false;
+    }
+    assert!(check(&a, "\u{a0}").is_ok());
+}
+
+#[test]
+fn every_paragraph_separator_is_rejected_in_paragraph_text() {
+    for text in [
+        "a\nb",
+        "a\rb",
+        "a\u{85}b",
+        "a\u{2029}b",
+        "a\u{1c}b",
+        "a\u{1e}b",
+    ] {
+        let a = ast(text);
+        assert_eq!(
+            check(&a, text),
+            Err(LayoutInputError::ParagraphSeparatorInText),
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn non_finite_cluster_glyph_measurement_is_rejected() {
+    let mut a = ast("abc");
+    if let WordNode::Box(BoxNode::Text { clusters, .. }) = &mut a.items[0] {
+        clusters[0].glyphs[0].x_advance = f32::NAN;
+    }
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::InvalidTextWidth { item: 0 })
+    );
+}
+
+#[test]
+fn non_finite_variation_and_impossible_bidi_level_are_rejected() {
+    let mut a = ast("abc");
+    a.runs[0]
+        .features
+        .variations
+        .push(FontVariation::new(*b"wght", f32::INFINITY));
+    // `FontVariation::new` canonicalises NaN but not infinity.
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::InvalidShapingRun { run: 0 })
+    );
+    let mut a = ast("abc");
+    a.runs[0].bidi_level = BIDI_MAX_DEPTH + 2;
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::InvalidShapingRun { run: 0 })
+    );
 }
 
 #[test]

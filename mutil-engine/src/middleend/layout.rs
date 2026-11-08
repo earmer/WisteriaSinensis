@@ -7,7 +7,7 @@ use super::{LayoutConstraints, LayoutOptions, LineContext, PositionedParagraph};
 use crate::frontend::MAX_DECORATION_NESTING_DEPTH;
 use crate::frontend::{
     BoxDecorationBreak, BoxNode, BreakAction, DiscretionaryNode, GlueKind, GlueTier,
-    HyphenOpportunity, ParagraphAst, SpanEdge, WordNode,
+    HyphenOpportunity, ParagraphAst, SpanEdge, WordNode, is_paragraph_separator,
 };
 use crate::shaping::TextShaper;
 use crate::types::{AtomFlags, BIDI_MAX_DEPTH, BidiLevel, GraphemeAtom, TextRange};
@@ -20,11 +20,20 @@ pub enum LayoutInputError {
     /// `wrap_width` is negative or not finite, or the tab step is not a finite
     /// positive number.
     InvalidConstraints,
+    /// `text` contains a paragraph separator; split it with
+    /// [`frontend::split_paragraphs`](crate::frontend::split_paragraphs) first.
+    ParagraphSeparatorInText,
     /// The raw strut metrics, the strut font size or a `LineHeight::Fixed`
     /// multiplier is not finite (or the size is negative).
     InvalidStrut,
     /// A run's `byte_range` exceeds `text` or splits a UTF-8 sequence.
     RunOutsideText {
+        /// Index into `ParagraphAst::runs`.
+        run: usize,
+    },
+    /// A run's `bidi_level` exceeds the UAX #9 maximum, or one of its font
+    /// variation coordinates is not finite.
+    InvalidShapingRun {
         /// Index into `ParagraphAst::runs`.
         run: usize,
     },
@@ -44,8 +53,9 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A text box's cached `natural_width` is not finite, or differs from the
-    /// sum of its cluster widths.
+    /// A text box's cached `natural_width` is not finite, differs from the sum
+    /// of its cluster widths, or one of its clusters has a non-finite width,
+    /// font scale or raw glyph measurement.
     InvalidTextWidth {
         /// Index into `ParagraphAst::items`.
         item: usize,
@@ -168,8 +178,14 @@ impl fmt::Display for LayoutInputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidConstraints => f.write_str("invalid wrap width or tab stops"),
+            Self::ParagraphSeparatorInText => {
+                f.write_str("text contains a paragraph separator; split it first")
+            }
             Self::InvalidStrut => f.write_str("invalid strut metrics, font size or line height"),
             Self::RunOutsideText { run } => write!(f, "run {run} does not fit the text"),
+            Self::InvalidShapingRun { run } => {
+                write!(f, "run {run} has an invalid bidi level or variation")
+            }
             Self::RunIndexOutOfRange { item } => {
                 write!(f, "item {item} refers to a run that does not exist")
             }
@@ -700,11 +716,9 @@ pub fn check_layout_inputs(
         return Err(E::InvalidConstraints);
     }
     // Single-paragraph contract: reject paragraph separators in text.
-    if text
-        .chars()
-        .any(|c| matches!(c, '\n' | '\r' | '\u{85}' | '\u{b}' | '\u{c}' | '\u{2029}'))
-    {
-        return Err(E::InvalidConstraints);
+    // UAX #9 class B plus the application-policy separators U+000B/U+000C.
+    if text.chars().any(is_paragraph_separator) {
+        return Err(E::ParagraphSeparatorInText);
     }
     let m = &ast.strut_metrics;
     let fixed_ok = match options.line_height {
@@ -730,8 +744,20 @@ pub fn check_layout_inputs(
         if !r.font_size.is_finite() || r.font_size <= 0.0 {
             return Err(E::InvalidStrut);
         }
+        if r.bidi_level > BIDI_MAX_DEPTH + 1
+            || r.features.variations.iter().any(|v| !v.value().is_finite())
+        {
+            return Err(E::InvalidShapingRun { run });
+        }
     }
     check_spans(ast, text)?;
+    // Reject items outside the text before indexing spans against them.
+    for (item, node) in ast.items.iter().enumerate() {
+        match node.byte_span() {
+            Some(span) if fits(text, span) => {}
+            _ => return Err(E::ItemOutsideText { item }),
+        }
+    }
     let span_index = SpanIndex::new(ast);
     let mut atomic_at = 0;
     let last_disc = ast.items.iter().rposition(|n| n.is_break_opportunity());
@@ -771,7 +797,13 @@ pub fn check_layout_inputs(
                 if clusters.iter().any(|c| {
                     !c.font.scale.is_finite()
                         || c.font.scale <= 0.0
+                        || !c.natural_width.is_finite()
                         || !c.uncompressed_width.is_finite()
+                        || c.glyphs.iter().any(|g| {
+                            !g.x_advance.is_finite()
+                                || !g.x_offset.is_finite()
+                                || !g.y_offset.is_finite()
+                        })
                 }) {
                     return Err(E::InvalidTextWidth { item });
                 }
@@ -859,7 +891,8 @@ pub fn check_layout_inputs(
             WordNode::Glue(g) => {
                 let sizes_ok = [g.natural_width, g.max_stretch, g.max_shrink]
                     .iter()
-                    .all(|v| v.is_finite() && *v >= 0.0);
+                    .all(|v| v.is_finite() && *v >= 0.0)
+                    && g.bidi_level <= BIDI_MAX_DEPTH + 1;
                 // Tier 2 is derived from cluster flags; the compression pool
                 // is shrink only and belongs to Tier 0.
                 let pool_ok = g.kind != GlueKind::CjkPunctCompression
