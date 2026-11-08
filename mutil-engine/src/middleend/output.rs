@@ -2225,6 +2225,18 @@ mod tests {
             l.validate(&ctx()),
             Err(LineInvariantError::SpanFragmentOutsideLine { index: 0 })
         );
+        // Starting before the line (a nonzero-start line).
+        let mut later = spanned_line();
+        later.byte_range = TextRange::new(1, 4);
+        later.visual_runs[0].byte_range = TextRange::new(1, 4);
+        later.visual_runs[0].glyphs[0].byte_range = Some(TextRange::new(1, 2));
+        later.span_fragments = vec![fragment(1, 0.0, 30.0, (1, 4))];
+        assert!(later.validate(&ctx()).is_ok());
+        later.span_fragments[0].byte_range = TextRange::new(0, 4);
+        assert_eq!(
+            later.validate(&ctx()),
+            Err(LineInvariantError::SpanFragmentOutsideLine { index: 0 })
+        );
         let mut inverted = fragment(1, 0.0, 30.0, (0, 4));
         inverted.byte_range = TextRange { start: 3, end: 1 };
         l.span_fragments = vec![inverted];

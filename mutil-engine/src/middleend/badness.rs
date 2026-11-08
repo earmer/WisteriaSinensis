@@ -114,8 +114,19 @@ pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
     let slack = f64::from(slack);
     let stretch = cap.stretch.map(f64::from);
     let z = f64::from(cap.shrink[0]) + f64::from(cap.shrink[1]);
-    let y01 = stretch[0] + stretch[1];
-    let y_total = y01 + stretch[2];
+    // The seams are also accepted at their f32 rounding, so a caller passing
+    // `primary_stretch()` / `total_stretch()` (f32 sums) as the slack lands on
+    // the boundary instead of just past it.
+    let seam = |sum: f64| {
+        let rounded = f64::from(sum as f32);
+        if rounded.is_finite() {
+            sum.max(rounded)
+        } else {
+            sum
+        }
+    };
+    let y01 = seam(stretch[0] + stretch[1]);
+    let y_total = seam(stretch[0] + stretch[1] + stretch[2]);
     let fit = |ratio: f64, badness: f64| LineFit {
         ratio: ratio as f32,
         badness: badness as f32,
@@ -287,6 +298,23 @@ mod tests {
         assert!(close(f.ratio, 0.5) && close(f.badness, 12.5) && !f.overfull);
         let g = line_fit(-big, &cap, 16.0);
         assert!(close(g.ratio, -0.5) && close(g.badness, 12.5));
+    }
+
+    #[test]
+    fn the_f32_helper_sums_land_on_the_seams() {
+        // 0.1 + 0.2 rounds up in f32; the widened sum is slightly smaller.
+        let cap = TierCapacities {
+            stretch: [0.1, 0.2, 0.0],
+            shrink: [0.0, 0.0],
+        };
+        let f = line_fit(cap.primary_stretch(), &cap, 16.0);
+        assert!(close(f.ratio, 1.0) && close(f.badness, 100.0));
+        let cap = TierCapacities {
+            stretch: [0.1, 0.2, 0.3],
+            shrink: [0.0, 0.0],
+        };
+        let f = line_fit(cap.total_stretch(), &cap, 16.0);
+        assert!(close(f.ratio, 2.0) && close(f.badness, 400.0));
     }
 
     #[test]

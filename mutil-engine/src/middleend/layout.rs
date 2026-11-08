@@ -266,7 +266,12 @@ fn text_at(
 /// Returns the chain's far byte bound (its start going backwards, its end going
 /// forwards) and its atom boundaries (starts and ends), or `None` when there is
 /// no neighbouring text box.
-fn hyphen_chain(items: &[WordNode], index: usize, backwards: bool) -> Option<(usize, Vec<usize>)> {
+fn hyphen_chain(
+    items: &[WordNode],
+    index: usize,
+    backwards: bool,
+    target: usize,
+) -> Option<(usize, Vec<usize>)> {
     let step = |i: usize| {
         if backwards {
             i.checked_sub(1)
@@ -281,9 +286,21 @@ fn hyphen_chain(items: &[WordNode], index: usize, backwards: bool) -> Option<(us
         .iter()
         .flat_map(|a| [a.byte_range.start, a.byte_range.end])
         .collect();
-    // `items[cursor]` is the last text box added; look past it for a
-    // `Hyphenate` joining it to another text box of the same run.
-    while let Some(disc_at) = cursor.and_then(step) {
+    // The walk ends once the chain reaches `target`, so a short cut never scans
+    // a long chain (validation stays linear overall). `items[cursor]` is the
+    // last text box added; look past it for a `Hyphenate` joining it to another
+    // text box of the same run.
+    let reached = |bound: usize| {
+        if backwards {
+            bound <= target
+        } else {
+            bound >= target
+        }
+    };
+    while !reached(bound) {
+        let Some(disc_at) = cursor.and_then(step) else {
+            break;
+        };
         let Some(WordNode::Discretionary(d)) = items.get(disc_at) else {
             break;
         };
@@ -339,16 +356,22 @@ fn hyphen_valid(
     if prev.is_empty() || next.is_empty() {
         return false;
     }
-    let (Some((left_bound, left_edges)), Some((right_bound, right_edges))) = (
-        hyphen_chain(items, index, true),
-        hyphen_chain(items, index, false),
+    let (Some(prefix), Some(suffix)) = (
+        off.checked_sub(h.prefix_cut_bytes as usize),
+        off.checked_add(h.suffix_cut_bytes as usize),
     ) else {
         return false;
     };
-    let prefix = off.checked_sub(h.prefix_cut_bytes as usize);
-    let suffix = off.checked_add(h.suffix_cut_bytes as usize);
-    prefix.is_some_and(|p| p >= left_bound && left_edges.contains(&p))
-        && suffix.is_some_and(|q| q <= right_bound && right_edges.contains(&q))
+    let (Some((left_bound, left_edges)), Some((right_bound, right_edges))) = (
+        hyphen_chain(items, index, true, prefix),
+        hyphen_chain(items, index, false, suffix),
+    ) else {
+        return false;
+    };
+    prefix >= left_bound
+        && left_edges.contains(&prefix)
+        && suffix <= right_bound
+        && right_edges.contains(&suffix)
 }
 
 fn fits(text: &str, r: crate::types::TextRange) -> bool {
@@ -489,13 +512,32 @@ fn edge_cluster_width(items: &[WordNode], index: Option<usize>, last: bool) -> O
 }
 
 /// Monotone progression: each item starts at or after the end of the previous
-/// one (zero-width nodes may share an offset).
+/// one (zero-width nodes may share an offset). Among the zero-width nodes at one
+/// offset a `CjkAutospace` glue precedes every break opportunity, as a
+/// breakable space's glue precedes its discretionary (so the spacing stays on
+/// the line that ends there): `[Glue(CjkAutospace), Discretionary]`.
 fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     for (i, w) in ast.items.windows(2).enumerate() {
         if let (Some(prev), Some(next)) = (w[0].byte_span(), w[1].byte_span()) {
             if prev.end > next.start {
                 return Err(LayoutInputError::ItemsOutOfOrder { item: i + 1 });
             }
+        }
+    }
+    // Offset of the break opportunity seen in the current run of zero-width
+    // nodes, if any.
+    let mut break_at: Option<usize> = None;
+    for (item, n) in ast.items.iter().enumerate() {
+        let Some(r) = n.byte_span() else { continue };
+        if !r.is_empty() || break_at != Some(r.start) {
+            break_at = None;
+        }
+        if n.is_break_opportunity() && r.is_empty() {
+            break_at = Some(r.start);
+        } else if matches!(n, WordNode::Glue(g) if g.kind == GlueKind::CjkAutospace)
+            && break_at == Some(r.start)
+        {
+            return Err(LayoutInputError::ItemsOutOfOrder { item });
         }
     }
     Ok(())
@@ -509,8 +551,9 @@ fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
 ///   byte_range.start`) sits before `lead`, one at `e..e` after `trail`, so
 ///   breaking before or after the chip leaves both boundaries on the chip's
 ///   line and the seam spacing outside it. At a seam shared by two adjacent
-///   spans the canonical order follows from monotone order and LIFO:
-///   `[A Trailing, Glue(CjkAutospace), Discretionary, B Leading]`;
+///   spans the canonical order is `[A Trailing, Glue(CjkAutospace),
+///   Discretionary, B Leading]`: LIFO and this rule fix the boundaries'
+///   places, `check_item_order` the glue before the discretionary;
 /// * any other zero-width node at `s` or `e` (a neighbouring span's boundary)
 ///   is unconstrained;
 /// * every other item inside `[s, e]` is strictly between `lead` and `trail`,
@@ -719,6 +762,7 @@ pub fn check_layout_inputs(
                 let total: f64 = clusters.iter().map(|c| f64::from(c.natural_width)).sum();
                 let cached = f64::from(*natural_width);
                 if !(natural_width.is_finite()
+                    && total.is_finite()
                     && (cached - total).abs() <= 1e-3_f64.max(1e-5 * total.abs()))
                 {
                     return Err(E::InvalidTextWidth { item });
@@ -875,10 +919,8 @@ pub fn check_layout_inputs(
                         // At least one net delta is real; each needs its
                         // neighbouring text box and may not drive that edge
                         // cluster's width below zero.
-                        let live =
-                            |net: f64, width: f64| net.abs() > 1e-3_f64.max(1e-5 * width.abs());
-                        let live_pre = live(net_pre, pre);
-                        let live_post = live(net_post, post);
+                        let live_pre = net_pre.abs() > 1e-3;
+                        let live_post = net_post.abs() > 1e-3;
                         let side_ok = |live: bool, net: f64, width: Option<f32>| {
                             !live || width.is_some_and(|w| f64::from(w) + net >= -1e-3)
                         };
@@ -1389,6 +1431,12 @@ mod tests {
         let bad = Err(LayoutInputError::InvalidHyphenOpportunity { item: 3 });
         // A 2-byte spelling-change cut crosses the unchosen point one byte away.
         assert!(check(&three_part_word(hyphen_at_1(), (2, 1))).is_ok());
+        // The suffix cut crosses a later point just the same.
+        let mut first = hyphen_at_1();
+        if let WordNode::Discretionary(d) = &mut first {
+            d.action = BreakAction::Hyphenate(opportunity(1, 0, 2));
+        }
+        assert!(check(&three_part_word(first, (0, 0))).is_ok());
         // ... but not the start of the word, nor a cut past its end.
         assert_eq!(check(&three_part_word(hyphen_at_1(), (3, 0))), bad);
         assert_eq!(check(&three_part_word(hyphen_at_1(), (0, 3))), bad);
@@ -1463,6 +1511,57 @@ mod tests {
         assert!(adjust(2.0, 2.0).is_err()); // padding alone adjusts nothing
         assert!(adjust(-2.5, 2.0).is_err()); // net_pre = -4.5
         assert!(adjust(2.0, -2.5).is_err()); // net_post = -4.5
+    }
+
+    #[test]
+    fn a_non_finite_cluster_total_cannot_match_a_finite_cached_width() {
+        let o = LayoutOptions::default();
+        let mut a = with_items(vec![text_box(vec![atom(0, 1)])]);
+        if let WordNode::Box(BoxNode::Text { clusters, .. }) = &mut a.items[0] {
+            clusters[0].natural_width = f32::INFINITY;
+        }
+        assert_eq!(
+            check_layout_inputs(&a, "abcd", &constraints(), &o),
+            Err(LayoutInputError::InvalidTextWidth { item: 0 })
+        );
+    }
+
+    #[test]
+    fn punctuation_deltas_are_judged_net_of_large_clone_padding() {
+        use crate::frontend::BoxDecorationBreak::Clone;
+        let o = LayoutOptions::default();
+        // A chip with 1e6 of padding on each side: the padded widths are huge,
+        // the net deltas small, and only the net deltas decide.
+        let big = |pre: f32, post: f32| {
+            let mut d = DiscretionaryNode::direct(2);
+            d.action = BreakAction::CjkPunctAdjust;
+            d.pre_break_width = pre;
+            d.post_break_width = post;
+            d.cloned_spans.push(5);
+            let mut a = with_items(vec![
+                with_width(text_box(vec![atom(0, 1)])),
+                with_width(text_box(vec![atom(1, 2)])),
+                WordNode::Discretionary(d),
+                with_width(text_box(vec![atom(2, 3)])),
+                with_width(text_box(vec![atom(3, 4)])),
+            ]);
+            let mut sp = chip(5, Clone);
+            sp.start_padding = 1.0e6;
+            sp.end_padding = 1.0e6;
+            a.decoration_spans = vec![sp];
+            // Boundary widths follow the padding.
+            let mut a = closed(a);
+            for n in &mut a.items {
+                if let WordNode::Box(BoxNode::SpanBoundary { width, .. }) = n {
+                    *width = 1.0e6;
+                }
+            }
+            check_layout_inputs(&a, "abcd", &constraints(), &o)
+        };
+        assert!(big(1.0e6 - 1.0, 1.0e6).is_ok()); // net_pre = -1 of 4
+        assert!(big(1.0e6, 1.0e6 + 0.5).is_ok()); // a small restore is real
+        assert!(big(1.0e6 - 5.0, 1.0e6).is_err()); // net_pre = -5 empties the cluster
+        assert!(big(1.0e6, 1.0e6).is_err()); // nothing adjusted
     }
 
     #[test]
@@ -2202,6 +2301,13 @@ mod tests {
         a.decoration_spans[1].byte_range = TextRange::new(3, 4);
         let r = check(a.clone());
         assert!(r.is_ok(), "{r:?}");
+        // The break before the seam glue is the wrong way round.
+        let mut swapped = a.clone();
+        swapped.items.swap(4, 5);
+        assert_eq!(
+            check(swapped),
+            Err(LayoutInputError::ItemsOutOfOrder { item: 5 })
+        );
         // B's Leading before the seam glue or break strands them inside B.
         a.items.swap(5, 6);
         assert!(check(a).is_err());

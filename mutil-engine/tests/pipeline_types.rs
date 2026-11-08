@@ -451,6 +451,24 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
         ],
     );
     assert!(!backwards.is_self_contained());
+    let overlap = text_box(
+        TextRange::new(0, 3),
+        vec![
+            GraphemeAtom {
+                byte_range: TextRange::new(0, 2),
+                ..atom(0)
+            },
+            GraphemeAtom {
+                byte_range: TextRange::new(1, 3),
+                ..atom(1)
+            },
+        ],
+        vec![
+            lig(0..1, TextRange::new(0, 2)),
+            lig(1..2, TextRange::new(1, 3)),
+        ],
+    );
+    assert!(!overlap.is_self_contained());
     // The box's own range must run from its first atom to its last.
     let wrong_range = text_box(
         TextRange::new(0, 2),
