@@ -4,7 +4,7 @@
 use super::{LeadingEdit, TextShaper, TrailingEdit};
 use crate::frontend::ShapingRun;
 use crate::types::{
-    Direction, FontFamily, FontFeatures, FontId, FontMetrics, FontRef, FontStyle, GraphemeAtom,
+    Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, GraphemeAtom,
     LocaleTag, ScriptTag, ShapedCluster, TextRange,
 };
 use smallvec::SmallVec;
@@ -16,6 +16,9 @@ use smallvec::SmallVec;
 pub struct NoopShaper;
 
 impl TextShaper for NoopShaper {
+    fn font_metrics(&self, _instance: FontInstanceRef<'_>) -> FontMetrics {
+        FontMetrics::default()
+    }
     fn resolve_primary_font_metrics(
         &self,
         _families: &[FontFamily],
@@ -32,9 +35,6 @@ impl TextShaper for NoopShaper {
         _text: &str,
         _run: &ShapingRun,
         _atoms: &[GraphemeAtom],
-        _families: &[FontFamily],
-        _font_size: f32,
-        _features: &FontFeatures,
         _output_clusters: &mut Vec<ShapedCluster>,
     ) {
     }
@@ -45,7 +45,6 @@ impl TextShaper for NoopShaper {
         _run: &ShapingRun,
         _atoms: &[GraphemeAtom],
         _window: TextRange,
-        _features: &FontFeatures,
         _leading_edit: LeadingEdit,
         _trailing_edit: TrailingEdit,
         _output_clusters: &mut Vec<ShapedCluster>,
@@ -54,10 +53,9 @@ impl TextShaper for NoopShaper {
 
     fn ligature_carets(
         &self,
-        _font: FontRef,
+        _instance: FontInstanceRef<'_>,
         _glyph_id: u32,
         _direction: Direction,
-        _font_size: f32,
     ) -> SmallVec<[f32; 4]> {
         SmallVec::new()
     }

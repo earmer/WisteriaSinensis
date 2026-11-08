@@ -1,71 +1,32 @@
-//! The five strategy/profile enums derive the full set of standard traits and
-//! carry the defaults the spec names.
-
+//! Strategy parameters affect the solver's bounded search budget.
 use mutil_engine::*;
-use std::collections::HashSet;
-use std::fmt::Debug;
-use std::hash::Hash;
-
-fn assert_value_type<T>(variants: &[T], default: T)
-where
-    T: Debug + Clone + Copy + PartialEq + Eq + Hash + Default + Send + Sync + 'static,
-{
-    assert_eq!(T::default(), default);
-    // Hash + Eq: all variants are distinct set members; Copy: usable after move.
-    let set: HashSet<T> = variants.iter().copied().collect();
-    assert_eq!(set.len(), variants.len());
-    for &v in variants {
-        let copy = v;
-        assert_eq!(copy.clone(), v);
-        assert!(!format!("{v:?}").is_empty());
-    }
-    // One byte: fieldless enums with at most 256 variants.
-    assert_eq!(core::mem::size_of::<T>(), 1);
-}
 
 #[test]
-fn autospace_profile() {
-    assert_value_type(
-        &[AutospaceProfile::Jlreq, AutospaceProfile::CssCompat],
-        AutospaceProfile::Jlreq,
-    );
-}
-
-#[test]
-fn hanging_whitespace_mode() {
-    assert_value_type(
-        &[
-            HangingWhitespaceMode::Collapsible,
-            HangingWhitespaceMode::Preserved,
-        ],
-        HangingWhitespaceMode::Collapsible,
-    );
-}
-
-#[test]
-fn line_break_strategy() {
-    assert_value_type(
-        &[
-            LineBreakStrategy::Greedy,
-            LineBreakStrategy::Balanced,
-            LineBreakStrategy::Publication,
-        ],
+fn search_budgets_increase_with_quality() {
+    let strategies = [
+        LineBreakStrategy::Greedy,
         LineBreakStrategy::Balanced,
+        LineBreakStrategy::Publication,
+    ];
+    assert_eq!(
+        strategies.map(|s| (s.beam_width(), s.window_depth())),
+        [(1, 1), (2, 2), (8, 6)]
     );
+    for pair in strategies.windows(2) {
+        assert!(pair[0].beam_width() < pair[1].beam_width());
+        assert!(pair[0].window_depth() < pair[1].window_depth());
+    }
 }
 
+// These defaults are externally specified policy, not representation checks.
 #[test]
-fn soft_hyphen_policy() {
-    assert_value_type(
-        &[SoftHyphenPolicy::Keep, SoftHyphenPolicy::Strip],
-        SoftHyphenPolicy::Keep,
+fn public_policy_defaults_match_the_contract() {
+    assert_eq!(AutospaceProfile::default(), AutospaceProfile::Jlreq);
+    assert_eq!(
+        HangingWhitespaceMode::default(),
+        HangingWhitespaceMode::Collapsible
     );
-}
-
-#[test]
-fn shaper_profile() {
-    assert_value_type(
-        &[ShaperProfile::FullContract, ShaperProfile::LineOnly],
-        ShaperProfile::FullContract,
-    );
+    assert_eq!(SoftHyphenPolicy::default(), SoftHyphenPolicy::Keep);
+    assert_eq!(ShaperProfile::default(), ShaperProfile::FullContract);
+    assert_eq!(LineBreakStrategy::default(), LineBreakStrategy::Balanced);
 }

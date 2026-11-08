@@ -128,11 +128,76 @@ pub struct Selection {
 /// `[C1]` (spec §6.6).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum BoxHeightStyle {
-    /// Tight around the glyphs of each run.
+    /// Union of selected font-instance ascent/descent, excluding gap and leading.
     #[default]
     Tight,
-    /// The full line box height.
+    /// Includes line gap and maximum inline-box height.
     Max,
     /// The paragraph's resolved strut (`ParagraphAst::strut_metrics` after `LineHeight::resolve_strut`).
     Strut,
+}
+
+/// Visual fragment of an atomic edit span, independent of decorations.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AtomicFragment {
+    /// Atomic span id (independent id space).
+    pub atomic_id: u64,
+    /// Entire atomic logical range.
+    pub full_byte_range: crate::types::TextRange,
+    /// Source bytes on this visual fragment.
+    pub fragment_byte_range: crate::types::TextRange,
+    /// Physical left edge.
+    pub x_start: f32,
+    /// Physical right edge.
+    pub x_end: f32,
+    /// Resolved fragment direction.
+    pub bidi_level: BidiLevel,
+}
+impl AtomicFragment {
+    /// Snaps to the entire span's outer endpoints by midpoint rule.
+    /// Even level: left half → start/Downstream, right half → end/Upstream.
+    /// Odd level: halves swap. Midpoint itself counts as right half.
+    pub fn hit_test(&self, x: f32) -> CursorPosition {
+        let in_left_half = x < self.x_start + 0.5 * (self.x_end - self.x_start);
+        // even: left→start, right→end ; odd: left→end, right→start
+        let snaps_to_start = in_left_half == (self.bidi_level & 1 == 0);
+        if snaps_to_start {
+            CursorPosition {
+                byte_offset: self.full_byte_range.start,
+                affinity: CaretAffinity::Downstream,
+            }
+        } else {
+            CursorPosition {
+                byte_offset: self.full_byte_range.end,
+                affinity: CaretAffinity::Upstream,
+            }
+        }
+    }
+}
+/// Validates GDEF subdivisions or falls back to K equal atom slots.
+pub fn resolve_ligature_carets(width: f32, atom_count: usize, carets: &[f32]) -> Vec<f32> {
+    let fallback = || -> Vec<f32> {
+        if atom_count <= 1 || !width.is_finite() || width <= 0.0 {
+            return Vec::new();
+        }
+        (1..atom_count)
+            .map(|i| width * i as f32 / atom_count as f32)
+            .collect()
+    };
+    if atom_count <= 1 {
+        return Vec::new();
+    }
+    if carets.len() != atom_count - 1 {
+        return fallback();
+    }
+    if carets
+        .iter()
+        .any(|v| !v.is_finite() || *v <= 0.0 || *v >= width)
+    {
+        return fallback();
+    }
+    if carets.windows(2).any(|w| w[1] <= w[0]) {
+        return fallback();
+    }
+    carets.to_vec()
 }

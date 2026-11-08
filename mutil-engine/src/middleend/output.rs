@@ -40,10 +40,8 @@ pub struct PositionedGlyph {
     /// (An actual U+00AD in the source is *not* synthesized.)
     pub is_synthesized: bool,
     /// `true` for punctuation hanging outside the text block (§5 Stage 1.3).
-    /// Such a glyph lies wholly outside `[0, visual_width]`: left of 0
-    /// (`x < 0`) or at or beyond `visual_width`. **[Design decision]**:
-    /// addition to §2.6, so the hanging invariants of [`PositionedLine`] are
-    /// checkable.
+    /// May straddle the body edge; its normalized pen interval must overflow
+    /// `[0, visual_width]` beyond tolerance. Only the overflow counts as hanging.
     pub is_hanging: bool,
 }
 
@@ -54,6 +52,10 @@ pub struct PositionedGlyph {
 /// face per run.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisualGlyphRun {
+    /// Requested size before fallback scaling.
+    pub font_size: f32,
+    /// Variable font instance coordinates.
+    pub variations: smallvec::SmallVec<[crate::types::FontVariation; 2]>,
     /// Font and fallback scale shared by every glyph.
     pub font: FontRef,
     /// Bidi level shared by every glyph.
@@ -189,6 +191,8 @@ impl PositionedSpanFragment {
 /// One laid-out line (spec §2.6).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PositionedLine {
+    /// Atomic editing geometry, independent of decoration ids.
+    pub atomic_fragments: Vec<super::AtomicFragment>,
     /// Source bytes, **including** trailing whitespace.
     pub byte_range: TextRange,
     /// End of the last visible cluster (trailing whitespace excluded). Glyphs
@@ -734,7 +738,7 @@ impl PositionedLine {
     ///   The padding thus lets a 40-wide cluster with 3 units on each side pass
     ///   at `wrap_width = 30`, while an unpadded entity cannot inflate
     ///   `visual_width`;
-    /// * every `is_hanging` glyph lies wholly outside the body;
+    /// * every `is_hanging` glyph has actual overflow (may straddle the body);
     /// * `hanging_left`/`hanging_right` equal the extent those glyphs occupy
     ///   (so are positive exactly when such glyphs exist), and are zero on an
     ///   edge that `ctx.hang_mode` does not allow for `ctx.base_direction`;
@@ -830,6 +834,16 @@ impl PositionedLine {
             return Err(E::VisibleEndOutsideRange);
         }
         let expected = ctx.strut.natural_line_height();
+        if !(self.line_height.is_finite()
+            && self.line_height > 0.0
+            && expected.is_finite()
+            && expected > 0.0)
+        {
+            return Err(E::LineHeightMismatch {
+                expected,
+                actual: self.line_height,
+            });
+        }
         if range.is_empty() {
             if !self.visual_runs.is_empty() {
                 return Err(E::EmptyLineHasVisualRuns);
@@ -917,21 +931,25 @@ impl PositionedLine {
                 // A zero-advance glyph (combining mark) attaches to a base and
                 // has no extent, but its pen position must still lie in the
                 // body unless it rides on a hanging base.
-                if g.advance == 0.0 {
+                if g.advance == 0.0 && !g.is_hanging {
                     if !g.is_hanging && (g.x < -tol || g.x > vw + tol) {
                         return Err(E::BodyGlyphOutsideBlock { run, glyph });
                     }
                     continue;
                 }
                 if g.is_hanging {
-                    if lo < 0.0 && hi <= tol {
-                        left = left.max(-lo);
-                        has_left = true;
-                    } else if lo >= vw - tol && hi > lo {
-                        right = right.max(hi - vw);
-                        has_right = true;
-                    } else {
+                    let over_left = (0.0_f32 - lo).max(0.0);
+                    let over_right = (hi - vw).max(0.0);
+                    if over_left <= tol && over_right <= tol {
                         return Err(E::HangingGlyphInsideBlock { run, glyph });
+                    }
+                    if over_left > 0.0 {
+                        left = left.max(over_left);
+                        has_left = true;
+                    }
+                    if over_right > 0.0 {
+                        right = right.max(over_right);
+                        has_right = true;
                     }
                 } else if lo < -tol || hi > vw + tol {
                     return Err(E::BodyGlyphOutsideBlock { run, glyph });
@@ -1028,9 +1046,7 @@ impl PositionedLine {
                         .filter(|g| {
                             !g.is_hanging
                                 && !g.is_synthesized
-                                && !g
-                                    .byte_range
-                                    .is_some_and(|b| b.start >= self.visible_byte_end)
+                                && g.byte_range.is_none_or(|b| b.start < self.visible_byte_end)
                         })
                 };
                 let mut ranges = glyphs().map(|g| g.byte_range);
@@ -1289,6 +1305,8 @@ mod tests {
 
     fn line(glyphs: Vec<PositionedGlyph>, width: f32, hang_l: f32, hang_r: f32) -> PositionedLine {
         PositionedLine {
+            atomic_fragments: vec![],
+
             byte_range: TextRange::new(0, 4),
             visible_byte_end: 4,
             baseline_y: 12.0,
@@ -1300,6 +1318,9 @@ mod tests {
             hanging_right: hang_r,
             is_justified: false,
             visual_runs: vec![VisualGlyphRun {
+                font_size: 16.0,
+                variations: Default::default(),
+
                 font: FontRef::unscaled(FontId(0)),
                 bidi_level: 0,
                 byte_range: TextRange::new(0, 4),
@@ -1914,7 +1935,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hanging_glyph_is_gated_even_when_its_extent_is_negligible() {
+    fn a_hanging_glyph_with_negligible_overflow_is_rejected() {
         // Extent 1e-4 sits inside the tolerance, so `hanging_left` is 0.0.
         let l = line(
             vec![glyph(-1.0e-4, 1.0e-4, true), glyph(0.0, 20.0, false)],
@@ -1922,13 +1943,9 @@ mod tests {
             0.0,
             0.0,
         );
-        assert_eq!(
-            l.validate(&no_hang()),
-            Err(LineInvariantError::HangingNotAllowed {
-                side: HangSide::Left
-            })
-        );
-        assert_eq!(l.validate(&ctx()), Ok(()));
+        let expected = Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 0 });
+        assert_eq!(l.validate(&no_hang()), expected);
+        assert_eq!(l.validate(&ctx()), expected);
     }
 
     #[test]

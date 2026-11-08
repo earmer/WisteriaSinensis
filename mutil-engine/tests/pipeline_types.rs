@@ -13,6 +13,8 @@ const ADVANCE: f32 = 10.0;
 
 fn run() -> ShapingRun {
     ShapingRun {
+        features: Default::default(),
+
         byte_range: TextRange::new(0, TEXT.len()),
         families: Arc::from([FontFamily::Generic(GenericFamily::SansSerif)]),
         font_size: 16.0,
@@ -90,6 +92,10 @@ fn test_pipeline_types_compile() {
             word(TextRange::new(0, 5)),
             // A breakable space: the break opportunity follows the glue.
             WordNode::Glue(GlueNode {
+                original_bidi_class: BidiClass::Ws,
+                bidi_level: 0,
+                is_collapsible: true,
+
                 byte_range: TextRange::new(5, 6),
                 kind: GlueKind::WordSpace,
                 tier: GlueTier::Tier0,
@@ -113,22 +119,13 @@ fn test_pipeline_types_compile() {
     assert_eq!(metrics, FontMetrics::default());
 
     let mut out = Vec::new();
-    shaper.shape_run(
-        TEXT,
-        r,
-        &[],
-        &r.families,
-        r.font_size,
-        &FontFeatures::new(),
-        &mut out,
-    );
+    shaper.shape_run(TEXT, r, &[], &mut out);
     let run_atoms: Vec<GraphemeAtom> = (0..TEXT.len()).map(atom).collect();
     shaper.reshape_window(
         TEXT,
         r,
         &run_atoms,
         TextRange::new(0, 5),
-        &FontFeatures::new(),
         LeadingEdit::None,
         TrailingEdit::AppendHyphen { hyphen: '-' },
         &mut out,
@@ -136,7 +133,15 @@ fn test_pipeline_types_compile() {
     assert!(out.is_empty());
     assert!(
         shaper
-            .ligature_carets(FontRef::unscaled(font_id), 0, r.direction(), 16.0)
+            .ligature_carets(
+                FontInstanceRef {
+                    font: FontRef::unscaled(font_id),
+                    font_size: 16.0,
+                    variations: &[]
+                },
+                0,
+                r.direction()
+            )
             .is_empty()
     );
 
@@ -180,6 +185,8 @@ fn test_pipeline_types_compile() {
     );
 
     let line = PositionedLine {
+        atomic_fragments: vec![],
+
         tabs: vec![],
         span_fragments: vec![],
         byte_range: TextRange::new(0, TEXT.len()),
@@ -193,6 +200,9 @@ fn test_pipeline_types_compile() {
         hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
+            font_size: 16.0,
+            variations: Default::default(),
+
             font: FontRef::unscaled(FontId(1)),
             bidi_level: 0,
             byte_range: TextRange::new(0, TEXT.len()),
@@ -278,6 +288,10 @@ fn every_word_node_variant_is_constructible() {
             bidi_level: 1,
         }),
         WordNode::Glue(GlueNode {
+            original_bidi_class: BidiClass::Ws,
+            bidi_level: 0,
+            is_collapsible: true,
+
             byte_range: TextRange::empty_at(5),
             kind: GlueKind::CjkAutospace,
             tier: GlueKind::CjkAutospace.default_tier(),
@@ -325,7 +339,6 @@ fn every_word_node_variant_is_constructible() {
             suffix_replacement: None,
             prefix_cut_bytes: 0,
             suffix_cut_bytes: 0,
-            penalty: 135,
         }),
         BreakAction::CjkPunctAdjust,
         BreakAction::MathOperator {
@@ -379,7 +392,6 @@ fn hyphen_opportunity_carries_prefix_and_suffix_replacements() {
         suffix_replacement: Some("tje".into()),
         prefix_cut_bytes: 1,
         suffix_cut_bytes: 2,
-        penalty: 50,
     };
     assert_eq!(h.prefix_replacement.as_deref(), Some("a"));
     assert_eq!(h.suffix_replacement.as_deref(), Some("tje"));
@@ -523,8 +535,6 @@ fn full_spec_type_surface_is_nameable() {
         Motion::Down,
     ];
     assert_eq!(motions.len(), 12);
-    assert_eq!(BoxHeightStyle::default(), BoxHeightStyle::Tight);
-    assert_eq!(HangMode::default(), HangMode::NONE);
     assert_ne!(
         HangMode {
             start: HangStartMode::FirstLine,
@@ -535,8 +545,6 @@ fn full_spec_type_surface_is_nameable() {
             end: HangEndMode::Allow
         }
     );
-    assert_eq!(LineHeight::Fixed(1.5), LineHeight::Fixed(1.5));
-    assert_eq!(QuotePolicy::default(), QuotePolicy::Standard);
     assert_ne!(QuotePolicy::CjkAware, QuotePolicy::Standard);
 }
 

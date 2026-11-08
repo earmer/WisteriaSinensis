@@ -67,6 +67,10 @@ fn text(start: usize, end: usize) -> WordNode {
 
 fn space(at: usize) -> WordNode {
     WordNode::Glue(GlueNode {
+        original_bidi_class: BidiClass::Ws,
+        bidi_level: 0,
+        is_collapsible: true,
+
         byte_range: TextRange::new(at, at + 1),
         kind: GlueKind::WordSpace,
         tier: GlueTier::Tier0,
@@ -95,6 +99,8 @@ fn sentinel(len: usize) -> WordNode {
 
 fn run() -> ShapingRun {
     ShapingRun {
+        features: Default::default(),
+
         byte_range: TextRange::new(0, TEXT.len()),
         families: std::sync::Arc::from([FontFamily::Generic(GenericFamily::SansSerif)]),
         font_size: 16.0,
@@ -194,6 +200,8 @@ fn fragment(
 
 fn line(byte_range: (usize, usize), visible_end: usize, y: f32, width: f32) -> PositionedLine {
     PositionedLine {
+        atomic_fragments: vec![],
+
         byte_range: TextRange::new(byte_range.0, byte_range.1),
         visible_byte_end: visible_end,
         baseline_y: y,
@@ -283,6 +291,9 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         .collect();
     glyphs0.extend((3..8).map(|i| pen_glyph((i, i + 1), 27.0 + (i - 3) as f32 * ADV)));
     l0.visual_runs = vec![VisualGlyphRun {
+        font_size: 16.0,
+        variations: Default::default(),
+
         font: FontRef::unscaled(FontId(1)),
         bidi_level: 0,
         byte_range: TextRange::new(0, 8),
@@ -298,6 +309,9 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         .collect();
     glyphs1.extend((12..14).map(|i| pen_glyph((i, i + 1), 40.0 + (i - 12) as f32 * ADV)));
     l1.visual_runs = vec![VisualGlyphRun {
+        font_size: 16.0,
+        variations: Default::default(),
+
         font: FontRef::unscaled(FontId(1)),
         bidi_level: 0,
         byte_range: TextRange::new(8, 14),

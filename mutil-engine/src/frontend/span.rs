@@ -140,3 +140,10 @@ mod tests {
         assert!(!a.is_interior(2));
     }
 }
+
+/// IME preedit styling over source bytes; never changes EGC segmentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompositionSpan {
+    /// UTF-8 code-point-aligned source range, which may lie inside an EGC.
+    pub byte_range: TextRange,
+}

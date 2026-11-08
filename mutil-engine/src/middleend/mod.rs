@@ -11,12 +11,12 @@ mod options;
 mod output;
 
 pub use badness::{
-    CAPACITY_EPSILON, FIT_EPSILON, LineFit, OVERFULL_BADNESS, OVERFULL_RATIO, TierCapacities,
-    UNDERFULL_BADNESS_CAP, line_fit,
+    CAPACITY_EPSILON, FIT_EPSILON, LineFit, MAX_BADNESS, OVERFULL_BADNESS, OVERFULL_RATIO,
+    TierCapacities, UNDERFULL_BADNESS_CAP, line_fit,
 };
 pub use interaction::{
-    BoxHeightStyle, CaretAffinity, CaretStop, CaretVisual, CursorPosition, HitResult, Motion,
-    Selection, SelectionRect,
+    AtomicFragment, BoxHeightStyle, CaretAffinity, CaretStop, CaretVisual, CursorPosition,
+    HitResult, Motion, Selection, SelectionRect, resolve_ligature_carets,
 };
 pub use layout::{LayoutInputError, check_layout_inputs, layout_paragraph};
 pub use options::{

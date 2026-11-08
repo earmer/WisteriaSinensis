@@ -355,3 +355,14 @@ mod tests {
         assert_eq!(FontRef::unscaled(FontId(3)).scale, 1.0);
     }
 }
+
+/// Borrowed, complete physical font instance used by measurement queries.
+#[derive(Clone, Copy, Debug)]
+pub struct FontInstanceRef<'a> {
+    /// Face and fallback scale; FontId identifies a face, not variations.
+    pub font: FontRef,
+    /// Requested size in layout units.
+    pub font_size: f32,
+    /// Variable font coordinates.
+    pub variations: &'a [FontVariation],
+}

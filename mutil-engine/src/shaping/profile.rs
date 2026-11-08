@@ -14,13 +14,3 @@ pub enum ShaperProfile {
     /// honoured and `ligature_carets` returns nothing.
     LineOnly,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn full_contract_is_the_default() {
-        assert_eq!(ShaperProfile::default(), ShaperProfile::FullContract);
-    }
-}

@@ -13,8 +13,8 @@ use smallvec::smallvec;
 use std::sync::Arc;
 
 // bytes: 0..7 "omaatje" | 7..8 " " | 8..11 U+FFFC | 11..12 "\t" | 12..14 "go"
-//        | 14..15 "," | 15..16 "\n"
-const TEXT: &str = "omaatje \u{FFFC}\tgo,\n";
+//        | 14..15 "," | 15..18 "U+2028"
+const TEXT: &str = "omaatje \u{FFFC}\tgo,\u{2028}";
 const ADV: f32 = 10.0;
 const BOX_W: f32 = 12.0;
 const TAB_W: f32 = 8.0;
@@ -88,6 +88,8 @@ fn assert_send_sync_static<T: Send + Sync + 'static>() {}
 
 fn run() -> ShapingRun {
     ShapingRun {
+        features: Default::default(),
+
         byte_range: TextRange::new(0, TEXT.len()),
         families: Arc::from([FontFamily::Generic(GenericFamily::SansSerif)]),
         font_size: 16.0,
@@ -109,7 +111,6 @@ fn zero_layout_full_pipeline_assembly() {
         suffix_replacement: Some("tje".into()),
         prefix_cut_bytes: 1,
         suffix_cut_bytes: 2,
-        penalty: 50,
     };
     let ast = ParagraphAst {
         base_direction: BidiDirection::Ltr,
@@ -137,6 +138,10 @@ fn zero_layout_full_pipeline_assembly() {
             // A breakable space: the opportunity follows the glue, so the space
             // stays on the trailing edge of the line that breaks after it.
             WordNode::Glue(GlueNode {
+                original_bidi_class: BidiClass::Ws,
+                bidi_level: 0,
+                is_collapsible: true,
+
                 byte_range: TextRange::new(7, 8),
                 kind: GlueKind::WordSpace,
                 tier: GlueTier::Tier0,
@@ -159,11 +164,11 @@ fn zero_layout_full_pipeline_assembly() {
             word(12, 14),
             // "," is fused to "go" by the absence of a discretionary.
             word(14, 15),
-            // The hard break owns the newline's bytes: the next line starts at 16.
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(15, 16), false)),
+            // The hard break owns U+2028: the next line starts at byte 18.
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(15, 18), false)),
             // Every paragraph ends with the sentinel: it terminates the blank line
-            // after the trailing newline, so N newlines give N + 1 lines.
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::empty_at(16), true)),
+            // after the trailing line separator, so N separators give N + 1 lines.
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::empty_at(18), true)),
         ],
         decoration_spans: vec![],
         atomic_spans: vec![],
@@ -217,7 +222,7 @@ fn zero_layout_full_pipeline_assembly() {
             ..atom(i)
         })
         .collect();
-    assert_eq!(run_atoms.len(), TEXT.len() - 2);
+    assert_eq!(run_atoms.len(), TEXT.len() - 4);
     assert!(
         run_atoms
             .iter()
@@ -230,7 +235,6 @@ fn zero_layout_full_pipeline_assembly() {
             "window edge {edge} is not an atom start"
         );
     }
-    let features = FontFeatures::new();
     // Each side reads only its own replacement and cut count.
     let trailing_edit = TrailingEdit::for_opportunity(&opportunity, '-');
     let leading_edit = LeadingEdit::for_opportunity(&opportunity);
@@ -257,7 +261,6 @@ fn zero_layout_full_pipeline_assembly() {
         r,
         &run_atoms,
         TextRange::new(0, 3),
-        &features,
         LeadingEdit::None,
         trailing_edit.clone(),
         &mut out,
@@ -267,7 +270,6 @@ fn zero_layout_full_pipeline_assembly() {
         r,
         &run_atoms,
         TextRange::new(3, 7),
-        &features,
         leading_edit.clone(),
         TrailingEdit::None,
         &mut out,
@@ -278,7 +280,6 @@ fn zero_layout_full_pipeline_assembly() {
         r,
         &run_atoms,
         TextRange::new(3, 7),
-        &features,
         leading_edit,
         trailing_edit,
         &mut out,
@@ -308,6 +309,8 @@ fn zero_layout_full_pipeline_assembly() {
         is_hanging: false,
     });
     let line0 = PositionedLine {
+        atomic_fragments: vec![],
+
         span_fragments: vec![],
         byte_range: TextRange::new(0, 3),
         visible_byte_end: 3,
@@ -320,6 +323,9 @@ fn zero_layout_full_pipeline_assembly() {
         hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
+            font_size: 16.0,
+            variations: Default::default(),
+
             font: FontRef::unscaled(FontId(1)),
             bidi_level: 0,
             byte_range: TextRange::new(0, 3),
@@ -350,8 +356,10 @@ fn zero_layout_full_pipeline_assembly() {
     let body_width = pen;
     l1_glyphs.push(glyph(comma, body_width, true));
     let line1 = PositionedLine {
+        atomic_fragments: vec![],
+
         span_fragments: vec![],
-        byte_range: TextRange::new(3, 16),
+        byte_range: TextRange::new(3, 18),
         visible_byte_end: 15,
         baseline_y: 32.0,
         ascent: 12.0,
@@ -362,6 +370,9 @@ fn zero_layout_full_pipeline_assembly() {
         hanging_right: ADV,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
+            font_size: 16.0,
+            variations: Default::default(),
+
             font: FontRef::unscaled(FontId(1)),
             bidi_level: 0,
             byte_range: TextRange::new(3, 15),
@@ -388,9 +399,11 @@ fn zero_layout_full_pipeline_assembly() {
 
     // Line 2: the empty line after the hard break (Stage 4.2).
     let line2 = PositionedLine {
+        atomic_fragments: vec![],
+
         span_fragments: vec![],
-        byte_range: TextRange::empty_at(16),
-        visible_byte_end: 16,
+        byte_range: TextRange::empty_at(18),
+        visible_byte_end: 18,
         baseline_y: 48.0,
         ascent: 12.0,
         descent: 4.0,
@@ -402,7 +415,7 @@ fn zero_layout_full_pipeline_assembly() {
         visual_runs: vec![],
         caret_stops: vec![CaretStop {
             x: 0.0,
-            offset: 16,
+            offset: 18,
             affinity: CaretAffinity::Downstream,
             level: 0,
             line: 2,
@@ -546,6 +559,8 @@ fn small_line() -> PositionedLine {
         is_hanging: false,
     };
     PositionedLine {
+        atomic_fragments: vec![],
+
         span_fragments: vec![],
         byte_range: TextRange::new(0, 4),
         visible_byte_end: 4,
@@ -558,6 +573,9 @@ fn small_line() -> PositionedLine {
         hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
+            font_size: 16.0,
+            variations: Default::default(),
+
             font: FontRef::unscaled(FontId(1)),
             bidi_level: 0,
             byte_range: TextRange::new(0, 4),
@@ -681,7 +699,7 @@ fn hang_mode_struct_gates_each_physical_edge() {
     let mut l = small_line();
     l.visual_runs[0].glyphs.push(PositionedGlyph {
         glyph_id: 2,
-        x: 40.0,
+        x: 36.0,
         x_offset: 0.0,
         y_offset: 0.0,
         advance: 10.0,
@@ -691,7 +709,7 @@ fn hang_mode_struct_gates_each_physical_edge() {
     });
     l.byte_range = TextRange::new(0, 5);
     l.visible_byte_end = 5;
-    l.hanging_right = 10.0;
+    l.hanging_right = 6.0;
     let with = |hang_mode, base_direction| LineContext {
         hang_mode,
         base_direction,
@@ -1020,6 +1038,6 @@ fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
     let options = LayoutOptions::default();
     let shaper: &dyn TextShaper = &NoopShaper;
     let p = layout_paragraph(&ast, "", shaper, &constraints, &options);
-    assert_eq!(p, PositionedParagraph::empty(BidiDirection::Rtl));
+    assert_eq!(p, Ok(PositionedParagraph::empty(BidiDirection::Rtl)));
     assert!(check_layout_inputs(&ast, "", &constraints, &options).is_ok());
 }

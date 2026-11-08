@@ -36,8 +36,6 @@ pub struct HyphenOpportunity {
     /// Original bytes removed immediately **after** `byte_offset`; the same
     /// rules apply.
     pub suffix_cut_bytes: u32,
-    /// Break penalty (feeds the Knuth-Plass demerits, §5 Stage 1.6).
-    pub penalty: i32,
 }
 
 /// Kind of stretchable space (spec §2.4).
@@ -95,6 +93,12 @@ pub enum GlueTier {
 /// a [`DiscretionaryNode`] emitted by the frontend (see [`WordNode`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlueNode {
+    /// Original Unicode bidi class for L1.
+    pub original_bidi_class: crate::types::BidiClass,
+    /// Resolved level before line-local L1.
+    pub bidi_level: crate::types::BidiLevel,
+    /// Only collapsible trailing whitespace can disappear.
+    pub is_collapsible: bool,
     /// Source bytes (empty for `CjkAutospace` and `CjkPunctCompression`, which
     /// have `start == end`).
     pub byte_range: TextRange,
