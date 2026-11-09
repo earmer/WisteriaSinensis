@@ -416,16 +416,27 @@ pub struct LineClampPolicy {
     /// Synthesized suffix; empty means silent truncation.
     pub ellipsis: Box<str>,
 }
-impl Default for LineClampPolicy {
-    fn default() -> Self {
+impl LineClampPolicy {
+    /// Truncates after `n` lines, with the ellipsis `"…"`.
+    #[must_use]
+    pub fn max_lines(n: u32) -> Self {
         Self {
-            max_lines: None,
+            max_lines: Some(n as usize),
             max_block_size: None,
             ellipsis: "…".into(),
         }
     }
-}
-impl LineClampPolicy {
+
+    /// Truncates once the block extent would exceed `h`, with the ellipsis `"…"`.
+    #[must_use]
+    pub fn max_block_size(h: f32) -> Self {
+        Self {
+            max_lines: None,
+            max_block_size: Some(h),
+            ellipsis: "…".into(),
+        }
+    }
+
     /// Checks configured limits and the suffix source.
     pub fn is_valid(&self) -> bool {
         (self.max_lines.is_some() || self.max_block_size.is_some())

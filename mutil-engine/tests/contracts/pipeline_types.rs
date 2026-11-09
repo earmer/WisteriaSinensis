@@ -4,7 +4,9 @@
 //! hand-written fixture (fixed 10-unit advances) whose only purpose is to
 //! exercise ownership, visibility and trait closure from *outside* the crate.
 
-use crate::common::{ADV, assert_send_sync_static, atom, push_text, rebuild_items, shaping_run};
+use crate::common::{
+    ADV, assert_send_sync_static, atom, push_text, rebuild_items, shaping_run, single_slot,
+};
 use mutil_engine::*;
 
 const TEXT: &str = "Hello world";
@@ -148,7 +150,7 @@ fn test_pipeline_types_compile() {
     );
 
     let line = PositionedLine {
-        slots: smallvec::SmallVec::new(),
+        slots: single_slot(pen + ADV, f32::INFINITY),
         annotations: Vec::new(),
         is_ellipsized: false,
         resolved_slot_constraints: smallvec::SmallVec::new(),
@@ -161,7 +163,7 @@ fn test_pipeline_types_compile() {
         baseline_y: ast.strut_metrics.ascent,
         ascent: ast.strut_metrics.ascent,
         descent: ast.strut_metrics.descent,
-        line_height: VerticalMetrics::from_font_metrics(&ast.strut_metrics).natural_line_height(),
+        line_height: ast.strut_metrics.natural_line_height(),
         visual_width: pen + ADV,
         hanging_left: 0.0,
         hanging_right: 0.0,
@@ -189,10 +191,6 @@ fn test_pipeline_types_compile() {
 
     let mut para = PositionedParagraph::empty(ast.base_direction);
     assert!(para.lines.is_empty());
-    para.size = Size {
-        width: line.visual_width,
-        height: line.line_height,
-    };
     para.lines.push(line);
     assert_eq!(para.lines.len(), 1);
 

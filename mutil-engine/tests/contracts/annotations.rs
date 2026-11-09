@@ -81,7 +81,7 @@ fn annotation_output_and_synthesized_ownership() {
     bad.visual_runs[0].glyphs[0].is_synthesized = true;
     assert_eq!(
         bad.validate(&c),
-        Err(LineInvariantError::InvalidGlyphSource)
+        Err(LineInvariantError::InvalidGlyphSource { run: 0, glyph: 0 })
     );
 }
 
@@ -90,7 +90,7 @@ fn annotation_base_allows_glyph_less_source_gaps() {
     let mut l = line();
     l.byte_range = TextRange::new(0, 3);
     l.visible_byte_end = 3;
-    l.visual_width = 100.0;
+    set_visual_width(&mut l, 100.0);
     l.ascent += 3.0;
     l.line_height += 3.0;
     l.baseline_y += 3.0;
@@ -116,7 +116,7 @@ fn annotation_base_allows_glyph_less_source_gaps() {
     bad.visual_runs[1].glyphs[0].byte_range = Some(TextRange::new(1, 3));
     assert_eq!(
         bad.validate(&ctx()),
-        Err(LineInvariantError::InvalidAnnotation)
+        Err(LineInvariantError::InvalidAnnotation { index: 0 })
     );
 
     // A base with no intersecting body glyph is not a visible base.
@@ -124,7 +124,7 @@ fn annotation_base_allows_glyph_less_source_gaps() {
     bad.annotations[0].base_byte_range = TextRange::new(1, 2);
     assert_eq!(
         bad.validate(&ctx()),
-        Err(LineInvariantError::InvalidAnnotation)
+        Err(LineInvariantError::InvalidAnnotation { index: 0 })
     );
 }
 
@@ -198,5 +198,88 @@ fn annotation_atom_script_must_match_its_run_and_be_resolved() {
     assert_eq!(
         check(&a, "ab"),
         Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
+    );
+}
+
+/// A line of two bases, "a" over `[0, 100]` and "b" over `[150, 250]`, with
+/// room above and below for annotations.
+fn annotated_line() -> (PositionedLine, LineContext) {
+    let (mut l, c) = two_slots();
+    l.ascent += 3.0;
+    l.descent += 3.0;
+    l.line_height += 6.0;
+    l.baseline_y += 3.0;
+    let first = positioned_annotation();
+    let mut second = positioned_annotation();
+    second.annotation_id = 2;
+    second.base_byte_range = TextRange::new(1, 2);
+    second.glyphs[0].x = 175.0;
+    l.annotations = vec![first, second];
+    (l, c)
+}
+
+#[test]
+fn annotations_need_glyphs_unique_ids_and_disjoint_bases_per_side() {
+    let (l, c) = annotated_line();
+    assert_eq!(l.validate(&c), Ok(()));
+
+    let mut empty = l.clone();
+    empty.annotations[1].glyphs.clear();
+    assert_eq!(
+        empty.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 1 })
+    );
+
+    let mut repeated = l.clone();
+    repeated.annotations[1].annotation_id = 1;
+    assert_eq!(
+        repeated.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 1 })
+    );
+
+    let mut overlapping = l.clone();
+    overlapping.annotations[1].base_byte_range = TextRange::new(0, 2);
+    assert_eq!(
+        overlapping.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 1 })
+    );
+
+    // The other side of the same base is a different annotation slot.
+    let mut other_side = l;
+    other_side.annotations[1].base_byte_range = TextRange::new(0, 1);
+    other_side.annotations[1].side = AnnotationSide::Under;
+    other_side.annotations[1].glyphs[0].x = 25.0;
+    other_side.annotations[1].baseline_offset = -1.0;
+    assert_eq!(other_side.validate(&c), Ok(()));
+}
+
+#[test]
+fn an_annotation_id_appears_once_per_paragraph() {
+    let annotated = |range: (usize, usize), id: u64, baseline_y: f32| {
+        let mut l = line();
+        l.byte_range = TextRange::new(range.0, range.1);
+        l.visible_byte_end = range.1;
+        l.ascent += 3.0;
+        l.line_height += 3.0;
+        l.baseline_y = baseline_y;
+        let mut g = glyph(0.0, 10.0, false);
+        g.byte_range = Some(l.byte_range);
+        l.visual_runs = vec![run(g)];
+        let mut ann = positioned_annotation();
+        ann.annotation_id = id;
+        ann.base_byte_range = l.byte_range;
+        ann.glyphs[0].x = 0.0;
+        ann.glyphs[0].advance = 10.0;
+        l.annotations = vec![ann];
+        l
+    };
+    let mut p = PositionedParagraph::empty(Direction::Ltr);
+    p.lines = vec![annotated((0, 1), 1, 11.0), annotated((1, 2), 2, 24.0)];
+    p.total_block_size = 26.0;
+    assert_eq!(p.validate("ab", None, &ctx()), Ok(()));
+    p.lines[1].annotations[0].annotation_id = 1;
+    assert_eq!(
+        p.validate("ab", None, &ctx()),
+        Err((1, LineInvariantError::InvalidParagraph))
     );
 }

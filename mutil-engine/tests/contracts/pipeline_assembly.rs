@@ -8,7 +8,10 @@
 //! a hand-written fixture (10-unit advances; the hyphenation example is a
 //! structural fixture, not real Dutch).
 
-use crate::common::{ADV, assert_send_sync_static, atom, push_text, rebuild_items, shaping_run};
+use crate::common::{
+    ADV, assert_send_sync_static, atom, push_text, rebuild_items, set_visual_width, shaping_run,
+    single_slot,
+};
 use mutil_engine::*;
 use smallvec::smallvec;
 
@@ -169,7 +172,7 @@ fn line_context(ast: &ParagraphAst) -> LineContext {
 /// entities.
 fn blank_line() -> PositionedLine {
     PositionedLine {
-        slots: smallvec::SmallVec::new(),
+        slots: single_slot(0.0, WRAP_WIDTH),
         annotations: Vec::new(),
         is_ellipsized: false,
         resolved_slot_constraints: smallvec::SmallVec::new(),
@@ -234,6 +237,7 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
         visible_byte_end: 3,
         baseline_y: 12.0,
         visual_width: 4.0 * ADV,
+        slots: single_slot(4.0 * ADV, ctx.wrap_width),
         visual_runs: vec![run_of(TextRange::new(0, 3), l0_glyphs)],
         ..blank_line()
     };
@@ -261,6 +265,7 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
         visible_byte_end: 15,
         baseline_y: 32.0,
         visual_width: body_width,
+        slots: single_slot(body_width, ctx.wrap_width),
         hanging_right: ADV,
         visual_runs: vec![run_of(TextRange::new(3, 15), l1_glyphs)],
         visual_boxes: vec![PositionedInlineBox {
@@ -299,10 +304,6 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
     };
 
     let mut para = PositionedParagraph::empty(ast.base_direction);
-    para.size = Size {
-        width: body_width,
-        height: 48.0,
-    };
     para.lines = vec![line0, line1, line2];
     para
 }
@@ -450,7 +451,7 @@ fn middle_end_assembles_three_valid_lines() {
         panic!("expected three lines, got {}", para.lines.len());
     };
     for (i, l) in para.lines.iter().enumerate() {
-        assert_eq!(l.validate(&ctx), Ok(()), "line {i}");
+        assert_eq!(l.validate(&ctx.clone().for_line(i)), Ok(()), "line {i}");
     }
     assert!(line1.hanging_right > 0.0 && line0.hanging_right == 0.0);
     assert_eq!((line1.visual_boxes.len(), line1.tabs.len()), (1, 1));
@@ -478,7 +479,8 @@ fn assembled_output_owns_its_data() {
 fn hanging_comma_counted_in_visual_width_is_rejected() {
     let (_, ctx, para) = assembled();
     let mut bad = para.lines[1].clone();
-    bad.visual_width += ADV;
+    let widened = bad.visual_width + ADV;
+    set_visual_width(&mut bad, widened);
     bad.hanging_right = 0.0;
     assert!(matches!(
         bad.validate(&ctx),
@@ -579,7 +581,7 @@ fn small_line() -> PositionedLine {
         is_hanging: false,
     };
     PositionedLine {
-        slots: smallvec::SmallVec::new(),
+        slots: single_slot(40.0, f32::INFINITY),
         annotations: Vec::new(),
         is_ellipsized: false,
         resolved_slot_constraints: smallvec::SmallVec::new(),
@@ -724,7 +726,7 @@ fn empty_line_rejects_tabs() {
     l.visible_byte_end = 0;
     l.visual_runs.clear();
     l.visual_boxes.clear();
-    l.visual_width = 0.0;
+    set_visual_width(&mut l, 0.0);
     l.line_height = 16.0;
     assert_eq!(
         l.validate(&small_ctx()),
@@ -805,7 +807,8 @@ fn trailing_space_line(x: f32) -> PositionedLine {
     l.visual_boxes.clear();
     l.byte_range = TextRange::new(0, 3);
     l.visible_byte_end = 2;
-    l.visual_width = 20.0;
+    set_visual_width(&mut l, 20.0);
+    l.visual_runs[0].byte_range = l.byte_range;
     l.visual_runs[0].glyphs = vec![
         PositionedGlyph {
             glyph_id: 1,
@@ -871,7 +874,8 @@ fn trailing_tab_follows_the_same_l1_rule() {
     l.visual_runs[0].glyphs.truncate(1);
     l.byte_range = TextRange::new(0, 3);
     l.visible_byte_end = 2;
-    l.visual_width = 10.0;
+    set_visual_width(&mut l, 10.0);
+    l.visual_runs[0].byte_range = l.byte_range;
     l.tabs = vec![PositionedTab {
         byte_range: TextRange::new(2, 3),
         x: 10.0,
@@ -984,7 +988,6 @@ fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
         truncated_range: None,
         writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
         base_direction: BidiDirection::Ltr,
-        size: Size::default(),
         lines: vec![l.clone(), l],
     };
     let c = ctx(FirstLine, BidiDirection::Ltr, 0);

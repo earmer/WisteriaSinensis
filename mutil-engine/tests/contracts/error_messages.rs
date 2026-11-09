@@ -149,12 +149,12 @@ fn line_invariant_error_messages() {
             "invalid visual orientation",
         ),
         (
-            LineInvariantError::InvalidGlyphSource,
-            "invalid synthesized/source glyph ownership",
+            LineInvariantError::InvalidGlyphSource { run: 1, glyph: 5 },
+            "glyph 5 of run 1 has an invalid synthesized flag or source range",
         ),
         (
-            LineInvariantError::InvalidAnnotation,
-            "invalid positioned annotation",
+            LineInvariantError::InvalidAnnotation { index: 4 },
+            "annotation 4 is invalid, has no glyphs, repeats an id, overlaps another on its side, or does not fit its base",
         ),
         (
             LineInvariantError::InvalidParagraph,
@@ -177,7 +177,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidVisualRun { run: 1 },
-            "visual run 1 has an invalid font instance",
+            "visual run 1 has no glyphs, bytes outside the line, or an invalid font instance",
         ),
         (
             LineInvariantError::InvalidAtomicFragment { index: 4 },
@@ -246,7 +246,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidInlineBox { index: 4 },
-            "inline box 4 has a non-finite coordinate or a negative size",
+            "inline box 4 has a non-finite coordinate, a negative size, an invalid baseline alignment or bytes outside the line",
         ),
         (
             LineInvariantError::InlineBoxOutsideBlock { index: 4 },
@@ -304,7 +304,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidTab { index: 4 },
-            "tab 4 has a non-finite coordinate or a negative width",
+            "tab 4 has a non-finite coordinate, a negative width, or empty or out-of-line bytes",
         ),
         (
             LineInvariantError::TabOutsideBlock { index: 4 },
@@ -323,12 +323,12 @@ fn line_invariant_error_messages() {
             "trailing tab 4 is not on the far edge of the base direction",
         ),
         (
-            LineInvariantError::NonFiniteCaretStop { index: 4 },
-            "caret stop 4 has a non-finite x",
+            LineInvariantError::InvalidCaretStop { index: 4 },
+            "caret stop 4 is non-finite, out of visual order, outside the line or at an invalid level",
         ),
         (
-            LineInvariantError::NonFiniteDecoration { index: 4 },
-            "decoration 4 has a non-finite coordinate",
+            LineInvariantError::InvalidDecoration { index: 4 },
+            "decoration 4 has a non-finite or negative extent or bytes outside the line",
         ),
         (
             LineInvariantError::TrailingWhitespaceMarkedHanging { run: 1, glyph: 5 },

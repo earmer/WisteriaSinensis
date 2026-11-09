@@ -44,7 +44,7 @@ fn nbsp_remains_visible_in_collapsible_output() {
     let mut l = line();
     l.byte_range = TextRange::new(0, 3);
     l.visible_byte_end = 3;
-    l.visual_width = 14.;
+    set_visual_width(&mut l, 14.);
     let mut nbsp = glyph(10., 4., false);
     nbsp.byte_range = Some(TextRange::new(1, 3));
     l.visual_runs = vec![run(glyph(0., 10., false)), run(nbsp)];
@@ -59,12 +59,12 @@ fn malformed_atomic_fragments_are_rejected() {
         atomic_id: 1,
         full_byte_range: TextRange::new(0, 1),
         fragment_byte_range: TextRange::new(0, 1),
-        x_start: 0.,
-        x_end: 10.,
+        x: 0.,
+        width: 10.,
         bidi_level: 0,
     }];
     assert_eq!(l.validate(&ctx()), Ok(()));
-    l.atomic_fragments[0].x_end = f32::NAN;
+    l.atomic_fragments[0].width = f32::NAN;
     assert_eq!(
         l.validate(&ctx()),
         Err(LineInvariantError::InvalidAtomicFragment { index: 0 })
@@ -219,4 +219,158 @@ fn empty_slot_hanging_and_trailing_whitespace() {
     assert_eq!(l.validate(&c), Ok(()));
     l.visual_runs[0].glyphs.last_mut().unwrap().x = 145.0;
     assert!(l.validate(&c).is_err());
+}
+
+fn one_glyph_line() -> PositionedLine {
+    let mut l = line();
+    l.visual_runs = vec![run(glyph(0., 10., false))];
+    l
+}
+
+#[test]
+fn inline_box_alignment_and_bytes_are_checked_per_box() {
+    let object = PositionedInlineBox {
+        baseline_align: BaselineAlignment::Auto,
+        box_id: 1,
+        byte_range: TextRange::new(0, 1),
+        x: 20.,
+        y: 0.,
+        width: 10.,
+        ascent: 5.,
+        descent: 1.,
+        overflow_policy: BoxOverflowPolicy::Clip,
+    };
+    let mut l = one_glyph_line();
+    l.visual_boxes = vec![object];
+    assert_eq!(l.validate(&ctx()), Ok(()));
+    let invalid = Err(LineInvariantError::InvalidInlineBox { index: 1 });
+    l.visual_boxes = vec![
+        object,
+        PositionedInlineBox {
+            baseline_align: BaselineAlignment::Offset(f32::NAN),
+            ..object
+        },
+    ];
+    assert_eq!(l.validate(&ctx()), invalid);
+    l.visual_boxes[1] = PositionedInlineBox {
+        byte_range: TextRange::new(0, 2),
+        ..object
+    };
+    assert_eq!(l.validate(&ctx()), invalid);
+}
+
+#[test]
+fn non_synthesized_glyphs_own_bytes_inside_the_line() {
+    let mut l = one_glyph_line();
+    l.visual_runs[0].glyphs.push(glyph(10., 10., false));
+    assert_eq!(l.validate(&ctx()), Ok(()));
+    let invalid = Err(LineInvariantError::InvalidGlyphSource { run: 0, glyph: 1 });
+    l.visual_runs[0].glyphs[1].byte_range = Some(TextRange::empty_at(0));
+    assert_eq!(l.validate(&ctx()), invalid);
+    l.visual_runs[0].glyphs[1].byte_range = Some(TextRange::new(0, 2));
+    assert_eq!(l.validate(&ctx()), invalid);
+    // A synthesized glyph carries no range at all.
+    l.visual_runs[0].glyphs[1].byte_range = None;
+    assert_eq!(l.validate(&ctx()), invalid);
+    l.visual_runs[0].glyphs[1].is_synthesized = true;
+    assert_eq!(l.validate(&ctx()), Ok(()));
+}
+
+#[test]
+fn visual_runs_hold_glyphs_and_stay_inside_the_line() {
+    let mut l = one_glyph_line();
+    l.visual_runs.push(run(glyph(10., 10., false)));
+    assert_eq!(l.validate(&ctx()), Ok(()));
+    let invalid = Err(LineInvariantError::InvalidVisualRun { run: 1 });
+    l.visual_runs[1].glyphs.clear();
+    assert_eq!(l.validate(&ctx()), invalid);
+    l.visual_runs[1] = run(glyph(10., 10., false));
+    l.visual_runs[1].byte_range = TextRange::new(0, 2);
+    assert_eq!(l.validate(&ctx()), invalid);
+}
+
+#[test]
+fn tabs_own_non_empty_bytes_inside_the_line() {
+    let tab = PositionedTab {
+        byte_range: TextRange::new(0, 1),
+        x: 10.,
+        width: 8.,
+    };
+    let mut l = one_glyph_line();
+    l.tabs = vec![tab];
+    assert_eq!(l.validate(&ctx()), Ok(()));
+    for byte_range in [TextRange::empty_at(0), TextRange::new(0, 2)] {
+        l.tabs = vec![PositionedTab { byte_range, ..tab }];
+        assert_eq!(
+            l.validate(&ctx()),
+            Err(LineInvariantError::InvalidTab { index: 0 })
+        );
+    }
+}
+
+#[test]
+fn ellipsis_only_line_rejects_every_body_entity() {
+    let mut l = line();
+    l.byte_range = TextRange::empty_at(0);
+    l.visible_byte_end = 0;
+    l.is_ellipsized = true;
+    let mut ellipsis = glyph(0., 10., false);
+    ellipsis.is_synthesized = true;
+    ellipsis.byte_range = None;
+    let mut r = run(glyph(0., 10., false));
+    r.byte_range = TextRange::empty_at(0);
+    r.glyphs = vec![ellipsis];
+    l.visual_runs = vec![r];
+    assert_eq!(l.validate(&ctx()), Ok(()));
+    let mut body = l.clone();
+    body.visual_runs[0].glyphs.push(glyph(10., 10., false));
+    assert_eq!(
+        body.validate(&ctx()),
+        Err(LineInvariantError::InvalidGlyphSource { run: 0, glyph: 1 })
+    );
+    let mut tabbed = l;
+    tabbed.tabs = vec![PositionedTab {
+        byte_range: TextRange::empty_at(0),
+        x: 0.,
+        width: 0.,
+    }];
+    assert_eq!(
+        tabbed.validate(&ctx()),
+        Err(LineInvariantError::EmptyLineHasTabs)
+    );
+}
+
+#[test]
+fn a_slot_holding_only_a_tab_is_occupied() {
+    let mut l = line();
+    set_visual_width(&mut l, 0.);
+    l.tabs = vec![PositionedTab {
+        byte_range: TextRange::new(0, 1),
+        x: 0.,
+        width: 0.,
+    }];
+    assert_eq!(l.validate(&ctx()), Ok(()));
+    // A trailing tab does not occupy the slot.
+    l.visible_byte_end = 0;
+    l.tabs[0].byte_range = TextRange::new(0, 1);
+    assert_eq!(l.validate(&ctx()), Err(LineInvariantError::InvalidSlots));
+}
+
+#[test]
+fn occupancy_and_containment_share_one_tolerance() {
+    // The mark sits 1e-4 before the slot: inside by tolerance, hence occupying.
+    let mut l = line();
+    set_visual_width(&mut l, 0.);
+    l.visual_runs = vec![run(glyph(-1e-4, 0., false))];
+    assert_eq!(l.validate(&ctx()), Ok(()));
+    // Beyond the tolerance the slot stays empty although a glyph is present.
+    l.visual_runs = vec![run(glyph(-1e-2, 0., false))];
+    assert_eq!(l.validate(&ctx()), Err(LineInvariantError::InvalidSlots));
+}
+
+#[test]
+fn empty_slots_are_invalid() {
+    let mut l = one_glyph_line();
+    l.slots.clear();
+    assert_eq!(l.validate(&ctx()), Err(LineInvariantError::InvalidSlots));
 }

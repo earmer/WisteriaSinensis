@@ -300,9 +300,25 @@ pub fn check(a: &ParagraphAst, t: &str) -> Result<LineContext, LayoutInputError>
     )
 }
 
+/// The one slot of a line laid out in a context whose wrap width is
+/// `wrap_width`: it starts at 0 and holds the whole `visual_width`.
+pub fn single_slot(visual_width: f32, wrap_width: f32) -> smallvec::SmallVec<[PositionedSlot; 1]> {
+    smallvec![PositionedSlot {
+        start: 0.0,
+        visual_width,
+        constraint_width: wrap_width,
+    }]
+}
+
+/// Sets the width of a single-slot line, keeping its slot in step.
+pub fn set_visual_width(line: &mut PositionedLine, width: f32) {
+    line.visual_width = width;
+    line.slots[0].visual_width = width;
+}
+
 pub fn line() -> PositionedLine {
     PositionedLine {
-        slots: smallvec::SmallVec::new(),
+        slots: single_slot(100., f32::INFINITY),
         annotations: Vec::new(),
         is_ellipsized: false,
         resolved_slot_constraints: smallvec::SmallVec::new(),

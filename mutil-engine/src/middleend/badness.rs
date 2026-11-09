@@ -73,7 +73,11 @@ impl LineFit {
     /// Lower keys win; excess slack breaks ties between saturated scores.
     #[must_use]
     pub fn comparison_key(&self) -> (u32, u64) {
-        (self.badness.to_bits(), self.excess_slack_bits)
+        (
+            // Adding zero turns `-0.0` into `+0.0`, so both sort alike.
+            (self.badness + 0.0).to_bits(),
+            self.excess_slack_bits,
+        )
     }
 
     const OVERFULL: Self = Self {
@@ -340,6 +344,21 @@ mod tests {
         };
         let f = line_fit(cap.total_stretch(), &cap, 16.0);
         assert!(close(f.ratio, 2.0) && close(f.badness, 400.0));
+    }
+
+    #[test]
+    fn negative_zero_badness_sorts_as_positive_zero() {
+        let positive = LineFit {
+            ratio: 0.0,
+            badness: 0.0,
+            overfull: false,
+            excess_slack_bits: 0,
+        };
+        let negative = LineFit {
+            badness: -0.0,
+            ..positive
+        };
+        assert_eq!(positive.comparison_key(), negative.comparison_key());
     }
 
     #[test]

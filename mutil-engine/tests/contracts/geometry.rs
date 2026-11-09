@@ -23,19 +23,16 @@ fn unbounded_width_indent_and_clamp_options() {
     assert_eq!(c.slot_constraints[0].start, -2.0);
     assert_eq!(c.wrap_width, 10.0);
     for policy in [
-        LineClampPolicy::default(),
         LineClampPolicy {
-            max_lines: Some(0),
-            ..Default::default()
+            max_lines: None,
+            max_block_size: None,
+            ellipsis: "…".into(),
         },
+        LineClampPolicy::max_lines(0),
+        LineClampPolicy::max_block_size(f32::INFINITY),
         LineClampPolicy {
-            max_block_size: Some(f32::INFINITY),
-            ..Default::default()
-        },
-        LineClampPolicy {
-            max_lines: Some(1),
             ellipsis: "\u{2028}".into(),
-            ..Default::default()
+            ..LineClampPolicy::max_lines(1)
         },
     ] {
         let options = LayoutOptions {
@@ -52,7 +49,7 @@ fn unbounded_width_indent_and_clamp_options() {
 #[test]
 fn truncation_and_multiple_synthesized_ellipsis_glyphs() {
     let mut l = line();
-    l.visual_width = 120.0;
+    set_visual_width(&mut l, 120.0);
     l.is_ellipsized = true;
     l.visual_runs = vec![run(glyph(0.0, 100.0, false))];
     for x in [100.0, 110.0] {
@@ -65,36 +62,26 @@ fn truncation_and_multiple_synthesized_ellipsis_glyphs() {
     let p = PositionedParagraph {
         writing_mode: WritingMode::HorizontalTb,
         base_direction: Direction::Ltr,
-        size: Size {
-            width: 120.0,
-            height: 10.0,
-        },
         total_block_size: 10.0,
         lines: vec![l],
         truncated_range: Some(TextRange::new(1, 3)),
     };
     let options = LayoutOptions {
-        clamp: Some(LineClampPolicy {
-            max_lines: Some(1),
-            ..Default::default()
-        }),
+        clamp: Some(LineClampPolicy::max_lines(1)),
         ..Default::default()
     };
-    assert_eq!(p.validate("abc", &options, &ctx()), Ok(()));
+    assert_eq!(p.validate("abc", options.clamp.as_ref(), &ctx()), Ok(()));
     let mut bad = p.clone();
     bad.truncated_range = Some(TextRange::new(2, 3));
-    assert!(bad.validate("abc", &options, &ctx()).is_err());
+    assert!(bad.validate("abc", options.clamp.as_ref(), &ctx()).is_err());
     let mut bad = p.clone();
     let mut next = bad.lines[0].clone();
     next.baseline_y += 10.0;
     next.byte_range = TextRange::new(1, 2);
     bad.lines.push(next);
     bad.total_block_size = 20.0;
-    assert!(bad.validate("abc", &options, &ctx()).is_err());
-    assert!(
-        p.validate("abc", &LayoutOptions::default(), &ctx())
-            .is_err()
-    );
+    assert!(bad.validate("abc", options.clamp.as_ref(), &ctx()).is_err());
+    assert!(p.validate("abc", None, &ctx()).is_err());
 }
 
 #[derive(Debug)]
@@ -167,12 +154,11 @@ fn provider_monotonicity_clearance_and_snapshots() {
     let p = PositionedParagraph {
         writing_mode: WritingMode::HorizontalTb,
         base_direction: Direction::Ltr,
-        size: Size::default(),
         total_block_size: 10.0,
         truncated_range: None,
         lines: vec![l],
     };
-    assert_eq!(p.validate("ab", &LayoutOptions::default(), &c), Ok(()));
+    assert_eq!(p.validate("ab", None, &c), Ok(()));
 }
 
 #[test]
@@ -228,7 +214,7 @@ fn ellipsis_only_empty_and_empty_paragraph_contracts() {
     l.byte_range = TextRange::empty_at(0);
     l.visible_byte_end = 0;
     l.is_ellipsized = true;
-    l.visual_width = 120.0;
+    set_visual_width(&mut l, 120.0);
     let mut r = run(glyph(0.0, 120.0, false));
     r.byte_range = TextRange::empty_at(0);
     r.glyphs[0].is_synthesized = true;
@@ -239,22 +225,19 @@ fn ellipsis_only_empty_and_empty_paragraph_contracts() {
     p.lines = vec![l];
     p.truncated_range = Some(TextRange::new(0, 1));
     let mut options = LayoutOptions {
-        clamp: Some(LineClampPolicy {
-            max_lines: Some(1),
-            ..Default::default()
-        }),
+        clamp: Some(LineClampPolicy::max_lines(1)),
         ..Default::default()
     };
-    assert_eq!(p.validate("a", &options, &ctx()), Ok(()));
+    assert_eq!(p.validate("a", options.clamp.as_ref(), &ctx()), Ok(()));
     p.lines[0].visual_runs.clear();
-    p.lines[0].visual_width = 0.0;
+    set_visual_width(&mut p.lines[0], 0.0);
     options.clamp.as_mut().unwrap().ellipsis = "".into();
-    assert_eq!(p.validate("a", &options, &ctx()), Ok(()));
+    assert_eq!(p.validate("a", options.clamp.as_ref(), &ctx()), Ok(()));
     p.truncated_range = None;
     p.lines[0].is_ellipsized = false;
-    assert_eq!(p.validate("", &LayoutOptions::default(), &ctx()), Ok(()));
+    assert_eq!(p.validate("", None, &ctx()), Ok(()));
     p.lines.clear();
-    assert!(p.validate("", &LayoutOptions::default(), &ctx()).is_err());
+    assert!(p.validate("", None, &ctx()).is_err());
 }
 
 #[derive(Debug)]

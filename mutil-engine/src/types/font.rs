@@ -275,37 +275,6 @@ pub struct FontMetrics {
     pub use_typo_metrics: bool,
 }
 
-/// Strut metrics for a paragraph (spec §2.5, §5 Stage 4): what an empty or
-/// fixed-height line is measured with.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct VerticalMetrics {
-    /// Baseline to line-box top.
-    pub ascent: f32,
-    /// Baseline to line-box bottom.
-    pub descent: f32,
-    /// Extra inter-line gap.
-    pub line_gap: f32,
-}
-
-impl VerticalMetrics {
-    /// Takes the vertical subset of a font's metrics. No policy is applied here:
-    /// `USE_TYPO_METRICS` selection is the backend's job (§4.5).
-    #[must_use]
-    pub const fn from_font_metrics(m: &FontMetrics) -> Self {
-        Self {
-            ascent: m.ascent,
-            descent: m.descent,
-            line_gap: m.line_gap,
-        }
-    }
-
-    /// `ascent + descent + line_gap`, the CSS `line-height: normal` height.
-    #[must_use]
-    pub fn natural_line_height(&self) -> f32 {
-        self.ascent + self.descent + self.line_gap
-    }
-}
-
 /// Borrowed, complete physical font instance used by measurement queries.
 #[derive(Clone, Copy, Debug)]
 pub struct FontInstanceRef<'a> {
@@ -410,21 +379,6 @@ mod tests {
         let b = FontVariation::new(*b"slnt", 0.0);
         assert_eq!(a, b);
         assert_eq!(s.hash_one(a), s.hash_one(b));
-    }
-
-    #[test]
-    fn vertical_metrics_follow_font_metrics() {
-        let fm = FontMetrics {
-            vertical_ascent: 5.0,
-            vertical_descent: 5.0,
-            vertical_line_gap: 0.0,
-            ascent: 8.0,
-            descent: 2.0,
-            line_gap: 1.0,
-            ..Default::default()
-        };
-        let v = VerticalMetrics::from_font_metrics(&fm);
-        assert_eq!(v.natural_line_height(), 11.0);
     }
 
     #[test]

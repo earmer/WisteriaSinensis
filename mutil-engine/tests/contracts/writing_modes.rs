@@ -156,9 +156,9 @@ fn vertical_lr_paragraph_uses_line_under_for_block_start() {
     p.writing_mode = WritingMode::VerticalLr;
     p.total_block_size = 10.0;
     p.lines = vec![l];
-    assert_eq!(p.validate("a", &LayoutOptions::default(), &ctx()), Ok(()));
+    assert_eq!(p.validate("a", None, &ctx()), Ok(()));
     p.lines[0].baseline_y = 1.0;
-    assert!(p.validate("a", &LayoutOptions::default(), &ctx()).is_err());
+    assert!(p.validate("a", None, &ctx()).is_err());
 }
 
 #[test]
@@ -182,10 +182,10 @@ fn vertical_lr_under_annotation_moves_first_baseline() {
     p.writing_mode = WritingMode::VerticalLr;
     p.total_block_size = 11.0;
     p.lines = vec![l];
-    assert_eq!(p.validate("a", &LayoutOptions::default(), &ctx()), Ok(()));
+    assert_eq!(p.validate("a", None, &ctx()), Ok(()));
     // The line-under side is the block start in VerticalLr, so shrinking the
     // baseline to the strut descent alone pushes the line into negative block
     // space once the annotation has extended descent.
     p.lines[0].baseline_y = 2.0;
-    assert!(p.validate("a", &LayoutOptions::default(), &ctx()).is_err());
+    assert!(p.validate("a", None, &ctx()).is_err());
 }

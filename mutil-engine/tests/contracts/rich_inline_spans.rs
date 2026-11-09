@@ -4,7 +4,7 @@
 //! and is atomic for editing, and a flattened inline formula. Every width and
 //! position is a hand-written fixture; no layout algorithm runs.
 
-use crate::common::{ADV, push_text, shaping_run};
+use crate::common::{ADV, push_text, shaping_run, single_slot};
 use mutil_engine::*;
 
 // bytes: 0..2 "go" | 2..3 " " | 3..11 "@Ann-Lee" | 11..12 " " | 12..14 "ok"
@@ -175,7 +175,7 @@ fn fragment(
 
 fn line(byte_range: (usize, usize), visible_end: usize, y: f32, width: f32) -> PositionedLine {
     PositionedLine {
-        slots: smallvec::SmallVec::new(),
+        slots: single_slot(width, 100.0),
         annotations: Vec::new(),
         is_ellipsized: false,
         resolved_slot_constraints: smallvec::SmallVec::new(),
@@ -328,10 +328,6 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         100.0,
     );
     let mut para = PositionedParagraph::empty(ast.base_direction);
-    para.size = Size {
-        width: 80.0,
-        height: 32.0,
-    };
     para.lines = vec![l0, l1];
     para.total_block_size = 32.0;
     assert_eq!(para.validate_geometry(&ctx), Ok(()));
