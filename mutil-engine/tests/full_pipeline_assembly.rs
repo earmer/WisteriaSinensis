@@ -107,18 +107,20 @@ fn run() -> ShapingRun {
     }
 }
 
-#[test]
-fn zero_layout_full_pipeline_assembly() {
-    // ---- Frontend: every WordNode variant -------------------------------
-    // "omaatje" is split at the opportunity: Box("oma"), Discretionary, Box("atje").
-    let opportunity = HyphenOpportunity {
+// "omaatje" is split at the opportunity: Box("oma"), Discretionary, Box("atje").
+fn opportunity() -> HyphenOpportunity {
+    HyphenOpportunity {
         byte_offset: 3,
         prefix_replacement: Some("a".into()),
         suffix_replacement: Some("tje".into()),
         prefix_cut_bytes: 1,
         suffix_cut_bytes: 2,
-    };
-    let ast = ParagraphAst {
+    }
+}
+
+/// One paragraph that uses every `WordNode` variant.
+fn paragraph_ast() -> ParagraphAst {
+    ParagraphAst {
         annotations: Vec::new(),
         bidi_spans: Vec::new(),
         writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
@@ -144,7 +146,7 @@ fn zero_layout_full_pipeline_assembly() {
                 pre_break_width: ADV,
                 post_break_width: 0.0,
                 no_break_width: 0.0,
-                action: BreakAction::Hyphenate(opportunity.clone()),
+                action: BreakAction::Hyphenate(opportunity()),
                 cloned_spans: Default::default(),
             }),
             word(3, 7),
@@ -186,124 +188,34 @@ fn zero_layout_full_pipeline_assembly() {
         ],
         decoration_spans: vec![],
         atomic_spans: vec![],
-    };
-    assert_eq!(ast.items.len(), 11);
-    assert!(ast.items.iter().all(WordNode::is_self_contained));
-    // Nodes tile the text exactly: no cluster was split or lost.
-    let covered: usize = ast
-        .items
-        .iter()
-        .flat_map(clusters_of)
-        .map(|c| c.byte_range.len())
-        .sum();
-    assert_eq!(covered, 7 + 2 + 1); // "omaatje" + "go" + ","
+    }
+}
 
-    // Layout policy and the validation context. The strut is resolved here, in
-    // the middle-end, from the AST's raw metrics and the line-height policy.
-    let options = LayoutOptions {
+fn layout_options() -> LayoutOptions {
+    LayoutOptions {
         hang_mode: HangMode {
             start: HangStartMode::None,
             end: HangEndMode::Allow,
         },
         ..Default::default()
-    };
-    let ctx = LineContext::from_options(
+    }
+}
+
+/// The strut is resolved here, in the middle-end, from the AST's raw metrics
+/// and the line-height policy.
+fn line_context(ast: &ParagraphAst) -> LineContext {
+    LineContext::from_options(
         &ast.strut_metrics,
         ast.strut_font_size,
         ast.base_direction,
-        &options,
+        &layout_options(),
         200.0,
-    );
-    assert_eq!(ctx.strut.natural_line_height(), 16.0);
-    let constraints = LayoutConstraints {
-        first_line_indent: 0.0,
-        geometry_provider: None,
-        hanging_indent: 0.0,
-        wrap_width: 200.0,
-        tab_stops: TabStops { step: 8.0 },
-    };
-    assert_eq!(
-        check_layout_inputs(&ast, TEXT, &constraints, &options),
-        Ok(ctx.clone())
-    );
+    )
+}
 
-    // ---- Shaping bridge: both spelling edits through the trait ----------
-    let shaper: &dyn TextShaper = &NoopShaper;
-    let r = &ast.runs[0];
-    // One atom per char: U+FFFC is a single 3-byte atom (8..11), so every
-    // window edge below lies on an atom boundary.
-    let run_atoms: Vec<_> = TEXT
-        .char_indices()
-        .map(|(i, c)| GraphemeAtom {
-            byte_range: TextRange::new(i, i + c.len_utf8()),
-            ..atom(i)
-        })
-        .collect();
-    assert_eq!(run_atoms.len(), TEXT.len() - 4);
-    assert!(
-        run_atoms
-            .iter()
-            .any(|a| a.byte_range == TextRange::new(8, 11))
-    );
-    let starts: Vec<_> = run_atoms.iter().map(|a| a.byte_range.start).collect();
-    for edge in [0, 3, 7] {
-        assert!(
-            starts.contains(&edge),
-            "window edge {edge} is not an atom start"
-        );
-    }
-    // Each side reads only its own replacement and cut count.
-    let trailing_edit = TrailingEdit::for_opportunity(&opportunity, '-');
-    let leading_edit = LeadingEdit::for_opportunity(&opportunity);
-    assert_eq!(
-        trailing_edit,
-        TrailingEdit::ReplacePrefix {
-            replacement: "a".into(),
-            cut_bytes: 1,
-            hyphen: '-'
-        }
-    );
-    assert_eq!(
-        leading_edit,
-        LeadingEdit::ReplaceSuffix {
-            replacement: "tje".into(),
-            cut_bytes: 2
-        }
-    );
-    // Seeded: shapers append to the buffer and never clear it.
-    let mut out = vec![cluster(0, 0)];
-    // Regular break: line 0 ends at the break, line 1 starts after it.
-    shaper.reshape_window(
-        TEXT,
-        r,
-        &run_atoms,
-        TextRange::new(0, 3),
-        LeadingEdit::None,
-        trailing_edit.clone(),
-        &mut out,
-    );
-    shaper.reshape_window(
-        TEXT,
-        r,
-        &run_atoms,
-        TextRange::new(3, 7),
-        leading_edit.clone(),
-        TrailingEdit::None,
-        &mut out,
-    );
-    // Extreme middle fragment: both edges edited in one call.
-    shaper.reshape_window(
-        TEXT,
-        r,
-        &run_atoms,
-        TextRange::new(3, 7),
-        leading_edit,
-        trailing_edit,
-        &mut out,
-    );
-    assert_eq!(out, vec![cluster(0, 0)]);
-
-    // ---- Middle-end: three lines ----------------------------------------
+/// Three hand-positioned lines: "oma-", "atje ␠ [box] ⇥ go," and the blank line
+/// after the hard break.
+fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParagraph {
     let oma = clusters_of(&ast.items[0]);
     let atje = clusters_of(&ast.items[2]);
     let word_b = clusters_of(&ast.items[7]);
@@ -457,7 +369,137 @@ fn zero_layout_full_pipeline_assembly() {
         decorations: vec![],
     };
 
-    for (i, l) in [&line0, &line1, &line2].into_iter().enumerate() {
+    let mut para = PositionedParagraph::empty(ast.base_direction);
+    para.size = Size {
+        width: body_width,
+        height: 48.0,
+    };
+    para.lines = vec![line0, line1, line2];
+    para
+}
+
+#[test]
+fn frontend_ast_uses_every_word_node_variant_and_tiles_the_text() {
+    let ast = paragraph_ast();
+    assert_eq!(ast.items.len(), 11);
+    assert!(ast.items.iter().all(WordNode::is_self_contained));
+    // Nodes tile the text exactly: no cluster was split or lost.
+    let covered: usize = ast
+        .items
+        .iter()
+        .flat_map(clusters_of)
+        .map(|c| c.byte_range.len())
+        .sum();
+    assert_eq!(covered, 7 + 2 + 1); // "omaatje" + "go" + ","
+}
+
+#[test]
+fn middle_end_resolves_the_strut_and_accepts_the_inputs() {
+    let ast = paragraph_ast();
+    let ctx = line_context(&ast);
+    assert_eq!(ctx.strut.natural_line_height(), 16.0);
+    let constraints = LayoutConstraints {
+        first_line_indent: 0.0,
+        geometry_provider: None,
+        hanging_indent: 0.0,
+        wrap_width: 200.0,
+        tab_stops: TabStops { step: 8.0 },
+    };
+    assert_eq!(
+        check_layout_inputs(&ast, TEXT, &constraints, &layout_options()),
+        Ok(ctx)
+    );
+}
+
+#[test]
+fn shaping_bridge_applies_both_spelling_edits() {
+    let ast = paragraph_ast();
+    let opportunity = opportunity();
+    let shaper: &dyn TextShaper = &NoopShaper;
+    let r = &ast.runs[0];
+    // One atom per char: U+FFFC is a single 3-byte atom (8..11), so every
+    // window edge below lies on an atom boundary.
+    let run_atoms: Vec<_> = TEXT
+        .char_indices()
+        .map(|(i, c)| GraphemeAtom {
+            byte_range: TextRange::new(i, i + c.len_utf8()),
+            ..atom(i)
+        })
+        .collect();
+    assert_eq!(run_atoms.len(), TEXT.len() - 4);
+    assert!(
+        run_atoms
+            .iter()
+            .any(|a| a.byte_range == TextRange::new(8, 11))
+    );
+    let starts: Vec<_> = run_atoms.iter().map(|a| a.byte_range.start).collect();
+    for edge in [0, 3, 7] {
+        assert!(
+            starts.contains(&edge),
+            "window edge {edge} is not an atom start"
+        );
+    }
+    // Each side reads only its own replacement and cut count.
+    let trailing_edit = TrailingEdit::for_opportunity(&opportunity, '-');
+    let leading_edit = LeadingEdit::for_opportunity(&opportunity);
+    assert_eq!(
+        trailing_edit,
+        TrailingEdit::ReplacePrefix {
+            replacement: "a".into(),
+            cut_bytes: 1,
+            hyphen: '-'
+        }
+    );
+    assert_eq!(
+        leading_edit,
+        LeadingEdit::ReplaceSuffix {
+            replacement: "tje".into(),
+            cut_bytes: 2
+        }
+    );
+    // Seeded: shapers append to the buffer and never clear it.
+    let mut out = vec![cluster(0, 0)];
+    // Regular break: line 0 ends at the break, line 1 starts after it.
+    shaper.reshape_window(
+        TEXT,
+        r,
+        &run_atoms,
+        TextRange::new(0, 3),
+        LeadingEdit::None,
+        trailing_edit.clone(),
+        &mut out,
+    );
+    shaper.reshape_window(
+        TEXT,
+        r,
+        &run_atoms,
+        TextRange::new(3, 7),
+        leading_edit.clone(),
+        TrailingEdit::None,
+        &mut out,
+    );
+    // Extreme middle fragment: both edges edited in one call.
+    shaper.reshape_window(
+        TEXT,
+        r,
+        &run_atoms,
+        TextRange::new(3, 7),
+        leading_edit,
+        trailing_edit,
+        &mut out,
+    );
+    assert_eq!(out, vec![cluster(0, 0)]);
+}
+
+#[test]
+fn middle_end_assembles_three_valid_lines() {
+    let ast = paragraph_ast();
+    let ctx = line_context(&ast);
+    let para = assembled_paragraph(&ast, &ctx);
+    let [line0, line1, _] = &para.lines[..] else {
+        panic!("expected three lines, got {}", para.lines.len());
+    };
+    for (i, l) in para.lines.iter().enumerate() {
         assert_eq!(l.validate(&ctx), Ok(()), "line {i}");
     }
     assert!(line1.hanging_right > 0.0 && line0.hanging_right == 0.0);
@@ -466,25 +508,29 @@ fn zero_layout_full_pipeline_assembly() {
     let (b, t) = (line1.visual_boxes[0], line1.tabs[0]);
     assert_eq!(b.x + b.width, t.x);
     assert_eq!(t.x + t.width, line1.visual_runs[0].glyphs[4].x);
+}
 
-    let mut para = PositionedParagraph::empty(ast.base_direction);
-    para.size = Size {
-        width: body_width,
-        height: 48.0,
-    };
-    para.lines = vec![line0, line1, line2];
-
-    // ---- Ownership: the output stands alone ------------------------------
+#[test]
+fn assembled_output_owns_its_data() {
     assert_send_sync_static::<ParagraphAst>();
     assert_send_sync_static::<PositionedParagraph>();
     assert_send_sync_static::<LeadingEdit>();
     assert_send_sync_static::<TrailingEdit>();
+    let ast = paragraph_ast();
+    let ctx = line_context(&ast);
+    let para = assembled_paragraph(&ast, &ctx);
     let ast_copy = ast.clone();
     drop(ast); // the layout holds no borrow of the AST
     assert!(ast_copy.items.iter().all(WordNode::is_self_contained));
     assert_eq!(para.lines.len(), 3);
     assert_eq!(para.clone(), para);
-    // Tampering is caught: counting the hanging comma in visual_width.
+}
+
+#[test]
+fn hanging_comma_counted_in_visual_width_is_rejected() {
+    let ast = paragraph_ast();
+    let ctx = line_context(&ast);
+    let para = assembled_paragraph(&ast, &ctx);
     let mut bad = para.lines[1].clone();
     bad.visual_width += ADV;
     bad.hanging_right = 0.0;
@@ -577,7 +623,7 @@ fn ligature_cluster_takes_justify_after_from_its_last_atom_only() {
     assert!(node(atoms, f).is_self_contained());
 }
 
-// ---- Counter-examples on the assembled line --------------------------------
+// Counter-examples on the assembled line.
 
 /// A one-line fixture whose body is `[0, 40]`: glyph, inline box, tab, glyph.
 fn small_line() -> PositionedLine {
