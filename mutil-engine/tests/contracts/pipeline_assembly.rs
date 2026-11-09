@@ -8,50 +8,24 @@
 //! a hand-written fixture (10-unit advances; the hyphenation example is a
 //! structural fixture, not real Dutch).
 
+use crate::common::{ADV, assert_send_sync_static, atom, shaping_run};
 use mutil_engine::*;
 use smallvec::smallvec;
-use std::sync::Arc;
 
 // bytes: 0..7 "omaatje" | 7..8 " " | 8..11 U+FFFC | 11..12 "\t" | 12..14 "go"
 //        | 14..15 "," | 15..18 "U+2028"
 const TEXT: &str = "omaatje \u{FFFC}\tgo,\u{2028}";
-const ADV: f32 = 10.0;
 const BOX_W: f32 = 12.0;
 const TAB_W: f32 = 8.0;
 const SPACE_W: f32 = 4.0;
 const WRAP_WIDTH: f32 = 200.0;
 
-fn atom(offset: usize) -> GraphemeAtom {
-    GraphemeAtom {
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
-        byte_range: TextRange::new(offset, offset + 1),
-        script: ScriptTag::LATIN,
-        bidi_level: 0,
-        linebreak_class: LineBreakClass::Al,
-        flags: AtomFlags::EMPTY,
-    }
+fn cluster(base: usize, local: usize) -> ShapedCluster {
+    crate::common::cluster(TEXT, base, local)
 }
 
-fn cluster(base: usize, local: usize) -> ShapedCluster {
-    let off = base + local;
-    ShapedCluster {
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
-        byte_range: TextRange::new(off, off + 1),
-        atom_range: local..local + 1,
-        font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
-        flags: AtomFlags::EMPTY,
-        glyphs: smallvec![RawShapedGlyph {
-            glyph_id: TEXT.as_bytes()[off] as u32,
-            cluster: off as u32,
-            x_advance: ADV,
-            ..Default::default()
-        }],
-        natural_width: ADV,
-        uncompressed_width: ADV,
-        safe_to_break_before: true,
-        safe_to_concat_before: true,
-    }
+fn run() -> ShapingRun {
+    shaping_run(TEXT, "nl-NL")
 }
 
 fn word(start: usize, end: usize) -> WordNode {
@@ -84,27 +58,6 @@ fn clusters_of(node: &WordNode) -> &[ShapedCluster] {
     match node {
         WordNode::Box(BoxNode::Text { clusters, .. }) => clusters,
         _ => &[],
-    }
-}
-
-fn assert_send_sync_static<T: Send + Sync + 'static>() {}
-
-fn run() -> ShapingRun {
-    ShapingRun {
-        word_spacing: 0.0,
-        baseline_align: mutil_engine::types::BaselineAlignment::Auto,
-        letter_spacing: 0.0,
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
-        features: Default::default(),
-
-        byte_range: TextRange::new(0, TEXT.len()),
-        families: Arc::from([FontFamily::Generic(GenericFamily::SansSerif)]),
-        font_size: 16.0,
-        style: FontStyle::default(),
-        script: ScriptTag::LATIN,
-        locale: LocaleTag::new("nl-NL"),
-        bidi_level: 0,
-        decoration: TextDecoration::default(),
     }
 }
 

@@ -4,55 +4,39 @@
 //! and is atomic for editing, and a flattened inline formula. Every width and
 //! position is a hand-written fixture; no layout algorithm runs.
 
+use crate::common::{ADV, shaping_run};
 use mutil_engine::*;
-use smallvec::smallvec;
 
 // bytes: 0..2 "go" | 2..3 " " | 3..11 "@Ann-Lee" | 11..12 " " | 12..14 "ok"
 const TEXT: &str = "go @Ann-Lee ok";
-const ADV: f32 = 10.0;
 const PAD: f32 = 3.0;
 const SPACE_W: f32 = 4.0;
 const CHIP: TextRange = TextRange { start: 3, end: 11 };
 const SPAN_ID: u64 = 77;
 
+/// Atoms inside the chip carry the atomic-edit flag.
 fn atom(offset: usize) -> GraphemeAtom {
-    let in_chip = CHIP.contains(offset);
+    let flags = if CHIP.contains(offset) {
+        AtomFlags::IN_ATOMIC_EDIT_SPAN
+    } else {
+        AtomFlags::EMPTY
+    };
     GraphemeAtom {
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
-        byte_range: TextRange::new(offset, offset + 1),
-        script: ScriptTag::LATIN,
-        bidi_level: 0,
-        linebreak_class: LineBreakClass::Al,
-        flags: if in_chip {
-            AtomFlags::IN_ATOMIC_EDIT_SPAN
-        } else {
-            AtomFlags::EMPTY
-        },
+        flags,
+        ..crate::common::atom(offset)
     }
 }
 
+/// The cluster's flags are the aggregate of its atoms (spec §2.2).
 fn cluster(base: usize, local: usize) -> ShapedCluster {
-    let off = base + local;
-    let atoms = [atom(off)];
     ShapedCluster {
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
-        byte_range: TextRange::new(off, off + 1),
-        atom_range: local..local + 1,
-        font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
-        // The cluster's flags are the aggregate of its atoms (spec §2.2).
-        flags: AtomFlags::for_cluster(&atoms),
-        glyphs: smallvec![RawShapedGlyph {
-            glyph_id: TEXT.as_bytes()[off] as u32,
-            cluster: off as u32,
-            x_advance: ADV,
-            ..Default::default()
-        }],
-        natural_width: ADV,
-        uncompressed_width: ADV,
-        safe_to_break_before: true,
-        safe_to_concat_before: true,
+        flags: AtomFlags::for_cluster(&[atom(base + local)]),
+        ..crate::common::cluster(TEXT, base, local)
     }
+}
+
+fn run() -> ShapingRun {
+    shaping_run(TEXT, "en-GB")
 }
 
 fn text(start: usize, end: usize) -> WordNode {
@@ -97,25 +81,6 @@ fn sentinel(len: usize) -> WordNode {
         TextRange::empty_at(len),
         true,
     ))
-}
-
-fn run() -> ShapingRun {
-    ShapingRun {
-        word_spacing: 0.0,
-        baseline_align: mutil_engine::types::BaselineAlignment::Auto,
-        letter_spacing: 0.0,
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
-        features: Default::default(),
-
-        byte_range: TextRange::new(0, TEXT.len()),
-        families: std::sync::Arc::from([FontFamily::Generic(GenericFamily::SansSerif)]),
-        font_size: 16.0,
-        style: FontStyle::default(),
-        script: ScriptTag::LATIN,
-        locale: LocaleTag::new("en-GB"),
-        bidi_level: 0,
-        decoration: TextDecoration::default(),
-    }
 }
 
 fn chip_ast() -> ParagraphAst {

@@ -1,4 +1,5 @@
-//! Shared AST, context and positioned-line builders.
+//! Shared fixture builders: atoms, clusters, shaping runs, ASTs, contexts and
+//! positioned lines.
 
 use mutil_engine::*;
 use smallvec::smallvec;
@@ -290,3 +291,63 @@ pub fn positioned_annotation() -> PositionedAnnotationRun {
         }],
     }
 }
+
+/// Fixed advance of every fixture glyph.
+pub const ADV: f32 = 10.0;
+
+/// One Latin atom covering the single byte at `offset`.
+pub fn atom(offset: usize) -> GraphemeAtom {
+    GraphemeAtom {
+        orientation: GlyphOrientation::Horizontal,
+        byte_range: TextRange::new(offset, offset + 1),
+        script: ScriptTag::LATIN,
+        bidi_level: 0,
+        linebreak_class: LineBreakClass::Al,
+        flags: AtomFlags::EMPTY,
+    }
+}
+
+/// One-glyph cluster for the atom at `local` index of a node starting at byte
+/// `base` of `text`; `atom_range` is relative to the node's own atoms.
+pub fn cluster(text: &str, base: usize, local: usize) -> ShapedCluster {
+    let off = base + local;
+    ShapedCluster {
+        orientation: GlyphOrientation::Horizontal,
+        byte_range: TextRange::new(off, off + 1),
+        atom_range: local..local + 1,
+        font: FontRef::unscaled(FontId(1)),
+        bidi_level: 0,
+        flags: AtomFlags::EMPTY,
+        glyphs: smallvec![RawShapedGlyph {
+            glyph_id: u32::from(text.as_bytes()[off]),
+            cluster: off as u32,
+            x_advance: ADV,
+            ..Default::default()
+        }],
+        natural_width: ADV,
+        uncompressed_width: ADV,
+        safe_to_break_before: true,
+        safe_to_concat_before: true,
+    }
+}
+
+/// A 16-unit sans-serif Latin run covering all of `text`.
+pub fn shaping_run(text: &str, locale: &str) -> ShapingRun {
+    ShapingRun {
+        word_spacing: 0.0,
+        baseline_align: BaselineAlignment::Auto,
+        letter_spacing: 0.0,
+        orientation: GlyphOrientation::Horizontal,
+        features: Default::default(),
+        byte_range: TextRange::new(0, text.len()),
+        families: Arc::from([FontFamily::Generic(GenericFamily::SansSerif)]),
+        font_size: 16.0,
+        style: FontStyle::default(),
+        script: ScriptTag::LATIN,
+        locale: LocaleTag::new(locale),
+        bidi_level: 0,
+        decoration: TextDecoration::default(),
+    }
+}
+
+pub fn assert_send_sync_static<T: Send + Sync + 'static>() {}

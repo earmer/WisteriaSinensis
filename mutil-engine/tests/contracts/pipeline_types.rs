@@ -4,67 +4,17 @@
 //! hand-written fixture (fixed 10-unit advances) whose only purpose is to
 //! exercise ownership, visibility and trait closure from *outside* the crate.
 
+use crate::common::{ADV, assert_send_sync_static, atom, shaping_run};
 use mutil_engine::*;
-use smallvec::smallvec;
-use std::sync::Arc;
 
 const TEXT: &str = "Hello world";
-const ADVANCE: f32 = 10.0;
+
+fn cluster(base: usize, local: usize) -> ShapedCluster {
+    crate::common::cluster(TEXT, base, local)
+}
 
 fn run() -> ShapingRun {
-    ShapingRun {
-        word_spacing: 0.0,
-        baseline_align: mutil_engine::types::BaselineAlignment::Auto,
-        letter_spacing: 0.0,
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
-        features: Default::default(),
-
-        byte_range: TextRange::new(0, TEXT.len()),
-        families: Arc::from([FontFamily::Generic(GenericFamily::SansSerif)]),
-        font_size: 16.0,
-        style: FontStyle::default(),
-        script: ScriptTag::LATIN,
-        locale: LocaleTag::new("en-GB"),
-        bidi_level: 0,
-        decoration: TextDecoration::default(),
-    }
-}
-
-/// One atom per ASCII letter, at its absolute byte offset.
-fn atom(offset: usize) -> GraphemeAtom {
-    GraphemeAtom {
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
-        byte_range: TextRange::new(offset, offset + 1),
-        script: ScriptTag::LATIN,
-        bidi_level: 0,
-        linebreak_class: LineBreakClass::Al,
-        flags: AtomFlags::EMPTY,
-    }
-}
-
-/// Fixture cluster for the atom at `local` index of a node starting at byte `base`.
-fn cluster(base: usize, local: usize) -> ShapedCluster {
-    let off = base + local;
-    ShapedCluster {
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
-        byte_range: TextRange::new(off, off + 1),
-        atom_range: local..local + 1, // relative to the node's own atoms
-        font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
-        flags: AtomFlags::EMPTY,
-        glyphs: smallvec![RawShapedGlyph {
-            glyph_id: TEXT.as_bytes()[off] as u32,
-            cluster: off as u32,
-            x_advance: ADVANCE,
-            x_offset: 0.0,
-            y_offset: 0.0,
-            is_synthesized: false,
-        }],
-        natural_width: ADVANCE,
-        uncompressed_width: ADVANCE,
-        safe_to_break_before: true,
-        safe_to_concat_before: true,
-    }
+    shaping_run(TEXT, "en-GB")
 }
 
 fn word(range: TextRange) -> WordNode {
@@ -79,8 +29,6 @@ fn word(range: TextRange) -> WordNode {
         natural_width,
     })
 }
-
-fn assert_send_sync_static<T: Send + Sync + 'static>() {}
 
 #[test]
 fn test_pipeline_types_compile() {
@@ -184,7 +132,7 @@ fn test_pipeline_types_compile() {
         x: pen,
         x_offset: 0.0,
         y_offset: 0.0,
-        advance: ADVANCE,
+        advance: ADV,
         byte_range: None,
         is_synthesized: true,
         is_hanging: false,
@@ -211,7 +159,7 @@ fn test_pipeline_types_compile() {
         ascent: ast.strut_metrics.ascent,
         descent: ast.strut_metrics.descent,
         line_height: VerticalMetrics::from_font_metrics(&ast.strut_metrics).natural_line_height(),
-        visual_width: pen + ADVANCE,
+        visual_width: pen + ADV,
         hanging_left: 0.0,
         hanging_right: 0.0,
         is_justified: false,
@@ -276,7 +224,7 @@ fn fixture_clusters_index_their_own_node_atoms() {
     else {
         unreachable!()
     };
-    assert_eq!(*natural_width, 5.0 * ADVANCE);
+    assert_eq!(*natural_width, 5.0 * ADV);
     for c in clusters {
         let covered = &atoms[c.atom_range.clone()];
         assert_eq!(covered.len(), 1);
@@ -570,10 +518,10 @@ fn hanging_punctuation_fits_negative_x_and_synthesized_flag_round_trips() {
     // A hanging opening bracket sits left of the line edge.
     let hanging = PositionedGlyph {
         glyph_id: 1,
-        x: -ADVANCE,
+        x: -ADV,
         x_offset: 0.0,
         y_offset: 0.0,
-        advance: ADVANCE,
+        advance: ADV,
         byte_range: Some(TextRange::new(0, 1)),
         is_synthesized: false,
         is_hanging: true,

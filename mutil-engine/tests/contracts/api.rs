@@ -1,4 +1,5 @@
-//! Public API contract probes. Shell behavior is intentionally still red.
+//! Public API contract probes: paragraph splitting, carets, tabs, badness and
+//! conformance reporting.
 use mutil_engine::*;
 
 #[test]
