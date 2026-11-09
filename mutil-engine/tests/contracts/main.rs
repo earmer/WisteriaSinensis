@@ -5,6 +5,7 @@
 mod annotations;
 mod badness;
 mod common;
+mod error_messages;
 mod geometry;
 mod input_validation;
 mod line_validation;
