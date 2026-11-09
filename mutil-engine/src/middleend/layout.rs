@@ -11,7 +11,6 @@ use crate::frontend::{
 };
 use crate::shaping::TextShaper;
 use crate::types::{AtomFlags, BIDI_MAX_DEPTH, BidiLevel, GraphemeAtom, ShapedCluster, TextRange};
-use core::fmt;
 
 /// An input that [`check_layout_inputs`] rejects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,97 +187,6 @@ pub enum LayoutInputError {
         span: usize,
     },
 }
-
-impl fmt::Display for LayoutInputError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OrientationMismatch => {
-                f.write_str("orientation does not match writing mode or bidi level")
-            }
-            Self::InvalidFontMetrics => f.write_str("invalid font metrics"),
-            Self::InvalidSpacing => f.write_str("invalid explicit spacing"),
-            Self::InvalidBidiSpan => f.write_str("invalid explicit bidi span"),
-            Self::InvalidAnnotationSpan => f.write_str("invalid annotation span"),
-            Self::InvalidLayoutOptions => f.write_str("invalid layout options"),
-            Self::InvalidLineGeometry => f.write_str("invalid line geometry"),
-            Self::NonMonotonicGeometry => {
-                f.write_str("geometry grew with an expanded block envelope")
-            }
-            Self::InvalidConstraints => f.write_str("invalid wrap width or tab stops"),
-            Self::ParagraphSeparatorInText => {
-                f.write_str("text contains a paragraph separator; split it first")
-            }
-            Self::InvalidStrut => f.write_str("invalid strut metrics, font size or line height"),
-            Self::RunOutsideText { run } => write!(f, "run {run} does not fit the text"),
-            Self::InvalidShapingRun { run } => {
-                write!(f, "run {run} has an invalid bidi level or variation")
-            }
-            Self::RunIndexOutOfRange { item } => {
-                write!(f, "item {item} refers to a run that does not exist")
-            }
-            Self::ItemOutsideText { item } => write!(f, "item {item} does not fit the text"),
-            Self::ItemOutsideRun { item } => {
-                write!(f, "item {item} lies outside the shaping run it names")
-            }
-            Self::InvalidTextWidth { item } => {
-                write!(f, "item {item} has a width that is not its clusters' total")
-            }
-            Self::ItemNotSelfContained { item } => {
-                write!(f, "item {item} does not partition its atoms")
-            }
-            Self::InvalidInlineBox { item } => {
-                write!(f, "inline box {item} has a non-finite or negative size")
-            }
-            Self::InvalidGlue { item } => {
-                write!(f, "glue {item} has a non-finite or negative size")
-            }
-            Self::InvalidDiscretionary { item } => {
-                write!(f, "discretionary {item} has an invalid penalty or width")
-            }
-            Self::InvalidHyphenOpportunity { item } => {
-                write!(f, "item {item} has a hyphenation opportunity off its atoms")
-            }
-            Self::InvalidSpanBoundary { item } => {
-                write!(
-                    f,
-                    "span boundary {item} is not empty or has an invalid width"
-                )
-            }
-            Self::UnknownSpan { item } => {
-                write!(f, "item {item} refers to a span that does not exist")
-            }
-            Self::InvalidDecorationSpan { span } => {
-                write!(f, "decoration span {span} is invalid or duplicated")
-            }
-            Self::ItemsOutOfOrder { item } => {
-                write!(f, "item {item} starts before the previous item ends")
-            }
-            Self::SpanEnclosure { span, item } => {
-                write!(
-                    f,
-                    "item {item} is misplaced relative to the boundaries of decoration span {span}"
-                )
-            }
-            Self::MissingParagraphEnd => {
-                f.write_str("the items do not end with the paragraph-end sentinel")
-            }
-            Self::MissingSpanBoundary { span } => {
-                write!(
-                    f,
-                    "decoration span {span} lacks a leading or trailing boundary"
-                )
-            }
-            Self::AtomicFlagMismatch { item } => {
-                write!(f, "item {item} has an atom whose atomic-span flag is wrong")
-            }
-            Self::InvalidAtomicSpan { span } => {
-                write!(f, "atomic span {span} is invalid or duplicated")
-            }
-        }
-    }
-}
-
-impl std::error::Error for LayoutInputError {}
 
 /// The text box at `items[index]`: `(run_index, byte_range, atoms)`.
 fn text_at(

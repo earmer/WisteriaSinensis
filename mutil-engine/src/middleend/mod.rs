@@ -4,6 +4,7 @@
 //! Line breaking, reordering and justification are not implemented yet.
 
 mod badness;
+mod error_messages;
 mod interaction;
 mod layout;
 mod options;
