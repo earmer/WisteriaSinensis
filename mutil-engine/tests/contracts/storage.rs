@@ -267,3 +267,21 @@ fn reshape_window_takes_the_run_slice_of_the_paragraph_storage_directly() {
     // The no-op shaper appends nothing and never clears the buffer.
     assert_eq!(out, vec![cluster(TEXT, 2, 0)]);
 }
+
+#[test]
+fn a_box_reaching_into_the_next_run_is_not_self_contained() {
+    // Box 1 (run 0) also claims run 1's first atom and cluster, with byte and
+    // atom ranges that would be consistent if the run did not end at 2.
+    let mut a = two_runs();
+    if let WordNode::Box(BoxNode::Text {
+        byte_range,
+        atom_range,
+        cluster_range,
+        ..
+    }) = &mut a.items[1]
+    {
+        (*byte_range, *atom_range, *cluster_range) = (TextRange::new(1, 3), 1..3, 1..3);
+    }
+    a.clusters[2].atom_range = 2..3;
+    assert!(!a.is_self_contained(1));
+}

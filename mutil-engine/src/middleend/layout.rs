@@ -265,6 +265,23 @@ fn hyphen_chains(ast: &ParagraphAst) -> Vec<(usize, usize)> {
     chains
 }
 
+/// Whether `ranges` are non-overlapping and in byte order, which the binary
+/// searches below require. Validation computes this before searching: an
+/// unordered sequence always belongs to an AST that a later item check
+/// (`ItemOutsideText`, `ItemsOutOfOrder`, `ItemNotSelfContained`) rejects, so
+/// a search over it is skipped rather than allowed to report a misleading
+/// error first.
+fn in_byte_order(mut ranges: impl Iterator<Item = TextRange>) -> bool {
+    let Some(mut prev) = ranges.next() else {
+        return true;
+    };
+    ranges.all(|r| {
+        let ok = prev.start <= prev.end && prev.end <= r.start;
+        prev = r;
+        ok
+    }) && prev.start <= prev.end
+}
+
 /// Whether `atoms` (byte-ordered) has an atom starting or ending at `offset`.
 fn is_atom_boundary(atoms: &[GraphemeAtom], offset: usize) -> bool {
     let at = atoms.partition_point(|a| a.byte_range.end < offset);
@@ -286,6 +303,7 @@ fn is_atom_boundary(atoms: &[GraphemeAtom], offset: usize) -> bool {
 fn hyphen_valid(
     ast: &ParagraphAst,
     chains: &[(usize, usize)],
+    ordered_runs: &[bool],
     index: usize,
     d: &DiscretionaryNode,
     h: &HyphenOpportunity,
@@ -315,8 +333,8 @@ fn hyphen_valid(
     let atoms = ast.run_atoms(prev_run);
     prefix >= chains[index - 1].0
         && suffix <= chains[index + 1].1
-        && is_atom_boundary(atoms, prefix)
-        && is_atom_boundary(atoms, suffix)
+        && (!ordered_runs[prev_run]
+            || (is_atom_boundary(atoms, prefix) && is_atom_boundary(atoms, suffix)))
 }
 
 fn fits(text: &str, r: crate::types::TextRange) -> bool {
@@ -378,6 +396,10 @@ fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
         stack.push(r);
     }
     let content = concrete_content(ast);
+    if !in_byte_order(content.iter().copied()) {
+        // See `in_byte_order`: a later item check rejects this AST.
+        return Ok(());
+    }
     // The offsets an atomic span may start or end at: the start or end of a
     // text atom or of an inline object. Glue, tabs and line terminators
     // contribute none, so an edge inside whitespace is rejected.
@@ -746,6 +768,9 @@ pub fn check_layout_inputs(
     check_item_order(ast)?;
     let span_index = SpanIndex::new(ast);
     let chains = hyphen_chains(ast);
+    let ordered_runs: Vec<bool> = (0..ast.runs.len())
+        .map(|run| in_byte_order(ast.run_atoms(run).iter().map(|a| a.byte_range)))
+        .collect();
     let mut atomic_at = 0;
     let last_disc = ast.items.iter().rposition(|n| n.is_break_opportunity());
     for (item, node) in ast.items.iter().enumerate() {
@@ -938,7 +963,7 @@ pub fn check_layout_inputs(
                     |a: f64, b: f64| (a - b).abs() <= 1e-3_f64.max(1e-5 * a.abs().max(b.abs()));
                 match &d.action {
                     BreakAction::Hyphenate(h)
-                        if !d.flagged || !hyphen_valid(ast, &chains, item, d, h) =>
+                        if !d.flagged || !hyphen_valid(ast, &chains, &ordered_runs, item, d, h) =>
                     {
                         return Err(E::InvalidHyphenOpportunity { item });
                     }
@@ -2051,6 +2076,35 @@ mod tests {
         a.items.remove(2);
         settle(&mut a);
         assert_eq!(check_layout_inputs(&a, "abé", &constraints(), &o), bad);
+    }
+
+    #[test]
+    fn unordered_atoms_report_the_item_error_before_hyphen_or_span_errors() {
+        let o = LayoutOptions::default();
+        // The tail box's atoms are out of byte order. The hyphen at 1 must not
+        // binary-search them; the box itself is reported.
+        let mut a = with_items(vec![
+            text_box(vec![atom(0, 1)]),
+            hyphenated(opportunity(1, 0, 1)).items[1].clone(),
+            text_box(vec![atom(3, 4), atom(1, 2), atom(2, 3)]),
+        ]);
+        if let WordNode::Box(BoxNode::Text { byte_range, .. }) = &mut a.items[2] {
+            *byte_range = TextRange::new(1, 4);
+        }
+        assert_eq!(
+            check_layout_inputs(&a, "abcd", &constraints(), &o),
+            Err(LayoutInputError::ItemNotSelfContained { item: 2 })
+        );
+        // Items out of order: the atomic span is not checked against them.
+        let mut a = with_items(vec![text_box(vec![atom(1, 2)]), text_box(vec![atom(0, 1)])]);
+        a.atomic_spans = vec![AtomicEditSpan {
+            span_id: 1,
+            byte_range: TextRange::new(0, 1),
+        }];
+        assert_eq!(
+            check_layout_inputs(&a, "abcd", &constraints(), &o),
+            Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
+        );
     }
 
     /// "abcd" as `"a" | "b" | "cd"`: boxes at 0..1, 1..2 and 2..4 around two

@@ -584,21 +584,33 @@ impl ParagraphAst {
     /// empty box has no atoms), its clusters partition its atoms in order with
     /// matching byte ranges, and each cluster's flags aggregate its atoms'.
     /// Every other node is trivially self-contained; an `item` past the end,
-    /// or a text box whose ranges or run do not resolve, is not.
+    /// or a text box whose ranges do not resolve or leave its run's ranges,
+    /// is not.
     #[must_use]
     pub fn is_self_contained(&self, item: usize) -> bool {
         match self.items.get(item) {
-            Some(WordNode::Box(BoxNode::Text { atom_range, .. })) => {
+            Some(WordNode::Box(BoxNode::Text {
+                atom_range,
+                cluster_range,
+                ..
+            })) => {
                 let Some(view) = self.text_box(item) else {
                     return false;
                 };
-                let base = self
-                    .runs
-                    .get(view.run_index)
-                    .and_then(|run| atom_range.start.checked_sub(run.atom_range.start));
-                base.is_some_and(|base| {
-                    text_is_self_contained(view.byte_range, view.atoms, view.clusters, base)
-                })
+                let Some(run) = self.runs.get(view.run_index) else {
+                    return false;
+                };
+                let inside_run = run.atom_range.start <= atom_range.start
+                    && atom_range.end <= run.atom_range.end
+                    && run.cluster_range.start <= cluster_range.start
+                    && cluster_range.end <= run.cluster_range.end;
+                inside_run
+                    && text_is_self_contained(
+                        view.byte_range,
+                        view.atoms,
+                        view.clusters,
+                        atom_range.start - run.atom_range.start,
+                    )
             }
             Some(_) => true,
             None => false,
