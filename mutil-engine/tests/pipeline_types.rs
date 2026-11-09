@@ -13,6 +13,10 @@ const ADVANCE: f32 = 10.0;
 
 fn run() -> ShapingRun {
     ShapingRun {
+        word_spacing: 0.0,
+        baseline_align: mutil_engine::types::BaselineAlignment::Auto,
+        letter_spacing: 0.0,
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         features: Default::default(),
 
         byte_range: TextRange::new(0, TEXT.len()),
@@ -29,6 +33,7 @@ fn run() -> ShapingRun {
 /// One atom per ASCII letter, at its absolute byte offset.
 fn atom(offset: usize) -> GraphemeAtom {
     GraphemeAtom {
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         byte_range: TextRange::new(offset, offset + 1),
         script: ScriptTag::LATIN,
         bidi_level: 0,
@@ -41,6 +46,7 @@ fn atom(offset: usize) -> GraphemeAtom {
 fn cluster(base: usize, local: usize) -> ShapedCluster {
     let off = base + local;
     ShapedCluster {
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         byte_range: TextRange::new(off, off + 1),
         atom_range: local..local + 1, // relative to the node's own atoms
         font: FontRef::unscaled(FontId(1)),
@@ -80,8 +86,14 @@ fn assert_send_sync_static<T: Send + Sync + 'static>() {}
 fn test_pipeline_types_compile() {
     // Frontend: a pseudo ParagraphAst of Box, Discretionary, Glue, Box.
     let ast = ParagraphAst {
+        annotations: Vec::new(),
+        bidi_spans: Vec::new(),
+        writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
         base_direction: BidiDirection::Ltr,
         strut_metrics: FontMetrics {
+            vertical_ascent: 5.0,
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
             ascent: 12.0,
             descent: 4.0,
             ..Default::default()
@@ -185,6 +197,10 @@ fn test_pipeline_types_compile() {
     );
 
     let line = PositionedLine {
+        slots: smallvec::SmallVec::new(),
+        annotations: Vec::new(),
+        is_ellipsized: false,
+        resolved_slot_constraints: smallvec::SmallVec::new(),
         atomic_fragments: vec![],
 
         tabs: vec![],
@@ -200,6 +216,7 @@ fn test_pipeline_types_compile() {
         hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
+            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
             font_size: 16.0,
             variations: Default::default(),
 
@@ -273,6 +290,7 @@ fn every_word_node_variant_is_constructible() {
     let nodes = [
         word(TextRange::new(0, 5)),
         WordNode::Box(BoxNode::InlineObject {
+            baseline_align: mutil_engine::types::BaselineAlignment::Auto,
             byte_range: TextRange::new(7, 8),
             box_id: 7,
             width: 12.0,

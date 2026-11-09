@@ -339,11 +339,12 @@ impl fmt::Debug for AtomFlags {
 /// (spec §2.2). The logical unit for carets, script, bidi level and break
 /// classes.
 ///
-/// Layout (64-bit): `TextRange` 16 + `ScriptTag` 4 + `BidiLevel` 1 +
-/// `LineBreakClass` 1 + `AtomFlags` 2 = 24 bytes, alignment 8, no padding;
-/// asserted at compile time below.
+/// Layout on 64-bit targets is 32 bytes, aligned to 8, including orientation
+/// and padding; asserted at compile time below.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphemeAtom {
+    /// Resolved glyph orientation.
+    pub orientation: crate::types::GlyphOrientation,
     /// Bytes of the cluster in the paragraph text.
     pub byte_range: TextRange,
     /// Resolved script. After frontend resolution never `Zyyy` or `Zinh` (§2.1).
@@ -361,7 +362,7 @@ pub struct GraphemeAtom {
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {
-    assert!(core::mem::size_of::<GraphemeAtom>() == 24);
+    assert!(core::mem::size_of::<GraphemeAtom>() == 32);
     assert!(core::mem::align_of::<GraphemeAtom>() == 8);
     assert!(core::mem::size_of::<AtomFlags>() == 2);
     assert!(core::mem::size_of::<LineBreakClass>() == 1);
@@ -397,6 +398,7 @@ mod tests {
 
     fn atom_with(flags: AtomFlags) -> GraphemeAtom {
         GraphemeAtom {
+            orientation: crate::types::GlyphOrientation::Horizontal,
             byte_range: TextRange::new(0, 1),
             script: ScriptTag::LATIN,
             bidi_level: 0,

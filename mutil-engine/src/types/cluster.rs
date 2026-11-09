@@ -8,8 +8,8 @@ use smallvec::SmallVec;
 ///
 /// **[Design decision]** The spec names `RawShapedGlyph` (§2.3) without
 /// defining it. The field set mirrors what HarfBuzz, CoreText and DirectWrite
-/// all provide for horizontal text. Vertical text (a `y_advance`) is out of
-/// scope for the spec so far.
+/// all provide. The bridge normalizes the active inline advance into
+/// `x_advance`; orientation describes how glyph offsets are interpreted.
 ///
 /// Layout: five 4-byte fields plus a `bool`, 24 bytes with 3 bytes of tail
 /// padding, alignment 4.
@@ -21,7 +21,7 @@ pub struct RawShapedGlyph {
     /// belongs to (spec §4.2 req. 4). Same coordinate space as the text handed
     /// to the shaper.
     pub cluster: u32,
-    /// Horizontal advance.
+    /// Advance along the active shaping axis (internal horizontal advance for TCY).
     pub x_advance: f32,
     /// Horizontal offset from the pen position (marks, kerning).
     pub x_offset: f32,
@@ -74,6 +74,8 @@ pub struct RawShapedGlyph {
 /// safe. `true` means the corresponding HarfBuzz unsafe flag is absent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapedCluster {
+    /// Resolved glyph orientation.
+    pub orientation: crate::types::GlyphOrientation,
     /// Source bytes covered by the cluster.
     pub byte_range: TextRange,
     /// Atoms covered: `K >= 1`, and a cluster never splits an atom. `K > 1`
@@ -93,7 +95,7 @@ pub struct ShapedCluster {
     /// Backends that return visual order for RTL must reverse (§4.2 req. 2).
     /// Two inline slots: most clusters are one or two glyphs.
     pub glyphs: SmallVec<[RawShapedGlyph; 2]>,
-    /// Advance width as shaped, with any `chws` compression applied.
+    /// Final inline layout advance, including explicit spacing and ruby expansion.
     pub natural_width: f32,
     /// Width with `chws` off. Costs a second shaping pass (§4.2 req. 6).
     pub uncompressed_width: f32,
@@ -146,6 +148,7 @@ mod tests {
 
     fn cluster(atoms: Range<usize>, brk: bool, cat: bool) -> ShapedCluster {
         ShapedCluster {
+            orientation: crate::types::GlyphOrientation::Horizontal,
             byte_range: TextRange::new(0, 2),
             atom_range: atoms,
             font: FontRef::unscaled(FontId(0)),

@@ -225,10 +225,24 @@ impl FontFeatures {
 /// The field set is a **[Design decision]** (the draft never defined it).
 /// `resolve_primary_font_metrics` must return every field (§4.5); fonts lacking
 /// a table value fall back to the backend's best estimate. All values are in
-/// layout units at the requested size; positions follow the OpenType sign
-/// convention chosen by the backend and normalised by the middle-end later.
+/// layout units at the requested size. Baseline offsets are positive toward
+/// line-over; the backend normalizes table signs and supplies missing metrics.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FontMetrics {
+    /// Vertical line-over half extent.
+    pub vertical_ascent: f32,
+    /// Vertical line-under half extent.
+    pub vertical_descent: f32,
+    /// Vertical inter-line gap.
+    pub vertical_line_gap: f32,
+    /// Baseline offset toward line-over, in scaled layout units.
+    pub ideographic_baseline_offset: f32,
+    /// Baseline offset toward line-over, in scaled layout units.
+    pub central_baseline_offset: f32,
+    /// Baseline offset toward line-over, in scaled layout units.
+    pub hanging_baseline_offset: f32,
+    /// Baseline offset toward line-over, in scaled layout units.
+    pub mathematical_baseline_offset: f32,
     /// Distance from baseline to the top of the line box.
     pub ascent: f32,
     /// Distance from baseline to the bottom of the line box (positive downwards).
@@ -277,6 +291,53 @@ impl VerticalMetrics {
     #[must_use]
     pub fn natural_line_height(&self) -> f32 {
         self.ascent + self.descent + self.line_gap
+    }
+}
+
+/// Borrowed, complete physical font instance used by measurement queries.
+#[derive(Clone, Copy, Debug)]
+pub struct FontInstanceRef<'a> {
+    /// Face and fallback scale; FontId identifies a face, not variations.
+    pub font: FontRef,
+    /// Requested size in layout units.
+    pub font_size: f32,
+    /// Variable font coordinates.
+    pub variations: &'a [FontVariation],
+}
+
+impl FontMetrics {
+    /// Total resolved horizontal line height.
+    pub fn natural_line_height(&self) -> f32 {
+        self.ascent + self.descent + self.line_gap
+    }
+    /// Checks raw font metrics, including finite derived heights.
+    pub fn is_valid(&self) -> bool {
+        let nonnegative = [
+            self.ascent,
+            self.descent,
+            self.line_gap,
+            self.vertical_ascent,
+            self.vertical_descent,
+            self.vertical_line_gap,
+            self.underline_thickness,
+            self.x_height,
+            self.cap_height,
+        ];
+        nonnegative.iter().all(|v| v.is_finite() && *v >= 0.0)
+            && [
+                self.underline_position,
+                self.strikeout_position,
+                self.ideographic_baseline_offset,
+                self.central_baseline_offset,
+                self.hanging_baseline_offset,
+                self.mathematical_baseline_offset,
+                self.natural_line_height(),
+                self.vertical_ascent + self.vertical_descent + self.vertical_line_gap,
+            ]
+            .iter()
+            .all(|v| v.is_finite())
+            && self.ascent + self.descent > 0.0
+            && self.vertical_ascent + self.vertical_descent > 0.0
     }
 }
 
@@ -341,6 +402,9 @@ mod tests {
     #[test]
     fn vertical_metrics_follow_font_metrics() {
         let fm = FontMetrics {
+            vertical_ascent: 5.0,
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
             ascent: 8.0,
             descent: 2.0,
             line_gap: 1.0,
@@ -354,15 +418,4 @@ mod tests {
     fn unscaled_font_ref_has_unit_scale() {
         assert_eq!(FontRef::unscaled(FontId(3)).scale, 1.0);
     }
-}
-
-/// Borrowed, complete physical font instance used by measurement queries.
-#[derive(Clone, Copy, Debug)]
-pub struct FontInstanceRef<'a> {
-    /// Face and fallback scale; FontId identifies a face, not variations.
-    pub font: FontRef,
-    /// Requested size in layout units.
-    pub font_size: f32,
-    /// Variable font coordinates.
-    pub variations: &'a [FontVariation],
 }

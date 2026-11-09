@@ -167,3 +167,34 @@ fn equal_caret_slots(width: f32, atom_count: usize) -> Vec<f32> {
         .map(|index| width * (index as f32 / atom_count as f32))
         .collect()
 }
+
+/// A physical direction resolved once at the interaction boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FlowMotion {
+    /// Previous visual inline stop.
+    InlinePrev,
+    /// Next visual inline stop.
+    InlineNext,
+    /// Previous block-axis line.
+    BlockPrev,
+    /// Next block-axis line.
+    BlockNext,
+}
+impl Motion {
+    /// Resolves the four physical arrows; logical and word commands return `None`.
+    pub const fn flow_direction(self, mode: crate::types::WritingMode) -> Option<FlowMotion> {
+        use crate::types::WritingMode::*;
+        use FlowMotion::*;
+        match (mode, self) {
+            (HorizontalTb, Self::Left) | (VerticalRl | VerticalLr, Self::Up) => Some(InlinePrev),
+            (HorizontalTb, Self::Right) | (VerticalRl | VerticalLr, Self::Down) => Some(InlineNext),
+            (HorizontalTb, Self::Up) | (VerticalRl, Self::Right) | (VerticalLr, Self::Left) => {
+                Some(BlockPrev)
+            }
+            (HorizontalTb, Self::Down) | (VerticalRl, Self::Left) | (VerticalLr, Self::Right) => {
+                Some(BlockNext)
+            }
+            _ => None,
+        }
+    }
+}

@@ -1,7 +1,9 @@
 //! Layout options (spec §5 Stage 1.3 and Stage 4).
 
 use super::HangSide;
-use crate::types::{Direction, FontMetrics, VerticalMetrics};
+use crate::types::{CompactString, Direction, FontMetrics, WritingMode};
+use smallvec::{SmallVec, smallvec};
+use std::sync::Arc;
 
 /// Hanging at the trailing edge of a line (spec §5 Stage 1.3; CSS Text 4
 /// `hanging-punctuation: force-end | allow-end` `[W2]`).
@@ -101,18 +103,29 @@ impl LineHeight {
     ///
     /// `natural_line_height()` of the result is the line height of an empty line.
     #[must_use]
-    pub fn resolve_strut(self, font: &FontMetrics, font_size: f32) -> VerticalMetrics {
-        match self {
-            Self::Normal => VerticalMetrics::from_font_metrics(font),
-            Self::Fixed(multiplier) => {
-                let leading = multiplier * font_size - (font.ascent + font.descent);
-                VerticalMetrics {
-                    ascent: font.ascent + leading / 2.0,
-                    descent: font.descent + leading / 2.0,
-                    line_gap: 0.0,
-                }
-            }
+    pub fn resolve_strut(self, font: &FontMetrics, font_size: f32) -> FontMetrics {
+        self.resolve_strut_for_mode(font, font_size, WritingMode::HorizontalTb)
+    }
+    /// Resolves the active strut using horizontal or vertical raw metrics.
+    pub fn resolve_strut_for_mode(
+        self,
+        raw: &FontMetrics,
+        font_size: f32,
+        mode: WritingMode,
+    ) -> FontMetrics {
+        let mut font = *raw;
+        if mode.is_vertical() {
+            font.ascent = raw.vertical_ascent;
+            font.descent = raw.vertical_descent;
+            font.line_gap = raw.vertical_line_gap;
         }
+        if let Self::Fixed(multiplier) = self {
+            let leading = multiplier * font_size - (font.ascent + font.descent);
+            font.ascent += leading / 2.0;
+            font.descent += leading / 2.0;
+            font.line_gap = 0.0;
+        }
+        font
     }
 }
 
@@ -230,34 +243,44 @@ impl TabStops {
 
 /// Geometric constraints of the container: what the layout must fit into, as
 /// opposed to the policy ([`LayoutOptions`]) deciding how.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct LayoutConstraints {
-    /// Available layout width of the container, in layout units. Must be finite
-    /// and non-negative. Hanging punctuation and `Preserved` trailing
-    /// whitespace may extend beyond it. `PositionedLine::validate` checks a
-    /// line's `visual_width` against it within tolerance; a line may be wider
-    /// only in the single-entity overflow state (a lone `AllowOverflow` box, or
-    /// one indivisible cluster after the emergency break, §5 Stage 1.5). A
-    /// line of several clusters wider than the width fails validation: an
-    /// unbreakable word is split by the emergency break, not left to overflow.
+    /// Finite inline offset for the first line.
+    pub first_line_indent: f32,
+    /// Finite inline offset for subsequent lines.
+    pub hanging_indent: f32,
+    /// Optional obstacle-aware container geometry.
+    pub geometry_provider: Option<Arc<dyn LineGeometryProvider>>,
+    /// Positive container inline width; positive infinity disables wrapping.
+    /// Indentation changes slot capacity, not this unobstructed reference width.
     pub wrap_width: f32,
     /// Tab stops.
     pub tab_stops: TabStops,
 }
 
 impl LayoutConstraints {
-    /// `true` when the width is finite and non-negative and the tab stops are
-    /// valid.
+    /// Checks width, finite indents, positive standard-slot capacity and tab stops.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.wrap_width.is_finite() && self.wrap_width >= 0.0 && self.tab_stops.is_valid()
+        self.wrap_width > 0.0
+            && !self.wrap_width.is_nan()
+            && self.first_line_indent.is_finite()
+            && self.hanging_indent.is_finite()
+            && (self.geometry_provider.is_some()
+                || (self.first_line_indent < self.wrap_width
+                    && self.hanging_indent < self.wrap_width))
+            && self.tab_stops.is_valid()
     }
 }
 
 /// Layout **policy** (spec §5, §6.6): a pure collection of strategies. The
 /// geometry lives in [`LayoutConstraints`].
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LayoutOptions {
+    /// Whether available elastic capacity is used to justify content.
+    pub justify: bool,
+    /// Optional line-count or block-size truncation policy.
+    pub clamp: Option<LineClampPolicy>,
     /// Line-breaking strategy.
     pub strategy: LineBreakStrategy,
     /// Hanging punctuation at both edges.
@@ -267,7 +290,180 @@ pub struct LayoutOptions {
     /// Trailing-whitespace handling at a soft wrap.
     pub whitespace: HangingWhitespaceMode,
     /// Clipboard policy for an actual U+00AD in the source.
-    pub copy_soft_hyphen: SoftHyphenPolicy,
+    pub soft_hyphen: SoftHyphenPolicy,
+}
+
+/// One available inline interval; only its end may be positive infinity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InlineSlotConstraint {
+    /// Finite inline start.
+    pub start: f32,
+    /// End strictly beyond start, possibly positive infinity.
+    pub end: f32,
+}
+impl InlineSlotConstraint {
+    /// Available advance.
+    pub fn width(self) -> f32 {
+        self.end - self.start
+    }
+    /// Whether endpoints and their difference obey the geometry contract.
+    pub fn is_valid(self) -> bool {
+        self.start.is_finite()
+            && self.end > self.start
+            && (self.end == f32::INFINITY || (self.end.is_finite() && self.width().is_finite()))
+    }
+}
+/// Available slots for one block-axis envelope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineGeometry {
+    /// Sorted, nonoverlapping available intervals.
+    pub slots: SmallVec<[InlineSlotConstraint; 2]>,
+    /// Next block start at which geometry may change.
+    pub next_feature_block_offset: Option<f32>,
+    /// Original unobstructed container width, before indentation.
+    pub max_unobstructed_width: f32,
+}
+impl LineGeometry {
+    /// Checks a provider response at the given query start.
+    pub fn is_valid(&self, block_start: f32) -> bool {
+        self.max_unobstructed_width > 0.0
+            && !self.max_unobstructed_width.is_nan()
+            && self.slots.iter().all(|s| s.is_valid())
+            && self
+                .slots
+                .windows(2)
+                .all(|w| w[0].start < w[1].start && w[0].end <= w[1].start)
+            && self
+                .next_feature_block_offset
+                .is_none_or(|v| v.is_finite() && v > block_start)
+    }
+    /// Checks that an expanded block envelope introduced no new inline area.
+    pub fn is_subset_of(&self, previous: &Self) -> bool {
+        let mut at = 0;
+        for slot in &self.slots {
+            while at < previous.slots.len() && previous.slots[at].end < slot.end {
+                at += 1;
+            }
+            if !previous
+                .slots
+                .get(at)
+                .is_some_and(|p| slot.start >= p.start && slot.end <= p.end)
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+/// Obstacle-aware geometry, queried in canonical flow coordinates.
+pub trait LineGeometryProvider: std::fmt::Debug + Send + Sync {
+    /// Increasing `block_end` for the same start/index may only remove space.
+    fn query_line_geometry(
+        &self,
+        line_index: usize,
+        block_start: f32,
+        block_end: f32,
+    ) -> LineGeometry;
+}
+impl Default for LayoutConstraints {
+    fn default() -> Self {
+        Self {
+            wrap_width: f32::INFINITY,
+            first_line_indent: 0.0,
+            hanging_indent: 0.0,
+            tab_stops: TabStops { step: 8.0 },
+            geometry_provider: None,
+        }
+    }
+}
+impl LayoutConstraints {
+    /// Queries custom geometry or constructs the standard indented column.
+    pub fn resolve_line_geometry(
+        &self,
+        line_index: usize,
+        block_start: f32,
+        block_end: f32,
+    ) -> LineGeometry {
+        if let Some(provider) = &self.geometry_provider {
+            return provider.query_line_geometry(line_index, block_start, block_end);
+        }
+        let start = if line_index == 0 {
+            self.first_line_indent
+        } else {
+            self.hanging_indent
+        };
+        LineGeometry {
+            slots: if start < self.wrap_width {
+                smallvec![InlineSlotConstraint {
+                    start,
+                    end: self.wrap_width
+                }]
+            } else {
+                SmallVec::new()
+            },
+            next_feature_block_offset: None,
+            max_unobstructed_width: self.wrap_width,
+        }
+    }
+}
+/// Truncation limits; at least one limit must be configured when enabled.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineClampPolicy {
+    /// Positive maximum number of output lines.
+    pub max_lines: Option<usize>,
+    /// Positive finite maximum block extent, except that one line is mandatory.
+    pub max_block_size: Option<f32>,
+    /// Synthesized suffix; empty means silent truncation.
+    pub ellipsis: CompactString,
+}
+impl Default for LineClampPolicy {
+    fn default() -> Self {
+        Self {
+            max_lines: None,
+            max_block_size: None,
+            ellipsis: "…".into(),
+        }
+    }
+}
+impl LineClampPolicy {
+    /// Checks configured limits and the suffix source.
+    pub fn is_valid(&self) -> bool {
+        (self.max_lines.is_some() || self.max_block_size.is_some())
+            && self.max_lines != Some(0)
+            && self.max_block_size.is_none_or(|h| h.is_finite() && h > 0.0)
+            && !self
+                .ellipsis
+                .chars()
+                .any(|c| crate::frontend::is_paragraph_separator(c) || c == '\u{2028}')
+    }
+}
+
+impl LayoutConstraints {
+    /// Queries and validates geometry, optionally checking an earlier smaller envelope.
+    ///
+    /// # Errors
+    /// Invalid query/response coordinates or a violation of provider monotonicity.
+    pub fn query_checked_geometry(
+        &self,
+        line_index: usize,
+        block_start: f32,
+        block_end: f32,
+        previous: Option<&LineGeometry>,
+    ) -> Result<LineGeometry, super::LayoutInputError> {
+        if !block_start.is_finite() || !block_end.is_finite() || block_end <= block_start {
+            return Err(super::LayoutInputError::InvalidLineGeometry);
+        }
+        let geometry = self.resolve_line_geometry(line_index, block_start, block_end);
+        if !geometry.is_valid(block_start) {
+            return Err(super::LayoutInputError::InvalidLineGeometry);
+        }
+        if previous.is_some_and(|p| {
+            !geometry.is_subset_of(p) || geometry.max_unobstructed_width != p.max_unobstructed_width
+        }) {
+            return Err(super::LayoutInputError::NonMonotonicGeometry);
+        }
+        Ok(geometry)
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +473,9 @@ mod tests {
     #[test]
     fn strut_resolution_folds_half_leading() {
         let font = FontMetrics {
+            vertical_ascent: 5.0,
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
             ascent: 8.0,
             descent: 2.0,
             line_gap: 1.0,
@@ -364,12 +563,21 @@ mod tests {
         let x = 3.0e7_f32;
         assert!(t.next_stop(x).is_none_or(|next| next > x));
         let c = LayoutConstraints {
+            first_line_indent: 0.0,
+            geometry_provider: None,
+            hanging_indent: 0.0,
             wrap_width: 100.0,
             tab_stops: t,
         };
         assert!(c.is_valid());
-        for w in [-1.0, f32::NAN, f32::INFINITY] {
-            assert!(!LayoutConstraints { wrap_width: w, ..c }.is_valid());
+        for w in [0.0, -1.0, f32::NAN] {
+            assert!(
+                !LayoutConstraints {
+                    wrap_width: w,
+                    ..c.clone()
+                }
+                .is_valid()
+            );
         }
     }
 }

@@ -3,7 +3,13 @@
 //! Phase 0 defines the output and option types only; no analysis pass is
 //! implemented.
 
+mod annotation;
 mod ast;
+pub use annotation::{
+    AnnotationAlignment, AnnotationKind, AnnotationSide, AnnotationSpan, BidiControlKind,
+    ExplicitBidiSpan, MAX_BIDI_SPAN_DEPTH,
+};
+pub(crate) use ast::text_is_self_contained;
 mod options;
 mod run;
 mod span;

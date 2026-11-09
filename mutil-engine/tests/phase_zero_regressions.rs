@@ -13,6 +13,7 @@ fn boxed(s: usize, e: usize, atomic: bool) -> WordNode {
     };
     let atoms: Vec<_> = (s..e)
         .map(|i| GraphemeAtom {
+            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
             byte_range: TextRange::new(i, i + 1),
             script: ScriptTag::LATIN,
             bidi_level: 0,
@@ -24,6 +25,7 @@ fn boxed(s: usize, e: usize, atomic: bool) -> WordNode {
         .iter()
         .enumerate()
         .map(|(i, a)| ShapedCluster {
+            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
             byte_range: a.byte_range,
             atom_range: i..i + 1,
             font: FontRef::unscaled(FontId(1)),
@@ -51,14 +53,24 @@ fn boxed(s: usize, e: usize, atomic: bool) -> WordNode {
 }
 fn ast(t: &str) -> ParagraphAst {
     ParagraphAst {
+        annotations: Vec::new(),
+        bidi_spans: Vec::new(),
+        writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
         base_direction: Direction::Ltr,
         strut_metrics: FontMetrics {
+            vertical_ascent: 5.0,
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
             ascent: 8.,
             descent: 2.,
             ..Default::default()
         },
         strut_font_size: 10.,
         runs: vec![ShapingRun {
+            word_spacing: 0.0,
+            baseline_align: mutil_engine::types::BaselineAlignment::Auto,
+            letter_spacing: 0.0,
+            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
             features: Default::default(),
 
             byte_range: TextRange::new(0, t.len()),
@@ -80,6 +92,9 @@ fn check(a: &ParagraphAst, t: &str) -> Result<LineContext, LayoutInputError> {
         a,
         t,
         &LayoutConstraints {
+            first_line_indent: 0.0,
+            geometry_provider: None,
+            hanging_indent: 0.0,
             wrap_width: 100.,
             tab_stops: TabStops { step: 8. },
         },
@@ -167,6 +182,7 @@ fn reject_separator_in_source(sep: &str) {
     let t = format!("a{sep}b");
     let mut a = ast(&t);
     a.items[0] = WordNode::Box(BoxNode::InlineObject {
+        baseline_align: mutil_engine::types::BaselineAlignment::Auto,
         byte_range: TextRange::new(0, t.len()),
         box_id: 1,
         width: 1.,
@@ -208,6 +224,10 @@ fn reject_negative_strut() {
 }
 fn line() -> PositionedLine {
     PositionedLine {
+        slots: smallvec::SmallVec::new(),
+        annotations: Vec::new(),
+        is_ellipsized: false,
+        resolved_slot_constraints: smallvec::SmallVec::new(),
         atomic_fragments: vec![],
 
         byte_range: TextRange::new(0, 1),
@@ -230,7 +250,22 @@ fn line() -> PositionedLine {
 }
 fn ctx() -> LineContext {
     LineContext {
-        strut: VerticalMetrics {
+        strut: FontMetrics {
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
+            x_height: 0.0,
+
+            underline_thickness: 0.0,
+            use_typo_metrics: false,
+            vertical_ascent: 5.0,
+            cap_height: 0.0,
+            strikeout_position: 0.0,
+            underline_position: 0.0,
+
+            ideographic_baseline_offset: 0.0,
+            mathematical_baseline_offset: 0.0,
+            central_baseline_offset: 0.0,
+            hanging_baseline_offset: 0.0,
             ascent: 8.,
             descent: 2.,
             line_gap: 0.,
@@ -253,6 +288,7 @@ fn glyph(x: f32, advance: f32, hanging: bool) -> PositionedGlyph {
 }
 fn run(g: PositionedGlyph) -> VisualGlyphRun {
     VisualGlyphRun {
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         font_size: 16.0,
         variations: Default::default(),
 
@@ -608,6 +644,9 @@ fn zero_fixed_multiplier_is_rejected() {
             &a,
             "abc",
             &LayoutConstraints {
+                first_line_indent: 0.0,
+                geometry_provider: None,
+                hanging_indent: 0.0,
                 wrap_width: 100.,
                 tab_stops: TabStops { step: 8. }
             },
@@ -627,6 +666,9 @@ fn negative_half_leading_with_positive_total_is_allowed() {
         &a,
         "abc",
         &LayoutConstraints {
+            first_line_indent: 0.0,
+            geometry_provider: None,
+            hanging_indent: 0.0,
             wrap_width: 100.,
             tab_stops: TabStops { step: 8. },
         },
@@ -851,4 +893,971 @@ fn hanging_requires_overflow_beyond_tolerance() {
     l.hanging_right = 5.;
     l.visual_runs = vec![run(glyph(99., 0., true))];
     assert!(l.validate(&c).is_err());
+}
+
+// Phase 0 extension acceptance matrix.
+fn orient(a: &mut ParagraphAst, mode: WritingMode, orientation: GlyphOrientation, level: u8) {
+    a.writing_mode = mode;
+    for r in &mut a.runs {
+        r.orientation = orientation;
+        r.bidi_level = level;
+    }
+    for node in &mut a.items {
+        if let WordNode::Box(BoxNode::Text {
+            atoms, clusters, ..
+        }) = node
+        {
+            for atom in atoms {
+                atom.orientation = orientation;
+                atom.bidi_level = level;
+            }
+            for cluster in clusters {
+                cluster.orientation = orientation;
+                cluster.bidi_level = level;
+            }
+        }
+    }
+}
+fn annotation(base: TextRange, side: AnnotationSide) -> AnnotationSpan {
+    let mut a = ast("x");
+    let WordNode::Box(BoxNode::Text {
+        atoms, clusters, ..
+    }) = a.items.remove(0)
+    else {
+        unreachable!()
+    };
+    AnnotationSpan {
+        annotation_id: if side == AnnotationSide::Over { 1 } else { 2 },
+        base_byte_range: base,
+        side,
+        kind: AnnotationKind::Ruby {
+            alignment: AnnotationAlignment::Center,
+            max_overhang: 0.0,
+        },
+        block_extent: 3.0,
+        annotation_text: "x".into(),
+        run: a.runs.remove(0),
+        atoms,
+        clusters,
+    }
+}
+fn two_slots() -> (PositionedLine, LineContext) {
+    let constraints = smallvec![
+        InlineSlotConstraint {
+            start: 0.0,
+            end: 100.0
+        },
+        InlineSlotConstraint {
+            start: 150.0,
+            end: 250.0
+        }
+    ];
+    let mut l = line();
+    l.byte_range = TextRange::new(0, 2);
+    l.visible_byte_end = 2;
+    l.visual_width = 200.0;
+    l.slots = smallvec![
+        PositionedSlot {
+            start: 0.0,
+            visual_width: 100.0,
+            constraint_width: 100.0
+        },
+        PositionedSlot {
+            start: 150.0,
+            visual_width: 100.0,
+            constraint_width: 100.0
+        }
+    ];
+    l.resolved_slot_constraints = constraints.clone();
+    let mut right = glyph(150.0, 100.0, false);
+    right.byte_range = Some(TextRange::new(1, 2));
+    let mut r = run(glyph(0.0, 100.0, false));
+    r.byte_range = l.byte_range;
+    r.glyphs.push(right);
+    l.visual_runs = vec![r];
+    (l, ctx().with_slots(constraints, 250.0))
+}
+fn positioned_annotation() -> PositionedAnnotationRun {
+    PositionedAnnotationRun {
+        annotation_id: 1,
+        base_byte_range: TextRange::new(0, 1),
+        side: AnnotationSide::Over,
+        font: FontRef::unscaled(FontId(1)),
+        font_size: 5.0,
+        variations: smallvec![],
+        orientation: GlyphOrientation::Horizontal,
+        baseline_offset: 8.0,
+        max_overhang: 0.0,
+        block_extent: 3.0,
+        glyphs: vec![PositionedGlyph {
+            byte_range: None,
+            is_synthesized: true,
+            ..glyph(25.0, 50.0, false)
+        }],
+    }
+}
+
+#[test]
+fn phase0_orientation_and_tcy_matrix() {
+    for (mode, orientation, level, valid) in [
+        (
+            WritingMode::HorizontalTb,
+            GlyphOrientation::Horizontal,
+            0,
+            true,
+        ),
+        (
+            WritingMode::HorizontalTb,
+            GlyphOrientation::VerticalUpright,
+            0,
+            false,
+        ),
+        (
+            WritingMode::VerticalRl,
+            GlyphOrientation::Horizontal,
+            0,
+            false,
+        ),
+        (
+            WritingMode::VerticalLr,
+            GlyphOrientation::VerticalUpright,
+            0,
+            true,
+        ),
+        (
+            WritingMode::VerticalRl,
+            GlyphOrientation::VerticalUpright,
+            1,
+            false,
+        ),
+        (
+            WritingMode::VerticalLr,
+            GlyphOrientation::HorizontalInVertical,
+            1,
+            false,
+        ),
+        (
+            WritingMode::VerticalRl,
+            GlyphOrientation::VerticalSideways,
+            1,
+            true,
+        ),
+    ] {
+        let mut a = ast("a");
+        orient(&mut a, mode, orientation, level);
+        assert_eq!(
+            check(&a, "a").is_ok(),
+            valid,
+            "{mode:?} {orientation:?} {level}"
+        );
+    }
+    let mut a = ast("ab");
+    orient(
+        &mut a,
+        WritingMode::VerticalRl,
+        GlyphOrientation::HorizontalInVertical,
+        0,
+    );
+    assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
+    a.items = vec![
+        boxed(0, 1, false),
+        WordNode::Discretionary(DiscretionaryNode::direct(1)),
+        boxed(1, 2, false),
+        end(2),
+    ];
+    orient(
+        &mut a,
+        WritingMode::VerticalRl,
+        GlyphOrientation::HorizontalInVertical,
+        0,
+    );
+    assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
+    a.items.remove(1);
+    assert!(check(&a, "ab").is_ok());
+    if let WordNode::Box(BoxNode::Text { atoms, .. }) = &mut a.items[0] {
+        atoms[0].orientation = GlyphOrientation::VerticalSideways;
+    }
+    assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
+}
+
+#[test]
+fn phase0_writing_mode_roundtrips_and_over_sides() {
+    let point = Point { x: 13.0, y: 27.0 };
+    let rect = Rect::new(3.0, 7.0, 11.0, 19.0);
+    for mode in [
+        WritingMode::HorizontalTb,
+        WritingMode::VerticalRl,
+        WritingMode::VerticalLr,
+    ] {
+        assert_eq!(
+            mode.physical_to_flow_point(mode.flow_to_physical_point(point, 100.0), 100.0),
+            point
+        );
+        assert_eq!(
+            mode.physical_to_flow_rect(mode.flow_to_physical_rect(rect, 100.0), 100.0),
+            rect
+        );
+        let baseline = mode.flow_to_physical_point(point, 100.0);
+        let over = mode.flow_to_physical_point(
+            Point {
+                y: point.y + mode.over_to_block(5.0),
+                ..point
+            },
+            100.0,
+        );
+        if mode.is_vertical() {
+            assert_eq!(over.x, baseline.x + 5.0);
+        } else {
+            assert_eq!(over.y, baseline.y - 5.0);
+        }
+        let (start, end) = mode.line_bounds(20.0, 8.0, 2.0);
+        assert_eq!(
+            (start, end),
+            if mode == WritingMode::VerticalLr {
+                (18.0, 28.0)
+            } else {
+                (12.0, 22.0)
+            }
+        );
+    }
+    use FlowMotion::*;
+    assert_eq!(
+        Motion::Left.flow_direction(WritingMode::VerticalRl),
+        Some(BlockNext)
+    );
+    assert_eq!(
+        Motion::Left.flow_direction(WritingMode::VerticalLr),
+        Some(BlockPrev)
+    );
+    assert_eq!(
+        Motion::Down.flow_direction(WritingMode::VerticalLr),
+        Some(InlineNext)
+    );
+    assert_eq!(
+        Motion::Previous.flow_direction(WritingMode::VerticalLr),
+        None
+    );
+}
+
+#[test]
+fn phase0_font_metrics_all_fields_and_overflow() {
+    let valid = ast("a").strut_metrics;
+    for i in 0..15 {
+        let mut a = ast("a");
+        let m = &mut a.strut_metrics;
+        let fields = [
+            &mut m.ascent,
+            &mut m.descent,
+            &mut m.line_gap,
+            &mut m.vertical_ascent,
+            &mut m.vertical_descent,
+            &mut m.vertical_line_gap,
+            &mut m.underline_position,
+            &mut m.underline_thickness,
+            &mut m.strikeout_position,
+            &mut m.x_height,
+            &mut m.cap_height,
+            &mut m.ideographic_baseline_offset,
+            &mut m.central_baseline_offset,
+            &mut m.hanging_baseline_offset,
+            &mut m.mathematical_baseline_offset,
+        ];
+        *fields.into_iter().nth(i).unwrap() = f32::NAN;
+        assert!(check(&a, "a").is_err(), "field {i}");
+    }
+    let mut a = ast("a");
+    a.strut_metrics.ascent = f32::MAX;
+    a.strut_metrics.descent = f32::MAX;
+    assert!(check(&a, "a").is_err());
+    a.strut_metrics = valid;
+    a.strut_metrics.vertical_ascent = -1.0;
+    assert_eq!(check(&a, "a"), Err(LayoutInputError::InvalidFontMetrics));
+    a.strut_metrics = valid;
+    a.strut_metrics.vertical_ascent = 9.0;
+    a.strut_metrics.vertical_descent = 3.0;
+    orient(
+        &mut a,
+        WritingMode::VerticalLr,
+        GlyphOrientation::VerticalUpright,
+        0,
+    );
+    let c = check(&a, "a").unwrap();
+    assert_eq!((c.strut.ascent, c.strut.descent), (9.0, 3.0));
+}
+
+#[test]
+fn phase0_explicit_spacing_and_discretionary_equations() {
+    let mut a = ast("a");
+    a.runs[0].letter_spacing = 1.0;
+    if let WordNode::Box(BoxNode::Text {
+        atoms, clusters, ..
+    }) = &mut a.items[0]
+    {
+        atoms[0].flags |= AtomFlags::NO_LETTER_SPACING;
+        clusters[0].flags = atoms[0].flags;
+    }
+    assert_eq!(check(&a, "a"), Err(LayoutInputError::InvalidSpacing));
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut a = ast("a");
+        a.runs[0].word_spacing = value;
+        assert_eq!(check(&a, "a"), Err(LayoutInputError::InvalidSpacing));
+    }
+    let mut a = ast("a");
+    if let WordNode::Box(BoxNode::Text {
+        clusters,
+        natural_width,
+        ..
+    }) = &mut a.items[0]
+    {
+        clusters[0].natural_width = -1.0;
+        *natural_width = -1.0;
+    }
+    assert!(check(&a, "a").is_err());
+    for spacing in [-0.25, 0.25] {
+        let mut a = ast("ab");
+        let mut disc = DiscretionaryNode::direct(1);
+        disc.no_break_width = spacing;
+        disc.no_break_spacing = spacing;
+        a.items = vec![
+            boxed(0, 1, false),
+            WordNode::Discretionary(disc),
+            boxed(1, 2, false),
+            end(2),
+        ];
+        assert!(check(&a, "ab").is_ok());
+        if let WordNode::Discretionary(d) = &mut a.items[1] {
+            d.no_break_spacing = 0.0;
+        }
+        assert!(check(&a, "ab").is_err());
+    }
+    let mut a = ast("a");
+    if let WordNode::Discretionary(d) = &mut a.items[1] {
+        d.no_break_width = 1.0;
+        d.no_break_spacing = 1.0;
+    }
+    assert!(check(&a, "a").is_err());
+}
+fn bidi_span(id: u64, start: usize, end: usize) -> ExplicitBidiSpan {
+    ExplicitBidiSpan {
+        span_id: id,
+        byte_range: TextRange::new(start, end),
+        control: BidiControlKind::Isolate(None),
+    }
+}
+#[test]
+fn phase0_bidi_spans_order_ids_boundaries_and_depth() {
+    let mut a = ast("abcd");
+    a.bidi_spans = vec![bidi_span(1, 0, 4), bidi_span(2, 1, 3)];
+    assert!(check(&a, "abcd").is_ok());
+    for spans in [
+        vec![bidi_span(1, 0, 3), bidi_span(2, 1, 4)],
+        vec![bidi_span(1, 0, 2), bidi_span(1, 2, 4)],
+        vec![bidi_span(1, 0, 4), bidi_span(2, 0, 4)],
+    ] {
+        a.bidi_spans = spans;
+        assert_eq!(check(&a, "abcd"), Err(LayoutInputError::InvalidBidiSpan));
+    }
+    let text = "a".repeat(128);
+    let mut a = ast(&text);
+    a.bidi_spans = (0..63).map(|i| bidi_span(i as u64, i, 128 - i)).collect();
+    assert!(check(&a, &text).is_ok());
+    a.bidi_spans.push(bidi_span(63, 63, 65));
+    assert_eq!(check(&a, &text), Err(LayoutInputError::InvalidBidiSpan));
+    let mut a = ast("ab");
+    if let WordNode::Box(BoxNode::Text {
+        atoms, clusters, ..
+    }) = &mut a.items[0]
+    {
+        atoms.truncate(1);
+        atoms[0].byte_range.end = 2;
+        clusters.truncate(1);
+        clusters[0].byte_range.end = 2;
+        clusters[0].natural_width = 2.0;
+    }
+    a.bidi_spans = vec![bidi_span(1, 1, 2)];
+    assert_eq!(check(&a, "ab"), Err(LayoutInputError::InvalidBidiSpan));
+}
+
+#[test]
+fn phase0_annotation_input_boundaries_and_local_partition() {
+    let mut a = ast("ab");
+    a.annotations = vec![
+        annotation(TextRange::new(0, 2), AnnotationSide::Over),
+        annotation(TextRange::new(0, 2), AnnotationSide::Under),
+    ];
+    assert!(check(&a, "ab").is_ok());
+    a.annotations[1].side = AnnotationSide::Over;
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidAnnotationSpan)
+    );
+    a.annotations.truncate(1);
+    a.annotations[0].clusters.clear();
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidAnnotationSpan)
+    );
+    a.annotations[0] = annotation(TextRange::new(0, 2), AnnotationSide::Over);
+    a.items = vec![
+        boxed(0, 1, false),
+        WordNode::Discretionary(DiscretionaryNode::direct(1)),
+        boxed(1, 2, false),
+        end(2),
+    ];
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidAnnotationSpan)
+    );
+    let mut a = ast("ab");
+    a.annotations = vec![annotation(TextRange::new(0, 2), AnnotationSide::Over)];
+    a.annotations[0].kind = AnnotationKind::Emphasis;
+    assert!(check(&a, "ab").is_ok());
+    a.annotations[0].run.letter_spacing = f32::NAN;
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidAnnotationSpan)
+    );
+    a.annotations[0] = annotation(TextRange::new(0, 2), AnnotationSide::Over);
+    a.items = vec![
+        boxed(0, 1, false),
+        WordNode::Tab {
+            byte_range: TextRange::new(1, 2),
+        },
+        end(2),
+    ];
+    assert!(check(&a, "ab").is_err());
+}
+
+#[test]
+fn phase0_multi_slot_containment_and_conserved_width() {
+    let (valid, c) = two_slots();
+    assert_eq!(valid.validate(&c), Ok(()));
+    let mut bad = valid.clone();
+    bad.visual_runs[0].glyphs[0].advance = 151.0;
+    assert!(bad.validate(&c).is_err());
+    let mut bad = valid.clone();
+    bad.slots[0].visual_width = 151.0;
+    bad.visual_width = 251.0;
+    assert!(bad.validate(&c).is_err());
+    let mut bad = valid.clone();
+    bad.visual_width += 1.0;
+    assert_eq!(bad.validate(&c), Err(LineInvariantError::InvalidSlots));
+    let mut bad = valid.clone();
+    bad.visual_runs.clear();
+    bad.visual_boxes.push(PositionedInlineBox {
+        baseline_align: BaselineAlignment::Auto,
+        box_id: 1,
+        byte_range: TextRange::new(0, 1),
+        x: 90.0,
+        y: 0.0,
+        width: 70.0,
+        ascent: 8.0,
+        descent: 2.0,
+        overflow_policy: BoxOverflowPolicy::Clip,
+    });
+    assert!(bad.validate(&c).is_err());
+    let mut bad = valid;
+    bad.span_fragments.push(PositionedSpanFragment {
+        span_id: 1,
+        byte_range: TextRange::new(0, 2),
+        x: 90.0,
+        width: 70.0,
+        ascent: 8.0,
+        descent: 2.0,
+        bidi_level: 0,
+        is_first_fragment: true,
+        is_last_fragment: true,
+    });
+    assert!(bad.validate(&c).is_err());
+}
+
+#[test]
+fn phase0_empty_slot_hanging_and_trailing_whitespace() {
+    let (mut l, mut c) = two_slots();
+    l.visual_runs[0].glyphs.remove(0);
+    l.slots[0].visual_width = 0.0;
+    l.visual_width = 100.0;
+    c.hang_mode.start = HangStartMode::AllLines;
+    assert_eq!(l.validate(&c), Ok(()));
+    let mut hanging = glyph(145.0, 5.0, true);
+    hanging.byte_range = Some(TextRange::new(0, 1));
+    l.visual_runs[0].glyphs.push(hanging);
+    l.hanging_left = 5.0;
+    assert!(l.validate(&c).is_err());
+    l.visual_runs[0].glyphs.pop();
+    l.hanging_left = 0.0;
+    let trailing = PositionedGlyph {
+        byte_range: Some(TextRange::new(2, 3)),
+        ..glyph(250.0, 5.0, false)
+    };
+    l.byte_range.end = 3;
+    l.visual_runs[0].glyphs.push(trailing);
+    c.whitespace = HangingWhitespaceMode::Preserved;
+    assert_eq!(l.validate(&c), Ok(()));
+    l.visual_runs[0].glyphs.last_mut().unwrap().x = 145.0;
+    assert!(l.validate(&c).is_err());
+}
+
+#[test]
+fn phase0_annotation_output_and_synthesized_ownership() {
+    let (mut l, c) = two_slots();
+    l.ascent += 3.0;
+    l.line_height += 3.0;
+    l.baseline_y += 3.0;
+    l.annotations.push(positioned_annotation());
+    assert_eq!(l.validate(&c), Ok(()));
+    let mut bad = l.clone();
+    bad.annotations[0].glyphs[0].byte_range = Some(TextRange::new(0, 1));
+    assert!(bad.validate(&c).is_err());
+    let mut bad = l.clone();
+    bad.annotations[0].base_byte_range.end = 2;
+    assert!(bad.validate(&c).is_err());
+    let mut bad = l.clone();
+    bad.ascent -= 3.0;
+    assert!(bad.validate(&c).is_err());
+    let mut bad = l.clone();
+    bad.annotations[0].glyphs[0].x = f32::NAN;
+    assert!(bad.validate(&c).is_err());
+    let mut bad = l;
+    bad.visual_runs[0].glyphs[0].is_synthesized = true;
+    assert_eq!(
+        bad.validate(&c),
+        Err(LineInvariantError::InvalidGlyphSource)
+    );
+}
+
+#[test]
+fn phase0_annotation_base_allows_glyph_less_source_gaps() {
+    let mut l = line();
+    l.byte_range = TextRange::new(0, 3);
+    l.visible_byte_end = 3;
+    l.visual_width = 100.0;
+    l.ascent += 3.0;
+    l.line_height += 3.0;
+    l.baseline_y += 3.0;
+    let mut first = glyph(0.0, 10.0, false);
+    first.byte_range = Some(TextRange::new(0, 1));
+    let mut last = glyph(70.0, 10.0, false);
+    last.byte_range = Some(TextRange::new(2, 3));
+    l.visual_runs = vec![run(first), run(last)];
+    let mut ann = positioned_annotation();
+    ann.base_byte_range = TextRange::new(0, 3);
+    ann.glyphs[0] = PositionedGlyph {
+        byte_range: None,
+        is_synthesized: true,
+        ..glyph(25.0, 50.0, false)
+    };
+    l.annotations.push(ann);
+    assert_eq!(l.validate(&ctx()), Ok(()));
+
+    // A partially intersecting body glyph is still an ownership error even
+    // when the base envelope would contain its painted extent.
+    let mut bad = l.clone();
+    bad.annotations[0].base_byte_range = TextRange::new(0, 2);
+    bad.visual_runs[1].glyphs[0].byte_range = Some(TextRange::new(1, 3));
+    assert_eq!(
+        bad.validate(&ctx()),
+        Err(LineInvariantError::InvalidAnnotation)
+    );
+
+    // A base with no intersecting body glyph is not a visible base.
+    let mut bad = l;
+    bad.annotations[0].base_byte_range = TextRange::new(1, 2);
+    assert_eq!(
+        bad.validate(&ctx()),
+        Err(LineInvariantError::InvalidAnnotation)
+    );
+}
+
+#[test]
+fn phase0_unbounded_width_indent_and_clamp_options() {
+    let a = ast("a");
+    let mut constraints = LayoutConstraints::default();
+    let c = check_layout_inputs(&a, "a", &constraints, &LayoutOptions::default()).unwrap();
+    assert!(c.wrap_width.is_infinite());
+    assert_eq!(line().validate(&c), Ok(()));
+    constraints.wrap_width = 10.0;
+    constraints.first_line_indent = 10.0;
+    assert_eq!(
+        check_layout_inputs(&a, "a", &constraints, &LayoutOptions::default()),
+        Err(LayoutInputError::InvalidConstraints)
+    );
+    constraints.first_line_indent = -2.0;
+    let c = check_layout_inputs(&a, "a", &constraints, &LayoutOptions::default()).unwrap();
+    assert_eq!(c.slot_constraints[0].start, -2.0);
+    assert_eq!(c.wrap_width, 10.0);
+    for policy in [
+        LineClampPolicy::default(),
+        LineClampPolicy {
+            max_lines: Some(0),
+            ..Default::default()
+        },
+        LineClampPolicy {
+            max_block_size: Some(f32::INFINITY),
+            ..Default::default()
+        },
+        LineClampPolicy {
+            max_lines: Some(1),
+            ellipsis: "\u{2028}".into(),
+            ..Default::default()
+        },
+    ] {
+        let options = LayoutOptions {
+            clamp: Some(policy),
+            ..Default::default()
+        };
+        assert_eq!(
+            check_layout_inputs(&a, "a", &constraints, &options),
+            Err(LayoutInputError::InvalidLayoutOptions)
+        );
+    }
+}
+
+#[test]
+fn phase0_truncation_and_multiple_synthesized_ellipsis_glyphs() {
+    let mut l = line();
+    l.visual_width = 120.0;
+    l.is_ellipsized = true;
+    l.visual_runs = vec![run(glyph(0.0, 100.0, false))];
+    for x in [100.0, 110.0] {
+        l.visual_runs[0].glyphs.push(PositionedGlyph {
+            byte_range: None,
+            is_synthesized: true,
+            ..glyph(x, 10.0, false)
+        });
+    }
+    let p = PositionedParagraph {
+        writing_mode: WritingMode::HorizontalTb,
+        base_direction: Direction::Ltr,
+        size: Size {
+            width: 120.0,
+            height: 10.0,
+        },
+        total_block_size: 10.0,
+        lines: vec![l],
+        truncated_range: Some(TextRange::new(1, 3)),
+    };
+    let options = LayoutOptions {
+        clamp: Some(LineClampPolicy {
+            max_lines: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(p.validate("abc", &options, &ctx()), Ok(()));
+    let mut bad = p.clone();
+    bad.truncated_range = Some(TextRange::new(2, 3));
+    assert!(bad.validate("abc", &options, &ctx()).is_err());
+    let mut bad = p.clone();
+    let mut next = bad.lines[0].clone();
+    next.baseline_y += 10.0;
+    next.byte_range = TextRange::new(1, 2);
+    bad.lines.push(next);
+    bad.total_block_size = 20.0;
+    assert!(bad.validate("abc", &options, &ctx()).is_err());
+    assert!(
+        p.validate("abc", &LayoutOptions::default(), &ctx())
+            .is_err()
+    );
+}
+
+#[derive(Debug)]
+struct GrowingGeometry;
+impl LineGeometryProvider for GrowingGeometry {
+    fn query_line_geometry(&self, _: usize, _: f32, end: f32) -> LineGeometry {
+        LineGeometry {
+            slots: smallvec![InlineSlotConstraint {
+                start: 0.0,
+                end: if end > 10.0 { 200.0 } else { 100.0 }
+            }],
+            next_feature_block_offset: None,
+            max_unobstructed_width: 200.0,
+        }
+    }
+}
+#[test]
+fn phase0_provider_monotonicity_clearance_and_snapshots() {
+    let constraints = LayoutConstraints {
+        geometry_provider: Some(Arc::new(GrowingGeometry)),
+        ..Default::default()
+    };
+    let mut a = ast("a");
+    a.items[0] = WordNode::Box(BoxNode::InlineObject {
+        baseline_align: BaselineAlignment::Auto,
+        byte_range: TextRange::new(0, 1),
+        box_id: 1,
+        width: 10.0,
+        ascent: 20.0,
+        descent: 2.0,
+        overflow_policy: BoxOverflowPolicy::Clip,
+    });
+    assert_eq!(
+        layout_paragraph(
+            &a,
+            "a",
+            &NoopShaper,
+            &constraints,
+            &LayoutOptions::default()
+        ),
+        Err(LayoutInputError::NonMonotonicGeometry)
+    );
+    let previous = LineGeometry {
+        slots: smallvec![InlineSlotConstraint {
+            start: 0.0,
+            end: 100.0
+        }],
+        next_feature_block_offset: None,
+        max_unobstructed_width: 100.0,
+    };
+    let split = LineGeometry {
+        slots: smallvec![
+            InlineSlotConstraint {
+                start: 0.0,
+                end: 20.0
+            },
+            InlineSlotConstraint {
+                start: 40.0,
+                end: 100.0
+            }
+        ],
+        ..previous.clone()
+    };
+    assert!(split.is_subset_of(&previous));
+    assert!(!previous.is_subset_of(&split));
+    let (l, c) = two_slots();
+    let p = PositionedParagraph {
+        writing_mode: WritingMode::HorizontalTb,
+        base_direction: Direction::Ltr,
+        size: Size::default(),
+        total_block_size: 10.0,
+        truncated_range: None,
+        lines: vec![l],
+    };
+    assert_eq!(p.validate("ab", &LayoutOptions::default(), &c), Ok(()));
+}
+
+#[test]
+fn phase0_probe_ignores_tall_input_after_first_break() {
+    let constraints = LayoutConstraints {
+        geometry_provider: Some(Arc::new(GrowingGeometry)),
+        ..Default::default()
+    };
+    let text = "a\u{2028}b";
+    let mut a = ast(text);
+    a.items = vec![
+        boxed(0, 1, false),
+        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4), false)),
+        WordNode::Box(BoxNode::InlineObject {
+            baseline_align: BaselineAlignment::Auto,
+            byte_range: TextRange::new(4, 5),
+            box_id: 1,
+            width: 10.0,
+            ascent: 20.0,
+            descent: 2.0,
+            overflow_policy: BoxOverflowPolicy::Clip,
+        }),
+        end(5),
+    ];
+    assert_eq!(
+        layout_paragraph(
+            &a,
+            text,
+            &NoopShaper,
+            &constraints,
+            &LayoutOptions::default()
+        ),
+        Ok(PositionedParagraph::empty(Direction::Ltr))
+    );
+}
+
+#[test]
+fn phase0_infinity_does_not_equal_finite_slot_capacity() {
+    let (mut l, c) = two_slots();
+    l.slots[0].constraint_width = f32::INFINITY;
+    assert_eq!(l.validate(&c), Err(LineInvariantError::InvalidSlots));
+    let mut c = c;
+    c.slot_constraints[0].start = -f32::MAX;
+    c.slot_constraints[0].end = f32::MAX;
+    assert!(l.validate(&c).is_err());
+}
+
+#[test]
+fn phase0_ellipsis_only_empty_and_empty_paragraph_contracts() {
+    let mut l = line();
+    l.byte_range = TextRange::empty_at(0);
+    l.visible_byte_end = 0;
+    l.is_ellipsized = true;
+    l.visual_width = 120.0;
+    let mut r = run(glyph(0.0, 120.0, false));
+    r.byte_range = TextRange::empty_at(0);
+    r.glyphs[0].is_synthesized = true;
+    r.glyphs[0].byte_range = None;
+    l.visual_runs = vec![r];
+    let mut p = PositionedParagraph::empty(Direction::Ltr);
+    p.total_block_size = 10.0;
+    p.lines = vec![l];
+    p.truncated_range = Some(TextRange::new(0, 1));
+    let mut options = LayoutOptions {
+        clamp: Some(LineClampPolicy {
+            max_lines: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(p.validate("a", &options, &ctx()), Ok(()));
+    p.lines[0].visual_runs.clear();
+    p.lines[0].visual_width = 0.0;
+    options.clamp.as_mut().unwrap().ellipsis = "".into();
+    assert_eq!(p.validate("a", &options, &ctx()), Ok(()));
+    p.truncated_range = None;
+    p.lines[0].is_ellipsized = false;
+    assert_eq!(p.validate("", &LayoutOptions::default(), &ctx()), Ok(()));
+    p.lines.clear();
+    assert!(p.validate("", &LayoutOptions::default(), &ctx()).is_err());
+}
+
+#[test]
+fn phase0_ruby_rejects_glue_and_cluster_internal_edges() {
+    let mut a = ast("a b");
+    a.items = vec![
+        boxed(0, 1, false),
+        WordNode::Glue(GlueNode {
+            original_bidi_class: BidiClass::Ws,
+            bidi_level: 0,
+            is_collapsible: true,
+            byte_range: TextRange::new(1, 2),
+            kind: GlueKind::WordSpace,
+            tier: GlueTier::Tier0,
+            natural_width: 1.0,
+            max_stretch: 0.0,
+            max_shrink: 0.0,
+        }),
+        boxed(2, 3, false),
+        end(3),
+    ];
+    assert!(check(&a, "a b").is_ok());
+    a.annotations = vec![annotation(TextRange::new(0, 3), AnnotationSide::Over)];
+    assert_eq!(
+        check(&a, "a b"),
+        Err(LayoutInputError::InvalidAnnotationSpan)
+    );
+    let mut a = ast("ab");
+    if let WordNode::Box(BoxNode::Text { clusters, .. }) = &mut a.items[0] {
+        clusters.truncate(1);
+        clusters[0].byte_range.end = 2;
+        clusters[0].atom_range.end = 2;
+        clusters[0].natural_width = 2.0;
+    }
+    assert!(check(&a, "ab").is_ok());
+    a.annotations = vec![annotation(TextRange::new(0, 1), AnnotationSide::Over)];
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidAnnotationSpan)
+    );
+}
+
+#[derive(Debug)]
+struct EmptyGeometry {
+    next: Option<f32>,
+}
+impl LineGeometryProvider for EmptyGeometry {
+    fn query_line_geometry(&self, _: usize, _: f32, _: f32) -> LineGeometry {
+        LineGeometry {
+            slots: smallvec![],
+            next_feature_block_offset: self.next,
+            max_unobstructed_width: 100.0,
+        }
+    }
+}
+#[test]
+fn phase0_geometry_rejects_empty_without_progress_and_invalid_intervals() {
+    for next in [
+        None,
+        Some(0.0),
+        Some(1e-6),
+        Some(f32::NAN),
+        Some(f32::INFINITY),
+    ] {
+        let constraints = LayoutConstraints {
+            geometry_provider: Some(Arc::new(EmptyGeometry { next })),
+            ..Default::default()
+        };
+        assert_eq!(
+            layout_paragraph(
+                &ast("a"),
+                "a",
+                &NoopShaper,
+                &constraints,
+                &LayoutOptions::default()
+            ),
+            Err(LayoutInputError::InvalidLineGeometry)
+        );
+    }
+    let mut geometry = LineGeometry {
+        slots: smallvec![
+            InlineSlotConstraint {
+                start: 0.0,
+                end: 100.0
+            },
+            InlineSlotConstraint {
+                start: 90.0,
+                end: 200.0
+            }
+        ],
+        next_feature_block_offset: None,
+        max_unobstructed_width: 200.0,
+    };
+    assert!(!geometry.is_valid(0.0));
+    geometry.slots[1].start = 100.0;
+    assert!(geometry.is_valid(0.0));
+    geometry.slots[1].end = f32::INFINITY;
+    assert!(geometry.is_valid(0.0));
+    geometry.slots[0].start = -f32::MAX;
+    geometry.slots[0].end = f32::MAX;
+    assert!(!geometry.is_valid(0.0));
+}
+
+#[test]
+fn phase0_vertical_lr_paragraph_uses_line_under_for_block_start() {
+    let mut l = line();
+    l.baseline_y = 2.0;
+    let mut r = run(glyph(0.0, 100.0, false));
+    r.orientation = GlyphOrientation::VerticalUpright;
+    l.visual_runs = vec![r];
+    let mut p = PositionedParagraph::empty(Direction::Ltr);
+    p.writing_mode = WritingMode::VerticalLr;
+    p.total_block_size = 10.0;
+    p.lines = vec![l];
+    assert_eq!(p.validate("a", &LayoutOptions::default(), &ctx()), Ok(()));
+    p.lines[0].baseline_y = 1.0;
+    assert!(p.validate("a", &LayoutOptions::default(), &ctx()).is_err());
+}
+
+#[test]
+fn phase0_vertical_lr_under_annotation_moves_first_baseline() {
+    let mut l = line();
+    l.baseline_y = 3.0;
+    l.descent = 3.0;
+    l.line_height = 11.0;
+    let mut r = run(glyph(0.0, 100.0, false));
+    r.orientation = GlyphOrientation::VerticalUpright;
+    l.visual_runs = vec![r];
+    let mut ann = positioned_annotation();
+    ann.side = AnnotationSide::Under;
+    ann.orientation = GlyphOrientation::VerticalUpright;
+    ann.block_extent = 1.0;
+    ann.baseline_offset = -2.0;
+    ann.glyphs[0].x = 0.0;
+    ann.glyphs[0].advance = 10.0;
+    l.annotations.push(ann);
+    let mut p = PositionedParagraph::empty(Direction::Ltr);
+    p.writing_mode = WritingMode::VerticalLr;
+    p.total_block_size = 11.0;
+    p.lines = vec![l];
+    assert_eq!(p.validate("a", &LayoutOptions::default(), &ctx()), Ok(()));
+    // The line-under side is the block start in VerticalLr, so shrinking the
+    // baseline to the strut descent alone pushes the line into negative block
+    // space once the annotation has extended descent.
+    p.lines[0].baseline_y = 2.0;
+    assert!(p.validate("a", &LayoutOptions::default(), &ctx()).is_err());
 }

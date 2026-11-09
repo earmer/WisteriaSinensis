@@ -17,8 +17,23 @@ use core::fmt;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LayoutInputError {
-    /// `wrap_width` is negative or not finite, or the tab step is not a finite
-    /// positive number.
+    /// Glyph orientation disagrees with mode, run or level parity.
+    OrientationMismatch,
+    /// Invalid raw horizontal/vertical metrics or baseline offsets.
+    InvalidFontMetrics,
+    /// Nonfinite or forbidden explicit spacing.
+    InvalidSpacing,
+    /// Invalid explicit directional span.
+    InvalidBidiSpan,
+    /// Invalid annotation base or locally shaped payload.
+    InvalidAnnotationSpan,
+    /// Invalid clamp or other layout policy.
+    InvalidLayoutOptions,
+    /// Malformed geometry or exhausted clearance progress.
+    InvalidLineGeometry,
+    /// Expanding a block envelope introduced available inline space.
+    NonMonotonicGeometry,
+    /// Invalid width, indentation or tab stops; positive-infinite width is allowed.
     InvalidConstraints,
     /// `text` contains a paragraph separator; split it with
     /// [`frontend::split_paragraphs`](crate::frontend::split_paragraphs) first.
@@ -177,6 +192,18 @@ pub enum LayoutInputError {
 impl fmt::Display for LayoutInputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::OrientationMismatch => {
+                f.write_str("orientation does not match writing mode or bidi level")
+            }
+            Self::InvalidFontMetrics => f.write_str("invalid font metrics"),
+            Self::InvalidSpacing => f.write_str("invalid explicit spacing"),
+            Self::InvalidBidiSpan => f.write_str("invalid explicit bidi span"),
+            Self::InvalidAnnotationSpan => f.write_str("invalid annotation span"),
+            Self::InvalidLayoutOptions => f.write_str("invalid layout options"),
+            Self::InvalidLineGeometry => f.write_str("invalid line geometry"),
+            Self::NonMonotonicGeometry => {
+                f.write_str("geometry grew with an expanded block envelope")
+            }
             Self::InvalidConstraints => f.write_str("invalid wrap width or tab stops"),
             Self::ParagraphSeparatorInText => {
                 f.write_str("text contains a paragraph separator; split it first")
@@ -492,7 +519,17 @@ fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
 /// fallback scale is positive.
 fn cluster_measurements_are_valid(cluster: &ShapedCluster) -> bool {
     let font_ok = cluster.font.scale.is_finite() && cluster.font.scale > 0.0;
-    let widths_ok = cluster.natural_width.is_finite() && cluster.uncompressed_width.is_finite();
+    let widths_ok = cluster.natural_width.is_finite()
+        && cluster.natural_width >= 0.0
+        && cluster.uncompressed_width.is_finite()
+        && cluster.uncompressed_width >= 0.0
+        && cluster
+            .glyphs
+            .iter()
+            .map(|g| f64::from(g.x_advance))
+            .sum::<f64>()
+            .abs()
+            <= f64::from(f32::MAX);
     let glyphs_ok = cluster.glyphs.iter().all(|glyph| {
         glyph.x_advance.is_finite() && glyph.x_offset.is_finite() && glyph.y_offset.is_finite()
     });
@@ -763,6 +800,9 @@ pub fn check_layout_inputs(
     if !constraints.is_valid() {
         return Err(E::InvalidConstraints);
     }
+    if options.clamp.as_ref().is_some_and(|c| !c.is_valid()) {
+        return Err(E::InvalidLayoutOptions);
+    }
     // Single-paragraph contract: reject paragraph separators in text.
     // UAX #9 class B plus the application-policy separators U+000B/U+000C.
     if text.chars().any(is_paragraph_separator) {
@@ -791,18 +831,12 @@ pub fn check_layout_inputs(
     if !strut_inputs_are_valid {
         return Err(E::InvalidStrut);
     }
+    if !strut_metrics.is_valid() {
+        return Err(E::InvalidFontMetrics);
+    }
+    check_extensions(ast, text)?;
     for (run, r) in ast.runs.iter().enumerate() {
-        if !fits(text, r.byte_range) {
-            return Err(E::RunOutsideText { run });
-        }
-        if !r.font_size.is_finite() || r.font_size <= 0.0 {
-            return Err(E::InvalidStrut);
-        }
-        if r.bidi_level > BIDI_MAX_DEPTH + 1
-            || r.features.variations.iter().any(|v| !v.value().is_finite())
-        {
-            return Err(E::InvalidShapingRun { run });
-        }
+        check_run(r, text, run)?;
     }
     check_spans(ast, text)?;
     // Reject out-of-order and out-of-text items before indexing spans against
@@ -831,25 +865,15 @@ pub fn check_layout_inputs(
                 let Some(run) = ast.runs.get(*run_index) else {
                     return Err(E::RunIndexOutOfRange { item });
                 };
-                // Every atom must fit, even when the node's overall span does.
-                if !atoms.iter().all(|a| fits(text, a.byte_range)) {
-                    return Err(E::ItemOutsideText { item });
-                }
-                if !node.is_self_contained() {
-                    return Err(E::ItemNotSelfContained { item });
-                }
-                let run_level = run.bidi_level;
-                if atoms.iter().any(|a| a.bidi_level != run_level)
-                    || clusters.iter().any(|c| c.bidi_level != run_level)
-                {
-                    return Err(E::ItemOutsideRun { item });
-                }
-                if clusters.iter().any(|c| !c.safety_flags_consistent()) {
-                    return Err(E::ItemNotSelfContained { item });
-                }
-                if clusters.iter().any(|c| !cluster_measurements_are_valid(c)) {
-                    return Err(E::InvalidTextWidth { item });
-                }
+                check_text_payload(
+                    text,
+                    *byte_range,
+                    run,
+                    atoms,
+                    clusters,
+                    *natural_width,
+                    item,
+                )?;
                 // IN_ATOMIC_EDIT_SPAN mirrors `atomic_spans` exactly.
                 if atoms.iter().any(|a| {
                     while atomic_at < ast.atomic_spans.len()
@@ -864,21 +888,6 @@ pub fn check_layout_inputs(
                     inside != a.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN)
                 }) {
                     return Err(E::AtomicFlagMismatch { item });
-                }
-                if !(run.byte_range.contains_range(*byte_range)
-                    && atoms
-                        .iter()
-                        .all(|a| run.byte_range.contains_range(a.byte_range)))
-                {
-                    return Err(E::ItemOutsideRun { item });
-                }
-                let total: f64 = clusters.iter().map(|c| f64::from(c.natural_width)).sum();
-                let cached = f64::from(*natural_width);
-                if !(natural_width.is_finite()
-                    && total.is_finite()
-                    && (cached - total).abs() <= 1e-3_f64.max(1e-5 * total.abs()))
-                {
-                    return Err(E::InvalidTextWidth { item });
                 }
             }
             WordNode::Box(BoxNode::InlineObject {
@@ -962,10 +971,18 @@ pub fn check_layout_inputs(
                 }
             }
             WordNode::Discretionary(d) => {
-                let widths_ok = [d.pre_break_width, d.post_break_width, d.no_break_width]
-                    .iter()
-                    .all(|v| v.is_finite());
+                let widths_ok = [
+                    d.pre_break_width,
+                    d.post_break_width,
+                    d.no_break_width,
+                    d.no_break_spacing,
+                ]
+                .iter()
+                .all(|v| v.is_finite());
                 let hard = matches!(d.action, BreakAction::HardBreak { .. });
+                if d.no_break_width != d.no_break_spacing || (hard && d.no_break_width != 0.0) {
+                    return Err(E::InvalidDiscretionary { item });
+                }
                 // Ownership: a soft opportunity owns nothing; a real hard break owns
                 // exactly its non-empty terminator; the paragraph-end sentinel is
                 // the empty range at the end of the text, the last discretionary.
@@ -1132,13 +1149,28 @@ pub fn check_layout_inputs(
             item: ast.items.len() - 1,
         });
     }
-    let context = LineContext::from_options(
+    let mut context = LineContext::from_options(
         strut_metrics,
         ast.strut_font_size,
         ast.base_direction,
         options,
         constraints.wrap_width,
     );
+    context.writing_mode = ast.writing_mode;
+    context.strut = options.line_height.resolve_strut_for_mode(
+        strut_metrics,
+        ast.strut_font_size,
+        ast.writing_mode,
+    );
+    // Dynamic provider responses are validated when queried by layout, not by AST validation.
+    if constraints.geometry_provider.is_none() {
+        let geometry =
+            constraints.resolve_line_geometry(0, 0.0, context.strut.natural_line_height());
+        if !geometry.is_valid(0.0) {
+            return Err(E::InvalidLineGeometry);
+        }
+        context = context.with_slots(geometry.slots, geometry.max_unobstructed_width);
+    }
     let r = &context.strut;
     if ![r.ascent, r.descent, r.line_gap, r.natural_line_height()]
         .iter()
@@ -1166,9 +1198,367 @@ pub fn layout_paragraph(
     constraints: &LayoutConstraints,
     options: &LayoutOptions,
 ) -> Result<PositionedParagraph, LayoutInputError> {
-    let _ = shaper;
-    let _context = check_layout_inputs(ast, text, constraints, options)?;
-    Ok(PositionedParagraph::empty(ast.base_direction))
+    let context = check_layout_inputs(ast, text, constraints, options)?;
+    if constraints.geometry_provider.is_some() {
+        // Phase 0 only probes the geometry that can begin at block start: the
+        // strut and input up to the first break opportunity. A tall object
+        // later in the paragraph is not evidence about the first line, so it
+        // must not turn a legal provider into a clearance failure. Line fitting
+        // is Phase 1–3 work.
+        let initial = context.strut.natural_line_height();
+        let initial_end = ast
+            .items
+            .iter()
+            .find(|item| item.is_break_opportunity())
+            .and_then(WordNode::byte_span)
+            .map_or(text.len(), |span| span.start);
+        let mut required = initial;
+        for item in ast
+            .items
+            .iter()
+            .take_while(|item| !item.is_break_opportunity())
+        {
+            match item {
+                WordNode::Box(BoxNode::InlineObject {
+                    ascent, descent, ..
+                }) => required = required.max(ascent + descent),
+                WordNode::Box(BoxNode::Text {
+                    run_index,
+                    clusters,
+                    ..
+                }) => {
+                    for cluster in clusters {
+                        let metrics = shaper.font_metrics(crate::types::FontInstanceRef {
+                            font: cluster.font,
+                            font_size: ast.runs[*run_index].font_size,
+                            variations: ast.runs[*run_index].features.variations(),
+                        });
+                        let height = options
+                            .line_height
+                            .resolve_strut_for_mode(
+                                &metrics,
+                                ast.runs[*run_index].font_size,
+                                ast.writing_mode,
+                            )
+                            .natural_line_height();
+                        if !height.is_finite() {
+                            return Err(LayoutInputError::InvalidFontMetrics);
+                        }
+                        required = required.max(height);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut over = 0.0_f32;
+        let mut under = 0.0_f32;
+        for ann in &ast.annotations {
+            if ann.base_byte_range.start >= initial_end {
+                continue;
+            }
+            match ann.side {
+                crate::frontend::AnnotationSide::Over => over = over.max(ann.block_extent),
+                crate::frontend::AnnotationSide::Under => under = under.max(ann.block_extent),
+            }
+        }
+        let max_initial_probe_height = required + over + under;
+        if !max_initial_probe_height.is_finite() {
+            return Err(LayoutInputError::InvalidFontMetrics);
+        }
+        let mut start = 0.0;
+        let mut cleared = false;
+        for _ in 0..1024 {
+            let probe = constraints.query_checked_geometry(0, start, start + initial, None)?;
+            if max_initial_probe_height > initial {
+                // Contract check only: an expanded envelope must stay inside
+                // the original one. Its contents do not decide whether the
+                // initial position is legal.
+                constraints.query_checked_geometry(
+                    0,
+                    start,
+                    start + max_initial_probe_height,
+                    Some(&probe),
+                )?;
+            }
+            if !probe.slots.is_empty() {
+                cleared = true;
+                break;
+            }
+            let next = probe
+                .next_feature_block_offset
+                .ok_or(LayoutInputError::InvalidLineGeometry)?;
+            if next - start < 1e-4 {
+                return Err(LayoutInputError::InvalidLineGeometry);
+            }
+            start = next;
+        }
+        if !cleared {
+            return Err(LayoutInputError::InvalidLineGeometry);
+        }
+    }
+    let mut paragraph = PositionedParagraph::empty(ast.base_direction);
+    paragraph.writing_mode = ast.writing_mode;
+    Ok(paragraph)
+}
+
+fn check_run(
+    r: &crate::frontend::ShapingRun,
+    text: &str,
+    run: usize,
+) -> Result<(), LayoutInputError> {
+    use LayoutInputError as E;
+    if !fits(text, r.byte_range) {
+        return Err(E::RunOutsideText { run });
+    }
+    if !r.font_size.is_finite() || r.font_size <= 0.0 {
+        return Err(E::InvalidStrut);
+    }
+    if r.bidi_level > BIDI_MAX_DEPTH + 1
+        || r.features.variations.iter().any(|v| !v.value().is_finite())
+    {
+        return Err(E::InvalidShapingRun { run });
+    }
+    Ok(())
+}
+
+fn check_text_payload(
+    text: &str,
+    range: TextRange,
+    run: &crate::frontend::ShapingRun,
+    atoms: &[GraphemeAtom],
+    clusters: &[ShapedCluster],
+    natural_width: f32,
+    item: usize,
+) -> Result<(), LayoutInputError> {
+    use LayoutInputError as E;
+    if !atoms.iter().all(|a| fits(text, a.byte_range)) {
+        return Err(E::ItemOutsideText { item });
+    }
+    if !crate::frontend::text_is_self_contained(range, atoms, clusters) {
+        return Err(E::ItemNotSelfContained { item });
+    }
+    if atoms.iter().any(|a| a.bidi_level != run.bidi_level)
+        || clusters.iter().any(|c| c.bidi_level != run.bidi_level)
+    {
+        return Err(E::ItemOutsideRun { item });
+    }
+    if clusters.iter().any(|c| !c.safety_flags_consistent()) {
+        return Err(E::ItemNotSelfContained { item });
+    }
+    if clusters.iter().any(|c| !cluster_measurements_are_valid(c)) {
+        return Err(E::InvalidTextWidth { item });
+    }
+    if !run.byte_range.contains_range(range)
+        || atoms
+            .iter()
+            .any(|a| !run.byte_range.contains_range(a.byte_range))
+    {
+        return Err(E::ItemOutsideRun { item });
+    }
+    let total: f64 = clusters.iter().map(|c| f64::from(c.natural_width)).sum();
+    if !natural_width.is_finite()
+        || total > f64::from(f32::MAX)
+        || (f64::from(natural_width) - total).abs() > 1e-3_f64.max(1e-5 * total.abs())
+    {
+        return Err(E::InvalidTextWidth { item });
+    }
+    Ok(())
+}
+
+fn check_run_extensions(
+    run: &crate::frontend::ShapingRun,
+    mode: crate::types::WritingMode,
+) -> Result<(), LayoutInputError> {
+    if !run.orientation.is_valid(mode, run.bidi_level) {
+        return Err(LayoutInputError::OrientationMismatch);
+    }
+    if !run.letter_spacing.is_finite()
+        || !run.word_spacing.is_finite()
+        || !run.baseline_align.is_valid()
+    {
+        return Err(LayoutInputError::InvalidSpacing);
+    }
+    Ok(())
+}
+
+fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
+    use crate::frontend::{AnnotationKind, AnnotationSide, MAX_BIDI_SPAN_DEPTH};
+    use crate::types::GlyphOrientation;
+    use LayoutInputError as E;
+    use std::collections::{HashMap, HashSet};
+    for run in &ast.runs {
+        check_run_extensions(run, ast.writing_mode)?;
+    }
+    let mut boundaries = HashSet::new();
+    let mut atom_starts = HashMap::new();
+    let mut atom_ends = HashMap::new();
+    let mut cluster_edges = HashSet::new();
+    let mut forbidden = 0usize;
+    for (item, node) in ast.items.iter().enumerate() {
+        match node {
+            WordNode::Box(BoxNode::Text {
+                run_index,
+                atoms,
+                clusters,
+                ..
+            }) => {
+                let run = ast
+                    .runs
+                    .get(*run_index)
+                    .ok_or(E::RunIndexOutOfRange { item })?;
+                if run.orientation == GlyphOrientation::HorizontalInVertical && clusters.len() != 1
+                {
+                    return Err(E::OrientationMismatch);
+                }
+                for atom in atoms {
+                    if atom.orientation != run.orientation
+                        || !atom.orientation.is_valid(ast.writing_mode, atom.bidi_level)
+                    {
+                        return Err(E::OrientationMismatch);
+                    }
+                    if run.letter_spacing != 0.0
+                        && atom.flags.contains(AtomFlags::NO_LETTER_SPACING)
+                    {
+                        return Err(E::InvalidSpacing);
+                    }
+                    boundaries.extend([atom.byte_range.start, atom.byte_range.end]);
+                    atom_starts.insert(atom.byte_range.start, forbidden);
+                    atom_ends.insert(atom.byte_range.end, forbidden);
+                }
+                for c in clusters {
+                    if c.orientation != run.orientation
+                        || !c.orientation.is_valid(ast.writing_mode, c.bidi_level)
+                    {
+                        return Err(E::OrientationMismatch);
+                    }
+                    cluster_edges.extend([c.byte_range.start, c.byte_range.end]);
+                }
+            }
+            WordNode::Box(BoxNode::InlineObject {
+                baseline_align,
+                byte_range,
+                ..
+            }) => {
+                if !baseline_align.is_valid() {
+                    return Err(E::InvalidInlineBox { item });
+                }
+                boundaries.extend([byte_range.start, byte_range.end]);
+                forbidden += 1;
+            }
+            WordNode::Glue(g) => {
+                boundaries.extend([g.byte_range.start, g.byte_range.end]);
+                forbidden += 1;
+            }
+            WordNode::Tab { byte_range } => {
+                boundaries.extend([byte_range.start, byte_range.end]);
+                forbidden += 1;
+            }
+            WordNode::Discretionary(d) => {
+                if !matches!(d.action, BreakAction::HardBreak { .. }) {
+                    if let (Some((l, _, _)), Some((r, _, _))) = (
+                        item.checked_sub(1)
+                            .and_then(|i| text_at(&ast.items, Some(i))),
+                        text_at(&ast.items, Some(item + 1)),
+                    ) {
+                        if l == r
+                            && ast.runs.get(l).is_some_and(|run| {
+                                run.orientation == GlyphOrientation::HorizontalInVertical
+                            })
+                        {
+                            return Err(E::OrientationMismatch);
+                        }
+                    }
+                }
+                forbidden += 1;
+            }
+            _ => {}
+        }
+    }
+    let mut ids = HashSet::with_capacity(ast.bidi_spans.len());
+    let mut stack: Vec<TextRange> = Vec::new();
+    let mut previous: Option<TextRange> = None;
+    for span in &ast.bidi_spans {
+        let r = span.byte_range;
+        if !ids.insert(span.span_id)
+            || r.is_empty()
+            || !fits(text, r)
+            || !boundaries.contains(&r.start)
+            || !boundaries.contains(&r.end)
+            || previous.is_some_and(|p| r.start < p.start || (r.start == p.start && r.end >= p.end))
+        {
+            return Err(E::InvalidBidiSpan);
+        }
+        while stack.last().is_some_and(|p| p.end <= r.start) {
+            stack.pop();
+        }
+        if stack.last().is_some_and(|p| r.end > p.end) || stack.len() >= MAX_BIDI_SPAN_DEPTH {
+            return Err(E::InvalidBidiSpan);
+        }
+        stack.push(r);
+        previous = Some(r);
+    }
+    let mut ids = HashSet::with_capacity(ast.annotations.len());
+    let mut last: [Option<TextRange>; 2] = [None, None];
+    for ann in &ast.annotations {
+        let r = ann.base_byte_range;
+        let side = usize::from(ann.side == AnnotationSide::Under);
+        if !ids.insert(ann.annotation_id)
+            || r.is_empty()
+            || !fits(text, r)
+            || !ann.block_extent.is_finite()
+            || ann.block_extent < 0.0
+            || last[side].is_some_and(|p| p.start >= r.start || p.end > r.start)
+            || !cluster_edges.contains(&r.start)
+            || !cluster_edges.contains(&r.end)
+            || atom_starts
+                .get(&r.start)
+                .zip(atom_ends.get(&r.end))
+                .is_none_or(|(a, b)| a != b)
+            || ann.annotation_text.is_empty()
+            || ann
+                .annotation_text
+                .chars()
+                .any(|c| is_paragraph_separator(c) || c == '\u{2028}')
+            || ann.run.byte_range != TextRange::new(0, ann.annotation_text.len())
+        {
+            return Err(E::InvalidAnnotationSpan);
+        }
+        if let AnnotationKind::Ruby { max_overhang, .. } = ann.kind {
+            if !max_overhang.is_finite() || max_overhang < 0.0 {
+                return Err(E::InvalidAnnotationSpan);
+            }
+        } else if ann.clusters.len() != 1 || ann.annotation_text.chars().count() != 1 {
+            return Err(E::InvalidAnnotationSpan);
+        }
+        last[side] = Some(r);
+        check_run_extensions(&ann.run, ast.writing_mode).map_err(|_| E::InvalidAnnotationSpan)?;
+        check_run(&ann.run, &ann.annotation_text, 0).map_err(|_| E::InvalidAnnotationSpan)?;
+        let total: f32 = ann.clusters.iter().map(|c| c.natural_width).sum();
+        check_text_payload(
+            &ann.annotation_text,
+            ann.run.byte_range,
+            &ann.run,
+            &ann.atoms,
+            &ann.clusters,
+            total,
+            0,
+        )
+        .map_err(|_| E::InvalidAnnotationSpan)?;
+        if ann.atoms.iter().any(|a| {
+            a.orientation != ann.run.orientation
+                || !a.orientation.is_valid(ast.writing_mode, a.bidi_level)
+                || a.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN)
+                || (ann.run.letter_spacing != 0.0 && a.flags.contains(AtomFlags::NO_LETTER_SPACING))
+        }) || ann.clusters.iter().any(|c| {
+            c.orientation != ann.run.orientation
+                || !c.orientation.is_valid(ast.writing_mode, c.bidi_level)
+        }) || (ann.run.orientation == GlyphOrientation::HorizontalInVertical
+            && ann.clusters.len() != 1)
+        {
+            return Err(E::InvalidAnnotationSpan);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1180,6 +1570,9 @@ mod tests {
 
     fn constraints() -> LayoutConstraints {
         LayoutConstraints {
+            first_line_indent: 0.0,
+            geometry_provider: None,
+            hanging_indent: 0.0,
             wrap_width: 100.0,
             tab_stops: TabStops { step: 8.0 },
         }
@@ -1187,8 +1580,14 @@ mod tests {
 
     fn ast() -> ParagraphAst {
         ParagraphAst {
+            annotations: Vec::new(),
+            bidi_spans: Vec::new(),
+            writing_mode: crate::types::WritingMode::HorizontalTb,
             base_direction: BidiDirection::Rtl,
             strut_metrics: FontMetrics {
+                vertical_ascent: 5.0,
+                vertical_descent: 5.0,
+                vertical_line_gap: 0.0,
                 ascent: 8.0,
                 descent: 2.0,
                 line_gap: 1.0,
@@ -1293,6 +1692,7 @@ mod tests {
 
     fn atom(start: usize, end: usize) -> GraphemeAtom {
         GraphemeAtom {
+            orientation: crate::types::GlyphOrientation::Horizontal,
             byte_range: TextRange::new(start, end),
             script: ScriptTag::LATIN,
             bidi_level: 0,
@@ -1308,6 +1708,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, a)| ShapedCluster {
+                orientation: crate::types::GlyphOrientation::Horizontal,
                 byte_range: a.byte_range,
                 atom_range: i..i + 1,
                 font: crate::types::FontRef::unscaled(crate::types::FontId(0)),
@@ -1338,6 +1739,10 @@ mod tests {
 
     fn run() -> crate::frontend::ShapingRun {
         crate::frontend::ShapingRun {
+            word_spacing: 0.0,
+            baseline_align: crate::types::BaselineAlignment::Auto,
+            letter_spacing: 0.0,
+            orientation: crate::types::GlyphOrientation::Horizontal,
             features: Default::default(),
 
             byte_range: TextRange::new(0, 4),
@@ -1435,6 +1840,7 @@ mod tests {
             (1.0, 1.0, f32::INFINITY),
         ] {
             let a = with_items(vec![WordNode::Box(BoxNode::InlineObject {
+                baseline_align: crate::types::BaselineAlignment::Auto,
                 byte_range: TextRange::new(0, 1),
                 box_id: 1,
                 width: w,
@@ -1544,6 +1950,7 @@ mod tests {
         let (head, tail): (Vec<_>, Vec<_>) =
             atoms.into_iter().partition(|a| a.byte_range.end <= at);
         let d = DiscretionaryNode {
+            no_break_spacing: 0.0,
             byte_range: TextRange::empty_at(at),
             penalty: DiscretionaryNode::HYPHEN_PENALTY,
             flagged: true,
@@ -1605,6 +2012,7 @@ mod tests {
     fn three_part_word(first: WordNode, second_cut: (u32, u32)) -> ParagraphAst {
         let hyphen = |at: usize, prefix: u32, suffix: u32| {
             WordNode::Discretionary(DiscretionaryNode {
+                no_break_spacing: 0.0,
                 byte_range: TextRange::empty_at(at),
                 penalty: DiscretionaryNode::HYPHEN_PENALTY,
                 flagged: true,
@@ -1629,6 +2037,7 @@ mod tests {
         let o = LayoutOptions::default();
         let hyphen_at_1 = || {
             WordNode::Discretionary(DiscretionaryNode {
+                no_break_spacing: 0.0,
                 byte_range: TextRange::empty_at(1),
                 penalty: DiscretionaryNode::HYPHEN_PENALTY,
                 flagged: true,
@@ -1694,6 +2103,7 @@ mod tests {
         // The same holds inside a longer chain: the first point already splits runs.
         let mut a = three_part_word(
             WordNode::Discretionary(DiscretionaryNode {
+                no_break_spacing: 0.0,
                 byte_range: TextRange::empty_at(1),
                 penalty: DiscretionaryNode::HYPHEN_PENALTY,
                 flagged: true,
@@ -2989,6 +3399,7 @@ mod tests {
         let mut a = with_items(vec![
             text_box(vec![atom(0, 1)]),
             WordNode::Box(BoxNode::InlineObject {
+                baseline_align: crate::types::BaselineAlignment::Auto,
                 byte_range: TextRange::new(1, 3),
                 box_id: 1,
                 width: 1.0,

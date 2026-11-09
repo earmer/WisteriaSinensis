@@ -16,6 +16,14 @@ pub struct TextDecoration {
 /// decoration (spec §2.5). Atoms never straddle runs (§3 Step 5).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapingRun {
+    /// Alignment relative to the paragraph main baseline.
+    pub baseline_align: crate::types::BaselineAlignment,
+    /// Finite extra spacing between eligible atoms.
+    pub letter_spacing: f32,
+    /// Finite extra advance for word spaces.
+    pub word_spacing: f32,
+    /// Resolved glyph orientation.
+    pub orientation: crate::types::GlyphOrientation,
     /// Complete shaping settings; the run is their single source of truth.
     pub features: crate::types::FontFeatures,
     /// Bytes of the paragraph covered by the run.

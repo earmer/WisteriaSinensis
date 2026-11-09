@@ -22,6 +22,7 @@ const SPACE_W: f32 = 4.0;
 
 fn atom(offset: usize) -> GraphemeAtom {
     GraphemeAtom {
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         byte_range: TextRange::new(offset, offset + 1),
         script: ScriptTag::LATIN,
         bidi_level: 0,
@@ -33,6 +34,7 @@ fn atom(offset: usize) -> GraphemeAtom {
 fn cluster(base: usize, local: usize) -> ShapedCluster {
     let off = base + local;
     ShapedCluster {
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         byte_range: TextRange::new(off, off + 1),
         atom_range: local..local + 1,
         font: FontRef::unscaled(FontId(1)),
@@ -88,6 +90,10 @@ fn assert_send_sync_static<T: Send + Sync + 'static>() {}
 
 fn run() -> ShapingRun {
     ShapingRun {
+        word_spacing: 0.0,
+        baseline_align: mutil_engine::types::BaselineAlignment::Auto,
+        letter_spacing: 0.0,
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         features: Default::default(),
 
         byte_range: TextRange::new(0, TEXT.len()),
@@ -113,9 +119,15 @@ fn zero_layout_full_pipeline_assembly() {
         suffix_cut_bytes: 2,
     };
     let ast = ParagraphAst {
+        annotations: Vec::new(),
+        bidi_spans: Vec::new(),
+        writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
         base_direction: BidiDirection::Ltr,
         // Raw primary-font metrics: the frontend never resolves a line height.
         strut_metrics: FontMetrics {
+            vertical_ascent: 5.0,
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
             ascent: 12.0,
             descent: 4.0,
             ..Default::default()
@@ -125,6 +137,7 @@ fn zero_layout_full_pipeline_assembly() {
         items: vec![
             word(0, 3),
             WordNode::Discretionary(DiscretionaryNode {
+                no_break_spacing: 0.0,
                 byte_range: TextRange::empty_at(3),
                 penalty: DiscretionaryNode::HYPHEN_PENALTY,
                 flagged: true,
@@ -151,6 +164,7 @@ fn zero_layout_full_pipeline_assembly() {
             }),
             WordNode::Discretionary(DiscretionaryNode::direct(8)),
             WordNode::Box(BoxNode::InlineObject {
+                baseline_align: mutil_engine::types::BaselineAlignment::Auto,
                 byte_range: TextRange::new(8, 11),
                 box_id: 42,
                 width: BOX_W,
@@ -202,12 +216,15 @@ fn zero_layout_full_pipeline_assembly() {
     );
     assert_eq!(ctx.strut.natural_line_height(), 16.0);
     let constraints = LayoutConstraints {
+        first_line_indent: 0.0,
+        geometry_provider: None,
+        hanging_indent: 0.0,
         wrap_width: 200.0,
         tab_stops: TabStops { step: 8.0 },
     };
     assert_eq!(
         check_layout_inputs(&ast, TEXT, &constraints, &options),
-        Ok(ctx)
+        Ok(ctx.clone())
     );
 
     // ---- Shaping bridge: both spelling edits through the trait ----------
@@ -309,6 +326,10 @@ fn zero_layout_full_pipeline_assembly() {
         is_hanging: false,
     });
     let line0 = PositionedLine {
+        slots: smallvec::SmallVec::new(),
+        annotations: Vec::new(),
+        is_ellipsized: false,
+        resolved_slot_constraints: smallvec::SmallVec::new(),
         atomic_fragments: vec![],
 
         span_fragments: vec![],
@@ -323,6 +344,7 @@ fn zero_layout_full_pipeline_assembly() {
         hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
+            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
             font_size: 16.0,
             variations: Default::default(),
 
@@ -356,6 +378,10 @@ fn zero_layout_full_pipeline_assembly() {
     let body_width = pen;
     l1_glyphs.push(glyph(comma, body_width, true));
     let line1 = PositionedLine {
+        slots: smallvec::SmallVec::new(),
+        annotations: Vec::new(),
+        is_ellipsized: false,
+        resolved_slot_constraints: smallvec::SmallVec::new(),
         atomic_fragments: vec![],
 
         span_fragments: vec![],
@@ -370,6 +396,7 @@ fn zero_layout_full_pipeline_assembly() {
         hanging_right: ADV,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
+            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
             font_size: 16.0,
             variations: Default::default(),
 
@@ -380,6 +407,7 @@ fn zero_layout_full_pipeline_assembly() {
         }],
         caret_stops: vec![],
         visual_boxes: vec![PositionedInlineBox {
+            baseline_align: mutil_engine::types::BaselineAlignment::Auto,
             box_id: 42,
             byte_range: TextRange::new(8, 11),
             x: box_x,
@@ -399,6 +427,10 @@ fn zero_layout_full_pipeline_assembly() {
 
     // Line 2: the empty line after the hard break (Stage 4.2).
     let line2 = PositionedLine {
+        slots: smallvec::SmallVec::new(),
+        annotations: Vec::new(),
+        is_ellipsized: false,
+        resolved_slot_constraints: smallvec::SmallVec::new(),
         atomic_fragments: vec![],
 
         span_fragments: vec![],
@@ -475,6 +507,7 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
                 run_index: 0,
                 byte_range: atoms[0].byte_range,
                 clusters: vec![ShapedCluster {
+                    orientation: mutil_engine::types::GlyphOrientation::Horizontal,
                     byte_range: atoms[0].byte_range,
                     atom_range: 0..1,
                     font: FontRef::unscaled(FontId(1)),
@@ -559,6 +592,10 @@ fn small_line() -> PositionedLine {
         is_hanging: false,
     };
     PositionedLine {
+        slots: smallvec::SmallVec::new(),
+        annotations: Vec::new(),
+        is_ellipsized: false,
+        resolved_slot_constraints: smallvec::SmallVec::new(),
         atomic_fragments: vec![],
 
         span_fragments: vec![],
@@ -573,6 +610,7 @@ fn small_line() -> PositionedLine {
         hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
+            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
             font_size: 16.0,
             variations: Default::default(),
 
@@ -582,6 +620,7 @@ fn small_line() -> PositionedLine {
             glyphs: vec![g(0.0, (0, 1)), g(30.0, (3, 4))],
         }],
         visual_boxes: vec![PositionedInlineBox {
+            baseline_align: mutil_engine::types::BaselineAlignment::Auto,
             box_id: 7,
             byte_range: TextRange::new(1, 2),
             x: 10.0,
@@ -603,7 +642,22 @@ fn small_line() -> PositionedLine {
 
 fn small_ctx() -> LineContext {
     LineContext {
-        strut: VerticalMetrics {
+        strut: FontMetrics {
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
+            x_height: 0.0,
+
+            underline_thickness: 0.0,
+            use_typo_metrics: false,
+            vertical_ascent: 5.0,
+            cap_height: 0.0,
+            strikeout_position: 0.0,
+            underline_position: 0.0,
+
+            ideographic_baseline_offset: 0.0,
+            mathematical_baseline_offset: 0.0,
+            central_baseline_offset: 0.0,
+            hanging_baseline_offset: 0.0,
             ascent: 12.0,
             descent: 4.0,
             line_gap: 0.0,
@@ -859,6 +913,8 @@ fn trailing_tab_follows_the_same_l1_rule() {
 #[test]
 fn context_follows_the_layout_options() {
     let options = LayoutOptions {
+        clamp: None,
+        justify: false,
         strategy: LineBreakStrategy::Publication,
         hang_mode: HangMode {
             start: HangStartMode::FirstLine,
@@ -866,9 +922,12 @@ fn context_follows_the_layout_options() {
         },
         line_height: LineHeight::Fixed(1.5),
         whitespace: HangingWhitespaceMode::Preserved,
-        copy_soft_hyphen: SoftHyphenPolicy::Strip,
+        soft_hyphen: SoftHyphenPolicy::Strip,
     };
     let raw = FontMetrics {
+        vertical_ascent: 5.0,
+        vertical_descent: 5.0,
+        vertical_line_gap: 0.0,
         ascent: 12.0,
         descent: 4.0,
         ..Default::default()
@@ -934,13 +993,16 @@ fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
 
     // The paragraph-level check supplies the index per line.
     let para = PositionedParagraph {
+        total_block_size: 0.0,
+        truncated_range: None,
+        writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
         base_direction: BidiDirection::Ltr,
         size: Size::default(),
         lines: vec![l.clone(), l],
     };
     let c = ctx(FirstLine, BidiDirection::Ltr, 0);
     assert_eq!(
-        para.validate(&c),
+        para.validate_geometry(&c),
         Err((
             1,
             LineInvariantError::HangingNotAllowed {
@@ -1015,8 +1077,14 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
 #[test]
 fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
     let ast = ParagraphAst {
+        annotations: Vec::new(),
+        bidi_spans: Vec::new(),
+        writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
         base_direction: BidiDirection::Rtl,
         strut_metrics: FontMetrics {
+            vertical_ascent: 5.0,
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
             ascent: 8.0,
             descent: 2.0,
             ..Default::default()
@@ -1032,6 +1100,9 @@ fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
         atomic_spans: vec![],
     };
     let constraints = LayoutConstraints {
+        first_line_indent: 0.0,
+        geometry_provider: None,
+        hanging_indent: 0.0,
         wrap_width: 120.0,
         tab_stops: TabStops { step: 16.0 },
     };

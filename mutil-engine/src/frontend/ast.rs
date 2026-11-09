@@ -164,6 +164,8 @@ pub enum BoxNode {
     },
     /// An embedded object with fixed extents.
     InlineObject {
+        /// Alignment relative to the line baseline.
+        baseline_align: crate::types::BaselineAlignment,
         /// Source bytes.
         byte_range: TextRange,
         /// Caller-assigned identifier.
@@ -248,6 +250,8 @@ pub enum BreakAction {
 /// Widths are signed deltas (a trim or restore may be negative) but finite.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiscretionaryNode {
+    /// Finite letter-spacing contribution when this opportunity is not taken.
+    pub no_break_spacing: f32,
     /// Bytes this opportunity owns. An **empty** range at the break position
     /// for every soft opportunity (after a space, between ideographs,
     /// hyphenation, a math operator); for a [`BreakAction::HardBreak`] the exact
@@ -314,6 +318,7 @@ impl DiscretionaryNode {
             pre_break_width: 0.0,
             post_break_width: 0.0,
             no_break_width: 0.0,
+            no_break_spacing: 0.0,
             action: BreakAction::Direct,
             cloned_spans: SmallVec::new(),
         }
@@ -335,6 +340,7 @@ impl DiscretionaryNode {
             pre_break_width: 0.0,
             post_break_width: 0.0,
             no_break_width: 0.0,
+            no_break_spacing: 0.0,
             action: BreakAction::HardBreak { is_paragraph_end },
             cloned_spans: SmallVec::new(),
         }
@@ -419,25 +425,29 @@ impl WordNode {
                 atoms,
                 clusters,
                 ..
-            }) => {
-                let span_ok = match (atoms.first(), atoms.last()) {
-                    (Some(first), Some(last)) => {
-                        byte_range.start == first.byte_range.start
-                            && byte_range.end == last.byte_range.end
-                    }
-                    _ => byte_range.is_empty(),
-                };
-                let atoms_tile_range = atoms
-                    .windows(2)
-                    .all(|pair| pair[0].byte_range.end == pair[1].byte_range.start)
-                    && atoms
-                        .iter()
-                        .all(|atom| atom.byte_range.start <= atom.byte_range.end);
-                span_ok && atoms_tile_range && clusters_partition_atoms(atoms, clusters)
-            }
+            }) => text_is_self_contained(*byte_range, atoms, clusters),
             _ => true,
         }
     }
+}
+
+pub(crate) fn text_is_self_contained(
+    byte_range: TextRange,
+    atoms: &[GraphemeAtom],
+    clusters: &[ShapedCluster],
+) -> bool {
+    let span_ok = match (atoms.first(), atoms.last()) {
+        (Some(first), Some(last)) => {
+            byte_range.start == first.byte_range.start && byte_range.end == last.byte_range.end
+        }
+        _ => byte_range.is_empty(),
+    };
+    span_ok
+        && atoms
+            .windows(2)
+            .all(|w| w[0].byte_range.end == w[1].byte_range.start)
+        && atoms.iter().all(|a| a.byte_range.start < a.byte_range.end)
+        && clusters_partition_atoms(atoms, clusters)
 }
 
 fn clusters_partition_atoms(atoms: &[GraphemeAtom], clusters: &[ShapedCluster]) -> bool {
@@ -468,6 +478,12 @@ fn clusters_partition_atoms(atoms: &[GraphemeAtom], clusters: &[ShapedCluster]) 
 /// `&str` per call.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParagraphAst {
+    /// Canonical-to-physical writing mode.
+    pub writing_mode: crate::types::WritingMode,
+    /// Explicit directional controls in source coordinates.
+    pub bidi_spans: Vec<super::ExplicitBidiSpan>,
+    /// Independent line-over and line-under annotations.
+    pub annotations: Vec<super::AnnotationSpan>,
     /// Resolved paragraph base direction (UAX #9 P2/P3 or the caller's override).
     pub base_direction: BidiDirection,
     /// The **raw** primary-font metrics exactly as `TextShaper::

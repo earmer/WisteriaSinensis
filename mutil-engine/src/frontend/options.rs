@@ -39,10 +39,14 @@ pub enum AutospaceProfile {
 /// metrics and never applies `LineHeight` (that is the middle-end's job).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FrontendOptions {
+    /// Paragraph writing mode.
+    pub writing_mode: crate::types::WritingMode,
+    /// Vertical orientation policy.
+    pub text_orientation: crate::types::TextOrientation,
     /// Whether untagged text can trigger experimental locale inference.
     pub locale_policy: LocalePolicy,
     /// Profile for `GlueKind::CjkAutospace` sizes.
-    pub autospace: AutospaceProfile,
+    pub autospace_profile: AutospaceProfile,
     /// How quotation marks resolve their script.
     pub quote_policy: QuotePolicy,
     /// Locale for runs that carry none (spec §1.2 fallback rules).

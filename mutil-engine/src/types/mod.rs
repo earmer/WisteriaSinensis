@@ -16,6 +16,10 @@ mod font;
 mod geometry;
 mod tag;
 mod text;
+mod writing;
+pub use writing::{BaselineAlignment, GlyphOrientation, TextOrientation, WritingMode};
+/// Owned short configuration text, using the existing string representation.
+pub type CompactString = Box<str>;
 
 pub use atom::{AtomFlags, GraphemeAtom, LineBreakClass};
 pub use bidi::{BIDI_MAX_DEPTH, BidiClass, BidiDirection, BidiLevel, Direction};

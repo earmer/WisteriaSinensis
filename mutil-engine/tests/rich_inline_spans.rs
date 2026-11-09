@@ -18,6 +18,7 @@ const SPAN_ID: u64 = 77;
 fn atom(offset: usize) -> GraphemeAtom {
     let in_chip = CHIP.contains(offset);
     GraphemeAtom {
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         byte_range: TextRange::new(offset, offset + 1),
         script: ScriptTag::LATIN,
         bidi_level: 0,
@@ -34,6 +35,7 @@ fn cluster(base: usize, local: usize) -> ShapedCluster {
     let off = base + local;
     let atoms = [atom(off)];
     ShapedCluster {
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         byte_range: TextRange::new(off, off + 1),
         atom_range: local..local + 1,
         font: FontRef::unscaled(FontId(1)),
@@ -99,6 +101,10 @@ fn sentinel(len: usize) -> WordNode {
 
 fn run() -> ShapingRun {
     ShapingRun {
+        word_spacing: 0.0,
+        baseline_align: mutil_engine::types::BaselineAlignment::Auto,
+        letter_spacing: 0.0,
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         features: Default::default(),
 
         byte_range: TextRange::new(0, TEXT.len()),
@@ -117,6 +123,7 @@ fn chip_ast() -> ParagraphAst {
     // both sides, and lists the span in `cloned_spans` (ruling 5): cloning is
     // orthogonal to the action, which stays `Direct` here.
     let interior_break = DiscretionaryNode {
+        no_break_spacing: 0.0,
         byte_range: TextRange::empty_at(8),
         penalty: DiscretionaryNode::NATURAL_PENALTY + DiscretionaryNode::CLONED_SPAN_PENALTY,
         flagged: false,
@@ -127,8 +134,14 @@ fn chip_ast() -> ParagraphAst {
         cloned_spans: smallvec::smallvec![SPAN_ID],
     };
     ParagraphAst {
+        annotations: Vec::new(),
+        bidi_spans: Vec::new(),
+        writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
         base_direction: BidiDirection::Ltr,
         strut_metrics: FontMetrics {
+            vertical_ascent: 5.0,
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
             ascent: 12.0,
             descent: 4.0,
             ..Default::default()
@@ -200,6 +213,10 @@ fn fragment(
 
 fn line(byte_range: (usize, usize), visible_end: usize, y: f32, width: f32) -> PositionedLine {
     PositionedLine {
+        slots: smallvec::SmallVec::new(),
+        annotations: Vec::new(),
+        is_ellipsized: false,
+        resolved_slot_constraints: smallvec::SmallVec::new(),
         atomic_fragments: vec![],
 
         byte_range: TextRange::new(byte_range.0, byte_range.1),
@@ -235,6 +252,9 @@ fn stop(x: f32, offset: usize, affinity: CaretAffinity, line: usize) -> CaretSto
 fn chip_inputs_are_accepted_and_atoms_carry_the_atomic_flag() {
     let ast = chip_ast();
     let constraints = LayoutConstraints {
+        first_line_indent: 0.0,
+        geometry_provider: None,
+        hanging_indent: 0.0,
         wrap_width: 100.0,
         tab_stops: TabStops { step: 8.0 },
     };
@@ -291,6 +311,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         .collect();
     glyphs0.extend((3..8).map(|i| pen_glyph((i, i + 1), 27.0 + (i - 3) as f32 * ADV)));
     l0.visual_runs = vec![VisualGlyphRun {
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         font_size: 16.0,
         variations: Default::default(),
 
@@ -309,6 +330,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         .collect();
     glyphs1.extend((12..14).map(|i| pen_glyph((i, i + 1), 40.0 + (i - 12) as f32 * ADV)));
     l1.visual_runs = vec![VisualGlyphRun {
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
         font_size: 16.0,
         variations: Default::default(),
 
@@ -355,7 +377,8 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         height: 32.0,
     };
     para.lines = vec![l0, l1];
-    assert_eq!(para.validate(&ctx), Ok(()));
+    para.total_block_size = 32.0;
+    assert_eq!(para.validate_geometry(&ctx), Ok(()));
 
     // Slice vs Clone is visible in the fragments: both pads exist on both lines
     // under Clone, so the first fragment is wider than its text by two pads.
@@ -372,7 +395,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
     let mut narrow = para.clone();
     narrow.lines[1].span_fragments[0].width = 20.0;
     assert_eq!(
-        narrow.validate(&ctx),
+        narrow.validate_geometry(&ctx),
         Err((
             1,
             LineInvariantError::GlyphOutsideSpanFragment {
@@ -390,6 +413,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     // everything inside braces, fractions or radicals would stay one object.
     let obj = |id: u64, at: usize| {
         WordNode::Box(BoxNode::InlineObject {
+            baseline_align: mutil_engine::types::BaselineAlignment::Auto,
             byte_range: TextRange::new(at, at + 1),
             box_id: id,
             width: 8.0,
@@ -400,6 +424,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     };
     let op_break = |offset: usize, penalty: i32| {
         WordNode::Discretionary(DiscretionaryNode {
+            no_break_spacing: 0.0,
             byte_range: TextRange::empty_at(offset),
             penalty,
             flagged: false,
@@ -434,6 +459,9 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
         ..chip_ast()
     };
     let constraints = LayoutConstraints {
+        first_line_indent: 0.0,
+        geometry_provider: None,
+        hanging_indent: 0.0,
         wrap_width: 100.0,
         tab_stops: TabStops { step: 8.0 },
     };
