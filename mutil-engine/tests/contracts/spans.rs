@@ -186,14 +186,20 @@ fn bidi_spans_order_ids_boundaries_and_depth() {
         vec![bidi_span(1, 0, 4), bidi_span(2, 0, 4)],
     ] {
         a.bidi_spans = spans;
-        assert_eq!(check(&a, "abcd"), Err(LayoutInputError::InvalidBidiSpan));
+        assert_eq!(
+            check(&a, "abcd"),
+            Err(LayoutInputError::InvalidBidiSpan { span: 1 })
+        );
     }
     let text = "a".repeat(128);
     let mut a = ast(&text);
     a.bidi_spans = (0..63).map(|i| bidi_span(i as u64, i, 128 - i)).collect();
     assert!(check(&a, &text).is_ok());
     a.bidi_spans.push(bidi_span(63, 63, 65));
-    assert_eq!(check(&a, &text), Err(LayoutInputError::InvalidBidiSpan));
+    assert_eq!(
+        check(&a, &text),
+        Err(LayoutInputError::InvalidBidiSpan { span: 63 })
+    );
     let mut a = ast("ab");
     edit_text_box(&mut a, 0, |atoms, clusters| {
         atoms.truncate(1);
@@ -203,5 +209,32 @@ fn bidi_spans_order_ids_boundaries_and_depth() {
         clusters[0].natural_width = 2.0;
     });
     a.bidi_spans = vec![bidi_span(1, 1, 2)];
-    assert_eq!(check(&a, "ab"), Err(LayoutInputError::InvalidBidiSpan));
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidBidiSpan { span: 0 })
+    );
+}
+
+#[test]
+fn an_isolate_may_cover_only_a_hard_break() {
+    let text = "a\u{2028}b";
+    let mut a = ast(text);
+    rebuild_items(&mut a, |b| {
+        vec![
+            boxed(b, 0, 1, false),
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4), false)),
+            WordNode::Box(BoxNode::InlineObject {
+                baseline_align: BaselineAlignment::Auto,
+                byte_range: TextRange::new(4, 5),
+                box_id: 1,
+                width: 1.0,
+                ascent: 1.0,
+                descent: 1.0,
+                overflow_policy: BoxOverflowPolicy::Clip,
+            }),
+            end(5),
+        ]
+    });
+    a.bidi_spans = vec![bidi_span(1, 1, 4)];
+    assert!(check(&a, text).is_ok());
 }

@@ -14,13 +14,13 @@ fn annotation_input_boundaries_and_local_partition() {
     a.annotations[1].side = AnnotationSide::Over;
     assert_eq!(
         check(&a, "ab"),
-        Err(LayoutInputError::InvalidAnnotationSpan)
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 1 })
     );
     a.annotations.truncate(1);
     a.annotations[0].clusters.clear();
     assert_eq!(
         check(&a, "ab"),
-        Err(LayoutInputError::InvalidAnnotationSpan)
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
     );
     a.annotations[0] = annotation(TextRange::new(0, 2), AnnotationSide::Over);
     rebuild_items(&mut a, |b| {
@@ -33,7 +33,7 @@ fn annotation_input_boundaries_and_local_partition() {
     });
     assert_eq!(
         check(&a, "ab"),
-        Err(LayoutInputError::InvalidAnnotationSpan)
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
     );
     let mut a = ast("ab");
     a.annotations = vec![annotation(TextRange::new(0, 2), AnnotationSide::Over)];
@@ -42,7 +42,7 @@ fn annotation_input_boundaries_and_local_partition() {
     a.annotations[0].run.letter_spacing = f32::NAN;
     assert_eq!(
         check(&a, "ab"),
-        Err(LayoutInputError::InvalidAnnotationSpan)
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
     );
     a.annotations[0] = annotation(TextRange::new(0, 2), AnnotationSide::Over);
     rebuild_items(&mut a, |b| {
@@ -153,7 +153,7 @@ fn ruby_rejects_glue_and_cluster_internal_edges() {
     a.annotations = vec![annotation(TextRange::new(0, 3), AnnotationSide::Over)];
     assert_eq!(
         check(&a, "a b"),
-        Err(LayoutInputError::InvalidAnnotationSpan)
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
     );
     let mut a = ast("ab");
     edit_text_box(&mut a, 0, |_, clusters| {
@@ -166,6 +166,37 @@ fn ruby_rejects_glue_and_cluster_internal_edges() {
     a.annotations = vec![annotation(TextRange::new(0, 1), AnnotationSide::Over)];
     assert_eq!(
         check(&a, "ab"),
-        Err(LayoutInputError::InvalidAnnotationSpan)
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
+    );
+}
+
+#[test]
+fn emphasis_mark_is_one_atom_even_when_it_is_two_chars() {
+    let mut a = ast("ab");
+    a.annotations = vec![annotation(TextRange::new(0, 2), AnnotationSide::Over)];
+    let ann = &mut a.annotations[0];
+    ann.kind = AnnotationKind::Emphasis;
+    ann.annotation_text = "\u{FE45}\u{FE00}".into();
+    ann.run.byte_range = TextRange::new(0, 6);
+    ann.atoms[0].byte_range = TextRange::new(0, 6);
+    ann.clusters[0].byte_range = TextRange::new(0, 6);
+    assert!(check(&a, "ab").is_ok());
+}
+
+#[test]
+fn annotation_atom_script_must_match_its_run_and_be_resolved() {
+    let mut a = ast("ab");
+    a.annotations = vec![annotation(TextRange::new(0, 2), AnnotationSide::Over)];
+    a.annotations[0].atoms[0].script = ScriptTag::GREEK;
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
+    );
+    let mut a = ast("ab");
+    a.annotations = vec![annotation(TextRange::new(0, 2), AnnotationSide::Over)];
+    a.annotations[0].run.script = ScriptTag::COMMON;
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
     );
 }

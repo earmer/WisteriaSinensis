@@ -224,19 +224,19 @@ fn an_annotation_run_indexes_its_own_storage_from_zero() {
     moved.annotations[0].run.atom_range = 1..2;
     assert_eq!(
         check(&moved, "ab"),
-        Err(LayoutInputError::InvalidAnnotationSpan)
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
     );
     let mut moved = a.clone();
     moved.annotations[0].run.cluster_range = 1..2;
     assert_eq!(
         check(&moved, "ab"),
-        Err(LayoutInputError::InvalidAnnotationSpan)
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
     );
     let mut short = a;
     short.annotations[0].run.atom_range = 0..0;
     assert_eq!(
         check(&short, "ab"),
-        Err(LayoutInputError::InvalidAnnotationSpan)
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
     );
 }
 

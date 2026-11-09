@@ -135,7 +135,6 @@ pub fn hyphen_chain_ast(
                 let offset = k + 1;
                 let (prefix_cut_bytes, suffix_cut_bytes) = cut(offset, n);
                 items.push(WordNode::Discretionary(DiscretionaryNode {
-                    no_break_spacing: 0.0,
                     byte_range: TextRange::empty_at(offset),
                     penalty: DiscretionaryNode::HYPHEN_PENALTY,
                     flagged: true,

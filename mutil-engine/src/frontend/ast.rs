@@ -10,9 +10,8 @@ use smallvec::SmallVec;
 
 /// Replacement text for spelling-change hyphenation.
 ///
-/// The spec uses `CompactString`; replacements are rare (`Option`, usually
-/// `None`), so `Box<str>` costs 16 bytes inline (niche-optimised) and one
-/// allocation only when present, with no extra dependency.
+/// Replacements are rare (`Option`, usually `None`), so `Box<str>` costs 16
+/// bytes inline (niche-optimised) and one allocation only when present.
 pub type ReplacementText = Box<str>;
 
 /// Hyphenation opportunity mirroring libhyphen's `(rep, pos, cut)` `[H3]`
@@ -257,8 +256,6 @@ pub enum BreakAction {
 /// Widths are signed deltas (a trim or restore may be negative) but finite.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiscretionaryNode {
-    /// Finite letter-spacing contribution when this opportunity is not taken.
-    pub no_break_spacing: f32,
     /// Bytes this opportunity owns. An **empty** range at the break position
     /// for every soft opportunity (after a space, between ideographs,
     /// hyphenation, a math operator); for a [`BreakAction::HardBreak`] the exact
@@ -279,7 +276,9 @@ pub struct DiscretionaryNode {
     /// `start_padding` of every span in `cloned_spans` plus the action's own
     /// delta.
     pub post_break_width: f32,
-    /// Width contributed to the current line if **not** broken here.
+    /// Width contributed to the current line if **not** broken here (for
+    /// example the letter-spacing of the skipped opportunity). Finite; zero for
+    /// a hard break.
     pub no_break_width: f32,
     /// Work done when the break is chosen.
     pub action: BreakAction,
@@ -325,7 +324,6 @@ impl DiscretionaryNode {
             pre_break_width: 0.0,
             post_break_width: 0.0,
             no_break_width: 0.0,
-            no_break_spacing: 0.0,
             action: BreakAction::Direct,
             cloned_spans: SmallVec::new(),
         }
@@ -347,7 +345,6 @@ impl DiscretionaryNode {
             pre_break_width: 0.0,
             post_break_width: 0.0,
             no_break_width: 0.0,
-            no_break_spacing: 0.0,
             action: BreakAction::HardBreak { is_paragraph_end },
             cloned_spans: SmallVec::new(),
         }

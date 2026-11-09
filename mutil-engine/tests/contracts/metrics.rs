@@ -22,7 +22,10 @@ fn zero_strut_font_size_is_rejected() {
 fn zero_run_font_size_is_rejected() {
     let mut a = ast("abc");
     a.runs[0].font_size = 0.;
-    assert!(check(&a, "abc").is_err());
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::InvalidShapingRun { run: 0 })
+    );
 }
 
 #[test]

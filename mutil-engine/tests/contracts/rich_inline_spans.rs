@@ -82,7 +82,6 @@ fn chip_ast() -> ParagraphAst {
     // both sides, and lists the span in `cloned_spans` (ruling 5): cloning is
     // orthogonal to the action, which stays `Direct` here.
     let interior_break = DiscretionaryNode {
-        no_break_spacing: 0.0,
         byte_range: TextRange::empty_at(8),
         penalty: DiscretionaryNode::NATURAL_PENALTY + DiscretionaryNode::CLONED_SPAN_PENALTY,
         flagged: false,
@@ -381,7 +380,6 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     };
     let op_break = |offset: usize, penalty: i32| {
         WordNode::Discretionary(DiscretionaryNode {
-            no_break_spacing: 0.0,
             byte_range: TextRange::empty_at(offset),
             penalty,
             flagged: false,

@@ -94,7 +94,6 @@ fn paragraph_ast() -> ParagraphAst {
     ast.items = vec![
         word(&mut ast, 0, 3),
         WordNode::Discretionary(DiscretionaryNode {
-            no_break_spacing: 0.0,
             byte_range: TextRange::empty_at(3),
             penalty: DiscretionaryNode::HYPHEN_PENALTY,
             flagged: true,

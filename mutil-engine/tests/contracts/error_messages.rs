@@ -12,12 +12,16 @@ fn layout_input_error_messages() {
         (LayoutInputError::InvalidFontMetrics, "invalid font metrics"),
         (LayoutInputError::InvalidSpacing, "invalid explicit spacing"),
         (
-            LayoutInputError::InvalidBidiSpan,
-            "invalid explicit bidi span",
+            LayoutInputError::InvalidBidiSpan { span: 3 },
+            "explicit bidi span 3 is invalid",
         ),
         (
-            LayoutInputError::InvalidAnnotationSpan,
-            "invalid annotation span",
+            LayoutInputError::InvalidAnnotationSpan { annotation: 2 },
+            "annotation 2 is invalid",
+        ),
+        (
+            LayoutInputError::ScriptMismatch { item: 4 },
+            "item 4 has an atom whose script differs from its run",
         ),
         (
             LayoutInputError::InvalidLayoutOptions,
@@ -49,7 +53,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidShapingRun { run: 1 },
-            "run 1 has an invalid bidi level or variation",
+            "run 1 has an unresolved script or an invalid font size, bidi level or variation",
         ),
         (
             LayoutInputError::InvalidRunStorage { run: 1 },

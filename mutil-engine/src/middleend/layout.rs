@@ -7,7 +7,8 @@ use super::{LayoutConstraints, LayoutOptions, LineContext, PositionedParagraph};
 use crate::frontend::MAX_DECORATION_NESTING_DEPTH;
 use crate::frontend::{
     BoxDecorationBreak, BoxNode, BreakAction, DiscretionaryNode, GlueKind, GlueTier,
-    HyphenOpportunity, ParagraphAst, SpanEdge, TextBoxView, WordNode, is_paragraph_separator,
+    HyphenOpportunity, ParagraphAst, SpanEdge, TextBoxView, WordNode,
+    is_line_or_paragraph_separator, is_paragraph_separator,
 };
 use crate::shaping::TextShaper;
 use crate::types::{AtomFlags, BIDI_MAX_DEPTH, BidiLevel, GraphemeAtom, ShapedCluster, TextRange};
@@ -23,9 +24,15 @@ pub enum LayoutInputError {
     /// Nonfinite or forbidden explicit spacing.
     InvalidSpacing,
     /// Invalid explicit directional span.
-    InvalidBidiSpan,
+    InvalidBidiSpan {
+        /// Index into `ParagraphAst::bidi_spans`.
+        span: usize,
+    },
     /// Invalid annotation base or locally shaped payload.
-    InvalidAnnotationSpan,
+    InvalidAnnotationSpan {
+        /// Index into `ParagraphAst::annotations`.
+        annotation: usize,
+    },
     /// Invalid clamp or other layout policy.
     InvalidLayoutOptions,
     /// Malformed geometry or exhausted clearance progress.
@@ -45,8 +52,9 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::runs`.
         run: usize,
     },
-    /// A run's `bidi_level` exceeds the UAX #9 maximum, or one of its font
-    /// variation coordinates is not finite.
+    /// A run's `bidi_level` exceeds the UAX #9 maximum, its font size is not
+    /// positive and finite, its script is unresolved (`Zyyy` / `Zinh`), or one
+    /// of its font variation coordinates is not finite.
     InvalidShapingRun {
         /// Index into `ParagraphAst::runs`.
         run: usize,
@@ -65,6 +73,11 @@ pub enum LayoutInputError {
     },
     /// An item's bytes exceed `text` or split a UTF-8 sequence.
     ItemOutsideText {
+        /// Index into `ParagraphAst::items`.
+        item: usize,
+    },
+    /// An atom of a text box has a script different from its run's.
+    ScriptMismatch {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
@@ -843,16 +856,11 @@ pub fn check_layout_inputs(
                 }
             }
             WordNode::Discretionary(d) => {
-                let widths_ok = [
-                    d.pre_break_width,
-                    d.post_break_width,
-                    d.no_break_width,
-                    d.no_break_spacing,
-                ]
-                .iter()
-                .all(|v| v.is_finite());
+                let widths_ok = [d.pre_break_width, d.post_break_width, d.no_break_width]
+                    .iter()
+                    .all(|v| v.is_finite());
                 let hard = matches!(d.action, BreakAction::HardBreak { .. });
-                if d.no_break_width != d.no_break_spacing || (hard && d.no_break_width != 0.0) {
+                if hard && d.no_break_width != 0.0 {
                     return Err(E::InvalidDiscretionary { item });
                 }
                 // Ownership: a soft opportunity owns nothing; a real hard break owns
@@ -1172,8 +1180,8 @@ fn check_run(
     if !fits(text, r.byte_range) {
         return Err(E::RunOutsideText { run });
     }
-    if !r.font_size.is_finite() || r.font_size <= 0.0 {
-        return Err(E::InvalidStrut);
+    if !r.font_size.is_finite() || r.font_size <= 0.0 || r.script.is_unresolved() {
+        return Err(E::InvalidShapingRun { run });
     }
     if r.bidi_level > BIDI_MAX_DEPTH + 1
         || r.features.variations.iter().any(|v| !v.value().is_finite())
@@ -1230,6 +1238,9 @@ fn check_text_payload(
         || (f64::from(natural_width) - total).abs() > 1e-3_f64.max(1e-5 * total.abs())
     {
         return Err(E::InvalidTextWidth { item });
+    }
+    if atoms.iter().any(|a| a.script != run.script) {
+        return Err(E::ScriptMismatch { item });
     }
     Ok(())
 }
@@ -1387,6 +1398,7 @@ fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputErr
                 forbidden += 1;
             }
             WordNode::Discretionary(d) => {
+                boundaries.extend([d.byte_range.start, d.byte_range.end]);
                 if !matches!(d.action, BreakAction::HardBreak { .. }) {
                     if let (Some((l, _, _)), Some((r, _, _))) = (
                         item.checked_sub(1).and_then(|i| text_at(ast, Some(i))),
@@ -1409,7 +1421,7 @@ fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputErr
     let mut ids = HashSet::with_capacity(ast.bidi_spans.len());
     let mut stack: Vec<TextRange> = Vec::new();
     let mut previous: Option<TextRange> = None;
-    for span in &ast.bidi_spans {
+    for (span_index, span) in ast.bidi_spans.iter().enumerate() {
         let r = span.byte_range;
         if !ids.insert(span.span_id)
             || r.is_empty()
@@ -1418,20 +1430,20 @@ fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputErr
             || !boundaries.contains(&r.end)
             || previous.is_some_and(|p| r.start < p.start || (r.start == p.start && r.end >= p.end))
         {
-            return Err(E::InvalidBidiSpan);
+            return Err(E::InvalidBidiSpan { span: span_index });
         }
         while stack.last().is_some_and(|p| p.end <= r.start) {
             stack.pop();
         }
         if stack.last().is_some_and(|p| r.end > p.end) || stack.len() >= MAX_BIDI_SPAN_DEPTH {
-            return Err(E::InvalidBidiSpan);
+            return Err(E::InvalidBidiSpan { span: span_index });
         }
         stack.push(r);
         previous = Some(r);
     }
     let mut ids = HashSet::with_capacity(ast.annotations.len());
     let mut last: [Option<TextRange>; 2] = [None, None];
-    for ann in &ast.annotations {
+    for (annotation, ann) in ast.annotations.iter().enumerate() {
         let r = ann.base_byte_range;
         let side = usize::from(ann.side == AnnotationSide::Under);
         if !ids.insert(ann.annotation_id)
@@ -1450,23 +1462,25 @@ fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputErr
             || ann
                 .annotation_text
                 .chars()
-                .any(|c| is_paragraph_separator(c) || c == '\u{2028}')
+                .any(is_line_or_paragraph_separator)
             || ann.run.byte_range != TextRange::new(0, ann.annotation_text.len())
             || ann.run.atom_range != (0..ann.atoms.len())
             || ann.run.cluster_range != (0..ann.clusters.len())
         {
-            return Err(E::InvalidAnnotationSpan);
+            return Err(E::InvalidAnnotationSpan { annotation });
         }
         if let AnnotationKind::Ruby { max_overhang, .. } = ann.kind {
             if !max_overhang.is_finite() || max_overhang < 0.0 {
-                return Err(E::InvalidAnnotationSpan);
+                return Err(E::InvalidAnnotationSpan { annotation });
             }
-        } else if ann.clusters.len() != 1 || ann.annotation_text.chars().count() != 1 {
-            return Err(E::InvalidAnnotationSpan);
+        } else if ann.atoms.len() != 1 || ann.clusters.len() != 1 {
+            return Err(E::InvalidAnnotationSpan { annotation });
         }
         last[side] = Some(r);
-        check_run_extensions(&ann.run, ast.writing_mode).map_err(|_| E::InvalidAnnotationSpan)?;
-        check_run(&ann.run, &ann.annotation_text, 0).map_err(|_| E::InvalidAnnotationSpan)?;
+        check_run_extensions(&ann.run, ast.writing_mode)
+            .map_err(|_| E::InvalidAnnotationSpan { annotation })?;
+        check_run(&ann.run, &ann.annotation_text, 0)
+            .map_err(|_| E::InvalidAnnotationSpan { annotation })?;
         let total: f32 = ann.clusters.iter().map(|c| c.natural_width).sum();
         let payload = TextBoxView {
             run_index: 0,
@@ -1476,7 +1490,7 @@ fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputErr
             natural_width: total,
         };
         check_text_payload(&ann.annotation_text, &ann.run, &payload, 0, 0)
-            .map_err(|_| E::InvalidAnnotationSpan)?;
+            .map_err(|_| E::InvalidAnnotationSpan { annotation })?;
         if ann.atoms.iter().any(|a| {
             a.orientation != ann.run.orientation
                 || !a.orientation.is_valid(ast.writing_mode, a.bidi_level)
@@ -1488,7 +1502,7 @@ fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputErr
         }) || (ann.run.orientation == GlyphOrientation::HorizontalInVertical
             && ann.clusters.len() != 1)
         {
-            return Err(E::InvalidAnnotationSpan);
+            return Err(E::InvalidAnnotationSpan { annotation });
         }
     }
     Ok(())
@@ -1983,7 +1997,6 @@ mod tests {
         let (head, tail): (Vec<_>, Vec<_>) =
             atoms.into_iter().partition(|a| a.byte_range.end <= at);
         let d = DiscretionaryNode {
-            no_break_spacing: 0.0,
             byte_range: TextRange::empty_at(at),
             penalty: DiscretionaryNode::HYPHEN_PENALTY,
             flagged: true,
@@ -2046,7 +2059,6 @@ mod tests {
     fn three_part_word(first: WordNode, second_cut: (u32, u32)) -> ParagraphAst {
         let hyphen = |at: usize, prefix: u32, suffix: u32| {
             WordNode::Discretionary(DiscretionaryNode {
-                no_break_spacing: 0.0,
                 byte_range: TextRange::empty_at(at),
                 penalty: DiscretionaryNode::HYPHEN_PENALTY,
                 flagged: true,
@@ -2071,7 +2083,6 @@ mod tests {
         let o = LayoutOptions::default();
         let hyphen_at_1 = || {
             WordNode::Discretionary(DiscretionaryNode {
-                no_break_spacing: 0.0,
                 byte_range: TextRange::empty_at(1),
                 penalty: DiscretionaryNode::HYPHEN_PENALTY,
                 flagged: true,
@@ -2138,7 +2149,6 @@ mod tests {
         // The same holds inside a longer chain: the first point already splits runs.
         let mut a = three_part_word(
             WordNode::Discretionary(DiscretionaryNode {
-                no_break_spacing: 0.0,
                 byte_range: TextRange::empty_at(1),
                 penalty: DiscretionaryNode::HYPHEN_PENALTY,
                 flagged: true,

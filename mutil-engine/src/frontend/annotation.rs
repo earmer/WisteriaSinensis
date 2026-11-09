@@ -1,6 +1,6 @@
 //! Explicit directional spans and independently shaped interlinear annotations.
 use super::ShapingRun;
-use crate::types::{BidiDirection, CompactString, GraphemeAtom, ShapedCluster, TextRange};
+use crate::types::{BidiDirection, GraphemeAtom, ShapedCluster, TextRange};
 /// Maximum nesting of source-level directional spans.
 pub const MAX_BIDI_SPAN_DEPTH: usize = 63;
 /// Source-level directional control pair.
@@ -14,7 +14,9 @@ pub enum BidiControlKind {
 /// Nonempty, properly nested directional-control span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplicitBidiSpan {
-    /// Unique identifier.
+    /// Caller-assigned handle so the host can map validation errors and edits
+    /// back to its own markup; unique within the paragraph. The engine does
+    /// not interpret it.
     pub span_id: u64,
     /// Source byte range aligned to concrete content boundaries.
     pub byte_range: TextRange,
@@ -70,7 +72,7 @@ pub struct AnnotationSpan {
     /// Additional block extent, including the gap.
     pub block_extent: f32,
     /// Nonempty annotation source without line/paragraph separators.
-    pub annotation_text: CompactString,
+    pub annotation_text: Box<str>,
     /// Shaping settings in annotation-local coordinates.
     pub run: ShapingRun,
     /// Local atoms; `run.atom_range` is `0..atoms.len()`.

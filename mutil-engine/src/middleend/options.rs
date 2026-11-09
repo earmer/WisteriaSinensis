@@ -1,7 +1,7 @@
 //! Layout options (spec §5 Stage 1.3 and Stage 4).
 
 use super::HangSide;
-use crate::types::{CompactString, Direction, FontMetrics, WritingMode};
+use crate::types::{Direction, FontMetrics, WritingMode};
 use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
@@ -414,7 +414,7 @@ pub struct LineClampPolicy {
     /// Positive finite maximum block extent, except that one line is mandatory.
     pub max_block_size: Option<f32>,
     /// Synthesized suffix; empty means silent truncation.
-    pub ellipsis: CompactString,
+    pub ellipsis: Box<str>,
 }
 impl Default for LineClampPolicy {
     fn default() -> Self {
@@ -434,7 +434,7 @@ impl LineClampPolicy {
             && !self
                 .ellipsis
                 .chars()
-                .any(|c| crate::frontend::is_paragraph_separator(c) || c == '\u{2028}')
+                .any(crate::frontend::is_line_or_paragraph_separator)
     }
 }
 

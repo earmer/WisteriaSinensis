@@ -48,6 +48,14 @@ pub fn is_paragraph_separator(c: char) -> bool {
     )
 }
 
+/// `true` for a paragraph separator or the line separator U+2028: any
+/// character that may not appear inside a single-line payload such as an
+/// annotation text or a clamp ellipsis.
+#[must_use]
+pub fn is_line_or_paragraph_separator(c: char) -> bool {
+    is_paragraph_separator(c) || c == '\u{2028}'
+}
+
 /// Splits document text, preserving empty paragraphs and source offsets.
 /// Paragraph separators are [`is_paragraph_separator`] characters; a CRLF
 /// pair is one separator. U+2028 is not a separator. Empty input yields one
@@ -59,7 +67,7 @@ pub fn split_paragraphs(text: &str) -> Vec<ParagraphSlice> {
     let mut offset = 0usize;
 
     while offset < bytes.len() {
-        if let Some(separator_len) = separator_len_at(bytes, offset) {
+        if let Some(separator_len) = separator_len_at(text, offset) {
             paragraphs.push(ParagraphSlice {
                 content: crate::types::TextRange::new(content_start, offset),
                 separator: crate::types::TextRange::new(offset, offset + separator_len),
@@ -81,16 +89,15 @@ pub fn split_paragraphs(text: &str) -> Vec<ParagraphSlice> {
 }
 
 /// Length in bytes of the separator starting at `offset`, or `None` when the
-/// byte there is ordinary content. CRLF is a single two-byte separator.
-fn separator_len_at(bytes: &[u8], offset: usize) -> Option<usize> {
-    match bytes[offset] {
-        b'\n' | 0x0B | 0x0C | 0x1C..=0x1E => Some(1),
-        b'\r' if bytes.get(offset + 1) == Some(&b'\n') => Some(2),
-        b'\r' => Some(1),
-        0xC2 if bytes.get(offset + 1) == Some(&0x85) => Some(2),
-        0xE2 if bytes.get(offset + 1) == Some(&0x80) && bytes.get(offset + 2) == Some(&0xA9) => {
-            Some(3)
-        }
-        _ => None,
+/// character there is ordinary content. CRLF is a single two-byte separator.
+fn separator_len_at(text: &str, offset: usize) -> Option<usize> {
+    let c = text[offset..].chars().next()?;
+    if !is_paragraph_separator(c) {
+        return None;
+    }
+    if c == '\r' && text.as_bytes().get(offset + 1) == Some(&b'\n') {
+        Some(2)
+    } else {
+        Some(c.len_utf8())
     }
 }

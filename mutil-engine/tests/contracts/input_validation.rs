@@ -138,7 +138,6 @@ fn non_finite_variation_and_impossible_bidi_level_are_rejected() {
         .features
         .variations
         .push(FontVariation::new(*b"wght", f32::INFINITY));
-    // `FontVariation::new` canonicalises NaN but not infinity.
     assert_eq!(
         check(&a, "abc"),
         Err(LayoutInputError::InvalidShapingRun { run: 0 })
@@ -173,7 +172,6 @@ fn explicit_spacing_and_discretionary_equations() {
         let mut a = ast("ab");
         let mut disc = DiscretionaryNode::direct(1);
         disc.no_break_width = spacing;
-        disc.no_break_spacing = spacing;
         rebuild_items(&mut a, |b| {
             vec![
                 boxed(b, 0, 1, false),
@@ -183,15 +181,10 @@ fn explicit_spacing_and_discretionary_equations() {
             ]
         });
         assert!(check(&a, "ab").is_ok());
-        if let WordNode::Discretionary(d) = &mut a.items[1] {
-            d.no_break_spacing = 0.0;
-        }
-        assert!(check(&a, "ab").is_err());
     }
     let mut a = ast("a");
     if let WordNode::Discretionary(d) = &mut a.items[1] {
         d.no_break_width = 1.0;
-        d.no_break_spacing = 1.0;
     }
     assert!(check(&a, "a").is_err());
 }
@@ -238,4 +231,46 @@ fn a_hyphen_cut_one_byte_past_the_chain_end_is_rejected() {
         check(&a, &t),
         Err(LayoutInputError::InvalidHyphenOpportunity { .. })
     ));
+}
+
+#[test]
+fn nan_variation_is_rejected() {
+    let mut a = ast("abc");
+    a.runs[0]
+        .features
+        .variations
+        .push(FontVariation::new(*b"wght", f32::NAN));
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::InvalidShapingRun { run: 0 })
+    );
+}
+
+#[test]
+fn nan_variations_are_equal_and_canonical() {
+    let a = FontVariation::new(*b"wght", f32::NAN);
+    assert_eq!(a, FontVariation::new(*b"wght", -f32::NAN));
+    assert!(a.value().is_nan());
+}
+
+#[test]
+fn unresolved_run_script_is_an_invalid_shaping_run() {
+    for script in [ScriptTag::COMMON, ScriptTag::INHERITED] {
+        let mut a = ast("abc");
+        a.runs[0].script = script;
+        assert_eq!(
+            check(&a, "abc"),
+            Err(LayoutInputError::InvalidShapingRun { run: 0 })
+        );
+    }
+}
+
+#[test]
+fn atom_script_must_match_its_run() {
+    let mut a = ast("abc");
+    a.atoms[1].script = ScriptTag::GREEK;
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::ScriptMismatch { item: 0 })
+    );
 }

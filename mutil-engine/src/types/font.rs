@@ -122,18 +122,24 @@ pub struct FontFeature {
 /// req. 5: the cache key includes "variation settings").
 ///
 /// Fields are private so that `Eq` and `Hash` are sound for `f32`: the
-/// constructor maps `-0.0` and NaN to `0.0` in every build profile, and hashing uses the bit pattern.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// constructor maps `-0.0` to `0.0` and every NaN to the one canonical
+/// `f32::NAN`, and equality and hashing both use the bit pattern. A NaN
+/// coordinate is therefore representable (and rejected by input validation)
+/// rather than silently becoming a number.
+#[derive(Clone, Copy, Debug)]
 pub struct FontVariation {
     tag: [u8; 4],
     value: f32,
 }
 
 impl FontVariation {
-    /// Builds a setting, canonicalising `-0.0` and NaN to `0.0`.
+    /// Builds a setting, canonicalising `-0.0` to `0.0` and every NaN to
+    /// `f32::NAN`.
     #[must_use]
     pub fn new(tag: [u8; 4], value: f32) -> Self {
-        let value = if value.is_nan() || value == 0.0 {
+        let value = if value.is_nan() {
+            f32::NAN
+        } else if value == 0.0 {
             0.0
         } else {
             value
@@ -151,6 +157,12 @@ impl FontVariation {
     #[must_use]
     pub const fn value(&self) -> f32 {
         self.value
+    }
+}
+
+impl PartialEq for FontVariation {
+    fn eq(&self, other: &Self) -> bool {
+        self.tag == other.tag && self.value.to_bits() == other.value.to_bits()
     }
 }
 
@@ -383,10 +395,11 @@ mod tests {
     }
 
     #[test]
-    fn variation_nan_is_normalised_to_zero() {
+    fn variation_nan_is_canonical_and_equal_to_itself() {
         let v = FontVariation::new(*b"wght", f32::NAN);
-        assert_eq!(v.value().to_bits(), 0.0_f32.to_bits());
-        assert_eq!(v, FontVariation::new(*b"wght", 0.0));
+        assert!(v.value().is_nan());
+        assert_eq!(v, FontVariation::new(*b"wght", -f32::NAN));
+        assert_ne!(v, FontVariation::new(*b"wght", 0.0));
     }
 
     #[test]
