@@ -73,8 +73,14 @@ fn test_pipeline_types_compile() {
     // Shaping bridge: the no-op backend, through a trait object.
     let shaper: &dyn TextShaper = &NoopShaper;
     let r = &ast.runs[0];
-    let (font_id, metrics) =
-        shaper.resolve_primary_font_metrics(&r.families, r.style, r.script, &r.locale, r.font_size);
+    let (font_id, metrics) = shaper.resolve_primary_font_metrics(
+        &r.families,
+        r.style,
+        r.script,
+        &r.locale,
+        r.font_size,
+        r.features.variations(),
+    );
     assert_eq!(font_id, FontId(0));
     assert_eq!(metrics, FontMetrics::default());
 

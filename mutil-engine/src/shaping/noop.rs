@@ -4,8 +4,8 @@
 use super::{LeadingEdit, TextShaper, TrailingEdit};
 use crate::frontend::ShapingRun;
 use crate::types::{
-    Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, GraphemeAtom,
-    LocaleTag, ScriptTag, ShapedCluster, TextRange,
+    Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
+    GraphemeAtom, LocaleTag, ScriptTag, ShapedCluster, TextRange,
 };
 use smallvec::SmallVec;
 
@@ -26,6 +26,7 @@ impl TextShaper for NoopShaper {
         _script: ScriptTag,
         _locale: &LocaleTag,
         _font_size: f32,
+        _variations: &[FontVariation],
     ) -> (FontId, FontMetrics) {
         (FontId::default(), FontMetrics::default())
     }

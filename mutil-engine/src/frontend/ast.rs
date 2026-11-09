@@ -221,7 +221,9 @@ pub enum BreakAction {
     /// single `ShapingRun`). The widths minus the cloned padding are the net
     /// prefix and suffix shaping deltas; the cuts stay within the contiguous
     /// same-run chain of text boxes joined by hyphenation points
-    /// (`check_layout_inputs`).
+    /// (`check_layout_inputs`). When the break is **not** taken across a seam
+    /// that split a cluster, the two boxes are re-shaped together; see
+    /// [`ParagraphAst::rejoin_window`].
     Hyphenate(HyphenOpportunity),
     /// Restore or trim `chws`-compressed CJK punctuation at the line edges.
     ///
@@ -486,7 +488,8 @@ pub struct ParagraphAst {
     /// Resolved paragraph base direction (UAX #9 P2/P3 or the caller's override).
     pub base_direction: BidiDirection,
     /// The **raw** primary-font metrics exactly as `TextShaper::
-    /// resolve_primary_font_metrics` returned them. The frontend neither reads
+    /// resolve_primary_font_metrics` returned them for the primary run's
+    /// variation instance. The frontend neither reads
     /// `LineHeight` nor computes half-leading; the middle-end resolves the
     /// active strut from this value with `LineHeight::resolve_strut`
     /// (§5 Stage 4.1).
@@ -506,4 +509,51 @@ pub struct ParagraphAst {
     /// Orthogonal to `decoration_spans`: a span may be either, both or neither.
     /// The atoms inside carry `AtomFlags::IN_ATOMIC_EDIT_SPAN`, and no others do.
     pub atomic_spans: Vec<AtomicEditSpan>,
+}
+
+impl ParagraphAst {
+    /// The window to re-shape as **one** piece when the `Hyphenate`
+    /// discretionary at `items[index]` is *not* taken on a committed line
+    /// (spec §5 Stage 1.6.5, rejoin rule).
+    ///
+    /// A hyphenation opportunity inside a multi-atom cluster (the `of-fice`
+    /// split of an `ffi` ligature) is resolved early by re-shaping the two
+    /// sides separately (§2.3 note 3). The frontend marks such a seam by giving
+    /// the first cluster after it `safe_to_concat_before == false`. If the
+    /// break is then not taken, concatenating the two separately shaped boxes
+    /// would lose the ligature and any kerning across the seam, so the
+    /// middle-end calls `TextShaper::reshape_window` once over the returned
+    /// range with `LeadingEdit::None` and `TrailingEdit::None`.
+    ///
+    /// Returns the byte range from the start of the preceding text box to the
+    /// end of the following one, or `None` when `items[index]` is not a
+    /// `Hyphenate` discretionary between two text boxes or its seam is safe to
+    /// concatenate. Windows of consecutive untaken seams overlap and should be
+    /// merged so that each atom is shaped once.
+    #[must_use]
+    pub fn rejoin_window(&self, index: usize) -> Option<TextRange> {
+        let WordNode::Discretionary(DiscretionaryNode {
+            action: BreakAction::Hyphenate(_),
+            ..
+        }) = self.items.get(index)?
+        else {
+            return None;
+        };
+        let WordNode::Box(BoxNode::Text {
+            byte_range: before, ..
+        }) = self.items.get(index.checked_sub(1)?)?
+        else {
+            return None;
+        };
+        let WordNode::Box(BoxNode::Text {
+            byte_range: after,
+            clusters,
+            ..
+        }) = self.items.get(index + 1)?
+        else {
+            return None;
+        };
+        let seam_is_unsafe = clusters.first().is_some_and(|c| !c.safe_to_concat_before);
+        seam_is_unsafe.then(|| TextRange::new(before.start, after.end))
+    }
 }

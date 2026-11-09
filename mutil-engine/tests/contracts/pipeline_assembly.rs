@@ -428,6 +428,24 @@ fn shaping_bridge_applies_both_spelling_edits() {
 }
 
 #[test]
+fn untaken_hyphenation_seam_is_rejoined_only_when_unsafe_to_concat() {
+    let mut ast = paragraph_ast();
+    // items: [0] "oma", [1] Hyphenate, [2] "atje", [3] glue, [4] Direct, ...
+    assert_eq!(ast.rejoin_window(1), None, "a safe seam keeps both boxes");
+
+    // The frontend split a multi-atom cluster here: the seam is unsafe.
+    if let WordNode::Box(BoxNode::Text { clusters, .. }) = &mut ast.items[2] {
+        clusters[0].safe_to_concat_before = false;
+    }
+    assert_eq!(ast.rejoin_window(1), Some(TextRange::new(0, 7)));
+
+    // Only a Hyphenate discretionary between two text boxes qualifies.
+    for index in [0, 2, 3, 4, ast.items.len() - 1, ast.items.len()] {
+        assert_eq!(ast.rejoin_window(index), None, "item {index}");
+    }
+}
+
+#[test]
 fn middle_end_assembles_three_valid_lines() {
     let (_, ctx, para) = assembled();
     let [line0, line1, _] = &para.lines[..] else {
@@ -491,7 +509,6 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
                     flags: AtomFlags::EMPTY,
                     glyphs: smallvec![],
                     natural_width: 0.0,
-                    uncompressed_width: 0.0,
                     safe_to_break_before: true,
                     safe_to_concat_before: true,
                 }],

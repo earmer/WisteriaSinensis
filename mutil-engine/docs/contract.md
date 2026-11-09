@@ -35,6 +35,9 @@ nonnegative. Horizontal and vertical ascent/descent sums are positive; derived
 heights must remain finite. Baseline offsets are scaled layout units, positive
 toward line-over. Font bridges supply missing vertical and BASE metrics;
 `NoopShaper` remains a deliberately non-rendering zero-metric test double.
+`resolve_primary_font_metrics` takes the requested variation coordinates, so
+`ParagraphAst::strut_metrics` holds the metrics of the actual variable-font
+instance, not its default axes.
 
 `LineHeight::resolve_strut_for_mode` copies the active raw metrics into
 ascent/descent/gap. Fixed height splits leading equally, including negative
@@ -42,7 +45,9 @@ leading; it does not mutate raw metrics. `resolve_strut` defaults to horizontal.
 
 Vertical upright and TCY orientations require even resolved levels; horizontal
 orientation is forbidden vertically and vertical orientations horizontally.
-Atoms and clusters must match their owning shaping run. UAX analysis and glyph
+Atoms and clusters must match their owning shaping run. Clusters carry one
+natural width; there is no stored chws-off width, and chws context is repaired
+locally at chosen breaks. UAX analysis and glyph
 rotation/placement are future frontend/rendering responsibilities; accepting an
 AST does not certify that it was produced by a conforming UAX implementation.
 
@@ -70,6 +75,13 @@ Cloned padding contributes `clone_pre = sum(end_padding)` and
 `clone_post = sum(start_padding)`. Direct, hard, and unrepeated math breaks have
 pre/post widths equal to these sums; punctuation and hyphenation carry their own
 net deltas beyond those sums. Each break action is validated as well.
+
+A hyphenation point inside a multi-atom cluster splits the word early: both
+sides are re-shaped separately and the first cluster after the seam has
+`safe_to_concat_before == false`. When a committed line does not take that
+`Hyphenate` break, the middle-end re-shapes the two neighbouring text boxes as
+one window (`ParagraphAst::rejoin_window`), restoring the unbroken ligature and
+kerning; overlapping windows of consecutive untaken seams are merged.
 
 Explicit Bidi spans have unique IDs, nonempty concrete-boundary-aligned ranges,
 and proper nesting ordered by ascending start / descending end. Equal ranges

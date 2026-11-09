@@ -2,8 +2,8 @@
 
 use crate::frontend::{HyphenOpportunity, ShapingRun};
 use crate::types::{
-    Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, GraphemeAtom,
-    LocaleTag, ScriptTag, ShapedCluster, TextRange,
+    Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
+    GraphemeAtom, LocaleTag, ScriptTag, ShapedCluster, TextRange,
 };
 use smallvec::SmallVec;
 
@@ -105,7 +105,9 @@ pub trait TextShaper: Send + Sync {
     /// Metrics of the actual font instance, without line-height policy.
     fn font_metrics(&self, instance: FontInstanceRef<'_>) -> FontMetrics;
     /// Resolves the primary font for a style and returns its identifier and
-    /// complete metrics (§4.5). Used for the paragraph strut.
+    /// complete metrics (§4.5) **for the requested variation instance**: a
+    /// variable font's metrics depend on its axes, so `variations` are applied
+    /// exactly as `font_metrics` would apply them. Used for the paragraph strut.
     fn resolve_primary_font_metrics(
         &self,
         families: &[FontFamily],
@@ -113,6 +115,7 @@ pub trait TextShaper: Send + Sync {
         script: ScriptTag,
         locale: &LocaleTag,
         font_size: f32,
+        variations: &[FontVariation],
     ) -> (FontId, FontMetrics);
 
     /// Shapes one complete run. Output is in **logical** order (§4.2 req. 2);

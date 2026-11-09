@@ -429,8 +429,6 @@ fn cluster_measurements_are_valid(cluster: &ShapedCluster) -> bool {
     let font_ok = cluster.font.scale.is_finite() && cluster.font.scale > 0.0;
     let widths_ok = cluster.natural_width.is_finite()
         && cluster.natural_width >= 0.0
-        && cluster.uncompressed_width.is_finite()
-        && cluster.uncompressed_width >= 0.0
         && cluster
             .glyphs
             .iter()
@@ -1608,7 +1606,6 @@ mod tests {
                 flags: AtomFlags::EMPTY,
                 glyphs: Default::default(),
                 natural_width: 0.0,
-                uncompressed_width: 0.0,
                 safe_to_break_before: true,
                 safe_to_concat_before: true,
             })

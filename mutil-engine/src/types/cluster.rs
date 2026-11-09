@@ -54,7 +54,10 @@ pub struct RawShapedGlyph {
 ///    chosen *before* clusters are assigned to nodes. If a split point falls
 ///    inside a multi-atom cluster, the frontend must re-shape that window with
 ///    the split as a boundary (`TextShaper::reshape_window` with
-///    `LeadingEdit::None` and `TrailingEdit::None`) instead of cutting the cluster.
+///    `LeadingEdit::None` and `TrailingEdit::None`) instead of cutting the cluster,
+///    and gives the first cluster after the split `safe_to_concat_before ==
+///    false`. If a `Hyphenate` break at that seam is not taken, the middle-end
+///    re-shapes both sides together (`ParagraphAst::rejoin_window`).
 /// 2. **Within a node, clusters partition the atoms.** In logical order the
 ///    `atom_range`s are contiguous, non-empty, start at 0 and end at
 ///    `atoms.len()`, and each `byte_range` runs from its first atom's start to
@@ -97,8 +100,6 @@ pub struct ShapedCluster {
     pub glyphs: SmallVec<[RawShapedGlyph; 2]>,
     /// Final inline layout advance, including explicit spacing and ruby expansion.
     pub natural_width: f32,
-    /// Width with `chws` off. Costs a second shaping pass (§4.2 req. 6).
-    pub uncompressed_width: f32,
     /// `true` iff HarfBuzz's `UNSAFE_TO_BREAK` is absent here: a line may begin
     /// at this cluster without re-shaping either side.
     pub safe_to_break_before: bool,
@@ -156,7 +157,6 @@ mod tests {
             flags: AtomFlags::EMPTY,
             glyphs: SmallVec::new(),
             natural_width: 0.0,
-            uncompressed_width: 0.0,
             safe_to_break_before: brk,
             safe_to_concat_before: cat,
         }

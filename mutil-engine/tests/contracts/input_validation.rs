@@ -56,10 +56,10 @@ fn font_scale_must_be_finite(v: f32) {
     assert!(check(&a, "abc").is_err());
 }
 
-fn uncompressed_width_must_be_finite(v: f32) {
+fn natural_width_must_be_finite(v: f32) {
     let mut a = ast("abc");
     if let WordNode::Box(BoxNode::Text { clusters, .. }) = &mut a.items[0] {
-        clusters[0].uncompressed_width = v;
+        clusters[0].natural_width = v;
     }
     assert!(check(&a, "abc").is_err());
 }
@@ -89,10 +89,10 @@ nonfinite_cases!(
 );
 
 nonfinite_cases!(
-    reject_nan_uncompressed_width,
-    reject_infinite_uncompressed_width,
-    reject_negative_infinite_uncompressed_width,
-    uncompressed_width_must_be_finite
+    reject_nan_natural_width,
+    reject_infinite_natural_width,
+    reject_negative_infinite_natural_width,
+    natural_width_must_be_finite
 );
 
 #[test]

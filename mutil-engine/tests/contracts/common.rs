@@ -42,7 +42,6 @@ pub fn boxed(s: usize, e: usize, atomic: bool) -> WordNode {
                 ..Default::default()
             }],
             natural_width: 1.,
-            uncompressed_width: 1.,
             safe_to_break_before: true,
             safe_to_concat_before: true,
         })
@@ -325,7 +324,6 @@ pub fn cluster(text: &str, base: usize, local: usize) -> ShapedCluster {
             ..Default::default()
         }],
         natural_width: ADV,
-        uncompressed_width: ADV,
         safe_to_break_before: true,
         safe_to_concat_before: true,
     }

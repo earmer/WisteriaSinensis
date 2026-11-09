@@ -30,11 +30,11 @@ Nonempty item ranges concatenate exactly to `0..text.len()`, with no gap or over
 
 `ShapingRun.features: FontFeatures` owns features and variation axes. Both `shape_run(text, run, atoms, output_clusters)` and `reshape_window(text, run, atoms, window, leading_edit, trailing_edit, output_clusters)` read family stack, size and features only from `run`. Duplicate configuration arguments are removed.
 
-`FontId` identifies a physical face, not a size or variation instance. `FontInstanceRef<'a> { font: FontRef, font_size: f32, variations: &'a [FontVariation] }` supplies complete query context. `TextShaper::font_metrics(instance) -> FontMetrics` returns unadjusted metrics; `ligature_carets(instance, glyph_id, direction)` returns layout-unit positions. `VisualGlyphRun` owns `font`, `font_size` and `SmallVec<[FontVariation; 2]>` variations for painting.
+`FontId` identifies a physical face, not a size or variation instance. `FontInstanceRef<'a> { font: FontRef, font_size: f32, variations: &'a [FontVariation] }` supplies complete query context. `TextShaper::font_metrics(instance) -> FontMetrics` returns unadjusted metrics; `resolve_primary_font_metrics(families, style, script, locale, font_size, variations)` takes the same variation coordinates, so the raw strut in `ParagraphAst::strut_metrics` describes the requested instance of a variable font; `ligature_carets(instance, glyph_id, direction)` returns layout-unit positions. `VisualGlyphRun` owns `font`, `font_size` and `SmallVec<[FontVariation; 2]>` variations for painting.
 
 A `ShapedCluster` remains single-font; `RawShapedGlyph` has no font id. Try whole-atom coverage first. If exhausted, select the best font covering the first code point (the base), shape the entire atom with that face, and use that same face's glyph 0 for unsupported marks. If even the base is unsupported, use the backend's deterministic final missing-glyph face. Do not combine glyph ids from different fonts in one cluster. Actual fallback behavior needs real-backend tests; `NoopShaper` only closes the interface.
 
-Remove `HyphenOpportunity.penalty`; only `DiscretionaryNode.penalty` is authoritative. Remove mandatory `uncompressed_width` storage and unconditional second shaping passes. These legacy fields may remain temporarily during the API-shell transition, but are not new-contract requirements.
+`HyphenOpportunity.penalty` is removed; only `DiscretionaryNode.penalty` is authoritative. `ShapedCluster.uncompressed_width` is removed: there is no mandatory chws-off width storage and no unconditional second shaping pass (4.2 req. 6).
 
 ### Whitespace, atomic editing and composition
 
@@ -339,7 +339,7 @@ pub struct ShapedCluster {
 
 **`UNSAFE_TO_CONCAT`.** Defined as: if text on one side of the start of the cluster changes, the other side's shaping might change. Its absence does not by itself prove that concatenation is safe: only two pieces both clear of the flag can be joined. `UNSAFE_TO_BREAK` always implies `UNSAFE_TO_CONCAT`. The flag is produced only if the buffer flag `HB_BUFFER_FLAG_PRODUCE_UNSAFE_TO_CONCAT` is set, which was added in HarfBuzz 4.0.0 (2022-03-01) `[B1]`. `UNSAFE_TO_BREAK` itself dates from HarfBuzz 1.5.0 (2017-08-23) `[B1]`.
 
-**Phase 0 contract notes [Design decision].** (1) In terms of the two `safe_*` booleans, "`UNSAFE_TO_BREAK` implies `UNSAFE_TO_CONCAT`" reads `safe_to_concat_before ⇒ safe_to_break_before`. The combination `safe_to_break_before = true, safe_to_concat_before = false` is legal (only concatenation is unsafe); the converse is a contradiction. (2) `atom_range` is relative to the atom slice stored beside the cluster: the `atoms` argument of `shape_run`, or `atoms` of the owning `WordNode` after the frontend has re-based it. (3) A cluster belongs to exactly one `WordNode`: split points are chosen before clusters are assigned, and a split inside a multi-atom cluster is resolved by re-shaping that window. (4) Within a node the clusters partition its atoms in logical order, and each `byte_range` runs from its first atom's start to its last atom's end. (5) `flags` is the per-flag aggregate of 2.2, which `WordNode::is_self_contained` checks together with (2) to (4).
+**Phase 0 contract notes [Design decision].** (1) In terms of the two `safe_*` booleans, "`UNSAFE_TO_BREAK` implies `UNSAFE_TO_CONCAT`" reads `safe_to_concat_before ⇒ safe_to_break_before`. The combination `safe_to_break_before = true, safe_to_concat_before = false` is legal (only concatenation is unsafe); the converse is a contradiction. (2) `atom_range` is relative to the atom slice stored beside the cluster: the `atoms` argument of `shape_run`, or `atoms` of the owning `WordNode` after the frontend has re-based it. (3) A cluster belongs to exactly one `WordNode`: split points are chosen before clusters are assigned, and a split inside a multi-atom cluster is resolved by re-shaping that window. The first cluster after such a split carries `safe_to_concat_before = false`, which marks the seam for the rejoin rule of 5, Stage 1.6.5: if a `Hyphenate` break at that seam is not taken, both sides are re-shaped together so the unbroken ligature and kerning are restored. (4) Within a node the clusters partition its atoms in logical order, and each `byte_range` runs from its first atom's start to its last atom's end. (5) `flags` is the per-flag aggregate of 2.2, which `WordNode::is_self_contained` checks together with (2) to (4).
 
 ### 2.4 Box-and-glue sequence: `WordNode`
 
@@ -656,6 +656,7 @@ pub trait TextShaper: Send + Sync {
     fn resolve_primary_font_metrics(
         &self, families: &[FontFamily], style: FontStyle,
         script: ScriptTag, locale: &LocaleTag, font_size: f32,
+        variations: &[FontVariation],
     ) -> (FontId, FontMetrics);
 
     /// Shapes one complete run. Output is in logical order (see 4.2).
@@ -706,7 +707,7 @@ HarfBuzz takes the language per buffer (`hb_buffer_set_language`, used by Blink 
 
 ### 4.5 Vertical metrics contract
 
-See 5, Stage 4. `resolve_primary_font_metrics` must return a complete `FontMetrics` (2.5).
+See 5, Stage 4. `resolve_primary_font_metrics` must return a complete `FontMetrics` (2.5) for the requested variation instance: `variations` change a variable font's metrics, and the frontend stores the result unchanged as the raw strut.
 
 ### 4.6 GPUI adapter and its limits
 
@@ -770,7 +771,7 @@ The step (`+100` base, `3×` the cubic slope) makes the optimiser prefer breaks 
 *6.5 Dominator pruning and lazy reshape (`Balanced` and `Publication`).*
 
 1. *Dominator commit.* When all *k ≤ K* live paths trace their ancestors at depth *d ≤ W* to the same `Discretionary` *B\**, every line up to *B\** is committed immediately.
-2. *Lazy reshape.* `TextShaper::reshape_window` is **never** called while candidate edges are evaluated. Only when a line `(a*, b*)` is committed does the middle-end inspect `a*.action` and `b*.action`; if either is `Hyphenate`, or a boundary has `!safe_to_concat_before`, `reshape_window` runs once for that boundary. If the exact width then overflows by more than `Z` (a rare micro-overflow), the breaker falls back to the runner-up state of the beam for that one line.
+2. *Lazy reshape.* `TextShaper::reshape_window` is **never** called while candidate edges are evaluated. Only when a line `(a*, b*)` is committed does the middle-end inspect `a*.action` and `b*.action`; if either is `Hyphenate`, or a boundary has `!safe_to_concat_before`, `reshape_window` runs once for that boundary. **Rejoin rule.** Every `Hyphenate` discretionary *inside* the committed line (not taken) whose following cluster has `!safe_to_concat_before` marks a seam that split a cluster early (2.3 note 3); the middle-end re-shapes the two neighbouring text boxes as one window with `LeadingEdit::None` and `TrailingEdit::None`, restoring the unbroken shaping (`ParagraphAst::rejoin_window`). Overlapping windows of consecutive untaken seams are merged so each atom is shaped once. If the exact width then overflows by more than `Z` (a rare micro-overflow), the breaker falls back to the runner-up state of the beam for that one line.
 3. *Relayout scope.* Phase 1/2 always reflow the entire independent paragraph. No cached-line resynchronisation is permitted before a frontend dirty-range invalidation model exists.
 
 *6.6 Knuth–Plass demerits (the `Publication` profile in full; the others truncate the same recurrence).* Boxes are text boxes and inline objects; glue is the tiered glue of 2.4; penalties are the `Discretionary` nodes. From Knuth and Plass (1981):
@@ -1007,7 +1008,7 @@ Drawn from the Gaps sections of the research notes.
 36. **Badness beyond the tiers (Revision 2.1). Resolved (ruling 4, row 84).** Five-case function in Stage 1.6.3. Superseded by the second rulings (rows 89 to 95).
 37. **Payload of `CloneSpanPadding` and `CjkPunctAdjust` (Revision 2.1). Resolved (ruling 5, row 85).** `DiscretionaryNode.cloned_spans` replaces the action; `CjkPunctAdjust` carries two advance overrides. Superseded by the second rulings (rows 89 to 95).
 38. **Span streams (Revision 2.1). Resolved (ruling 6, row 86).** Proper nesting, disjoint atom-aligned atomic spans, `SpanBoundary.bidi_level`, no styling in the AST. Superseded by the second rulings (rows 89 to 95).
-39. **Hyphenation split (Revision 2.1). Decided.** A word with hyphenation opportunities is split into adjacent text boxes (rule 3 of 2.4); "keep the clusters intact and anchor the offset" is not representable in a linear sequence. A split inside a multi-atom cluster is resolved by re-shaping the window (2.3 note 3).
+39. **Hyphenation split (Revision 2.1). Decided.** A word with hyphenation opportunities is split into adjacent text boxes (rule 3 of 2.4); "keep the clusters intact and anchor the offset" is not representable in a linear sequence. A split inside a multi-atom cluster is resolved by re-shaping the window (2.3 note 3); if that break is not taken, the rejoin rule of 5, Stage 1.6.5 re-shapes both sides together, so the unbroken rendering keeps its ligature and kerning.
 40. **Segmenter constructors. Superseded.** Stable interfaces and actual-version reporting replace the historical neo constructor requirement.
 41. **`AllowOverflow` validation (Revision 2.1). Resolved (ruling 8, row 88).** `LineContext.wrap_width` and check (h) of 2.6. Superseded by the second rulings (rows 89 to 95).
 42. **Hit test across a wrapped atomic span (Revision 2.1). Resolved (ruling 7, row 87).** Midpoint of the clicked fragment, oriented by its `bidi_level`.
