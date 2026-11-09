@@ -36,6 +36,7 @@ error_messages! {
         InvalidStrut => "invalid strut metrics, font size or line height",
         RunOutsideText { run } => "run {run} does not fit the text",
         InvalidShapingRun { run } => "run {run} has an invalid bidi level or variation",
+        InvalidRunStorage { run } => "run {run} has atom or cluster ranges that do not tile the paragraph storage",
         RunIndexOutOfRange { item } => "item {item} refers to a run that does not exist",
         ItemOutsideText { item } => "item {item} does not fit the text",
         ItemOutsideRun { item } => "item {item} lies outside the shaping run it names",

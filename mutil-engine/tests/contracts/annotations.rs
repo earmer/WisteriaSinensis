@@ -23,12 +23,14 @@ fn annotation_input_boundaries_and_local_partition() {
         Err(LayoutInputError::InvalidAnnotationSpan)
     );
     a.annotations[0] = annotation(TextRange::new(0, 2), AnnotationSide::Over);
-    a.items = vec![
-        boxed(0, 1, false),
-        WordNode::Discretionary(DiscretionaryNode::direct(1)),
-        boxed(1, 2, false),
-        end(2),
-    ];
+    rebuild_items(&mut a, |b| {
+        vec![
+            boxed(b, 0, 1, false),
+            WordNode::Discretionary(DiscretionaryNode::direct(1)),
+            boxed(b, 1, 2, false),
+            end(2),
+        ]
+    });
     assert_eq!(
         check(&a, "ab"),
         Err(LayoutInputError::InvalidAnnotationSpan)
@@ -43,13 +45,15 @@ fn annotation_input_boundaries_and_local_partition() {
         Err(LayoutInputError::InvalidAnnotationSpan)
     );
     a.annotations[0] = annotation(TextRange::new(0, 2), AnnotationSide::Over);
-    a.items = vec![
-        boxed(0, 1, false),
-        WordNode::Tab {
-            byte_range: TextRange::new(1, 2),
-        },
-        end(2),
-    ];
+    rebuild_items(&mut a, |b| {
+        vec![
+            boxed(b, 0, 1, false),
+            WordNode::Tab {
+                byte_range: TextRange::new(1, 2),
+            },
+            end(2),
+        ]
+    });
     assert!(check(&a, "ab").is_err());
 }
 
@@ -127,22 +131,24 @@ fn annotation_base_allows_glyph_less_source_gaps() {
 #[test]
 fn ruby_rejects_glue_and_cluster_internal_edges() {
     let mut a = ast("a b");
-    a.items = vec![
-        boxed(0, 1, false),
-        WordNode::Glue(GlueNode {
-            original_bidi_class: BidiClass::Ws,
-            bidi_level: 0,
-            is_collapsible: true,
-            byte_range: TextRange::new(1, 2),
-            kind: GlueKind::WordSpace,
-            tier: GlueTier::Tier0,
-            natural_width: 1.0,
-            max_stretch: 0.0,
-            max_shrink: 0.0,
-        }),
-        boxed(2, 3, false),
-        end(3),
-    ];
+    rebuild_items(&mut a, |b| {
+        vec![
+            boxed(b, 0, 1, false),
+            WordNode::Glue(GlueNode {
+                original_bidi_class: BidiClass::Ws,
+                bidi_level: 0,
+                is_collapsible: true,
+                byte_range: TextRange::new(1, 2),
+                kind: GlueKind::WordSpace,
+                tier: GlueTier::Tier0,
+                natural_width: 1.0,
+                max_stretch: 0.0,
+                max_shrink: 0.0,
+            }),
+            boxed(b, 2, 3, false),
+            end(3),
+        ]
+    });
     assert!(check(&a, "a b").is_ok());
     a.annotations = vec![annotation(TextRange::new(0, 3), AnnotationSide::Over)];
     assert_eq!(
@@ -150,12 +156,12 @@ fn ruby_rejects_glue_and_cluster_internal_edges() {
         Err(LayoutInputError::InvalidAnnotationSpan)
     );
     let mut a = ast("ab");
-    if let WordNode::Box(BoxNode::Text { clusters, .. }) = &mut a.items[0] {
+    edit_text_box(&mut a, 0, |_, clusters| {
         clusters.truncate(1);
         clusters[0].byte_range.end = 2;
         clusters[0].atom_range.end = 2;
         clusters[0].natural_width = 2.0;
-    }
+    });
     assert!(check(&a, "ab").is_ok());
     a.annotations = vec![annotation(TextRange::new(0, 1), AnnotationSide::Over)];
     assert_eq!(

@@ -129,6 +129,7 @@ fn provider_monotonicity_clearance_and_snapshots() {
         descent: 2.0,
         overflow_policy: BoxOverflowPolicy::Clip,
     });
+    clear_text(&mut a);
     assert_eq!(
         layout_paragraph(
             &a,
@@ -182,20 +183,22 @@ fn probe_ignores_tall_input_after_first_break() {
     };
     let text = "a\u{2028}b";
     let mut a = ast(text);
-    a.items = vec![
-        boxed(0, 1, false),
-        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4), false)),
-        WordNode::Box(BoxNode::InlineObject {
-            baseline_align: BaselineAlignment::Auto,
-            byte_range: TextRange::new(4, 5),
-            box_id: 1,
-            width: 10.0,
-            ascent: 20.0,
-            descent: 2.0,
-            overflow_policy: BoxOverflowPolicy::Clip,
-        }),
-        end(5),
-    ];
+    rebuild_items(&mut a, |b| {
+        vec![
+            boxed(b, 0, 1, false),
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4), false)),
+            WordNode::Box(BoxNode::InlineObject {
+                baseline_align: BaselineAlignment::Auto,
+                byte_range: TextRange::new(4, 5),
+                box_id: 1,
+                width: 10.0,
+                ascent: 20.0,
+                descent: 2.0,
+                overflow_policy: BoxOverflowPolicy::Clip,
+            }),
+            end(5),
+        ]
+    });
     assert_eq!(
         layout_paragraph(
             &a,

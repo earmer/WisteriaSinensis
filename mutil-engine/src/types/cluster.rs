@@ -38,36 +38,35 @@ pub struct RawShapedGlyph {
 ///
 /// ## Index spaces
 ///
-/// `byte_range` is in paragraph text coordinates. **`atom_range` is relative to
-/// the atom slice stored beside the cluster**: the `atoms` argument of
-/// `TextShaper::shape_run` for freshly shaped clusters, and `atoms` of the
-/// owning `BoxNode::Text` once the frontend has split a run
-/// into words (which re-bases the indices). Each node is therefore
-/// self-contained: `atoms[cluster.atom_range.clone()]` always works.
-/// **[Design decision]**; the spec leaves the base unspecified.
+/// `byte_range` is in paragraph text coordinates. **`atom_range` is run-local**:
+/// it indexes the run's atom slice, `&ast.atoms[run.atom_range.clone()]`, which
+/// is the `atoms` argument of `TextShaper::shape_run` and `reshape_window`
+/// (their output is stored as is, never re-based). The absolute index of a
+/// cluster's first atom in `ast.atoms` is `run.atom_range.start +
+/// cluster.atom_range.start`. By contrast `BoxNode::Text::{atom_range,
+/// cluster_range}` and `ShapingRun::{atom_range, cluster_range}` are
+/// paragraph-level indices into `ast.atoms` and `ast.clusters`; an annotation's
+/// clusters index its own `atoms` the same way, with the run's ranges starting
+/// at 0. **[Design decision]**; the spec leaves the base unspecified.
 ///
-/// Two invariants make this safe (checked by `WordNode::is_self_contained`):
+/// Three invariants make this safe (checked by `ParagraphAst::is_self_contained`):
 ///
-/// 1. **A cluster belongs to exactly one `WordNode`.** Splitting a
-///    `ShapingRun` into nodes must never split a `ShapedCluster`. Split points
-///    (UAX #14 opportunities, spaces, punctuation boundaries) are therefore
-///    chosen *before* clusters are assigned to nodes. If a split point falls
-///    inside a multi-atom cluster, the frontend must re-shape that window with
-///    the split as a boundary (`TextShaper::reshape_window` with
+/// 1. **A cluster belongs to exactly one text box.** Each cluster in
+///    `ast.clusters` is covered by exactly one `BoxNode::Text::cluster_range`.
+///    Splitting a `ShapingRun` into boxes must never split a `ShapedCluster`.
+///    Split points (UAX #14 opportunities, spaces, punctuation boundaries) are
+///    therefore chosen *before* clusters are assigned to boxes. If a split
+///    point falls inside a multi-atom cluster, the frontend must re-shape that
+///    window with the split as a boundary (`TextShaper::reshape_window` with
 ///    `LeadingEdit::None` and `TrailingEdit::None`) instead of cutting the cluster,
 ///    and gives the first cluster after the split `safe_to_concat_before ==
 ///    false`. If a `Hyphenate` break at that seam is not taken, the middle-end
 ///    re-shapes both sides together (`ParagraphAst::rejoin_window`).
-/// 2. **Within a node, clusters partition the atoms.** In logical order the
-///    `atom_range`s are contiguous, non-empty, start at 0 and end at
-///    `atoms.len()`, and each `byte_range` runs from its first atom's start to
-///    its last atom's end.
-///
-/// 3. **Flags aggregate per flag.** `flags == AtomFlags::for_cluster(atoms[atom_range])`
-///    (also checked by `WordNode::is_self_contained`).
-///
-/// `TextShaper::reshape_window` output uses the same space as `shape_run`
-/// output (indices into the run's atom slice, not re-based to the window).
+/// 2. **Within a box, clusters partition the atoms.** In logical order the
+///    `atom_range`s are contiguous, non-empty, start at the box's first atom
+///    and end after its last, and each `byte_range` runs from its first atom's
+///    start to its last atom's end.
+/// 3. **Flags aggregate per flag.** `flags == AtomFlags::for_cluster(atoms[atom_range])`.
 ///
 /// ## Break-safety polarity (HarfBuzz `[B1]`)
 ///
@@ -83,7 +82,7 @@ pub struct ShapedCluster {
     pub byte_range: TextRange,
     /// Atoms covered: `K >= 1`, and a cluster never splits an atom. `K > 1`
     /// means a ligature (§6.2 gives it K caret sub-slots). Explicitly a
-    /// [`Range<usize>`]; see "Index spaces" above.
+    /// [`Range<usize>`], **run-local**; see "Index spaces" above.
     pub atom_range: Range<usize>,
     /// Font used for this cluster, with the fallback scale (was `font_id`).
     pub font: FontRef,

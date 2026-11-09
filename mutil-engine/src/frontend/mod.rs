@@ -1,7 +1,8 @@
 //! Frontend: input abstraction and the paragraph AST (spec §3, §2.4, §2.5).
 //!
 //! Defines the output and option types; the analysis pass that builds the AST
-//! from text is not implemented yet.
+//! from text is not implemented yet. The AST stores atoms and clusters once per
+//! paragraph; text boxes and runs name slices of them by range.
 
 mod annotation;
 mod ast;
@@ -16,7 +17,7 @@ mod span;
 
 pub use ast::{
     BoxNode, BoxOverflowPolicy, BreakAction, DiscretionaryNode, GlueKind, GlueNode, GlueTier,
-    HyphenOpportunity, ParagraphAst, ReplacementText, SpanEdge, WordNode,
+    HyphenOpportunity, ParagraphAst, ReplacementText, SpanEdge, TextBoxView, WordNode,
 };
 pub use options::{AutospaceProfile, FrontendOptions, LocalePolicy, QuotePolicy};
 pub use run::{ShapingRun, TextDecoration};

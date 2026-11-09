@@ -17,5 +17,6 @@ mod pipeline_types;
 mod rich_inline_spans;
 mod source_coverage;
 mod spans;
+mod storage;
 mod strategy_enums;
 mod writing_modes;

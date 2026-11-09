@@ -52,6 +52,10 @@ fn layout_input_error_messages() {
             "run 1 has an invalid bidi level or variation",
         ),
         (
+            LayoutInputError::InvalidRunStorage { run: 1 },
+            "run 1 has atom or cluster ranges that do not tile the paragraph storage",
+        ),
+        (
             LayoutInputError::RunIndexOutOfRange { item: 2 },
             "item 2 refers to a run that does not exist",
         ),

@@ -119,7 +119,10 @@ pub trait TextShaper: Send + Sync {
     ) -> (FontId, FontMetrics);
 
     /// Shapes one complete run. Output is in **logical** order (§4.2 req. 2);
-    /// `atoms` is the run's atom slice, and `ShapedCluster::atom_range` indexes it.
+    /// `atoms` is the run's atom slice, `&ast.atoms[run.atom_range]`, and
+    /// `ShapedCluster::atom_range` indexes it. Implementations read the run's
+    /// settings from `run` but ignore `run.atom_range` and `run.cluster_range`,
+    /// which locate the slices in the AST and are not meaningful to a shaper.
     ///
     /// `text` is the **whole paragraph text**, with `run.byte_range` selecting
     /// the run, so that cluster byte offsets are absolute paragraph indices and
@@ -146,8 +149,8 @@ pub trait TextShaper: Send + Sync {
     ///
     /// **Deviation from the §4.1 signature** (two parameters added, both
     /// needed for a sound splice):
-    /// * `atoms`: the *same* run-local atom slice that was given to
-    ///   `shape_run` for this run;
+    /// * `atoms`: the *same* run atom slice, `&ast.atoms[run.atom_range]`,
+    ///   that was given to `shape_run` for this run (O(1) to obtain, no copy);
     /// * All features, variations, size and families come from `run`.
     ///
     /// Contract:

@@ -8,7 +8,7 @@
 //! a hand-written fixture (10-unit advances; the hyphenation example is a
 //! structural fixture, not real Dutch).
 
-use crate::common::{ADV, assert_send_sync_static, atom, shaping_run};
+use crate::common::{ADV, assert_send_sync_static, atom, push_text, rebuild_items, shaping_run};
 use mutil_engine::*;
 use smallvec::smallvec;
 
@@ -28,17 +28,10 @@ fn run() -> ShapingRun {
     shaping_run(TEXT, "nl-NL")
 }
 
-fn word(start: usize, end: usize) -> WordNode {
+fn word(ast: &mut ParagraphAst, start: usize, end: usize) -> WordNode {
     let atoms: Vec<_> = (start..end).map(atom).collect();
     let clusters: Vec<_> = (0..atoms.len()).map(|i| cluster(start, i)).collect();
-    let natural_width = clusters.iter().map(|c| c.natural_width).sum();
-    WordNode::Box(BoxNode::Text {
-        run_index: 0,
-        byte_range: TextRange::new(start, end),
-        atoms,
-        clusters,
-        natural_width,
-    })
+    push_text(ast, 0, atoms, clusters)
 }
 
 fn glyph(c: &ShapedCluster, x: f32, hanging: bool) -> PositionedGlyph {
@@ -54,11 +47,13 @@ fn glyph(c: &ShapedCluster, x: f32, hanging: bool) -> PositionedGlyph {
     }
 }
 
-fn clusters_of(node: &WordNode) -> &[ShapedCluster] {
-    match node {
-        WordNode::Box(BoxNode::Text { clusters, .. }) => clusters,
-        _ => &[],
-    }
+fn clusters_of(ast: &ParagraphAst, item: usize) -> &[ShapedCluster] {
+    ast.text_box(item).map_or(&[], |view| view.clusters)
+}
+
+/// `true` when every item of `ast` is self-contained.
+fn all_self_contained(ast: &ParagraphAst) -> bool {
+    (0..ast.items.len()).all(|item| ast.is_self_contained(item))
 }
 
 // "omaatje" is split at the opportunity: Box("oma"), Discretionary, Box("atje").
@@ -74,7 +69,7 @@ fn opportunity() -> HyphenOpportunity {
 
 /// One paragraph that uses every `WordNode` variant.
 fn paragraph_ast() -> ParagraphAst {
-    ParagraphAst {
+    let mut ast = ParagraphAst {
         annotations: Vec::new(),
         bidi_spans: Vec::new(),
         writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
@@ -90,59 +85,63 @@ fn paragraph_ast() -> ParagraphAst {
         },
         strut_font_size: 16.0,
         runs: vec![run()],
-        items: vec![
-            word(0, 3),
-            WordNode::Discretionary(DiscretionaryNode {
-                no_break_spacing: 0.0,
-                byte_range: TextRange::empty_at(3),
-                penalty: DiscretionaryNode::HYPHEN_PENALTY,
-                flagged: true,
-                pre_break_width: ADV,
-                post_break_width: 0.0,
-                no_break_width: 0.0,
-                action: BreakAction::Hyphenate(opportunity()),
-                cloned_spans: Default::default(),
-            }),
-            word(3, 7),
-            // A breakable space: the opportunity follows the glue, so the space
-            // stays on the trailing edge of the line that breaks after it.
-            WordNode::Glue(GlueNode {
-                original_bidi_class: BidiClass::Ws,
-                bidi_level: 0,
-                is_collapsible: true,
-
-                byte_range: TextRange::new(7, 8),
-                kind: GlueKind::WordSpace,
-                tier: GlueTier::Tier0,
-                natural_width: SPACE_W,
-                max_stretch: 2.0,
-                max_shrink: 1.0,
-            }),
-            WordNode::Discretionary(DiscretionaryNode::direct(8)),
-            WordNode::Box(BoxNode::InlineObject {
-                baseline_align: mutil_engine::types::BaselineAlignment::Auto,
-                byte_range: TextRange::new(8, 11),
-                box_id: 42,
-                width: BOX_W,
-                ascent: 10.0,
-                descent: 2.0,
-                overflow_policy: BoxOverflowPolicy::Clip,
-            }),
-            WordNode::Tab {
-                byte_range: TextRange::new(11, 12),
-            },
-            word(12, 14),
-            // "," is fused to "go" by the absence of a discretionary.
-            word(14, 15),
-            // The hard break owns U+2028: the next line starts at byte 18.
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(15, 18), false)),
-            // Every paragraph ends with the sentinel: it terminates the blank line
-            // after the trailing line separator, so N separators give N + 1 lines.
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::empty_at(18), true)),
-        ],
+        atoms: vec![],
+        clusters: vec![],
+        items: vec![],
         decoration_spans: vec![],
         atomic_spans: vec![],
-    }
+    };
+    ast.items = vec![
+        word(&mut ast, 0, 3),
+        WordNode::Discretionary(DiscretionaryNode {
+            no_break_spacing: 0.0,
+            byte_range: TextRange::empty_at(3),
+            penalty: DiscretionaryNode::HYPHEN_PENALTY,
+            flagged: true,
+            pre_break_width: ADV,
+            post_break_width: 0.0,
+            no_break_width: 0.0,
+            action: BreakAction::Hyphenate(opportunity()),
+            cloned_spans: Default::default(),
+        }),
+        word(&mut ast, 3, 7),
+        // A breakable space: the opportunity follows the glue, so the space
+        // stays on the trailing edge of the line that breaks after it.
+        WordNode::Glue(GlueNode {
+            original_bidi_class: BidiClass::Ws,
+            bidi_level: 0,
+            is_collapsible: true,
+
+            byte_range: TextRange::new(7, 8),
+            kind: GlueKind::WordSpace,
+            tier: GlueTier::Tier0,
+            natural_width: SPACE_W,
+            max_stretch: 2.0,
+            max_shrink: 1.0,
+        }),
+        WordNode::Discretionary(DiscretionaryNode::direct(8)),
+        WordNode::Box(BoxNode::InlineObject {
+            baseline_align: mutil_engine::types::BaselineAlignment::Auto,
+            byte_range: TextRange::new(8, 11),
+            box_id: 42,
+            width: BOX_W,
+            ascent: 10.0,
+            descent: 2.0,
+            overflow_policy: BoxOverflowPolicy::Clip,
+        }),
+        WordNode::Tab {
+            byte_range: TextRange::new(11, 12),
+        },
+        word(&mut ast, 12, 14),
+        // "," is fused to "go" by the absence of a discretionary.
+        word(&mut ast, 14, 15),
+        // The hard break owns U+2028: the next line starts at byte 18.
+        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(15, 18), false)),
+        // Every paragraph ends with the sentinel: it terminates the blank line
+        // after the trailing line separator, so N separators give N + 1 lines.
+        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::empty_at(18), true)),
+    ];
+    ast
 }
 
 fn layout_options() -> LayoutOptions {
@@ -210,10 +209,10 @@ fn run_of(byte_range: TextRange, glyphs: Vec<PositionedGlyph>) -> VisualGlyphRun
 /// Three hand-positioned lines: "oma-", "atje ␠ [box] ⇥ go," and the blank line
 /// after the hard break.
 fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParagraph {
-    let oma = clusters_of(&ast.items[0]);
-    let atje = clusters_of(&ast.items[2]);
-    let word_b = clusters_of(&ast.items[7]);
-    let comma = &clusters_of(&ast.items[8])[0];
+    let oma = clusters_of(ast, 0);
+    let atje = clusters_of(ast, 2);
+    let word_b = clusters_of(ast, 7);
+    let comma = &clusters_of(ast, 8)[0];
 
     // Line 0: "oma" + generated hyphen. Hyphen glyph is synthesized, no bytes.
     let mut l0_glyphs: Vec<_> = oma
@@ -321,12 +320,10 @@ fn assembled() -> (ParagraphAst, LineContext, PositionedParagraph) {
 fn frontend_ast_uses_every_word_node_variant_and_tiles_the_text() {
     let ast = paragraph_ast();
     assert_eq!(ast.items.len(), 11);
-    assert!(ast.items.iter().all(WordNode::is_self_contained));
+    assert!(all_self_contained(&ast));
     // Nodes tile the text exactly: no cluster was split or lost.
-    let covered: usize = ast
-        .items
-        .iter()
-        .flat_map(clusters_of)
+    let covered: usize = (0..ast.items.len())
+        .flat_map(|item| clusters_of(&ast, item))
         .map(|c| c.byte_range.len())
         .sum();
     assert_eq!(covered, 7 + 2 + 1); // "omaatje" + "go" + ","
@@ -434,9 +431,11 @@ fn untaken_hyphenation_seam_is_rejoined_only_when_unsafe_to_concat() {
     assert_eq!(ast.rejoin_window(1), None, "a safe seam keeps both boxes");
 
     // The frontend split a multi-atom cluster here: the seam is unsafe.
-    if let WordNode::Box(BoxNode::Text { clusters, .. }) = &mut ast.items[2] {
-        clusters[0].safe_to_concat_before = false;
-    }
+    let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &ast.items[2] else {
+        panic!("items[2] is a text box");
+    };
+    let first_cluster = cluster_range.start;
+    ast.clusters[first_cluster].safe_to_concat_before = false;
     assert_eq!(ast.rejoin_window(1), Some(TextRange::new(0, 7)));
 
     // Only a Hyphenate discretionary between two text boxes qualifies.
@@ -471,7 +470,7 @@ fn assembled_output_owns_its_data() {
     let (ast, _, para) = assembled();
     let ast_copy = ast.clone();
     drop(ast); // the layout holds no borrow of the AST
-    assert!(ast_copy.items.iter().all(WordNode::is_self_contained));
+    assert!(all_self_contained(&ast_copy));
     assert_eq!(para.lines.len(), 3);
     assert_eq!(para.clone(), para);
 }
@@ -494,13 +493,13 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
     // holds for every node and the cluster byte ranges tile the text without
     // overlap.
     let text_len = 200usize;
-    let items: Vec<_> = (0..text_len)
-        .map(|i| {
-            let atoms = vec![atom(i)];
-            WordNode::Box(BoxNode::Text {
-                run_index: 0,
-                byte_range: atoms[0].byte_range,
-                clusters: vec![ShapedCluster {
+    let text = "a".repeat(text_len);
+    let mut ast = crate::common::ast(&text);
+    rebuild_items(&mut ast, |ast| {
+        (0..text_len)
+            .map(|i| {
+                let atoms = vec![atom(i)];
+                let cluster = ShapedCluster {
                     orientation: mutil_engine::types::GlyphOrientation::Horizontal,
                     byte_range: atoms[0].byte_range,
                     atom_range: 0..1,
@@ -511,15 +510,14 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
                     natural_width: 0.0,
                     safe_to_break_before: true,
                     safe_to_concat_before: true,
-                }],
-                atoms,
-                natural_width: 0.0,
+                };
+                push_text(ast, 0, atoms, vec![cluster])
             })
-        })
-        .collect();
-    assert!(items.iter().all(WordNode::is_self_contained));
+            .collect()
+    });
+    assert!(all_self_contained(&ast));
     let mut next = 0;
-    for c in items.iter().flat_map(clusters_of) {
+    for c in (0..ast.items.len()).flat_map(|item| clusters_of(&ast, item)) {
         assert_eq!(c.byte_range.start, next);
         next = c.byte_range.end;
     }
@@ -529,18 +527,15 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
 #[test]
 fn ligature_cluster_takes_justify_after_from_its_last_atom_only() {
     let atom_with = |off: usize, flags: AtomFlags| GraphemeAtom { flags, ..atom(off) };
-    let node = |atoms: Vec<GraphemeAtom>, flags: AtomFlags| {
+    // Whether one box over `atoms` with a single cluster of `flags` is self-contained.
+    let contained = |atoms: Vec<GraphemeAtom>, flags: AtomFlags| {
         let mut c = cluster(0, 0);
         c.atom_range = 0..atoms.len();
         c.byte_range = TextRange::new(0, atoms.len());
         c.flags = flags;
-        WordNode::Box(BoxNode::Text {
-            run_index: 0,
-            byte_range: TextRange::new(0, atoms.len()),
-            atoms,
-            clusters: vec![c],
-            natural_width: 0.0,
-        })
+        let mut ast = crate::common::ast("");
+        rebuild_items(&mut ast, |ast| vec![push_text(ast, 0, atoms, vec![c])]);
+        ast.is_self_contained(0)
     };
     let allow = AtomFlags::ALLOW_CJK_JUSTIFY_AFTER;
 
@@ -548,17 +543,17 @@ fn ligature_cluster_takes_justify_after_from_its_last_atom_only() {
     let atoms = vec![atom_with(0, AtomFlags::EMPTY), atom_with(1, allow)];
     let aggregated = AtomFlags::for_cluster(&atoms);
     assert!(aggregated.contains(allow));
-    assert!(node(atoms.clone(), aggregated).is_self_contained());
+    assert!(contained(atoms.clone(), aggregated));
     // A naive OR is the same here, but the cluster flags must equal the aggregate.
-    assert!(!node(atoms, AtomFlags::EMPTY).is_self_contained());
+    assert!(!contained(atoms, AtomFlags::EMPTY));
 
     // Only the first atom has it: the opportunity lies *inside* the ligature,
     // so the cluster must not have it, and a naive OR is rejected.
     let atoms = vec![atom_with(0, allow), atom_with(1, AtomFlags::EMPTY)];
     let aggregated = AtomFlags::for_cluster(&atoms);
     assert!(!aggregated.contains(allow));
-    assert!(node(atoms.clone(), aggregated).is_self_contained());
-    assert!(!node(atoms.clone(), allow).is_self_contained());
+    assert!(contained(atoms.clone(), aggregated));
+    assert!(!contained(atoms.clone(), allow));
 
     // Open punctuation from the first atom, close punctuation from the last.
     let atoms = vec![
@@ -567,7 +562,7 @@ fn ligature_cluster_takes_justify_after_from_its_last_atom_only() {
     ];
     let f = AtomFlags::for_cluster(&atoms);
     assert!(f.contains(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT));
-    assert!(node(atoms, f).is_self_contained());
+    assert!(contained(atoms, f));
 }
 
 // Counter-examples on the assembled line.
@@ -1084,6 +1079,8 @@ fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
         },
         strut_font_size: 10.0,
         runs: vec![],
+        atoms: vec![],
+        clusters: vec![],
         // An empty paragraph is just the sentinel.
         items: vec![WordNode::Discretionary(DiscretionaryNode::hard_break(
             TextRange::empty_at(0),

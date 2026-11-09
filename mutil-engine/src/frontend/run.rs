@@ -1,5 +1,7 @@
 //! Shaping runs: the unit handed to a shaping backend (spec §2.5, §3 Step 5).
 
+use core::ops::Range;
+
 use crate::types::{BidiLevel, Direction, FamilyStack, FontStyle, LocaleTag, ScriptTag, TextRange};
 
 /// Text decoration requested for a run. Colour is deliberately absent: it is
@@ -42,6 +44,15 @@ pub struct ShapingRun {
     pub bidi_level: BidiLevel,
     /// Requested decoration.
     pub decoration: TextDecoration,
+    /// This run's atoms: `ast.atoms[atom_range]` for a body run (the slice
+    /// handed to `TextShaper::shape_run` and `reshape_window`), or
+    /// `ann.atoms[atom_range]` for an annotation run, where it is always
+    /// `0..ann.atoms.len()`. Shapers ignore it. Paragraph-level index space.
+    pub atom_range: Range<usize>,
+    /// This run's clusters: `ast.clusters[cluster_range]` for a body run, or
+    /// `ann.clusters[cluster_range]` (always `0..ann.clusters.len()`) for an
+    /// annotation run. Shapers ignore it. Paragraph-level index space.
+    pub cluster_range: Range<usize>,
 }
 
 impl ShapingRun {

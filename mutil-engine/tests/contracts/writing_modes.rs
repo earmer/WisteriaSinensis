@@ -65,12 +65,14 @@ fn orientation_and_tcy_matrix() {
         0,
     );
     assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
-    a.items = vec![
-        boxed(0, 1, false),
-        WordNode::Discretionary(DiscretionaryNode::direct(1)),
-        boxed(1, 2, false),
-        end(2),
-    ];
+    rebuild_items(&mut a, |b| {
+        vec![
+            boxed(b, 0, 1, false),
+            WordNode::Discretionary(DiscretionaryNode::direct(1)),
+            boxed(b, 1, 2, false),
+            end(2),
+        ]
+    });
     orient(
         &mut a,
         WritingMode::VerticalRl,
@@ -80,9 +82,7 @@ fn orientation_and_tcy_matrix() {
     assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
     a.items.remove(1);
     assert!(check(&a, "ab").is_ok());
-    if let WordNode::Box(BoxNode::Text { atoms, .. }) = &mut a.items[0] {
-        atoms[0].orientation = GlyphOrientation::VerticalSideways;
-    }
+    a.atoms[0].orientation = GlyphOrientation::VerticalSideways;
     assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
 }
 

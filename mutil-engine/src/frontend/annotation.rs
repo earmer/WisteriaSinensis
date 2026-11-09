@@ -73,8 +73,9 @@ pub struct AnnotationSpan {
     pub annotation_text: CompactString,
     /// Shaping settings in annotation-local coordinates.
     pub run: ShapingRun,
-    /// Local atoms.
+    /// Local atoms; `run.atom_range` is `0..atoms.len()`.
     pub atoms: Vec<GraphemeAtom>,
-    /// Local clusters partitioning the atoms.
+    /// Local clusters partitioning the atoms, with `atom_range`s into `atoms`;
+    /// `run.cluster_range` is `0..clusters.len()`.
     pub clusters: Vec<ShapedCluster>,
 }

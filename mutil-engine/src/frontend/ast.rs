@@ -5,6 +5,7 @@ use crate::types::{
     AtomFlags, BidiDirection, BidiLevel, ByteIndex, FontMetrics, GraphemeAtom, ShapedCluster,
     TextRange,
 };
+use core::ops::Range;
 use smallvec::SmallVec;
 
 /// Replacement text for spelling-change hyphenation.
@@ -141,9 +142,9 @@ pub enum BoxOverflowPolicy {
 
 /// A rigid item of the line-breaking sequence (spec §2.4).
 ///
-/// Collections are `Vec`, not `SmallVec`: inline storage would inflate every
-/// variant to the size of the largest. `ShapedCluster::atom_range` indexes the
-/// node's own `atoms` (see [`ShapedCluster`]).
+/// A text box owns no atoms or clusters: it names a contiguous slice of each
+/// in the paragraph-wide [`ParagraphAst::atoms`] and [`ParagraphAst::clusters`]
+/// (see [`ParagraphAst::text_box`] for the resolved view).
 #[derive(Clone, Debug, PartialEq)]
 pub enum BoxNode {
     /// Shaped text: a word, a fragment of one, or a punctuation mark. Closing
@@ -155,10 +156,14 @@ pub enum BoxNode {
         run_index: usize,
         /// Source bytes: first atom's start to last atom's end.
         byte_range: TextRange,
-        /// The box's atoms.
-        atoms: Vec<GraphemeAtom>,
-        /// Shaped clusters; `atom_range` is relative to `atoms`.
-        clusters: Vec<ShapedCluster>,
+        /// The box's atoms, as **paragraph-level** indices: `ast.atoms[atom_range]`.
+        /// Inside the run's own [`ShapingRun::atom_range`].
+        atom_range: Range<usize>,
+        /// The box's clusters, as **paragraph-level** indices:
+        /// `ast.clusters[cluster_range]`. Inside the run's own
+        /// [`ShapingRun::cluster_range`]. Each cluster's `atom_range` is
+        /// **run-local** (see [`ShapedCluster`]).
+        cluster_range: Range<usize>,
         /// Sum of cluster widths.
         natural_width: f32,
     },
@@ -412,30 +417,18 @@ impl WordNode {
     pub const fn is_break_opportunity(&self) -> bool {
         matches!(self, Self::Discretionary(_))
     }
-
-    /// Checks the `atom_range` invariants documented on [`ShapedCluster`] for a
-    /// `Box::Text` (the clusters partition its atoms, in order, with matching
-    /// byte ranges) and that its atoms tile `byte_range` contiguously, running
-    /// from the first atom's start to the last atom's end (an empty one has no
-    /// atoms). Every other node is trivially self-contained.
-    #[must_use]
-    pub fn is_self_contained(&self) -> bool {
-        match self {
-            Self::Box(BoxNode::Text {
-                byte_range,
-                atoms,
-                clusters,
-                ..
-            }) => text_is_self_contained(*byte_range, atoms, clusters),
-            _ => true,
-        }
-    }
 }
 
+/// Checks the invariants documented on [`ShapedCluster`] for one text box.
+/// `atoms` and `clusters` are the box's resolved slices; `base` is the
+/// run-local index of the box's first atom (`box.atom_range.start -
+/// run.atom_range.start`), which converts each cluster's run-local
+/// `atom_range` into an index of `atoms`.
 pub(crate) fn text_is_self_contained(
     byte_range: TextRange,
     atoms: &[GraphemeAtom],
     clusters: &[ShapedCluster],
+    base: usize,
 ) -> bool {
     let span_ok = match (atoms.first(), atoms.last()) {
         (Some(first), Some(last)) => {
@@ -448,27 +441,51 @@ pub(crate) fn text_is_self_contained(
             .windows(2)
             .all(|w| w[0].byte_range.end == w[1].byte_range.start)
         && atoms.iter().all(|a| a.byte_range.start < a.byte_range.end)
-        && clusters_partition_atoms(atoms, clusters)
+        && clusters_partition_atoms(atoms, clusters, base)
 }
 
-fn clusters_partition_atoms(atoms: &[GraphemeAtom], clusters: &[ShapedCluster]) -> bool {
-    let mut next = 0;
+fn clusters_partition_atoms(
+    atoms: &[GraphemeAtom],
+    clusters: &[ShapedCluster],
+    base: usize,
+) -> bool {
+    let mut next = base;
     for c in clusters {
         let r = &c.atom_range;
-        if r.start != next || r.end <= r.start || r.end > atoms.len() {
+        if r.start != next || r.end <= r.start || r.end > base + atoms.len() {
             return false;
         }
-        let (first, last) = (&atoms[r.start], &atoms[r.end - 1]);
+        let local = r.start - base..r.end - base;
+        let (first, last) = (&atoms[local.start], &atoms[local.end - 1]);
         if c.byte_range.start != first.byte_range.start || c.byte_range.end != last.byte_range.end {
             return false;
         }
         // Invariant 3: the cluster's flags are the per-flag aggregate of its atoms.
-        if c.flags != AtomFlags::for_cluster(&atoms[r.clone()]) {
+        if c.flags != AtomFlags::for_cluster(&atoms[local]) {
             return false;
         }
         next = r.end;
     }
-    next == atoms.len()
+    next == base + atoms.len()
+}
+
+/// A [`BoxNode::Text`] with its atoms and clusters resolved through the
+/// paragraph-wide arrays.
+///
+/// `clusters[i].atom_range` is **run-local**: it indexes the run's atom slice
+/// ([`ParagraphAst::run_atoms`]), not `atoms`.
+#[derive(Clone, Copy, Debug)]
+pub struct TextBoxView<'a> {
+    /// Index into [`ParagraphAst::runs`].
+    pub run_index: usize,
+    /// Source bytes: first atom's start to last atom's end.
+    pub byte_range: TextRange,
+    /// `ast.atoms[atom_range]` of the box.
+    pub atoms: &'a [GraphemeAtom],
+    /// `ast.clusters[cluster_range]` of the box.
+    pub clusters: &'a [ShapedCluster],
+    /// Sum of cluster widths, as cached on the box.
+    pub natural_width: f32,
 }
 
 /// Frontend output: everything the middle-end needs, independent of column
@@ -499,6 +516,13 @@ pub struct ParagraphAst {
     pub strut_font_size: f32,
     /// Shaping runs in logical order.
     pub runs: Vec<ShapingRun>,
+    /// Every atom of every body run, in run order then logical order. Run `i`
+    /// owns `atoms[runs[i].atom_range]`; the runs tile this vector.
+    pub atoms: Vec<GraphemeAtom>,
+    /// Every shaped cluster of every body run, in run order then logical order.
+    /// Run `i` owns `clusters[runs[i].cluster_range]`; the runs tile this
+    /// vector. Each cluster's `atom_range` is run-local (see [`ShapedCluster`]).
+    pub clusters: Vec<ShapedCluster>,
     /// Box-and-glue sequence in logical order.
     pub items: Vec<WordNode>,
     /// Rich-text decoration spans (chips, code spans): padding and
@@ -512,6 +536,78 @@ pub struct ParagraphAst {
 }
 
 impl ParagraphAst {
+    /// The atoms of body run `run`: `atoms[runs[run].atom_range]`, which is
+    /// exactly the slice `TextShaper::shape_run` and `reshape_window` take.
+    /// Empty for an out-of-range run or range (validation reports the error).
+    #[must_use]
+    pub fn run_atoms(&self, run: usize) -> &[GraphemeAtom] {
+        self.runs
+            .get(run)
+            .and_then(|r| self.atoms.get(r.atom_range.clone()))
+            .unwrap_or_default()
+    }
+
+    /// The clusters of body run `run`: `clusters[runs[run].cluster_range]`;
+    /// their `atom_range`s index [`run_atoms`](Self::run_atoms). Empty for an
+    /// out-of-range run or range.
+    #[must_use]
+    pub fn run_clusters(&self, run: usize) -> &[ShapedCluster] {
+        self.runs
+            .get(run)
+            .and_then(|r| self.clusters.get(r.cluster_range.clone()))
+            .unwrap_or_default()
+    }
+
+    /// The text box at `items[item]` with its slices resolved, or `None` when
+    /// that item is not a [`BoxNode::Text`] or one of its ranges is out of
+    /// bounds.
+    #[must_use]
+    pub fn text_box(&self, item: usize) -> Option<TextBoxView<'_>> {
+        let WordNode::Box(BoxNode::Text {
+            run_index,
+            byte_range,
+            atom_range,
+            cluster_range,
+            natural_width,
+        }) = self.items.get(item)?
+        else {
+            return None;
+        };
+        Some(TextBoxView {
+            run_index: *run_index,
+            byte_range: *byte_range,
+            atoms: self.atoms.get(atom_range.clone())?,
+            clusters: self.clusters.get(cluster_range.clone())?,
+            natural_width: *natural_width,
+        })
+    }
+
+    /// Checks the invariants documented on [`ShapedCluster`] for the text box at
+    /// `items[item]`: its atoms are contiguous and tile its `byte_range` (an
+    /// empty box has no atoms), its clusters partition its atoms in order with
+    /// matching byte ranges, and each cluster's flags aggregate its atoms'.
+    /// Every other node is trivially self-contained; an `item` past the end,
+    /// or a text box whose ranges or run do not resolve, is not.
+    #[must_use]
+    pub fn is_self_contained(&self, item: usize) -> bool {
+        match self.items.get(item) {
+            Some(WordNode::Box(BoxNode::Text { atom_range, .. })) => {
+                let Some(view) = self.text_box(item) else {
+                    return false;
+                };
+                let base = self
+                    .runs
+                    .get(view.run_index)
+                    .and_then(|run| atom_range.start.checked_sub(run.atom_range.start));
+                base.is_some_and(|base| {
+                    text_is_self_contained(view.byte_range, view.atoms, view.clusters, base)
+                })
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
     /// The window to re-shape as **one** piece when the `Hyphenate`
     /// discretionary at `items[index]` is *not* taken on a committed line
     /// (spec §5 Stage 1.6.5, rejoin rule).
@@ -539,21 +635,12 @@ impl ParagraphAst {
         else {
             return None;
         };
-        let WordNode::Box(BoxNode::Text {
-            byte_range: before, ..
-        }) = self.items.get(index.checked_sub(1)?)?
-        else {
-            return None;
-        };
-        let WordNode::Box(BoxNode::Text {
-            byte_range: after,
-            clusters,
-            ..
-        }) = self.items.get(index + 1)?
-        else {
-            return None;
-        };
-        let seam_is_unsafe = clusters.first().is_some_and(|c| !c.safe_to_concat_before);
-        seam_is_unsafe.then(|| TextRange::new(before.start, after.end))
+        let before = self.text_box(index.checked_sub(1)?)?.byte_range;
+        let after = self.text_box(index + 1)?;
+        let seam_is_unsafe = after
+            .clusters
+            .first()
+            .is_some_and(|c| !c.safe_to_concat_before);
+        seam_is_unsafe.then(|| TextRange::new(before.start, after.byte_range.end))
     }
 }

@@ -6,7 +6,7 @@ use mutil_engine::*;
 fn spanned(n: usize) -> (String, ParagraphAst) {
     let t = "a".repeat(n);
     let mut a = ast(&t);
-    a.items.clear();
+    rebuild_items(&mut a, |_| vec![]);
     for i in 0..n {
         let r = TextRange::new(i, i + 1);
         a.decoration_spans.push(InlineDecorationSpan {
@@ -30,7 +30,8 @@ fn spanned(n: usize) -> (String, ParagraphAst) {
                 bidi_level: 0,
             }));
             if edge == SpanEdge::Leading {
-                a.items.push(boxed(i, i + 1, true));
+                let text = boxed(&mut a, i, i + 1, true);
+                a.items.push(text);
             }
         }
     }
@@ -64,7 +65,7 @@ fn five_thousand_spans_scale_linearly() {
 
 fn decorated(ranges: &[(usize, usize)]) -> ParagraphAst {
     let mut a = ast("abcd");
-    a.items.clear();
+    rebuild_items(&mut a, |_| vec![]);
     a.decoration_spans = ranges
         .iter()
         .enumerate()
@@ -104,7 +105,8 @@ fn decorated(ranges: &[(usize, usize)]) -> ParagraphAst {
             }));
         }
         if offset < 4 {
-            a.items.push(boxed(offset, offset + 1, false));
+            let text = boxed(&mut a, offset, offset + 1, false);
+            a.items.push(text);
         }
     }
     a.items.push(end(4));
@@ -167,16 +169,13 @@ fn bidi_spans_order_ids_boundaries_and_depth() {
     a.bidi_spans.push(bidi_span(63, 63, 65));
     assert_eq!(check(&a, &text), Err(LayoutInputError::InvalidBidiSpan));
     let mut a = ast("ab");
-    if let WordNode::Box(BoxNode::Text {
-        atoms, clusters, ..
-    }) = &mut a.items[0]
-    {
+    edit_text_box(&mut a, 0, |atoms, clusters| {
         atoms.truncate(1);
         atoms[0].byte_range.end = 2;
         clusters.truncate(1);
         clusters[0].byte_range.end = 2;
         clusters[0].natural_width = 2.0;
-    }
+    });
     a.bidi_spans = vec![bidi_span(1, 1, 2)];
     assert_eq!(check(&a, "ab"), Err(LayoutInputError::InvalidBidiSpan));
 }

@@ -4,7 +4,7 @@
 //! and is atomic for editing, and a flattened inline formula. Every width and
 //! position is a hand-written fixture; no layout algorithm runs.
 
-use crate::common::{ADV, shaping_run};
+use crate::common::{ADV, push_text, shaping_run};
 use mutil_engine::*;
 
 // bytes: 0..2 "go" | 2..3 " " | 3..11 "@Ann-Lee" | 11..12 " " | 12..14 "ok"
@@ -39,16 +39,10 @@ fn run() -> ShapingRun {
     shaping_run(TEXT, "en-GB")
 }
 
-fn text(start: usize, end: usize) -> WordNode {
+fn text(ast: &mut ParagraphAst, start: usize, end: usize) -> WordNode {
     let atoms: Vec<_> = (start..end).map(atom).collect();
     let clusters: Vec<_> = (0..atoms.len()).map(|i| cluster(start, i)).collect();
-    WordNode::Box(BoxNode::Text {
-        run_index: 0,
-        byte_range: TextRange::new(start, end),
-        atoms,
-        clusters,
-        natural_width: (end - start) as f32 * ADV,
-    })
+    push_text(ast, 0, atoms, clusters)
 }
 
 fn space(at: usize) -> WordNode {
@@ -98,7 +92,7 @@ fn chip_ast() -> ParagraphAst {
         action: BreakAction::Direct,
         cloned_spans: smallvec::smallvec![SPAN_ID],
     };
-    ParagraphAst {
+    let mut ast = ParagraphAst {
         annotations: Vec::new(),
         bidi_spans: Vec::new(),
         writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
@@ -113,22 +107,9 @@ fn chip_ast() -> ParagraphAst {
         },
         strut_font_size: 16.0,
         runs: vec![run()],
-        items: vec![
-            text(0, 2),
-            // A breakable space is [Glue, Discretionary] (ruling 1): the space
-            // stays on the trailing edge of the line that breaks after it.
-            space(2),
-            WordNode::Discretionary(DiscretionaryNode::direct(3)),
-            boundary(SpanEdge::Leading, 3),
-            text(3, 8), // "@Ann-"
-            WordNode::Discretionary(interior_break),
-            text(8, 11), // "Lee"
-            boundary(SpanEdge::Trailing, 11),
-            space(11),
-            WordNode::Discretionary(DiscretionaryNode::direct(12)),
-            text(12, 14),
-            sentinel(TEXT.len()),
-        ],
+        atoms: vec![],
+        clusters: vec![],
+        items: vec![],
         decoration_spans: vec![InlineDecorationSpan {
             span_id: SPAN_ID,
             byte_range: CHIP,
@@ -140,7 +121,24 @@ fn chip_ast() -> ParagraphAst {
             span_id: SPAN_ID,
             byte_range: CHIP,
         }],
-    }
+    };
+    ast.items = vec![
+        text(&mut ast, 0, 2),
+        // A breakable space is [Glue, Discretionary] (ruling 1): the space
+        // stays on the trailing edge of the line that breaks after it.
+        space(2),
+        WordNode::Discretionary(DiscretionaryNode::direct(3)),
+        boundary(SpanEdge::Leading, 3),
+        text(&mut ast, 3, 8), // "@Ann-"
+        WordNode::Discretionary(interior_break),
+        text(&mut ast, 8, 11), // "Lee"
+        boundary(SpanEdge::Trailing, 11),
+        space(11),
+        WordNode::Discretionary(DiscretionaryNode::direct(12)),
+        text(&mut ast, 12, 14),
+        sentinel(TEXT.len()),
+    ];
+    ast
 }
 
 fn pen_glyph(range: (usize, usize), x: f32) -> PositionedGlyph {
@@ -224,29 +222,23 @@ fn chip_inputs_are_accepted_and_atoms_carry_the_atomic_flag() {
         tab_stops: TabStops { step: 8.0 },
     };
     assert!(check_layout_inputs(&ast, TEXT, &constraints, &LayoutOptions::default()).is_ok());
-    assert!(ast.items.iter().all(WordNode::is_self_contained));
+    assert!((0..ast.items.len()).all(|item| ast.is_self_contained(item)));
     // Atoms inside the chip carry the flag, and so do their clusters.
-    let WordNode::Box(BoxNode::Text {
-        atoms, clusters, ..
-    }) = &ast.items[4]
-    else {
-        unreachable!()
-    };
+    let chip = ast.text_box(4).unwrap();
     assert!(
-        atoms
+        chip.atoms
             .iter()
             .all(|a| a.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN))
     );
     assert!(
-        clusters
+        chip.clusters
             .iter()
             .all(|c| c.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN))
     );
-    let WordNode::Box(BoxNode::Text { clusters, .. }) = &ast.items[0] else {
-        unreachable!()
-    };
     assert!(
-        clusters
+        ast.text_box(0)
+            .unwrap()
+            .clusters
             .iter()
             .all(|c| !c.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN))
     );
@@ -409,6 +401,8 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     };
     let ast = ParagraphAst {
         runs: vec![formula_run],
+        atoms: vec![],
+        clusters: vec![],
         decoration_spans: vec![],
         atomic_spans: vec![],
         items: vec![

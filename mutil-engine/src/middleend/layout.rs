@@ -7,7 +7,7 @@ use super::{LayoutConstraints, LayoutOptions, LineContext, PositionedParagraph};
 use crate::frontend::MAX_DECORATION_NESTING_DEPTH;
 use crate::frontend::{
     BoxDecorationBreak, BoxNode, BreakAction, DiscretionaryNode, GlueKind, GlueTier,
-    HyphenOpportunity, ParagraphAst, SpanEdge, WordNode, is_paragraph_separator,
+    HyphenOpportunity, ParagraphAst, SpanEdge, TextBoxView, WordNode, is_paragraph_separator,
 };
 use crate::shaping::TextShaper;
 use crate::types::{AtomFlags, BIDI_MAX_DEPTH, BidiLevel, GraphemeAtom, ShapedCluster, TextRange};
@@ -51,6 +51,13 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::runs`.
         run: usize,
     },
+    /// A run's `atom_range` / `cluster_range` do not tile `ParagraphAst::atoms` /
+    /// `ParagraphAst::clusters` (a gap, an overlap or an out-of-bounds range),
+    /// or the run's atoms or clusters are not fully covered by its text boxes.
+    InvalidRunStorage {
+        /// Index into `ParagraphAst::runs`.
+        run: usize,
+    },
     /// An item's `run_index` is not a valid index into `ParagraphAst::runs`.
     RunIndexOutOfRange {
         /// Index into `ParagraphAst::items`.
@@ -74,7 +81,9 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A `BoxNode::Text` violates `WordNode::is_self_contained`.
+    /// A `BoxNode::Text` violates `ParagraphAst::is_self_contained`, or its
+    /// `atom_range` / `cluster_range` lies outside its run's ranges or out of
+    /// order among the run's boxes.
     ItemNotSelfContained {
         /// Index into `ParagraphAst::items`.
         item: usize,
@@ -190,18 +199,11 @@ pub enum LayoutInputError {
 
 /// The text box at `items[index]`: `(run_index, byte_range, atoms)`.
 fn text_at(
-    items: &[WordNode],
+    ast: &ParagraphAst,
     index: Option<usize>,
 ) -> Option<(usize, TextRange, &[GraphemeAtom])> {
-    match index.and_then(|i| items.get(i)) {
-        Some(WordNode::Box(BoxNode::Text {
-            run_index,
-            byte_range,
-            atoms,
-            ..
-        })) => Some((*run_index, *byte_range, atoms.as_slice())),
-        _ => None,
-    }
+    let view = ast.text_box(index?)?;
+    Some((view.run_index, view.byte_range, view.atoms))
 }
 
 /// The atom boundaries a hyphenation cut may land on, on one side of the
@@ -218,7 +220,7 @@ fn text_at(
 /// forwards) and its atom boundaries (starts and ends), or `None` when there is
 /// no neighbouring text box.
 fn hyphen_chain(
-    items: &[WordNode],
+    ast: &ParagraphAst,
     index: usize,
     backwards: bool,
     target: usize,
@@ -231,7 +233,7 @@ fn hyphen_chain(
         }
     };
     let mut cursor = step(index);
-    let (run, mut range, atoms) = text_at(items, cursor)?;
+    let (run, mut range, atoms) = text_at(ast, cursor)?;
     let mut bound = if backwards { range.start } else { range.end };
     let mut edges: Vec<usize> = atoms
         .iter()
@@ -252,13 +254,13 @@ fn hyphen_chain(
         let Some(disc_at) = cursor.and_then(step) else {
             break;
         };
-        let Some(WordNode::Discretionary(d)) = items.get(disc_at) else {
+        let Some(WordNode::Discretionary(d)) = ast.items.get(disc_at) else {
             break;
         };
         if !matches!(d.action, BreakAction::Hyphenate(_)) {
             break;
         }
-        let Some((next_run, next, next_atoms)) = text_at(items, step(disc_at)) else {
+        let Some((next_run, next, next_atoms)) = text_at(ast, step(disc_at)) else {
             break;
         };
         let meets = if backwards {
@@ -292,14 +294,14 @@ fn hyphen_chain(
 /// reaching two bytes back across a point one byte away) but never a run or
 /// span boundary.
 fn hyphen_valid(
-    items: &[WordNode],
+    ast: &ParagraphAst,
     index: usize,
     d: &DiscretionaryNode,
     h: &HyphenOpportunity,
 ) -> bool {
     let (Some((prev_run, prev, _)), Some((next_run, next, _))) = (
-        text_at(items, index.checked_sub(1)),
-        text_at(items, index.checked_add(1)),
+        text_at(ast, index.checked_sub(1)),
+        text_at(ast, index.checked_add(1)),
     ) else {
         return false;
     };
@@ -320,8 +322,8 @@ fn hyphen_valid(
         return false;
     };
     let (Some((left_bound, left_edges)), Some((right_bound, right_edges))) = (
-        hyphen_chain(items, index, true, prefix),
-        hyphen_chain(items, index, false, suffix),
+        hyphen_chain(ast, index, true, prefix),
+        hyphen_chain(ast, index, false, suffix),
     ) else {
         return false;
     };
@@ -353,10 +355,12 @@ fn atomic_edges(ast: &ParagraphAst) -> std::collections::HashSet<usize> {
 /// The byte ranges of concrete content: every text atom and inline object.
 fn concrete_content(ast: &ParagraphAst) -> Vec<TextRange> {
     let mut out = Vec::new();
-    for n in &ast.items {
+    for (item, n) in ast.items.iter().enumerate() {
         match n {
-            WordNode::Box(BoxNode::Text { atoms, .. }) => {
-                out.extend(atoms.iter().map(|a| a.byte_range));
+            WordNode::Box(BoxNode::Text { .. }) => {
+                if let Some(view) = ast.text_box(item) {
+                    out.extend(view.atoms.iter().map(|a| a.byte_range));
+                }
             }
             WordNode::Box(BoxNode::InlineObject { byte_range, .. }) => out.push(*byte_range),
             _ => {}
@@ -459,7 +463,7 @@ impl SpanIndex {
         let mut touching = Vec::with_capacity(ast.items.len());
         let mut levels = vec![(None, None); ast.decoration_spans.len()];
         let (mut next, mut active) = (0, Vec::<usize>::new());
-        for node in &ast.items {
+        for (item, node) in ast.items.iter().enumerate() {
             let r = node.byte_span();
             active.retain(|&i| ast.decoration_spans[i].byte_range.end >= r.start);
             while next < ast.decoration_spans.len()
@@ -470,10 +474,14 @@ impl SpanIndex {
                 }
                 next += 1;
             }
-            if let WordNode::Box(BoxNode::Text { atoms, .. }) = node {
+            if let Some(view) = ast.text_box(item) {
                 for &i in &active {
                     let span = ast.decoration_spans[i].byte_range;
-                    for atom in atoms.iter().filter(|a| span.contains_range(a.byte_range)) {
+                    for atom in view
+                        .atoms
+                        .iter()
+                        .filter(|a| span.contains_range(a.byte_range))
+                    {
                         levels[i].0.get_or_insert(atom.bidi_level);
                         levels[i].1 = Some(atom.bidi_level);
                     }
@@ -492,18 +500,14 @@ impl SpanIndex {
 /// The `natural_width` of the last (`last == true`) or first cluster of the
 /// text box at `items[index]`, or `None` if that item is not a text box with a
 /// cluster.
-fn edge_cluster_width(items: &[WordNode], index: Option<usize>, last: bool) -> Option<f32> {
-    match index.and_then(|i| items.get(i)) {
-        Some(WordNode::Box(BoxNode::Text { clusters, .. })) => {
-            let c = if last {
-                clusters.last()
-            } else {
-                clusters.first()
-            };
-            c.map(|c| c.natural_width)
-        }
-        _ => None,
-    }
+fn edge_cluster_width(ast: &ParagraphAst, index: Option<usize>, last: bool) -> Option<f32> {
+    let view = ast.text_box(index?)?;
+    let c = if last {
+        view.clusters.last()
+    } else {
+        view.clusters.first()
+    };
+    c.map(|c| c.natural_width)
 }
 
 /// Monotone progression: each item starts at or after the end of the previous
@@ -736,6 +740,7 @@ pub fn check_layout_inputs(
     if !strut_metrics.is_valid() {
         return Err(E::InvalidFontMetrics);
     }
+    check_run_storage(ast)?;
     check_extensions(ast, text)?;
     for (run, r) in ast.runs.iter().enumerate() {
         check_run(r, text, run)?;
@@ -756,27 +761,17 @@ pub fn check_layout_inputs(
     let last_disc = ast.items.iter().rposition(|n| n.is_break_opportunity());
     for (item, node) in ast.items.iter().enumerate() {
         match node {
-            WordNode::Box(BoxNode::Text {
-                run_index,
-                byte_range,
-                atoms,
-                clusters,
-                natural_width,
-            }) => {
-                let Some(run) = ast.runs.get(*run_index) else {
+            WordNode::Box(BoxNode::Text { atom_range, .. }) => {
+                let Some(view) = ast.text_box(item) else {
+                    return Err(E::ItemNotSelfContained { item });
+                };
+                let Some(run) = ast.runs.get(view.run_index) else {
                     return Err(E::RunIndexOutOfRange { item });
                 };
-                check_text_payload(
-                    text,
-                    *byte_range,
-                    run,
-                    atoms,
-                    clusters,
-                    *natural_width,
-                    item,
-                )?;
+                let base = atom_range.start.saturating_sub(run.atom_range.start);
+                check_text_payload(text, run, &view, base, item)?;
                 // IN_ATOMIC_EDIT_SPAN mirrors `atomic_spans` exactly.
-                if atoms.iter().any(|a| {
+                if view.atoms.iter().any(|a| {
                     while atomic_at < ast.atomic_spans.len()
                         && ast.atomic_spans[atomic_at].byte_range.end <= a.byte_range.start
                     {
@@ -957,9 +952,7 @@ pub fn check_layout_inputs(
                 let near =
                     |a: f64, b: f64| (a - b).abs() <= 1e-3_f64.max(1e-5 * a.abs().max(b.abs()));
                 match &d.action {
-                    BreakAction::Hyphenate(h)
-                        if !d.flagged || !hyphen_valid(&ast.items, item, d, h) =>
-                    {
+                    BreakAction::Hyphenate(h) if !d.flagged || !hyphen_valid(ast, item, d, h) => {
                         return Err(E::InvalidHyphenOpportunity { item });
                     }
                     // A hyphenation's net deltas are its reshaping deltas.
@@ -973,8 +966,8 @@ pub fn check_layout_inputs(
                         let side_ok = |live: bool, net: f64, width: Option<f32>| {
                             !live || width.is_some_and(|w| f64::from(w) + net >= -1e-3)
                         };
-                        let trailing = edge_cluster_width(&ast.items, item.checked_sub(1), true);
-                        let leading = edge_cluster_width(&ast.items, item.checked_add(1), false);
+                        let trailing = edge_cluster_width(ast, item.checked_sub(1), true);
+                        let leading = edge_cluster_width(ast, item.checked_add(1), false);
                         if !((live_pre || live_post)
                             && side_ok(live_pre, net_pre, trailing)
                             && side_ok(live_post, net_post, leading))
@@ -1107,16 +1100,16 @@ pub fn layout_paragraph(
         let first_break = ast.items.iter().position(WordNode::is_break_opportunity);
         let initial_end = first_break.map_or(text.len(), |k| ast.items[k].byte_span().start);
         let mut required = initial;
-        for item in &ast.items[..first_break.unwrap_or(ast.items.len())] {
+        for (index, item) in ast.items[..first_break.unwrap_or(ast.items.len())]
+            .iter()
+            .enumerate()
+        {
             match item {
                 WordNode::Box(BoxNode::InlineObject {
                     ascent, descent, ..
                 }) => required = required.max(ascent + descent),
-                WordNode::Box(BoxNode::Text {
-                    run_index,
-                    clusters,
-                    ..
-                }) => {
+                WordNode::Box(BoxNode::Text { run_index, .. }) => {
+                    let clusters = ast.text_box(index).map_or(&[][..], |view| view.clusters);
                     for cluster in clusters {
                         let metrics = shaper.font_metrics(crate::types::FontInstanceRef {
                             font: cluster.font,
@@ -1211,20 +1204,27 @@ fn check_run(
     Ok(())
 }
 
+/// Checks one text payload against its run. `base` is the run-local index of
+/// the payload's first atom (0 for an annotation).
 fn check_text_payload(
     text: &str,
-    range: TextRange,
     run: &crate::frontend::ShapingRun,
-    atoms: &[GraphemeAtom],
-    clusters: &[ShapedCluster],
-    natural_width: f32,
+    view: &TextBoxView<'_>,
+    base: usize,
     item: usize,
 ) -> Result<(), LayoutInputError> {
     use LayoutInputError as E;
+    let TextBoxView {
+        byte_range: range,
+        atoms,
+        clusters,
+        natural_width,
+        ..
+    } = *view;
     if !atoms.iter().all(|a| fits(text, a.byte_range)) {
         return Err(E::ItemOutsideText { item });
     }
-    if !crate::frontend::text_is_self_contained(range, atoms, clusters) {
+    if !crate::frontend::text_is_self_contained(range, atoms, clusters, base) {
         return Err(E::ItemNotSelfContained { item });
     }
     if atoms.iter().any(|a| a.bidi_level != run.bidi_level)
@@ -1271,6 +1271,73 @@ fn check_run_extensions(
     Ok(())
 }
 
+/// The storage invariants of the paragraph-wide arrays, checked before any
+/// check that resolves a text box's slices:
+///
+/// * the runs' `atom_range`s tile `ast.atoms` and their `cluster_range`s tile
+///   `ast.clusters`, in run order, in bounds;
+/// * in item order, the text boxes of one run take consecutive ranges inside
+///   the run's own, and together cover them exactly.
+fn check_run_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
+    use LayoutInputError as E;
+    let (mut atom_at, mut cluster_at) = (0, 0);
+    for (run, r) in ast.runs.iter().enumerate() {
+        let (a, c) = (&r.atom_range, &r.cluster_range);
+        if a.start != atom_at
+            || a.end < a.start
+            || a.end > ast.atoms.len()
+            || c.start != cluster_at
+            || c.end < c.start
+            || c.end > ast.clusters.len()
+        {
+            return Err(E::InvalidRunStorage { run });
+        }
+        (atom_at, cluster_at) = (a.end, c.end);
+    }
+    if atom_at != ast.atoms.len() || cluster_at != ast.clusters.len() {
+        return Err(E::InvalidRunStorage {
+            run: ast.runs.len().saturating_sub(1),
+        });
+    }
+    let mut next: Vec<(usize, usize)> = ast
+        .runs
+        .iter()
+        .map(|r| (r.atom_range.start, r.cluster_range.start))
+        .collect();
+    for (item, node) in ast.items.iter().enumerate() {
+        let WordNode::Box(BoxNode::Text {
+            run_index,
+            atom_range,
+            cluster_range,
+            ..
+        }) = node
+        else {
+            continue;
+        };
+        let run = ast
+            .runs
+            .get(*run_index)
+            .ok_or(E::RunIndexOutOfRange { item })?;
+        let (next_atom, next_cluster) = &mut next[*run_index];
+        if atom_range.start != *next_atom
+            || atom_range.end < atom_range.start
+            || atom_range.end > run.atom_range.end
+            || cluster_range.start != *next_cluster
+            || cluster_range.end < cluster_range.start
+            || cluster_range.end > run.cluster_range.end
+        {
+            return Err(E::ItemNotSelfContained { item });
+        }
+        (*next_atom, *next_cluster) = (atom_range.end, cluster_range.end);
+    }
+    for (run, (r, (atom_end, cluster_end))) in ast.runs.iter().zip(next).enumerate() {
+        if atom_end != r.atom_range.end || cluster_end != r.cluster_range.end {
+            return Err(E::InvalidRunStorage { run });
+        }
+    }
+    Ok(())
+}
+
 fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
     use crate::frontend::{AnnotationKind, AnnotationSide, MAX_BIDI_SPAN_DEPTH};
     use crate::types::GlyphOrientation;
@@ -1286,16 +1353,13 @@ fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputErr
     let mut forbidden = 0usize;
     for (item, node) in ast.items.iter().enumerate() {
         match node {
-            WordNode::Box(BoxNode::Text {
-                run_index,
-                atoms,
-                clusters,
-                ..
-            }) => {
+            WordNode::Box(BoxNode::Text { run_index, .. }) => {
                 let run = ast
                     .runs
                     .get(*run_index)
                     .ok_or(E::RunIndexOutOfRange { item })?;
+                let view = ast.text_box(item).ok_or(E::ItemNotSelfContained { item })?;
+                let (atoms, clusters) = (view.atoms, view.clusters);
                 if run.orientation == GlyphOrientation::HorizontalInVertical && clusters.len() != 1
                 {
                     return Err(E::OrientationMismatch);
@@ -1346,9 +1410,8 @@ fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputErr
             WordNode::Discretionary(d) => {
                 if !matches!(d.action, BreakAction::HardBreak { .. }) {
                     if let (Some((l, _, _)), Some((r, _, _))) = (
-                        item.checked_sub(1)
-                            .and_then(|i| text_at(&ast.items, Some(i))),
-                        text_at(&ast.items, Some(item + 1)),
+                        item.checked_sub(1).and_then(|i| text_at(ast, Some(i))),
+                        text_at(ast, Some(item + 1)),
                     ) {
                         if l == r
                             && ast.runs.get(l).is_some_and(|run| {
@@ -1410,6 +1473,8 @@ fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputErr
                 .chars()
                 .any(|c| is_paragraph_separator(c) || c == '\u{2028}')
             || ann.run.byte_range != TextRange::new(0, ann.annotation_text.len())
+            || ann.run.atom_range != (0..ann.atoms.len())
+            || ann.run.cluster_range != (0..ann.clusters.len())
         {
             return Err(E::InvalidAnnotationSpan);
         }
@@ -1424,16 +1489,15 @@ fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputErr
         check_run_extensions(&ann.run, ast.writing_mode).map_err(|_| E::InvalidAnnotationSpan)?;
         check_run(&ann.run, &ann.annotation_text, 0).map_err(|_| E::InvalidAnnotationSpan)?;
         let total: f32 = ann.clusters.iter().map(|c| c.natural_width).sum();
-        check_text_payload(
-            &ann.annotation_text,
-            ann.run.byte_range,
-            &ann.run,
-            &ann.atoms,
-            &ann.clusters,
-            total,
-            0,
-        )
-        .map_err(|_| E::InvalidAnnotationSpan)?;
+        let payload = TextBoxView {
+            run_index: 0,
+            byte_range: ann.run.byte_range,
+            atoms: &ann.atoms,
+            clusters: &ann.clusters,
+            natural_width: total,
+        };
+        check_text_payload(&ann.annotation_text, &ann.run, &payload, 0, 0)
+            .map_err(|_| E::InvalidAnnotationSpan)?;
         if ann.atoms.iter().any(|a| {
             a.orientation != ann.run.orientation
                 || !a.orientation.is_valid(ast.writing_mode, a.bidi_level)
@@ -1485,6 +1549,8 @@ mod tests {
             },
             strut_font_size: 10.0,
             runs: vec![],
+            atoms: vec![],
+            clusters: vec![],
             items: vec![sentinel(0)],
             decoration_spans: vec![],
             atomic_spans: vec![],
@@ -1591,8 +1657,25 @@ mod tests {
         }
     }
 
+    use std::cell::RefCell;
+
+    /// Marks the ranges of a staged box (see [`text_box`]): slot `k` is the
+    /// range `STAGED + k..STAGED + k + 1`.
+    const STAGED: usize = usize::MAX / 2;
+
+    thread_local! {
+        /// Atoms and clusters of the boxes made by [`text_box`] that no AST
+        /// stores yet; [`settle`] moves them into the AST's paragraph storage.
+        static STAGE: RefCell<Vec<(Vec<GraphemeAtom>, Vec<ShapedCluster>)>> =
+            const { RefCell::new(Vec::new()) };
+    }
+
     /// A text box over `atoms`, one cluster per atom. The range is built
     /// without the `start <= end` assertion so out-of-order atoms can be tested.
+    ///
+    /// The box is *staged*: its atoms and clusters wait in a thread-local queue
+    /// until [`settle`] (called by every `with_*` builder and by [`tiled`])
+    /// lays all boxes out in the AST's storage with correct ranges.
     fn text_box(atoms: Vec<GraphemeAtom>) -> WordNode {
         let clusters = atoms
             .iter()
@@ -1617,13 +1700,90 @@ mod tests {
             },
             _ => TextRange::EMPTY,
         };
+        let slot = STAGE.with(|stage| {
+            let mut stage = stage.borrow_mut();
+            stage.push((atoms, clusters));
+            STAGED + stage.len() - 1
+        });
         WordNode::Box(BoxNode::Text {
             run_index: 0,
             byte_range,
-            atoms,
-            clusters,
+            atom_range: slot..slot + 1,
+            cluster_range: slot..slot + 1,
             natural_width: 0.0,
         })
+    }
+
+    /// Re-lays the paragraph storage of `a` in item order: every text box
+    /// (staged by [`text_box`] or already stored) gets its atoms and clusters
+    /// appended to its run's range, so ranges tile, boxes are consecutive per
+    /// run, and boxes dropped from `items` leave no storage behind. A box's
+    /// clusters keep their offsets relative to its first atom.
+    fn settle(a: &mut ParagraphAst) {
+        let (old_atoms, old_clusters) = (
+            std::mem::take(&mut a.atoms),
+            std::mem::take(&mut a.clusters),
+        );
+        // Per run: its atoms and clusters, plus each box's local starts.
+        let mut per_run = vec![(Vec::new(), Vec::new()); a.runs.len()];
+        let mut starts = Vec::new();
+        for node in &a.items {
+            let WordNode::Box(BoxNode::Text {
+                run_index,
+                atom_range,
+                cluster_range,
+                ..
+            }) = node
+            else {
+                continue;
+            };
+            let (atoms, clusters, first) = if atom_range.start >= STAGED {
+                let slot = atom_range.start - STAGED;
+                let (atoms, clusters) = STAGE.with(|stage| stage.borrow()[slot].clone());
+                (atoms, clusters, 0)
+            } else {
+                let clusters = old_clusters[cluster_range.clone()].to_vec();
+                let first = clusters.first().map_or(0, |c| c.atom_range.start);
+                (old_atoms[atom_range.clone()].to_vec(), clusters, first)
+            };
+            let (run_atoms, run_clusters) = &mut per_run[*run_index];
+            starts.push((
+                (run_atoms.len(), atoms.len()),
+                (run_clusters.len(), clusters.len()),
+            ));
+            let shift = run_atoms.len();
+            run_atoms.extend(atoms);
+            run_clusters.extend(clusters.into_iter().map(|mut c| {
+                c.atom_range = c.atom_range.start - first + shift..c.atom_range.end - first + shift;
+                c
+            }));
+        }
+        let (mut atom_at, mut cluster_at) = (0, 0);
+        let mut run_starts = Vec::new();
+        for (run, (atoms, clusters)) in a.runs.iter_mut().zip(per_run) {
+            run.atom_range = atom_at..atom_at + atoms.len();
+            run.cluster_range = cluster_at..cluster_at + clusters.len();
+            run_starts.push((atom_at, cluster_at));
+            (atom_at, cluster_at) = (run.atom_range.end, run.cluster_range.end);
+            a.atoms.extend(atoms);
+            a.clusters.extend(clusters);
+        }
+        let mut starts = starts.into_iter();
+        for node in &mut a.items {
+            if let WordNode::Box(BoxNode::Text {
+                run_index,
+                atom_range,
+                cluster_range,
+                ..
+            }) = node
+            {
+                let ((local_atom, n_atoms), (local_cluster, n_clusters)) = starts.next().unwrap();
+                let (run_atom, run_cluster) = run_starts[*run_index];
+                *atom_range = run_atom + local_atom..run_atom + local_atom + n_atoms;
+                *cluster_range =
+                    run_cluster + local_cluster..run_cluster + local_cluster + n_clusters;
+            }
+        }
     }
 
     fn run() -> crate::frontend::ShapingRun {
@@ -1642,16 +1802,20 @@ mod tests {
             locale: Default::default(),
             bidi_level: 0,
             decoration: Default::default(),
+            atom_range: 0..0,
+            cluster_range: 0..0,
         }
     }
 
     /// `items` exactly as given (the caller supplies the sentinel).
     fn with_raw_items(items: Vec<WordNode>) -> ParagraphAst {
-        ParagraphAst {
+        let mut a = ParagraphAst {
             runs: vec![run()],
             items,
             ..ast()
-        }
+        };
+        settle(&mut a);
+        a
     }
 
     /// `items` followed by the sentinel of a `len`-byte text.
@@ -1671,7 +1835,7 @@ mod tests {
     fn tiled(mut a: ParagraphAst) -> ParagraphAst {
         let mut items = Vec::new();
         let mut covered = 0;
-        for node in a.items {
+        for node in std::mem::take(&mut a.items) {
             let r = node.byte_span();
             if r.start > covered {
                 items.push(text_box(
@@ -1682,6 +1846,7 @@ mod tests {
             items.push(node);
         }
         a.items = items;
+        settle(&mut a);
         a
     }
 
@@ -1892,6 +2057,7 @@ mod tests {
         // It needs a text box on each side.
         let mut a = hyphenated(opportunity(1, 0, 0));
         a.items.remove(2);
+        settle(&mut a);
         assert_eq!(check_layout_inputs(&a, "abé", &constraints(), &o), bad);
     }
 
@@ -1982,6 +2148,7 @@ mod tests {
             if let WordNode::Box(BoxNode::Text { run_index, .. }) = &mut a.items[2] {
                 *run_index = tail_run;
             }
+            settle(&mut a);
             check_layout_inputs(&a, "abé", &constraints(), &o)
         };
         assert!(split(0).is_ok());
@@ -2008,6 +2175,7 @@ mod tests {
         if let WordNode::Box(BoxNode::Text { run_index, .. }) = &mut a.items[0] {
             *run_index = 1;
         }
+        settle(&mut a);
         assert_eq!(
             check_layout_inputs(&a, "abcd", &constraints(), &o),
             Err(LayoutInputError::InvalidHyphenOpportunity { item: 1 })
@@ -2068,9 +2236,7 @@ mod tests {
     fn a_non_finite_cluster_total_cannot_match_a_finite_cached_width() {
         let o = LayoutOptions::default();
         let mut a = with_items(vec![text_box(vec![atom(0, 1)])]);
-        if let WordNode::Box(BoxNode::Text { clusters, .. }) = &mut a.items[0] {
-            clusters[0].natural_width = f32::INFINITY;
-        }
+        a.clusters[0].natural_width = f32::INFINITY;
         assert_eq!(
             check_layout_inputs(&a, "abcd", &constraints(), &o),
             Err(LayoutInputError::InvalidTextWidth { item: 0 })
@@ -2129,20 +2295,13 @@ mod tests {
                 span_id: 1,
                 byte_range: TextRange::new(1, 3),
             }];
-            if let WordNode::Box(BoxNode::Text {
-                atoms, clusters, ..
-            }) = &mut a.items[0]
-            {
-                for (i, at) in atoms.iter_mut().enumerate() {
-                    let inside = (1..3).contains(&i);
-                    if (inside && flag_inside) || (!inside && flag_outside) {
-                        at.flags = AtomFlags::IN_ATOMIC_EDIT_SPAN;
-                    }
-                }
-                for c in clusters.iter_mut() {
-                    c.flags = AtomFlags::for_cluster(&atoms[c.atom_range.clone()]);
+            for (i, at) in a.atoms.iter_mut().enumerate() {
+                let inside = (1..3).contains(&i);
+                if (inside && flag_inside) || (!inside && flag_outside) {
+                    at.flags = AtomFlags::IN_ATOMIC_EDIT_SPAN;
                 }
             }
+            reaggregate_cluster_flags(&mut a);
             a
         };
         let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
@@ -2180,6 +2339,8 @@ mod tests {
         // A text box naming a run that does not exist.
         let mut a = with_items(vec![text_box(vec![atom(0, 1)])]);
         a.runs.clear();
+        a.atoms.clear();
+        a.clusters.clear();
         assert_eq!(
             check_layout_inputs(&a, "abcd", &constraints(), &o),
             Err(LayoutInputError::RunIndexOutOfRange { item: 0 })
@@ -2265,6 +2426,7 @@ mod tests {
         // Boxes are split at the chip's start: "a" | "b" - "é".
         a.items[0] = text_box(vec![atom(0, 1)]);
         a.items.insert(1, text_box(vec![atom(1, 2)]));
+        settle(&mut a);
         let mut over = chip(5, Clone);
         over.byte_range = TextRange::new(1, 4); // "b" and "é"
         a.decoration_spans = vec![over];
@@ -2345,28 +2507,22 @@ mod tests {
         assert_eq!(DiscretionaryNode::direct(3).byte_offset(), 3);
     }
 
-    /// A text box with every cluster 4 wide.
-    fn with_width(n: WordNode) -> WordNode {
-        match n {
-            WordNode::Box(BoxNode::Text {
-                run_index,
-                byte_range,
-                atoms,
-                mut clusters,
-                ..
-            }) => {
+    /// A staged text box (see [`text_box`]) with every cluster 4 wide.
+    fn with_width(mut n: WordNode) -> WordNode {
+        if let WordNode::Box(BoxNode::Text {
+            atom_range,
+            natural_width,
+            ..
+        }) = &mut n
+        {
+            let slot = atom_range.start - STAGED;
+            STAGE.with(|stage| {
+                let clusters = &mut stage.borrow_mut()[slot].1;
                 clusters.iter_mut().for_each(|c| c.natural_width = 4.0);
-                let natural_width = clusters.len() as f32 * 4.0;
-                WordNode::Box(BoxNode::Text {
-                    run_index,
-                    byte_range,
-                    atoms,
-                    clusters,
-                    natural_width,
-                })
-            }
-            other => other,
+                *natural_width = clusters.len() as f32 * 4.0;
+            });
         }
+        n
     }
 
     #[test]
@@ -2396,12 +2552,14 @@ mod tests {
         // A non-zero delta needs the text box it applies to.
         let mut a = adjust(-1.0, 0.0);
         a.items.remove(0);
+        settle(&mut a);
         assert_eq!(
             check(a),
             Err(LayoutInputError::InvalidDiscretionary { item: 0 })
         );
         let mut a = adjust(0.0, -1.0);
         a.items.remove(2);
+        settle(&mut a);
         assert_eq!(check(a), bad);
         // A delta on one side needs no neighbour on the other.
         let mut a = adjust(-1.0, 0.0);
@@ -2409,30 +2567,31 @@ mod tests {
         assert!(check(tiled(a)).is_ok());
     }
 
+    /// Recomputes every cluster's flags from its atoms.
+    fn reaggregate_cluster_flags(a: &mut ParagraphAst) {
+        for run in &a.runs {
+            let atoms = &a.atoms[run.atom_range.clone()];
+            for c in &mut a.clusters[run.cluster_range.clone()] {
+                c.flags = AtomFlags::for_cluster(&atoms[c.atom_range.clone()]);
+            }
+        }
+    }
+
     /// Sets `IN_ATOMIC_EDIT_SPAN` on exactly the atoms inside an atomic span, as
     /// the frontend does, and re-aggregates the cluster flags to match.
     fn flag_atomic(a: &mut ParagraphAst) {
         let spans = a.atomic_spans.clone();
-        for n in &mut a.items {
-            if let WordNode::Box(BoxNode::Text {
-                atoms, clusters, ..
-            }) = n
-            {
-                for at in atoms.iter_mut() {
-                    let inside = spans
-                        .iter()
-                        .any(|s| s.byte_range.contains_range(at.byte_range));
-                    at.flags = if inside {
-                        AtomFlags::IN_ATOMIC_EDIT_SPAN
-                    } else {
-                        AtomFlags::EMPTY
-                    };
-                }
-                for c in clusters.iter_mut() {
-                    c.flags = AtomFlags::for_cluster(&atoms[c.atom_range.clone()]);
-                }
-            }
+        for at in &mut a.atoms {
+            let inside = spans
+                .iter()
+                .any(|s| s.byte_range.contains_range(at.byte_range));
+            at.flags = if inside {
+                AtomFlags::IN_ATOMIC_EDIT_SPAN
+            } else {
+                AtomFlags::EMPTY
+            };
         }
+        reaggregate_cluster_flags(a);
     }
 
     fn bnd(id: u64, edge: SpanEdge, at: usize) -> WordNode {
@@ -2682,15 +2841,11 @@ mod tests {
             let mut rtl_run = run();
             rtl_run.bidi_level = 1;
             a.runs.push(rtl_run);
-            if let WordNode::Box(BoxNode::Text {
-                run_index,
-                clusters,
-                ..
-            }) = &mut a.items[2]
-            {
+            if let WordNode::Box(BoxNode::Text { run_index, .. }) = &mut a.items[2] {
                 *run_index = 1;
-                clusters[0].bidi_level = 1;
             }
+            a.clusters[1].bidi_level = 1;
+            settle(&mut a);
             a.decoration_spans = vec![chip(5, Slice)];
             a
         };
