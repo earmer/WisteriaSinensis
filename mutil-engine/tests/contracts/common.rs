@@ -116,6 +116,50 @@ pub fn boxed(ast: &mut ParagraphAst, s: usize, e: usize, atomic: bool) -> WordNo
     push_text(ast, 0, atoms, clusters)
 }
 
+/// "x" followed by `n` one-byte boxes `"a"` joined by `Hyphenate`
+/// discretionaries, all in run 0: the hyphen chain spans bytes `1..n + 1`, and a
+/// `Direct` break keeps the `x` box out of it. The opportunity between box `k`
+/// and box `k + 1` (offset `k + 2`) takes the cuts `cut(offset, n)` returns as
+/// `(prefix_cut_bytes, suffix_cut_bytes)`.
+pub fn hyphen_chain_ast(
+    n: usize,
+    cut: impl Fn(usize, usize) -> (u32, u32),
+) -> (String, ParagraphAst) {
+    let t = format!("x{}", "a".repeat(n));
+    let mut a = ast(&t);
+    rebuild_items(&mut a, |a| {
+        let mut items = vec![boxed(a, 0, 1, false)];
+        items.push(WordNode::Discretionary(DiscretionaryNode::direct(1)));
+        for k in 0..n {
+            if k > 0 {
+                let offset = k + 1;
+                let (prefix_cut_bytes, suffix_cut_bytes) = cut(offset, n);
+                items.push(WordNode::Discretionary(DiscretionaryNode {
+                    no_break_spacing: 0.0,
+                    byte_range: TextRange::empty_at(offset),
+                    penalty: DiscretionaryNode::HYPHEN_PENALTY,
+                    flagged: true,
+                    pre_break_width: 5.0,
+                    post_break_width: 0.0,
+                    no_break_width: 0.0,
+                    action: BreakAction::Hyphenate(HyphenOpportunity {
+                        byte_offset: offset,
+                        prefix_replacement: None,
+                        suffix_replacement: None,
+                        prefix_cut_bytes,
+                        suffix_cut_bytes,
+                    }),
+                    cloned_spans: Default::default(),
+                }));
+            }
+            items.push(boxed(a, k + 1, k + 2, false));
+        }
+        items.push(end(t.len()));
+        items
+    });
+    (t, a)
+}
+
 /// Empties the paragraph's items and text storage (atoms, clusters and every
 /// body run's ranges), runs `build` to refill them through [`push_text`] /
 /// [`boxed`], and installs the items it returns.

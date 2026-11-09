@@ -195,3 +195,47 @@ fn explicit_spacing_and_discretionary_equations() {
     }
     assert!(check(&a, "a").is_err());
 }
+
+/// Every opportunity of a long single-run chain cuts back to the chain start
+/// and forward to its end.
+#[test]
+fn a_long_hyphen_chain_accepts_cuts_across_the_whole_chain() {
+    let n = 2000;
+    let (t, a) = hyphen_chain_ast(n, |offset, n| {
+        ((offset - 1) as u32, (n + 1 - offset) as u32)
+    });
+    assert!(check(&a, &t).is_ok());
+}
+
+#[test]
+fn a_hyphen_cut_one_byte_past_the_chain_start_is_rejected() {
+    let n = 2000;
+    let middle = n / 2;
+    let (t, a) = hyphen_chain_ast(n, |offset, n| {
+        let past_start = if offset == middle { offset } else { offset - 1 };
+        (past_start as u32, (n + 1 - offset) as u32)
+    });
+    let Err(LayoutInputError::InvalidHyphenOpportunity { item }) = check(&a, &t) else {
+        panic!("expected InvalidHyphenOpportunity");
+    };
+    // Items: x, Direct, then box / Hyphenate pairs; the opportunity at offset
+    // `middle` follows box `middle - 2`.
+    assert_eq!(item, 2 + 2 * (middle - 1) - 1);
+}
+
+#[test]
+fn a_hyphen_cut_one_byte_past_the_chain_end_is_rejected() {
+    let n = 50;
+    let (t, a) = hyphen_chain_ast(n, |offset, n| {
+        let past_end = if offset == 10 {
+            n + 2 - offset
+        } else {
+            n + 1 - offset
+        };
+        ((offset - 1) as u32, past_end as u32)
+    });
+    assert!(matches!(
+        check(&a, &t),
+        Err(LayoutInputError::InvalidHyphenOpportunity { .. })
+    ));
+}

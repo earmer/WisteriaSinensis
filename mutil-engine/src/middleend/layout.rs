@@ -206,81 +206,58 @@ fn text_at(
     Some((view.run_index, view.byte_range, view.atoms))
 }
 
-/// The atom boundaries a hyphenation cut may land on, on one side of the
-/// opportunity at `items[index]`: those of the **contiguous same-run word
-/// chain** that starts at the neighbouring text box (`items[index - 1]`, going
-/// backwards, or `items[index + 1]`, going forwards) and continues through
-/// further text boxes of the **same `run_index`** joined solely by
-/// `BreakAction::Hyphenate` discretionaries that meet the boxes end to end. The
-/// chain stops at glue, a tab, an inline object, a span boundary, a run change
-/// or any other discretionary: `TextShaper::reshape_window` takes one
-/// `ShapingRun`, and a box cannot straddle a span boundary.
+/// Byte bounds of the **hyphen chain** of every text box, indexed by item
+/// (entries of other items are unspecified). A chain is a maximal sequence of
+/// text boxes of the **same `run_index`** joined solely by
+/// `BreakAction::Hyphenate` discretionaries that meet the boxes end to end. It
+/// stops at glue, a tab, an inline object, a span boundary, a run change or any
+/// other discretionary: `TextShaper::reshape_window` takes one `ShapingRun`,
+/// and a box cannot straddle a span boundary.
 ///
-/// Returns the chain's far byte bound (its start going backwards, its end going
-/// forwards) and its atom boundaries (starts and ends), or `None` when there is
-/// no neighbouring text box.
-fn hyphen_chain(
-    ast: &ParagraphAst,
-    index: usize,
-    backwards: bool,
-    target: usize,
-) -> Option<(usize, Vec<usize>)> {
-    let step = |i: usize| {
-        if backwards {
-            i.checked_sub(1)
-        } else {
-            i.checked_add(1)
-        }
-    };
-    let mut cursor = step(index);
-    let (run, mut range, atoms) = text_at(ast, cursor)?;
-    let mut bound = if backwards { range.start } else { range.end };
-    let mut edges: Vec<usize> = atoms
+/// Built in two passes over the items, so the cost is linear however long a
+/// chain is.
+fn hyphen_chains(ast: &ParagraphAst) -> Vec<(usize, usize)> {
+    let items = &ast.items;
+    let mut chains: Vec<(usize, usize)> = items
         .iter()
-        .flat_map(|a| [a.byte_range.start, a.byte_range.end])
+        .enumerate()
+        .map(|(i, _)| text_at(ast, Some(i)).map_or((0, 0), |(_, r, _)| (r.start, r.end)))
         .collect();
-    // The walk ends once the chain reaches `target`, so a short cut never scans
-    // a long chain (validation stays linear overall). `items[cursor]` is the
-    // last text box added; look past it for a `Hyphenate` joining it to another
-    // text box of the same run.
-    let reached = |bound: usize| {
-        if backwards {
-            bound <= target
-        } else {
-            bound >= target
-        }
-    };
-    while !reached(bound) {
-        let Some(disc_at) = cursor.and_then(step) else {
-            break;
-        };
-        let Some(WordNode::Discretionary(d)) = ast.items.get(disc_at) else {
-            break;
+    // `items[i]`, `items[i + 1]`, `items[i + 2]` are text, `Hyphenate`, text of
+    // one run, meeting end to end.
+    let linked = |i: usize| -> bool {
+        let Some(WordNode::Discretionary(d)) = items.get(i + 1) else {
+            return false;
         };
         if !matches!(d.action, BreakAction::Hyphenate(_)) {
-            break;
+            return false;
         }
-        let Some((next_run, next, next_atoms)) = text_at(ast, step(disc_at)) else {
-            break;
+        let (Some((run, left, _)), Some((next_run, right, _))) =
+            (text_at(ast, Some(i)), text_at(ast, Some(i + 2)))
+        else {
+            return false;
         };
-        let meets = if backwards {
-            next.end == d.byte_range.start && d.byte_range.end == range.start
-        } else {
-            range.end == d.byte_range.start && d.byte_range.end == next.start
-        };
-        if next_run != run || !meets {
-            break;
+        run == next_run && left.end == d.byte_range.start && d.byte_range.end == right.start
+    };
+    for i in 2..items.len() {
+        if linked(i - 2) {
+            chains[i].0 = chains[i - 2].0;
         }
-        edges.extend(
-            next_atoms
-                .iter()
-                .flat_map(|a| [a.byte_range.start, a.byte_range.end]),
-        );
-        bound = if backwards { next.start } else { next.end };
-        range = next;
-        cursor = step(disc_at);
     }
-    Some((bound, edges))
+    for i in (0..items.len().saturating_sub(2)).rev() {
+        if linked(i) {
+            chains[i].1 = chains[i + 2].1;
+        }
+    }
+    chains
+}
+
+/// Whether `atoms` (byte-ordered) has an atom starting or ending at `offset`.
+fn is_atom_boundary(atoms: &[GraphemeAtom], offset: usize) -> bool {
+    let at = atoms.partition_point(|a| a.byte_range.end < offset);
+    atoms
+        .get(at)
+        .is_some_and(|a| a.byte_range.start == offset || a.byte_range.end == offset)
 }
 
 /// Whether a hyphenation discretionary at `items[index]` is well formed: its
@@ -289,12 +266,13 @@ fn hyphen_chain(
 /// within a single `ShapingRun`, and the hyphen glyph and
 /// `TextShaper::reshape_window` are scoped to one), and each cut stays within,
 /// and ends on an atom boundary of, the contiguous same-run hyphen-connected
-/// chain of text boxes on its side (see [`hyphen_chain`]). A cut may therefore
+/// chain of text boxes on its side (see [`hyphen_chains`]). A cut may therefore
 /// cross an unchosen hyphenation point of the same word (a spelling change
 /// reaching two bytes back across a point one byte away) but never a run or
 /// span boundary.
 fn hyphen_valid(
     ast: &ParagraphAst,
+    chains: &[(usize, usize)],
     index: usize,
     d: &DiscretionaryNode,
     h: &HyphenOpportunity,
@@ -321,16 +299,11 @@ fn hyphen_valid(
     ) else {
         return false;
     };
-    let (Some((left_bound, left_edges)), Some((right_bound, right_edges))) = (
-        hyphen_chain(ast, index, true, prefix),
-        hyphen_chain(ast, index, false, suffix),
-    ) else {
-        return false;
-    };
-    prefix >= left_bound
-        && left_edges.contains(&prefix)
-        && suffix <= right_bound
-        && right_edges.contains(&suffix)
+    let atoms = ast.run_atoms(prev_run);
+    prefix >= chains[index - 1].0
+        && suffix <= chains[index + 1].1
+        && is_atom_boundary(atoms, prefix)
+        && is_atom_boundary(atoms, suffix)
 }
 
 fn fits(text: &str, r: crate::types::TextRange) -> bool {
@@ -338,18 +311,6 @@ fn fits(text: &str, r: crate::types::TextRange) -> bool {
         && r.end <= text.len()
         && text.is_char_boundary(r.start)
         && text.is_char_boundary(r.end)
-}
-
-/// The offsets an atomic span may start or end at: the start or end of a text
-/// atom or of an inline object. Glue, tabs and line terminators contribute
-/// none, so an edge inside whitespace (or on an unowned offset) is rejected.
-fn atomic_edges(ast: &ParagraphAst) -> std::collections::HashSet<usize> {
-    let mut edges = std::collections::HashSet::new();
-    for r in concrete_content(ast) {
-        edges.insert(r.start);
-        edges.insert(r.end);
-    }
-    edges
 }
 
 /// The byte ranges of concrete content: every text atom and inline object.
@@ -403,8 +364,16 @@ fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
         }
         stack.push(r);
     }
-    let edges = atomic_edges(ast);
     let content = concrete_content(ast);
+    // The offsets an atomic span may start or end at: the start or end of a
+    // text atom or of an inline object. Glue, tabs and line terminators
+    // contribute none, so an edge inside whitespace is rejected.
+    let is_edge = |offset: usize| {
+        let at = content.partition_point(|r| r.end < offset);
+        content
+            .get(at)
+            .is_some_and(|r| r.start == offset || r.end == offset)
+    };
     let mut content_at = 0;
     ids.clear();
     for (span, s) in ast.atomic_spans.iter().enumerate() {
@@ -415,8 +384,8 @@ fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
             || s.byte_range.is_empty()
             || !fits(text, s.byte_range)
             || (span > 0 && ast.atomic_spans[span - 1].byte_range.end > s.byte_range.start)
-            || !edges.contains(&s.byte_range.start)
-            || !edges.contains(&s.byte_range.end)
+            || !is_edge(s.byte_range.start)
+            || !is_edge(s.byte_range.end)
             || !content
                 .get(content_at)
                 .is_some_and(|r| !r.is_empty() && s.byte_range.contains_range(*r))
@@ -449,7 +418,9 @@ fn cluster_measurements_are_valid(cluster: &ShapedCluster) -> bool {
 /// Indexed span membership for item checks; nesting is bounded by eight.
 struct SpanIndex {
     by_id: std::collections::HashMap<u64, usize>,
-    touching: Vec<Vec<usize>>,
+    /// Span indices touching item `i`: `touching_flat[touching_start[i]..touching_start[i + 1]]`.
+    touching_flat: Vec<usize>,
+    touching_start: Vec<usize>,
     levels: Vec<(Option<BidiLevel>, Option<BidiLevel>)>,
 }
 impl SpanIndex {
@@ -460,7 +431,8 @@ impl SpanIndex {
             .enumerate()
             .map(|(i, s)| (s.span_id, i))
             .collect();
-        let mut touching = Vec::with_capacity(ast.items.len());
+        let mut touching_flat = Vec::new();
+        let mut touching_start = Vec::with_capacity(ast.items.len() + 1);
         let mut levels = vec![(None, None); ast.decoration_spans.len()];
         let (mut next, mut active) = (0, Vec::<usize>::new());
         for (item, node) in ast.items.iter().enumerate() {
@@ -487,13 +459,21 @@ impl SpanIndex {
                     }
                 }
             }
-            touching.push(active.clone());
+            touching_start.push(touching_flat.len());
+            touching_flat.extend_from_slice(&active);
         }
+        touching_start.push(touching_flat.len());
         Self {
             by_id,
-            touching,
+            touching_flat,
+            touching_start,
             levels,
         }
+    }
+
+    /// Indices into `decoration_spans` of the spans touching `items[item]`.
+    fn touching(&self, item: usize) -> &[usize] {
+        &self.touching_flat[self.touching_start[item]..self.touching_start[item + 1]]
     }
 }
 
@@ -568,7 +548,7 @@ fn check_span_enclosure(ast: &ParagraphAst, index: &SpanIndex) -> Result<(), Lay
     }
     for (item, node) in ast.items.iter().enumerate() {
         let item_range = node.byte_span();
-        for &span_index in &index.touching[item] {
+        for &span_index in index.touching(item) {
             let span = &ast.decoration_spans[span_index];
             if matches!(node, WordNode::Box(BoxNode::SpanBoundary { span_id, .. }) if *span_id == span.span_id)
             {
@@ -633,14 +613,9 @@ fn span_enclosure_is_allowed(
     false
 }
 
-fn check_boundary_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
+fn check_boundary_order(ast: &ParagraphAst, index: &SpanIndex) -> Result<(), LayoutInputError> {
     use LayoutInputError as E;
-    let by_id: std::collections::HashMap<_, _> = ast
-        .decoration_spans
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.span_id, i))
-        .collect();
+    let by_id = &index.by_id;
     let mut open_spans = Vec::new();
     let mut seen_leading_spans = std::collections::HashSet::new();
     for (item, node) in ast.items.iter().enumerate() {
@@ -757,6 +732,7 @@ pub fn check_layout_inputs(
     }
     check_item_order(ast)?;
     let span_index = SpanIndex::new(ast);
+    let chains = hyphen_chains(ast);
     let mut atomic_at = 0;
     let last_disc = ast.items.iter().rposition(|n| n.is_break_opportunity());
     for (item, node) in ast.items.iter().enumerate() {
@@ -920,7 +896,8 @@ pub fn check_layout_inputs(
                         && sp.byte_range.start < off
                         && off < sp.byte_range.end
                 };
-                if span_index.touching[item]
+                if span_index
+                    .touching(item)
                     .iter()
                     .map(|&i| &ast.decoration_spans[i])
                     .any(|sp| cut_by_break(sp) && !d.cloned_spans.contains(&sp.span_id))
@@ -952,7 +929,9 @@ pub fn check_layout_inputs(
                 let near =
                     |a: f64, b: f64| (a - b).abs() <= 1e-3_f64.max(1e-5 * a.abs().max(b.abs()));
                 match &d.action {
-                    BreakAction::Hyphenate(h) if !d.flagged || !hyphen_valid(ast, item, d, h) => {
+                    BreakAction::Hyphenate(h)
+                        if !d.flagged || !hyphen_valid(ast, &chains, item, d, h) =>
+                    {
                         return Err(E::InvalidHyphenOpportunity { item });
                     }
                     // A hyphenation's net deltas are its reshaping deltas.
@@ -1024,7 +1003,7 @@ pub fn check_layout_inputs(
             return Err(E::InvalidStrut);
         }
     }
-    check_boundary_order(ast)?;
+    check_boundary_order(ast, &span_index)?;
     check_span_enclosure(ast, &span_index)?;
     // Item order makes each empty range a boundary of the coverage cursor.
     let mut covered = 0;
@@ -2647,7 +2626,7 @@ mod tests {
         nested.decoration_spans[1].byte_range = TextRange::new(1, 3);
         nested.decoration_spans[0].byte_range = TextRange::new(1, 4);
         assert_eq!(
-            check_boundary_order(&nested),
+            check_boundary_order(&nested, &SpanIndex::new(&nested)),
             Ok(()),
             "inner span closes first"
         );

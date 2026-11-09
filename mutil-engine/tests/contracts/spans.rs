@@ -63,6 +63,32 @@ fn five_thousand_spans_scale_linearly() {
     );
 }
 
+#[test]
+#[ignore = "manual release-mode benchmark; elapsed-time ratios are unsuitable for regular CI"]
+fn long_hyphen_chains_scale_linearly() {
+    fn measure(n: usize) -> std::time::Duration {
+        let (t, a) = hyphen_chain_ast(n, |offset, n| {
+            ((offset - 1) as u32, (n + 1 - offset) as u32)
+        });
+        assert!(check(&a, &t).is_ok());
+        (0..3)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                assert!(std::hint::black_box(check(std::hint::black_box(&a), &t)).is_ok());
+                start.elapsed()
+            })
+            .min()
+            .unwrap()
+    }
+    let small = measure(1250);
+    let large = measure(5000);
+    eprintln!("1250: {small:?}; 5000: {large:?}");
+    assert!(
+        large.as_secs_f64() / small.as_secs_f64() < 7.,
+        "4x chain length should approach 4x work, not 16x"
+    );
+}
+
 fn decorated(ranges: &[(usize, usize)]) -> ParagraphAst {
     let mut a = ast("abcd");
     rebuild_items(&mut a, |_| vec![]);
