@@ -81,7 +81,7 @@ fn orientation_and_tcy_matrix() {
     );
     assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
     a.items.remove(1);
-    assert!(check(&a, "ab").is_ok());
+    assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
     a.atoms[0].orientation = GlyphOrientation::VerticalSideways;
     assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
 }
@@ -214,5 +214,71 @@ fn vertical_rl_over_annotation_needs_line_relative_ascent() {
     assert_eq!(
         p.validate("a", None, &ctx()),
         Err((0, LineInvariantError::InvalidAnnotation { index: 0 }))
+    );
+}
+
+/// A "25" TCY run in `VerticalRl`: one box, one cluster over both atoms.
+fn tcy_ast() -> ParagraphAst {
+    let mut a = ast("25");
+    orient(
+        &mut a,
+        WritingMode::VerticalRl,
+        GlyphOrientation::HorizontalInVertical,
+        0,
+    );
+    edit_text_box(&mut a, 0, |_, clusters| {
+        let mut merged = clusters[0].clone();
+        merged.byte_range = TextRange::new(0, 2);
+        merged.atom_range = 0..2;
+        merged.glyphs.extend(clusters[1].glyphs.clone());
+        merged.natural_width = 2.;
+        *clusters = vec![merged];
+    });
+    a
+}
+
+#[test]
+fn tcy_run_with_one_box_and_one_cluster_is_accepted() {
+    assert!(check(&tcy_ast(), "25").is_ok());
+}
+
+#[test]
+fn tcy_run_split_across_two_boxes_is_rejected() {
+    let mut a = ast("25");
+    rebuild_items(&mut a, |b| {
+        vec![
+            boxed(b, 0, 1, false),
+            WordNode::Box(BoxNode::SpanBoundary {
+                byte_range: TextRange::empty_at(1),
+                span_id: 0,
+                edge: SpanEdge::Trailing,
+                width: 0.,
+                bidi_level: 0,
+            }),
+            boxed(b, 1, 2, false),
+            end(2),
+        ]
+    });
+    orient(
+        &mut a,
+        WritingMode::VerticalRl,
+        GlyphOrientation::HorizontalInVertical,
+        0,
+    );
+    assert_eq!(check(&a, "25"), Err(LayoutInputError::OrientationMismatch));
+}
+
+#[test]
+fn tcy_box_covering_part_of_the_run_is_rejected() {
+    let mut a = tcy_ast();
+    let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[0] else {
+        panic!("not a text box");
+    };
+    atom_range.end = 1;
+    // With one box per TCY run, storage coverage already forces the box to
+    // span the whole run, so the uncovered atom is the reported error.
+    assert_eq!(
+        check(&a, "25"),
+        Err(LayoutInputError::InvalidRunStorage { run: 0 })
     );
 }

@@ -124,6 +124,14 @@ pub trait TextShaper: Send + Sync {
     /// settings from `run` but ignore `run.atom_range` and `run.cluster_range`,
     /// which locate the slices in the AST and are not meaningful to a shaper.
     ///
+    /// **Tate-chu-yoko.** For a run whose `orientation` is
+    /// [`GlyphOrientation::HorizontalInVertical`](crate::types::GlyphOrientation::HorizontalInVertical), the backend returns exactly
+    /// one cluster covering all of the run's atoms (`atom_range ==
+    /// 0..atoms.len()`), with every glyph in logical order, `natural_width`
+    /// the run's total advance in the vertical line's inline direction, and
+    /// both `safe_to_*_before` flags as for the start of the run. The backend
+    /// merges per-character shaping clusters itself.
+    ///
     /// `text` is the **whole paragraph text**, with `run.byte_range` selecting
     /// the run, so that cluster byte offsets are absolute paragraph indices and
     /// need no translation between layers. The backend may use the text outside
@@ -162,6 +170,9 @@ pub trait TextShaper: Send + Sync {
     ///   replacing the clusters whose `atom_range` lies inside the window.
     /// * The output clusters partition exactly the atoms inside the window, in
     ///   logical order, and never split an atom.
+    /// * For a run whose `orientation` is
+    ///   [`GlyphOrientation::HorizontalInVertical`](crate::types::GlyphOrientation::HorizontalInVertical) the output is exactly one
+    ///   cluster covering the whole window, shaped as `shape_run` specifies.
     /// * A window that carries a hyphen (`AppendHyphen`, `ReplacePrefix`)
     ///   must contain at least one atom, since the hyphen's glyphs attach to
     ///   the window's last cluster.

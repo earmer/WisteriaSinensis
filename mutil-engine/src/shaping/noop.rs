@@ -11,7 +11,8 @@ use smallvec::SmallVec;
 
 /// Returns empty data and all-zero metrics. Performs no shaping, measurement or
 /// font selection: every request reports "no glyphs, no ligature carets,
-/// `FontId(0)` with zero metrics".
+/// `FontId(0)` with zero metrics". As a test double it is exempt from the
+/// one-cluster contract for tate-chu-yoko runs: it returns no clusters at all.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopShaper;
 

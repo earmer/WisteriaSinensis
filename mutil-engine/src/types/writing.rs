@@ -109,7 +109,13 @@ pub enum GlyphOrientation {
     VerticalUpright,
     /// Horizontal shaping rotated clockwise.
     VerticalSideways,
-    /// One indivisible horizontal group embedded in vertical text.
+    /// One indivisible horizontal group embedded in vertical text
+    /// (tate-chu-yoko).
+    ///
+    /// A run with this orientation is shaped into exactly one cluster covering
+    /// all of its atoms (see [`TextShaper::shape_run`](crate::TextShaper::shape_run)),
+    /// and is referenced by exactly one text box that spans the whole run, so
+    /// no line break can fall inside it.
     HorizontalInVertical,
 }
 impl GlyphOrientation {

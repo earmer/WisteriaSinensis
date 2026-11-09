@@ -1368,16 +1368,26 @@ fn check_extensions(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputErr
     let mut atom_ends = HashMap::new();
     let mut cluster_edges = HashSet::new();
     let mut forbidden = 0usize;
+    let mut tcy_runs = HashSet::new();
     for (item, node) in ast.items.iter().enumerate() {
         match node {
-            WordNode::Box(BoxNode::Text { run_index, .. }) => {
+            WordNode::Box(BoxNode::Text {
+                run_index,
+                atom_range,
+                cluster_range,
+                ..
+            }) => {
                 let run = ast
                     .runs
                     .get(*run_index)
                     .ok_or(E::RunIndexOutOfRange { item })?;
                 let view = ast.text_box(item).ok_or(E::ItemNotSelfContained { item })?;
                 let (atoms, clusters) = (view.atoms, view.clusters);
-                if run.orientation == GlyphOrientation::HorizontalInVertical && clusters.len() != 1
+                if run.orientation == GlyphOrientation::HorizontalInVertical
+                    && (clusters.len() != 1
+                        || !tcy_runs.insert(*run_index)
+                        || *atom_range != run.atom_range
+                        || *cluster_range != run.cluster_range)
                 {
                     return Err(E::OrientationMismatch);
                 }
