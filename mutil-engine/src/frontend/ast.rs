@@ -391,19 +391,18 @@ pub enum WordNode {
 impl WordNode {
     /// The source bytes this node covers: the stored range for every variant
     /// (a `Discretionary` owns its `byte_range`: empty for a soft opportunity,
-    /// the newline for a hard break). Always `Some`; the `Option` is kept for
-    /// call-site compatibility with earlier revisions in which atom-derived
-    /// spans could be missing.
+    /// the newline for a hard break). Zero-width nodes report an empty
+    /// `offset..offset` range, so every node has a position in the source.
     #[must_use]
-    pub fn byte_span(&self) -> Option<TextRange> {
-        Some(match self {
+    pub fn byte_span(&self) -> TextRange {
+        match self {
             Self::Box(BoxNode::Text { byte_range, .. })
             | Self::Box(BoxNode::InlineObject { byte_range, .. })
             | Self::Box(BoxNode::SpanBoundary { byte_range, .. })
             | Self::Glue(GlueNode { byte_range, .. })
             | Self::Tab { byte_range } => *byte_range,
             Self::Discretionary(d) => d.byte_range,
-        })
+        }
     }
 
     /// `true` for the only node a line may end at.

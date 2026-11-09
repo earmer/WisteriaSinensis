@@ -333,8 +333,7 @@ fn every_word_node_variant_is_constructible() {
             },
             WordNode::Glue(_) | WordNode::Discretionary(_) | WordNode::Tab { .. } => {}
         }
-        // Every node reports a span; only a discretionary is a break opportunity.
-        assert!(n.byte_span().is_some());
+        // Only a discretionary is a break opportunity.
         assert_eq!(
             n.is_break_opportunity(),
             matches!(n, WordNode::Discretionary(_))
@@ -343,8 +342,8 @@ fn every_word_node_variant_is_constructible() {
     assert_eq!(nodes.len(), 7);
     // A soft discretionary owns no bytes: its span is empty at the break. A
     // hard break owns its newline.
-    assert_eq!(nodes[4].byte_span(), Some(TextRange::empty_at(5)));
-    assert_eq!(nodes[5].byte_span(), Some(TextRange::new(6, 7)));
+    assert_eq!(nodes[4].byte_span(), TextRange::empty_at(5));
+    assert_eq!(nodes[5].byte_span(), TextRange::new(6, 7));
     // Break actions are exhaustive too.
     let actions = [
         BreakAction::Direct,

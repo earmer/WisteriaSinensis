@@ -554,7 +554,7 @@ impl SpanIndex {
         let mut levels = vec![(None, None); ast.decoration_spans.len()];
         let (mut next, mut active) = (0, Vec::<usize>::new());
         for node in &ast.items {
-            let r = node.byte_span().unwrap_or(TextRange::EMPTY);
+            let r = node.byte_span();
             active.retain(|&i| ast.decoration_spans[i].byte_range.end >= r.start);
             while next < ast.decoration_spans.len()
                 && ast.decoration_spans[next].byte_range.start <= r.end
@@ -607,19 +607,15 @@ fn edge_cluster_width(items: &[WordNode], index: Option<usize>, last: bool) -> O
 /// the line that ends there): `[Glue(CjkAutospace), Discretionary]`.
 fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     for (i, w) in ast.items.windows(2).enumerate() {
-        if let (Some(prev), Some(next)) = (w[0].byte_span(), w[1].byte_span()) {
-            if prev.end > next.start {
-                return Err(LayoutInputError::ItemsOutOfOrder { item: i + 1 });
-            }
+        if w[0].byte_span().end > w[1].byte_span().start {
+            return Err(LayoutInputError::ItemsOutOfOrder { item: i + 1 });
         }
     }
     // Offset of the break opportunity seen in the current run of zero-width
     // nodes, if any.
     let mut break_opportunity_offset: Option<usize> = None;
     for (item, node) in ast.items.iter().enumerate() {
-        let Some(range) = node.byte_span() else {
-            continue;
-        };
+        let range = node.byte_span();
         if !range.is_empty() || break_opportunity_offset != Some(range.start) {
             break_opportunity_offset = None;
         }
@@ -661,7 +657,7 @@ fn check_span_enclosure(ast: &ParagraphAst, index: &SpanIndex) -> Result<(), Lay
         }
     }
     for (item, node) in ast.items.iter().enumerate() {
-        let item_range = node.byte_span().unwrap();
+        let item_range = node.byte_span();
         for &span_index in &index.touching[item] {
             let span = &ast.decoration_spans[span_index];
             if matches!(node, WordNode::Box(BoxNode::SpanBoundary { span_id, .. }) if *span_id == span.span_id)
@@ -844,9 +840,8 @@ pub fn check_layout_inputs(
     // unboundedly for a malformed AST. The per-item loop below may assume every
     // item already fits inside `text`.
     for (item, node) in ast.items.iter().enumerate() {
-        match node.byte_span() {
-            Some(span) if fits(text, span) => {}
-            _ => return Err(E::ItemOutsideText { item }),
+        if !fits(text, node.byte_span()) {
+            return Err(E::ItemOutsideText { item });
         }
     }
     check_item_order(ast)?;
@@ -1110,10 +1105,7 @@ pub fn check_layout_inputs(
     }
     // No content at all on non-empty text is unowned source.
     if !text.is_empty() {
-        let has_content = ast
-            .items
-            .iter()
-            .any(|n| n.byte_span().map(|r| !r.is_empty()).unwrap_or(false));
+        let has_content = ast.items.iter().any(|n| !n.byte_span().is_empty());
         if !has_content {
             return Err(E::ItemOutsideText { item: 0 });
         }
@@ -1138,7 +1130,7 @@ pub fn check_layout_inputs(
     // Item order makes each empty range a boundary of the coverage cursor.
     let mut covered = 0;
     for (item, node) in ast.items.iter().enumerate() {
-        let r = node.byte_span().unwrap();
+        let r = node.byte_span();
         if r.start != covered {
             return Err(E::ItemOutsideText { item });
         }
@@ -1210,8 +1202,7 @@ pub fn layout_paragraph(
             .items
             .iter()
             .find(|item| item.is_break_opportunity())
-            .and_then(WordNode::byte_span)
-            .map_or(text.len(), |span| span.start);
+            .map_or(text.len(), |item| item.byte_span().start);
         let mut required = initial;
         for item in ast
             .items
@@ -1783,7 +1774,7 @@ mod tests {
         let mut items = Vec::new();
         let mut covered = 0;
         for node in a.items {
-            let r = node.byte_span().unwrap();
+            let r = node.byte_span();
             if r.start > covered {
                 items.push(text_box(
                     (covered..r.start).map(|i| atom(i, i + 1)).collect(),
@@ -1809,7 +1800,7 @@ mod tests {
                 .items
                 .iter()
                 .position(|n| {
-                    let r = n.byte_span().unwrap();
+                    let r = n.byte_span();
                     let seam = n.is_break_opportunity()
                         || matches!(n, WordNode::Glue(g) if g.kind == GlueKind::CjkAutospace);
                     r.start >= sp.byte_range.start
@@ -1823,7 +1814,7 @@ mod tests {
             let at = a
                 .items
                 .iter()
-                .position(|n| n.byte_span().unwrap().start >= sp.byte_range.end)
+                .position(|n| n.byte_span().start >= sp.byte_range.end)
                 .unwrap_or(a.items.len() - 1);
             a.items
                 .insert(at, bnd(sp.span_id, SpanEdge::Trailing, sp.byte_range.end));
