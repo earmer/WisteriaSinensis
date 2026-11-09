@@ -466,6 +466,19 @@ pub enum LineInvariantError {
         /// The line's `line_height`.
         actual: f32,
     },
+    /// Under `LineHeight::Fixed`, `ascent` or `descent` differs from the
+    /// strut's. A fixed line box never grows for annotations; they overflow
+    /// into the inter-line space.
+    LineMetricsMismatch {
+        /// The strut's ascent.
+        expected_ascent: f32,
+        /// The strut's descent.
+        expected_descent: f32,
+        /// The line's `ascent`.
+        actual_ascent: f32,
+        /// The line's `descent`.
+        actual_descent: f32,
+    },
     /// Under `LineHeight::Normal`, `line_height` is smaller than the strut's.
     LineHeightBelowStrut {
         /// The strut's natural line height.
@@ -842,6 +855,16 @@ impl PositionedLine {
                         actual: self.line_height,
                     });
                 }
+                if !approx_eq(self.ascent, ctx.strut.ascent)
+                    || !approx_eq(self.descent, ctx.strut.descent)
+                {
+                    return Err(E::LineMetricsMismatch {
+                        expected_ascent: ctx.strut.ascent,
+                        expected_descent: ctx.strut.descent,
+                        actual_ascent: self.ascent,
+                        actual_descent: self.descent,
+                    });
+                }
             }
             LineHeight::Normal => {
                 if self.line_height < expected - tolerance(self.line_height, expected) {
@@ -1064,15 +1087,26 @@ impl PositionedLine {
             {
                 return Err(E::InvalidAnnotation { index });
             }
-            let available = match ann.side {
-                crate::frontend::AnnotationSide::Over => self.ascent - ctx.strut.ascent,
-                crate::frontend::AnnotationSide::Under => self.descent - ctx.strut.descent,
+            let (base_side, placed) = match ann.side {
+                crate::frontend::AnnotationSide::Over => {
+                    (ann.base_over, ann.baseline_offset >= ann.base_over - eps)
+                }
+                crate::frontend::AnnotationSide::Under => {
+                    (ann.base_under, ann.baseline_offset <= -ann.base_under + eps)
+                }
             };
-            if available + eps < ann.block_extent
-                || ann.baseline_offset < -self.descent - eps
-                || ann.baseline_offset > self.ascent + eps
-            {
+            if !placed {
                 return Err(E::InvalidAnnotation { index });
+            }
+            if matches!(ctx.line_height, LineHeight::Normal) {
+                let required = base_side + ann.block_extent;
+                let (have, strut) = match ann.side {
+                    crate::frontend::AnnotationSide::Over => (self.ascent, ctx.strut.ascent),
+                    crate::frontend::AnnotationSide::Under => (self.descent, ctx.strut.descent),
+                };
+                if have + eps < required.max(strut) {
+                    return Err(E::InvalidAnnotation { index });
+                }
             }
         }
         self.check_span_fragments()?;
@@ -1435,6 +1469,18 @@ pub struct PositionedAnnotationRun {
     pub max_overhang: f32,
     /// Declared additional block extent, including gap.
     pub block_extent: f32,
+    /// Finite nonnegative extent of the annotated base content above the
+    /// baseline (toward line-over): the largest over-side extent of the base's
+    /// glyphs and inline boxes, as the producer measured it.
+    ///
+    /// An `Over` annotation sits at `baseline_offset >= base_over` and needs
+    /// `base_over + block_extent` of ascent under [`LineHeight::Normal`].
+    pub base_over: f32,
+    /// Finite nonnegative extent of the annotated base content below the
+    /// baseline (toward line-under); the mirror of `base_over`. An `Under`
+    /// annotation sits at `baseline_offset <= -base_under` and needs
+    /// `base_under + block_extent` of descent under [`LineHeight::Normal`].
+    pub base_under: f32,
     /// Glyphs shaped from the annotation's own text; they carry no body byte
     /// range, so they are marked synthesized.
     pub glyphs: Vec<PositionedGlyph>,
@@ -1557,6 +1603,10 @@ impl PositionedLine {
                 || ann.max_overhang < 0.0
                 || !ann.block_extent.is_finite()
                 || ann.block_extent < 0.0
+                || !ann.base_over.is_finite()
+                || ann.base_over < 0.0
+                || !ann.base_under.is_finite()
+                || ann.base_under < 0.0
                 || ann.variations.iter().any(|v| !v.value().is_finite())
                 || !ann.orientation.is_valid(ctx.writing_mode, 0)
                 || ann.base_byte_range.is_empty()

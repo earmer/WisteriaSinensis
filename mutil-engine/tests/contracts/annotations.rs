@@ -249,7 +249,7 @@ fn annotations_need_glyphs_unique_ids_and_disjoint_bases_per_side() {
     other_side.annotations[1].base_byte_range = TextRange::new(0, 1);
     other_side.annotations[1].side = AnnotationSide::Under;
     other_side.annotations[1].glyphs[0].x = 25.0;
-    other_side.annotations[1].baseline_offset = -1.0;
+    other_side.annotations[1].baseline_offset = -2.0;
     assert_eq!(other_side.validate(&c), Ok(()));
 }
 
@@ -281,5 +281,139 @@ fn an_annotation_id_appears_once_per_paragraph() {
     assert_eq!(
         p.validate("ab", None, &ctx()),
         Err((1, LineInvariantError::InvalidParagraph))
+    );
+}
+
+/// One line "a" with a single annotation on `side`, sized for the fixture strut
+/// (ascent 8, descent 2) plus the annotation's block extent of 3 on its side.
+fn single_annotation_line(side: AnnotationSide) -> (PositionedLine, LineContext) {
+    let mut l = line();
+    let mut r = run(glyph(0.0, 100.0, false));
+    r.byte_range = l.byte_range;
+    l.visual_runs = vec![r];
+    let mut ann = positioned_annotation();
+    ann.side = side;
+    ann.glyphs[0].x = 25.0;
+    if side == AnnotationSide::Over {
+        l.ascent += 3.0;
+        l.baseline_y += 3.0;
+    } else {
+        ann.baseline_offset = -2.0;
+        l.descent += 3.0;
+    }
+    l.line_height += 3.0;
+    l.annotations = vec![ann];
+    (l, ctx())
+}
+
+fn fixed(c: LineContext) -> LineContext {
+    LineContext {
+        line_height: LineHeight::Fixed(1.0),
+        ..c
+    }
+}
+
+#[test]
+fn over_room_is_measured_from_the_base_not_the_strut() {
+    let (l, c) = single_annotation_line(AnnotationSide::Over);
+    assert_eq!(l.validate(&c), Ok(()));
+    // A tall base needs more ascent than strut ascent + block extent.
+    let mut tall = l.clone();
+    tall.annotations[0].base_over = 12.0;
+    tall.annotations[0].baseline_offset = 12.0;
+    assert_eq!(
+        tall.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+    );
+    // With enough ascent it passes.
+    tall.ascent = 15.0;
+    tall.baseline_y = 15.0;
+    tall.line_height = 17.0;
+    assert_eq!(tall.validate(&c), Ok(()));
+}
+
+#[test]
+fn under_room_is_measured_from_the_base_not_the_strut() {
+    let (l, c) = single_annotation_line(AnnotationSide::Under);
+    assert_eq!(l.validate(&c), Ok(()));
+    let mut tall = l.clone();
+    tall.annotations[0].base_under = 6.0;
+    tall.annotations[0].baseline_offset = -6.0;
+    assert_eq!(
+        tall.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+    );
+    tall.descent = 9.0;
+    tall.line_height = 17.0;
+    assert_eq!(tall.validate(&c), Ok(()));
+}
+
+#[test]
+fn annotation_sits_beyond_its_base() {
+    let (l, c) = single_annotation_line(AnnotationSide::Over);
+    let mut low = l.clone();
+    low.annotations[0].baseline_offset = 7.0;
+    assert_eq!(
+        low.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+    );
+    let (l, c) = single_annotation_line(AnnotationSide::Under);
+    let mut low = l.clone();
+    low.annotations[0].baseline_offset = -1.0;
+    assert_eq!(
+        low.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+    );
+}
+
+#[test]
+fn base_extents_are_finite_and_nonnegative() {
+    let (l, c) = single_annotation_line(AnnotationSide::Over);
+    for bad in [f32::NAN, f32::INFINITY, -1.0] {
+        let mut over = l.clone();
+        over.annotations[0].base_over = bad;
+        assert_eq!(
+            over.validate(&c),
+            Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        );
+        let mut under = l.clone();
+        under.annotations[0].base_under = bad;
+        assert_eq!(
+            under.validate(&c),
+            Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        );
+    }
+}
+
+#[test]
+fn fixed_line_boxes_do_not_grow_for_annotations() {
+    let (mut l, c) = single_annotation_line(AnnotationSide::Over);
+    let c = fixed(c);
+    // The ruby overflows into the inter-line space: metrics equal the strut's.
+    l.ascent = 8.0;
+    l.baseline_y = 8.0;
+    l.line_height = 10.0;
+    l.annotations[0].base_over = 8.0;
+    assert!(l.annotations[0].base_over + l.annotations[0].block_extent > l.ascent);
+    assert_eq!(l.validate(&c), Ok(()));
+    // Growing the ascent to fit the ruby is rejected.
+    let mut grown = l.clone();
+    grown.ascent = 11.0;
+    grown.baseline_y = 11.0;
+    assert_eq!(
+        grown.validate(&c),
+        Err(LineInvariantError::LineMetricsMismatch {
+            expected_ascent: 8.0,
+            expected_descent: 2.0,
+            actual_ascent: 11.0,
+            actual_descent: 2.0,
+        })
+    );
+    // Placement rules still apply.
+    let mut low = l;
+    low.annotations[0].baseline_offset = 7.0;
+    assert_eq!(
+        low.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 0 })
     );
 }

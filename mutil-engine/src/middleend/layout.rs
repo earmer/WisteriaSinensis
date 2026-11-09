@@ -1147,8 +1147,10 @@ pub fn layout_paragraph(
         }
         let mut over = 0.0_f32;
         let mut under = 0.0_f32;
+        // A fixed line box does not grow for annotations; they may overflow.
+        let annotations_grow_the_line = matches!(options.line_height, super::LineHeight::Normal);
         for ann in &ast.annotations {
-            if ann.base_byte_range.start >= initial_end {
+            if !annotations_grow_the_line || ann.base_byte_range.start >= initial_end {
                 continue;
             }
             match ann.side {

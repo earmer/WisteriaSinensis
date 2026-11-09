@@ -189,3 +189,30 @@ fn vertical_lr_under_annotation_moves_first_baseline() {
     p.lines[0].baseline_y = 2.0;
     assert!(p.validate("a", None, &ctx()).is_err());
 }
+
+#[test]
+fn vertical_rl_over_annotation_needs_line_relative_ascent() {
+    let mut l = line();
+    l.baseline_y = 11.0;
+    l.ascent = 11.0;
+    l.line_height = 13.0;
+    let mut r = run(glyph(0.0, 100.0, false));
+    r.orientation = GlyphOrientation::VerticalUpright;
+    l.visual_runs = vec![r];
+    let mut ann = positioned_annotation();
+    ann.orientation = GlyphOrientation::VerticalUpright;
+    ann.glyphs[0].x = 0.0;
+    ann.glyphs[0].advance = 10.0;
+    l.annotations.push(ann);
+    let mut p = PositionedParagraph::empty(Direction::Ltr);
+    p.writing_mode = WritingMode::VerticalRl;
+    p.total_block_size = 13.0;
+    p.lines = vec![l];
+    assert_eq!(p.validate("a", None, &ctx()), Ok(()));
+    p.lines[0].annotations[0].base_over = 9.0;
+    p.lines[0].annotations[0].baseline_offset = 9.0;
+    assert_eq!(
+        p.validate("a", None, &ctx()),
+        Err((0, LineInvariantError::InvalidAnnotation { index: 0 }))
+    );
+}

@@ -154,7 +154,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidAnnotation { index: 4 },
-            "annotation 4 is invalid, has no glyphs, repeats an id, overlaps another on its side, or does not fit its base",
+            "annotation 4 is invalid, has no glyphs, repeats an id, overlaps another on its side, has an invalid base extent, sits closer to the baseline than its base, or does not fit the line box",
         ),
         (
             LineInvariantError::InvalidParagraph,
@@ -212,6 +212,15 @@ fn line_invariant_error_messages() {
                 actual: 2.5,
             },
             "line height 2.5 differs from the fixed strut height 1.5",
+        ),
+        (
+            LineInvariantError::LineMetricsMismatch {
+                expected_ascent: 1.5,
+                expected_descent: 0.5,
+                actual_ascent: 2.5,
+                actual_descent: 3.5,
+            },
+            "ascent 2.5 and descent 3.5 differ from the fixed strut's 1.5 and 0.5",
         ),
         (
             LineInvariantError::LineHeightBelowStrut {

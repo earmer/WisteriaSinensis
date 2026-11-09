@@ -484,6 +484,8 @@ pub fn positioned_annotation() -> PositionedAnnotationRun {
         baseline_offset: 8.0,
         max_overhang: 0.0,
         block_extent: 3.0,
+        base_over: 8.0,
+        base_under: 2.0,
         glyphs: vec![PositionedGlyph {
             byte_range: None,
             is_synthesized: true,

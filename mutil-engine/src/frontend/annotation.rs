@@ -69,7 +69,9 @@ pub struct AnnotationSpan {
     pub side: AnnotationSide,
     /// Ruby or emphasis policy.
     pub kind: AnnotationKind,
-    /// Additional block extent, including the gap.
+    /// Additional block extent, including the gap. Under `LineHeight::Normal`
+    /// the line box grows by it beyond the annotated base; under
+    /// `LineHeight::Fixed` the annotation overflows into the inter-line space.
     pub block_extent: f32,
     /// Nonempty annotation source without line/paragraph separators.
     pub annotation_text: Box<str>,
