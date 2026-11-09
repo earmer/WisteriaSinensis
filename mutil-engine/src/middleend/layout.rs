@@ -1106,17 +1106,10 @@ pub fn layout_paragraph(
         // must not turn a legal provider into a clearance failure. Line fitting
         // is not implemented yet.
         let initial = context.strut.natural_line_height();
-        let initial_end = ast
-            .items
-            .iter()
-            .find(|item| item.is_break_opportunity())
-            .map_or(text.len(), |item| item.byte_span().start);
+        let first_break = ast.items.iter().position(WordNode::is_break_opportunity);
+        let initial_end = first_break.map_or(text.len(), |k| ast.items[k].byte_span().start);
         let mut required = initial;
-        for item in ast
-            .items
-            .iter()
-            .take_while(|item| !item.is_break_opportunity())
-        {
+        for item in &ast.items[..first_break.unwrap_or(ast.items.len())] {
             match item {
                 WordNode::Box(BoxNode::InlineObject {
                     ascent, descent, ..

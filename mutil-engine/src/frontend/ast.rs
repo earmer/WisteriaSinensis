@@ -400,8 +400,8 @@ impl WordNode {
             | Self::Box(BoxNode::InlineObject { byte_range, .. })
             | Self::Box(BoxNode::SpanBoundary { byte_range, .. })
             | Self::Glue(GlueNode { byte_range, .. })
+            | Self::Discretionary(DiscretionaryNode { byte_range, .. })
             | Self::Tab { byte_range } => *byte_range,
-            Self::Discretionary(d) => d.byte_range,
         }
     }
 

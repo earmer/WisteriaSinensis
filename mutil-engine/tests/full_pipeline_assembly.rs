@@ -19,6 +19,7 @@ const ADV: f32 = 10.0;
 const BOX_W: f32 = 12.0;
 const TAB_W: f32 = 8.0;
 const SPACE_W: f32 = 4.0;
+const WRAP_WIDTH: f32 = 200.0;
 
 fn atom(offset: usize) -> GraphemeAtom {
     GraphemeAtom {
@@ -209,8 +210,48 @@ fn line_context(ast: &ParagraphAst) -> LineContext {
         ast.strut_font_size,
         ast.base_direction,
         &layout_options(),
-        200.0,
+        WRAP_WIDTH,
     )
+}
+
+/// The fields every assembled line shares: strut-sized metrics and no output
+/// entities.
+fn blank_line() -> PositionedLine {
+    PositionedLine {
+        slots: smallvec::SmallVec::new(),
+        annotations: Vec::new(),
+        is_ellipsized: false,
+        resolved_slot_constraints: smallvec::SmallVec::new(),
+        atomic_fragments: vec![],
+        span_fragments: vec![],
+        byte_range: TextRange::EMPTY,
+        visible_byte_end: 0,
+        baseline_y: 0.0,
+        ascent: 12.0,
+        descent: 4.0,
+        line_height: 16.0,
+        visual_width: 0.0,
+        hanging_left: 0.0,
+        hanging_right: 0.0,
+        is_justified: false,
+        visual_runs: vec![],
+        caret_stops: vec![],
+        visual_boxes: vec![],
+        tabs: vec![],
+        decorations: vec![],
+    }
+}
+
+fn run_of(byte_range: TextRange, glyphs: Vec<PositionedGlyph>) -> VisualGlyphRun {
+    VisualGlyphRun {
+        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
+        font_size: 16.0,
+        variations: Default::default(),
+        font: FontRef::unscaled(FontId(1)),
+        bidi_level: 0,
+        byte_range,
+        glyphs,
+    }
 }
 
 /// Three hand-positioned lines: "oma-", "atje ␠ [box] ⇥ go," and the blank line
@@ -238,37 +279,12 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
         is_hanging: false,
     });
     let line0 = PositionedLine {
-        slots: smallvec::SmallVec::new(),
-        annotations: Vec::new(),
-        is_ellipsized: false,
-        resolved_slot_constraints: smallvec::SmallVec::new(),
-        atomic_fragments: vec![],
-
-        span_fragments: vec![],
         byte_range: TextRange::new(0, 3),
         visible_byte_end: 3,
         baseline_y: 12.0,
-        ascent: 12.0,
-        descent: 4.0,
-        line_height: 16.0,
         visual_width: 4.0 * ADV,
-        hanging_left: 0.0,
-        hanging_right: 0.0,
-        is_justified: false,
-        visual_runs: vec![VisualGlyphRun {
-            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
-            font_size: 16.0,
-            variations: Default::default(),
-
-            font: FontRef::unscaled(FontId(1)),
-            bidi_level: 0,
-            byte_range: TextRange::new(0, 3),
-            glyphs: l0_glyphs,
-        }],
-        caret_stops: vec![],
-        visual_boxes: vec![],
-        tabs: vec![],
-        decorations: vec![],
+        visual_runs: vec![run_of(TextRange::new(0, 3), l0_glyphs)],
+        ..blank_line()
     };
 
     // Line 1: "atje" ␠ [box] ⇥ "go" and a right-hanging ",". The space occupies
@@ -290,34 +306,12 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
     let body_width = pen;
     l1_glyphs.push(glyph(comma, body_width, true));
     let line1 = PositionedLine {
-        slots: smallvec::SmallVec::new(),
-        annotations: Vec::new(),
-        is_ellipsized: false,
-        resolved_slot_constraints: smallvec::SmallVec::new(),
-        atomic_fragments: vec![],
-
-        span_fragments: vec![],
         byte_range: TextRange::new(3, 18),
         visible_byte_end: 15,
         baseline_y: 32.0,
-        ascent: 12.0,
-        descent: 4.0,
-        line_height: 16.0,
         visual_width: body_width,
-        hanging_left: 0.0,
         hanging_right: ADV,
-        is_justified: false,
-        visual_runs: vec![VisualGlyphRun {
-            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
-            font_size: 16.0,
-            variations: Default::default(),
-
-            font: FontRef::unscaled(FontId(1)),
-            bidi_level: 0,
-            byte_range: TextRange::new(3, 15),
-            glyphs: l1_glyphs,
-        }],
-        caret_stops: vec![],
+        visual_runs: vec![run_of(TextRange::new(3, 15), l1_glyphs)],
         visual_boxes: vec![PositionedInlineBox {
             baseline_align: mutil_engine::types::BaselineAlignment::Auto,
             box_id: 42,
@@ -334,29 +328,15 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
             x: box_x + BOX_W,
             width: TAB_W,
         }],
-        decorations: vec![],
+        ..blank_line()
     };
 
     // Line 2: the empty line after the hard break (Stage 4.2).
     let line2 = PositionedLine {
-        slots: smallvec::SmallVec::new(),
-        annotations: Vec::new(),
-        is_ellipsized: false,
-        resolved_slot_constraints: smallvec::SmallVec::new(),
-        atomic_fragments: vec![],
-
-        span_fragments: vec![],
         byte_range: TextRange::empty_at(18),
         visible_byte_end: 18,
         baseline_y: 48.0,
-        ascent: 12.0,
-        descent: 4.0,
         line_height: ctx.strut.natural_line_height(),
-        visual_width: 0.0,
-        hanging_left: 0.0,
-        hanging_right: 0.0,
-        is_justified: false,
-        visual_runs: vec![],
         caret_stops: vec![CaretStop {
             x: 0.0,
             offset: 18,
@@ -364,9 +344,7 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
             level: 0,
             line: 2,
         }],
-        visual_boxes: vec![],
-        tabs: vec![],
-        decorations: vec![],
+        ..blank_line()
     };
 
     let mut para = PositionedParagraph::empty(ast.base_direction);
@@ -376,6 +354,14 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
     };
     para.lines = vec![line0, line1, line2];
     para
+}
+
+/// The paragraph, its line context and the assembled output.
+fn assembled() -> (ParagraphAst, LineContext, PositionedParagraph) {
+    let ast = paragraph_ast();
+    let ctx = line_context(&ast);
+    let para = assembled_paragraph(&ast, &ctx);
+    (ast, ctx, para)
 }
 
 #[test]
@@ -399,11 +385,8 @@ fn middle_end_resolves_the_strut_and_accepts_the_inputs() {
     let ctx = line_context(&ast);
     assert_eq!(ctx.strut.natural_line_height(), 16.0);
     let constraints = LayoutConstraints {
-        first_line_indent: 0.0,
-        geometry_provider: None,
-        hanging_indent: 0.0,
-        wrap_width: 200.0,
-        tab_stops: TabStops { step: 8.0 },
+        wrap_width: WRAP_WIDTH,
+        ..Default::default()
     };
     assert_eq!(
         check_layout_inputs(&ast, TEXT, &constraints, &layout_options()),
@@ -493,9 +476,7 @@ fn shaping_bridge_applies_both_spelling_edits() {
 
 #[test]
 fn middle_end_assembles_three_valid_lines() {
-    let ast = paragraph_ast();
-    let ctx = line_context(&ast);
-    let para = assembled_paragraph(&ast, &ctx);
+    let (_, ctx, para) = assembled();
     let [line0, line1, _] = &para.lines[..] else {
         panic!("expected three lines, got {}", para.lines.len());
     };
@@ -516,9 +497,7 @@ fn assembled_output_owns_its_data() {
     assert_send_sync_static::<PositionedParagraph>();
     assert_send_sync_static::<LeadingEdit>();
     assert_send_sync_static::<TrailingEdit>();
-    let ast = paragraph_ast();
-    let ctx = line_context(&ast);
-    let para = assembled_paragraph(&ast, &ctx);
+    let (ast, _, para) = assembled();
     let ast_copy = ast.clone();
     drop(ast); // the layout holds no borrow of the AST
     assert!(ast_copy.items.iter().all(WordNode::is_self_contained));
@@ -528,9 +507,7 @@ fn assembled_output_owns_its_data() {
 
 #[test]
 fn hanging_comma_counted_in_visual_width_is_rejected() {
-    let ast = paragraph_ast();
-    let ctx = line_context(&ast);
-    let para = assembled_paragraph(&ast, &ctx);
+    let (_, ctx, para) = assembled();
     let mut bad = para.lines[1].clone();
     bad.visual_width += ADV;
     bad.hanging_right = 0.0;
