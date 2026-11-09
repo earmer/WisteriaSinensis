@@ -93,7 +93,7 @@ impl LineFit {
 /// `slack = wrap_width - W(a, b)`: positive when the line is short. Five
 /// exhaustive cases, continuous (C0) across the stretch boundaries except one:
 /// with no Tier 2 capacity, case C ends at 100 and case E starts at 400, the
-/// ruled step (spec row 97).
+/// locked step (spec §5 Stage 1.6.3).
 ///
 /// * **A** `|slack| <= FIT_EPSILON`: ratio 0, badness 0.
 /// * **B** `slack < 0`: with `Z = Z_0 + Z_1`, overfull (`Z <= CAPACITY_EPSILON`

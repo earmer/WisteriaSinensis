@@ -48,7 +48,7 @@ pub enum GlueKind {
     CjkAutospace,
     /// The compressible margin of CJK full-width punctuation that `chws` has
     /// not already squeezed, or that JLReq / CLREQ mid-line compression frees
-    /// (spec §2.4, ruling 3). It is the **punctuation compression pool** of
+    /// (spec §2.4, "Tier 2 is derived, not emitted"). It is the **punctuation compression pool** of
     /// [`GlueTier::Tier0`]: `natural_width == 0`, `max_stretch == 0`, and
     /// `max_shrink` up to `0.5 * ic`.
     CjkPunctCompression,
@@ -58,7 +58,7 @@ impl GlueKind {
     /// The tier the frontend assigns: `WordSpace` and `CjkPunctCompression` to
     /// [`GlueTier::Tier0`], `CjkAutospace` to [`GlueTier::Tier1`]. **No kind
     /// maps to [`GlueTier::Tier2`]**: inter-ideographic stretch is derived from
-    /// `ALLOW_CJK_JUSTIFY_AFTER` on the clusters, not from glue nodes (ruling 3).
+    /// `ALLOW_CJK_JUSTIFY_AFTER` on the clusters, not from glue nodes (spec §2.4).
     #[must_use]
     pub const fn default_tier(self) -> GlueTier {
         match self {
@@ -126,7 +126,7 @@ pub enum SpanEdge {
 }
 
 /// What happens to a rigid inline object that is wider than the line (spec
-/// §2.4, row 76).
+/// §2.4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum BoxOverflowPolicy {
     /// Clamp the visual rendering to `wrap_width`.

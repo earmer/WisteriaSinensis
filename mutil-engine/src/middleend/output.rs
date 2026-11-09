@@ -12,7 +12,7 @@ use crate::types::{
 /// moved without touching its glyphs. **[Design decision]** (spec silent).
 /// It is the strict **pen advance position**, the cumulative advance along the
 /// line, and not the drawing origin: the rasteriser draws the glyph at
-/// `(line_origin_x + x + x_offset, baseline_y - y_offset)` (row 71). A
+/// `(line_origin_x + x + x_offset, baseline_y - y_offset)` (spec §2.6, geometry conventions). A
 /// zero-advance combining mark with a negative `x_offset` at the start of a
 /// line therefore has `x == 0.0`. `x` may still be **negative** for hanging
 /// punctuation placed outside the left edge (§5 Stage 1.3), see
@@ -141,7 +141,7 @@ pub struct PositionedTab {
 }
 
 /// The visual box of one line fragment of an inline decoration span (spec
-/// §2.6, row 77), after bidi reordering.
+/// §2.6), after bidi reordering.
 ///
 /// Bidi reordering can split one span into several visual groups on a line;
 /// each group is its own fragment. `is_first_fragment` marks the fragment
@@ -1216,7 +1216,7 @@ impl PositionedLine {
             && approx_eq(right - origin, vw)
     }
 
-    /// Span containment (spec §2.6, row 77): fragments inside the body, and
+    /// Span containment (spec §2.6, Pass 3 (g)): fragments inside the body, and
     /// every glyph or inline box that belongs to a span inside one of its
     /// fragments.
     fn check_span_fragments(&self) -> Result<(), LineInvariantError> {
@@ -2477,7 +2477,7 @@ mod tests {
         assert!(para.validate_geometry(&c).is_err());
     }
 
-    // ---- wrap width (ruling 8) and fragment hit-testing (ruling 7) ----
+    // ---- wrap width (spec §2.6, Pass 3 (h)) and fragment hit-testing (spec §6.3) ----
 
     fn wrap(w: f32) -> LineContext {
         ctx().with_slots(
