@@ -1,7 +1,7 @@
 //! Frontend: input abstraction and the paragraph AST (spec §3, §2.4, §2.5).
 //!
-//! Phase 0 defines the output and option types only; no analysis pass is
-//! implemented.
+//! Defines the output and option types; the analysis pass that builds the AST
+//! from text is not implemented yet.
 
 mod annotation;
 mod ast;

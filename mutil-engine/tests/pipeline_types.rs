@@ -1,4 +1,4 @@
-//! Phase 0 validation: the types of all three tiers fit together.
+//! The types of all three tiers fit together.
 //!
 //! No typesetting happens here. Every cluster, width and position below is a
 //! hand-written fixture (fixed 10-unit advances) whose only purpose is to

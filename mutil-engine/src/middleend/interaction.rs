@@ -1,7 +1,7 @@
 //! Interactive types: caret, hit-test, movement and selection data (spec §6).
 //!
 //! Data only. The queries that produce and consume them (`hit_test`,
-//! `caret_geometry`, `move_cursor`, `selection_geometry`) arrive in later phases.
+//! `caret_geometry`, `move_cursor`, `selection_geometry`) are not implemented yet.
 
 use super::output::{AtomicFragment, CaretAffinity};
 use crate::types::{BidiLevel, ByteIndex, Rect};
@@ -100,8 +100,8 @@ pub struct Selection {
 pub enum BoxHeightStyle {
     /// Union of selected font-instance ascent/descent, excluding gap and leading.
     ///
-    /// **Forward contract (Phase 1/2).** Selection geometry is not computed in
-    /// Phase 0; when it lands it must query `TextShaper::font_metrics` for every
+    /// **Forward contract.** Selection geometry is not computed yet; when it
+    /// is, it must query `TextShaper::font_metrics` for every
     /// selected instance and union their ascent/descent.
     #[default]
     Tight,

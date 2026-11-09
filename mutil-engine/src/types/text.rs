@@ -6,8 +6,8 @@ use core::ops::Range;
 ///
 /// **[Design decision, §2.1]** Every internal offset is a UTF-8 byte offset and
 /// synthetic elements (generated hyphens, glue) never displace them. UTF-16
-/// conversion for platform text-input layers belongs to §6.7 and is not part of
-/// Phase 0.
+/// conversion for platform text-input layers belongs to §6.7 and is not
+/// implemented yet.
 pub type ByteIndex = usize;
 
 /// Half-open byte range `[start, end)`, aligned to code point boundaries (spec §2.1).

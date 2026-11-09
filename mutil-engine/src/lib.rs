@@ -1,10 +1,11 @@
 //! `mutil-engine`: a headless, synchronous, GUI-free multilingual typesetting and
 //! interactive layout engine.
 //!
-//! **Phase 0** (this state of the crate) contains the strongly typed data model
-//! of the specification (§2), the `TextShaper` contract (§4) and a `NoopShaper`
-//! that proves the types close over the whole pipeline. It implements **no**
-//! segmentation, shaping, line breaking or justification.
+//! The crate currently contains the strongly typed data model of the
+//! specification (§2), the `TextShaper` contract (§4), input and output
+//! validators, and a `NoopShaper` that proves the types close over the whole
+//! pipeline. Segmentation, shaping, line breaking and justification are not
+//! implemented yet.
 //!
 //! Layers (dependencies point left):
 //!

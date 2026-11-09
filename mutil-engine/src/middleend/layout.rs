@@ -1,6 +1,6 @@
 //! The mid-end entry point (spec §5).
 //!
-//! **Phase 0 skeleton:** it assembles the validation context and checks its
+//! **Validation-only skeleton:** it assembles the validation context and checks its
 //! inputs, but lays nothing out.
 
 use super::{LayoutConstraints, LayoutOptions, LineContext, PositionedParagraph};
@@ -1188,7 +1188,7 @@ pub fn check_layout_inputs(
 /// * `shaper`: used for re-shaping at breaks and for ligature carets.
 /// * `constraints`: container geometry; `options`: layout policy.
 ///
-/// **Phase 0 skeleton.** It runs [`check_layout_inputs`] and performs no
+/// **Validation-only skeleton.** It runs [`check_layout_inputs`] and performs no
 /// layout: the result has the AST's base direction and no lines. Validation
 /// errors are returned to the caller.
 pub fn layout_paragraph(
@@ -1200,11 +1200,11 @@ pub fn layout_paragraph(
 ) -> Result<PositionedParagraph, LayoutInputError> {
     let context = check_layout_inputs(ast, text, constraints, options)?;
     if constraints.geometry_provider.is_some() {
-        // Phase 0 only probes the geometry that can begin at block start: the
+        // Only the geometry that can begin at block start is probed: the
         // strut and input up to the first break opportunity. A tall object
         // later in the paragraph is not evidence about the first line, so it
         // must not turn a legal provider into a clearance failure. Line fitting
-        // is Phase 1–3 work.
+        // is not implemented yet.
         let initial = context.strut.natural_line_height();
         let initial_end = ast
             .items

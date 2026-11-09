@@ -1,8 +1,7 @@
 //! Middle-end: layout output containers, interaction types and layout options
 //! (spec §2.6, §5, §6).
 //!
-//! Phase 0 defines data only; line breaking, reordering and justification
-//! arrive in later phases.
+//! Line breaking, reordering and justification are not implemented yet.
 
 mod badness;
 mod interaction;

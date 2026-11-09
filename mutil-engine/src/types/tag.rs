@@ -130,7 +130,7 @@ impl fmt::Display for ScriptTag {
 ///
 /// Stored as a shared string: locales are per `ShapingRun`, not per atom, so
 /// one allocation is shared by every run and cache key that references it, and
-/// cloning is a reference-count bump. The tag is **not validated** in Phase 0;
+/// cloning is a reference-count bump. The tag is **not validated** yet;
 /// canonicalisation and the BCP 47 to OpenType language-system mapping arrive
 /// with Frontend Step 4 and §4.4.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]

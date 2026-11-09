@@ -172,8 +172,7 @@ pub trait TextShaper: Send + Sync {
     ///   With `cut_bytes == 0` and a non-empty replacement no cluster covers
     ///   removed bytes: the glyphs belong to the window's last cluster for
     ///   `ReplacePrefix` and to its first cluster for `ReplaceSuffix`.
-    ///   **[Design decision]**; to be refined with the HarfRust backend in
-    ///   Phase 1.
+    ///   **[Design decision]**; to be refined with the HarfRust backend.
     #[allow(clippy::too_many_arguments)] // signature derived from spec §4.1
     fn reshape_window(
         &self,

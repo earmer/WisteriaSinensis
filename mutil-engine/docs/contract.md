@@ -1,12 +1,12 @@
-# Phase 0 contract revision
+# Engine contract
 
-Phase 0 freezes the public data model, coordinate transforms, input and output
-validators, checked geometry queries, and contract tests. It does not implement
-Unicode analysis, actual line fitting, boundary reshaping, justification, ruby
-placement, clamping, rendering, or interactive paragraph queries. `WordNode`
-remains Box / Glue / Discretionary / Tab, and the badness algebra is unchanged.
+The crate currently provides the public data model, coordinate transforms, input
+and output validators, checked geometry queries, and contract tests. It does not yet
+implement Unicode analysis, actual line fitting, boundary reshaping,
+justification, ruby placement, clamping, rendering, or interactive paragraph
+queries. `WordNode` has four variants: Box / Glue / Discretionary / Tab.
 
-`layout_paragraph` validates the AST and returns the existing empty skeleton,
+`layout_paragraph` validates the AST and returns an empty skeleton,
 carrying the AST's writing mode and direction. With a geometry provider it also
 checks the strut probe, a conservative probe of input that can begin at block
 start (up to the first break opportunity), and bounded clearance progress. It
@@ -15,7 +15,7 @@ provider contract check, not the future line-fitting solver.
 A skeleton is intentionally not a fully positioned paragraph and cannot pass
 `PositionedParagraph::validate`.
 
-## Coordinates and metrics (questions 2, 7–19, 68)
+## Coordinates and metrics
 
 All layout coordinates use inline `x` and block-progressing `y`. Horizontal maps
 to `(x, y)`, VerticalLr to `(y, x)`, VerticalRl to `(total_block_size - y, x)`.
@@ -46,11 +46,10 @@ Atoms and clusters must match their owning shaping run. UAX analysis and glyph
 rotation/placement are future frontend/rendering responsibilities; accepting an
 AST does not certify that it was produced by a conforming UAX implementation.
 
-## Public inputs and frontend compilation (questions 3–6, 20–34, 55–58)
+## Public inputs and frontend compilation
 
-The AST is untrusted. Public struct literals require migration for new fields;
-source compatibility is not promised, but existing assertions remain applicable
-apart from deliberately strengthened source-glyph ownership rules.
+The AST is untrusted. Public structs are not `#[non_exhaustive]` and source
+compatibility across field additions is not promised.
 
 Future analysis order is graphemes, orientation, explicit-span Bidi, script and
 locale, run splitting, shaping/spacing/ruby expansion, then break compilation.
@@ -70,7 +69,7 @@ Soft break `no_break_width == no_break_spacing`; hard breaks require both zero.
 Cloned padding contributes `clone_pre = sum(end_padding)` and
 `clone_post = sum(start_padding)`. Direct, hard, and unrepeated math breaks have
 pre/post widths equal to these sums; punctuation and hyphenation carry their own
-net deltas beyond those sums. Existing action validation remains in force.
+net deltas beyond those sums. Each break action is validated as well.
 
 Explicit Bidi spans have unique IDs, nonempty concrete-boundary-aligned ranges,
 and proper nesting ordered by ascending start / descending end. Equal ranges
@@ -98,7 +97,7 @@ standard randomized hash maps/sets, time is expected O(total input records and
 bytes), with O(input boundaries + spans) extra memory. It neither sorts incoming
 spans nor copies annotation payloads to recursively validate a temporary AST.
 
-## Geometry and future solving (questions 35–46, 64, 66–67)
+## Geometry and future solving
 
 Slots have finite starts, ends strictly beyond starts, and finite widths except
 that positive-infinite ends/capacities explicitly represent no wrapping. Finite
@@ -123,19 +122,19 @@ line height. **Monotone available space alone does not prove that two iterations
 suffice**: strategy changes, slot fragmentation, and reshaping can change the
 chosen entity set. A bounded implementation must return an explicit failure or
 use a specified fallback; it must not silently clip source to force convergence.
-No two-iteration convergence claim is made by Phase 0.
+No two-iteration convergence claim is made by the current implementation.
 
 Future multi-slot fitting must establish legal break boundaries at obstacle
 crossings. Slot storage is always inline-ascending; logical consumption follows
 base direction. Justification fits each occupied slot independently. Whole-line
 Bidi reordering and subsequent slot assignment must still prove that reordered
 indivisible clusters fit their assigned slots: a logical capacity partition is
-not by itself such a proof. These algorithms remain Phase 1–3 work.
+not by itself such a proof. These algorithms are not implemented yet.
 
 Tabs use the flow-space origin as the stop reference. Actual obstacle-edge tab
 consumption and slot transitions belong to the future fitter.
 
-## Positioned output (questions 44, 47–54, 59–67, 75)
+## Positioned output
 
 Every slot reports its start, content advance and capacity. Their content widths
 sum to line visual width. Nonempty slot output must match the context and final
@@ -178,8 +177,8 @@ coverage from zero, adjacent range continuity, and the exact remaining tail.
 Unclamped output ends at text length with no ellipsized lines. Clamped output
 requires a valid clamp policy, a nonempty tail starting at the final line end,
 and exactly the final line ellipsized. `validate_geometry(context)` is available
-for geometry-only fixtures; it does not certify source coverage. Existing
-`base_direction` and `size` fields remain for callers; `total_block_size` is the
+for geometry-only fixtures; it does not certify source coverage. The
+`base_direction` and `size` fields are informational; `total_block_size` is the
 coordinate-transform authority.
 
 Future truncation respects cluster, TCY, atomic-edit and ruby boundaries; a
@@ -188,7 +187,7 @@ even when the block limit is smaller than that line. Line count includes hard
 break empty lines, but not clearance jumps. VerticalLr block-limit measurement
 uses the same mode-correct line bounds as validation.
 
-## Interaction boundary (questions 68–74)
+## Interaction boundary
 
 Physical arrow requests resolve through `Motion::flow_direction` to inline
 previous/next or block previous/next. Logical/word requests remain distinct.
@@ -202,9 +201,10 @@ when independently marked as an atomic editing span.
 
 ## Verification
 
-The extension acceptance tests in `tests/phase_zero_regressions.rs` cover all
-12 requested groups, plus empty/synthesized-only clamping, infinity mismatch,
+The contract tests in `tests/contracts/` cover writing modes and orientation,
+font metrics, explicit spacing, bidi spans, annotations, slots, line geometry,
+clamping and truncation, plus empty/synthesized-only clamping, infinity mismatch,
 malformed provider intervals, absent clearance progress, glyph-less annotation
 bases, late tall input outside the initial probe, and asymmetric VerticalLr
-paragraph bounds (including an under-side annotation). The existing manual
-release benchmark remains ignored in ordinary CI and can be run explicitly.
+paragraph bounds (including an under-side annotation). The manual
+release-mode scaling benchmark is `#[ignore]`d and can be run explicitly.

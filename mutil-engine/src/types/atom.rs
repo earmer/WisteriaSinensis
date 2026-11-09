@@ -9,7 +9,7 @@ use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub};
 /// Names follow the UAX #14 two-letter codes in Pascal case. The list covers
 /// the classes defined through Unicode 15.1 (including `Ak`, `Ap`, `As`, `Vf`,
 /// `Vi`); Unicode 18 may add values, hence `#[non_exhaustive]`. The data
-/// version is pinned and reported by `conformance_report()` (§1.1, Phase 1).
+/// version is pinned and reported by `conformance_report()` (§1.1).
 /// One byte wide.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
