@@ -3219,7 +3219,7 @@ mod tests {
     }
 
     #[test]
-    fn row_checks_from_the_coderabbit_pass() {
+    fn flagged_hyphens_cloned_spans_synthetic_glue_and_terminators_are_enforced() {
         use crate::frontend::BoxDecorationBreak::{Clone, Slice};
         let o = LayoutOptions::default();
         let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);

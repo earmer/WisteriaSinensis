@@ -1173,7 +1173,7 @@ The structural updates below were applied to the Phase 0 workspace **before** th
 
 ## Open questions and unverified items
 
-Drawn from the Gaps sections of the research notes. Entries that are resolved, decided or superseded are in `mutil-engine/docs/history.md` ("Resolved and superseded open questions"); question numbers are stable, so the list below has gaps.
+Drawn from the Gaps sections of the research notes. Question numbers are stable; resolved questions are folded into the body, so the list has gaps.
 
 1. **Segmenter data.** Choose stable interfaces during integration, pin their data versions, and run matching conformance suites. No unstable neo requirement remains.
 2. **Variation selectors.** Standardized Variation Sequences (`StandardizedVariants.txt`) and Mongolian free variation selectors were not fetched. `emoji-sequences.txt` was not read, so RGI counts per category are unknown.

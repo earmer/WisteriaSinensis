@@ -1,4 +1,4 @@
-//! Rich inline spans end to end (spec §2.2, §2.4, §2.6, §6; Revision 2.1).
+//! Rich inline spans end to end (spec §2.2, §2.4, §2.6, §6).
 //!
 //! A Notion-style mention chip that wraps across two lines with cloned padding
 //! and is atomic for editing, and a flattened inline formula. Every width and
@@ -79,7 +79,7 @@ fn sentinel(len: usize) -> WordNode {
 
 fn chip_ast() -> ParagraphAst {
     // Inside a `Clone` span every interior break carries +300, the padding on
-    // both sides, and lists the span in `cloned_spans` (ruling 5): cloning is
+    // both sides, and lists the span in `cloned_spans` (spec §2.4): cloning is
     // orthogonal to the action, which stays `Direct` here.
     let interior_break = DiscretionaryNode {
         byte_range: TextRange::empty_at(8),
@@ -123,7 +123,7 @@ fn chip_ast() -> ParagraphAst {
     };
     ast.items = vec![
         text(&mut ast, 0, 2),
-        // A breakable space is [Glue, Discretionary] (ruling 1): the space
+        // A breakable space is [Glue, Discretionary] (spec §2.4): the space
         // stays on the trailing edge of the line that breaks after it.
         space(2),
         WordNode::Discretionary(DiscretionaryNode::direct(3)),
