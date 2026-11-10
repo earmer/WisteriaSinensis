@@ -7,7 +7,7 @@
 //! pipeline. Segmentation, shaping, line breaking and justification are not
 //! implemented yet.
 //!
-//! Layers (dependencies point left):
+//! Layers (dependencies point left or up):
 //!
 //! ```text
 //! types  <-  frontend  <-  shaping

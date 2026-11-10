@@ -89,11 +89,21 @@ pub enum LineHeight {
     #[default]
     Normal,
     /// A multiple of the font size taken from the first available font only;
-    /// fallback glyphs may overflow the line box (standard CSS behaviour).
+    /// fallback glyphs may overflow the line box (standard CSS behaviour). The
+    /// multiplier must be finite and positive ([`LineHeight::is_valid`]).
     Fixed(f32),
 }
 
 impl LineHeight {
+    /// `true` for `Normal`, and for `Fixed(m)` when `m` is finite and positive.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        match self {
+            Self::Normal => true,
+            Self::Fixed(multiplier) => multiplier.is_finite() && multiplier > 0.0,
+        }
+    }
+
     /// Resolves the paragraph strut for `font` at `font_size` (spec §5 Stage 4.1).
     ///
     /// * `Normal`: the font's own ascent, descent and line gap.
@@ -207,7 +217,8 @@ pub enum SoftHyphenPolicy {
 /// defining the stops; a uniform step is the minimal configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabStops {
-    /// Distance between stops, in layout units. Must be finite and positive.
+    /// Distance between stops, in layout units. Must be finite and positive
+    /// ([`TabStops::is_valid`]; `InvalidConstraints` otherwise).
     pub step: f32,
 }
 
@@ -245,30 +256,43 @@ impl TabStops {
 /// opposed to the policy ([`LayoutOptions`]) deciding how.
 #[derive(Clone, Debug)]
 pub struct LayoutConstraints {
-    /// Finite inline offset for the first line.
+    /// Inline offset of the first line's standard slot. Without a geometry
+    /// provider it must lie in `[0, wrap_width)`; a provider ignores it, and
+    /// then it need only be finite.
     pub first_line_indent: f32,
-    /// Finite inline offset for subsequent lines.
+    /// Inline offset of the standard slot of the subsequent lines. Same range
+    /// as `first_line_indent`.
     pub hanging_indent: f32,
     /// Optional obstacle-aware container geometry.
     pub geometry_provider: Option<Arc<dyn LineGeometryProvider>>,
     /// Positive container inline width; positive infinity disables wrapping.
     /// Indentation changes slot capacity, not this unobstructed reference width.
+    /// When finite, the inline envelope of every line is `[0, wrap_width]` and
+    /// every slot, standard or provider-supplied, lies inside it.
     pub wrap_width: f32,
-    /// Tab stops.
+    /// Tab stops: `step` finite and positive.
     pub tab_stops: TabStops,
 }
 
 impl LayoutConstraints {
-    /// Checks width, finite indents, positive standard-slot capacity and tab stops.
+    /// Checks the width, the indents and the tab stops.
+    ///
+    /// * `wrap_width` is positive and not NaN (positive infinity is allowed);
+    /// * both indents are finite;
+    /// * without a geometry provider the standard slot starts at the indent and
+    ///   must lie in the wrap envelope `[0, wrap_width]`, so each indent is in
+    ///   `[0, wrap_width)`; negative indentation is not representable;
+    /// * the tab stops are valid.
     #[must_use]
     pub fn is_valid(&self) -> bool {
+        let indent_is_in_envelope = |indent: f32| indent >= 0.0 && indent < self.wrap_width;
         self.wrap_width > 0.0
             && !self.wrap_width.is_nan()
             && self.first_line_indent.is_finite()
             && self.hanging_indent.is_finite()
             && (self.geometry_provider.is_some()
-                || (self.first_line_indent < self.wrap_width
-                    && self.hanging_indent < self.wrap_width))
+                || (indent_is_in_envelope(self.first_line_indent)
+                    && indent_is_in_envelope(self.hanging_indent)))
             && self.tab_stops.is_valid()
     }
 }
@@ -279,13 +303,15 @@ impl LayoutConstraints {
 pub struct LayoutOptions {
     /// Whether available elastic capacity is used to justify content.
     pub justify: bool,
-    /// Optional line-count or block-size truncation policy.
+    /// Optional line-count or block-size truncation policy; when set it must
+    /// satisfy [`LineClampPolicy::is_valid`] (`InvalidLayoutOptions` otherwise).
     pub clamp: Option<LineClampPolicy>,
     /// Line-breaking strategy.
     pub strategy: LineBreakStrategy,
     /// Hanging punctuation at both edges.
     pub hang_mode: HangMode,
-    /// Line-height policy.
+    /// Line-height policy; a `Fixed` multiplier must be finite and positive
+    /// ([`LineHeight::is_valid`], `InvalidStrut` otherwise).
     pub line_height: LineHeight,
     /// Trailing-whitespace handling at a soft wrap.
     pub whitespace: HangingWhitespaceMode,
@@ -294,11 +320,16 @@ pub struct LayoutOptions {
 }
 
 /// One available inline interval; only its end may be positive infinity.
+///
+/// Besides being well formed ([`is_valid`](Self::is_valid)), a slot of a line
+/// lies in the line's inline envelope (see
+/// [`lies_in_envelope`](Self::lies_in_envelope)).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InlineSlotConstraint {
-    /// Finite inline start.
+    /// Finite inline start; `>= 0` within the line's envelope.
     pub start: f32,
-    /// End strictly beyond start, possibly positive infinity.
+    /// End strictly beyond start, possibly positive infinity (only when the
+    /// wrap width is infinite); `<= wrap_width` within the line's envelope.
     pub end: f32,
 }
 impl InlineSlotConstraint {
@@ -312,6 +343,19 @@ impl InlineSlotConstraint {
             && self.end > self.start
             && (self.end == f32::INFINITY || (self.end.is_finite() && self.width().is_finite()))
     }
+
+    /// Whether the slot lies in the inline envelope of a line whose wrap width
+    /// is `wrap_width`: `0 <= start` and, when `wrap_width` is finite,
+    /// `end <= wrap_width`, both within the crate's geometry tolerance. With an
+    /// infinite `wrap_width` only the lower bound applies. Assumes
+    /// [`is_valid`](Self::is_valid).
+    #[must_use]
+    pub fn lies_in_envelope(self, wrap_width: f32) -> bool {
+        self.start >= -super::output::tolerance(self.start, 0.0)
+            && (wrap_width == f32::INFINITY
+                || (self.end.is_finite()
+                    && self.end <= wrap_width + super::output::tolerance(self.end, wrap_width)))
+    }
 }
 /// Available slots for one block-axis envelope.
 #[derive(Debug, Clone, PartialEq)]
@@ -324,11 +368,16 @@ pub struct LineGeometry {
     pub max_unobstructed_width: f32,
 }
 impl LineGeometry {
-    /// Checks a provider response at the given query start.
-    pub fn is_valid(&self, block_start: f32) -> bool {
+    /// Checks a provider response at the given query start, for a container of
+    /// inline width `wrap_width`: every slot is well formed and lies in the
+    /// envelope `[0, wrap_width]` ([`InlineSlotConstraint::lies_in_envelope`]).
+    pub fn is_valid(&self, block_start: f32, wrap_width: f32) -> bool {
         self.max_unobstructed_width > 0.0
             && !self.max_unobstructed_width.is_nan()
-            && self.slots.iter().all(|s| s.is_valid())
+            && self
+                .slots
+                .iter()
+                .all(|s| s.is_valid() && s.lies_in_envelope(wrap_width))
             && self
                 .slots
                 .windows(2)
@@ -409,9 +458,10 @@ impl LayoutConstraints {
 /// Truncation limits; at least one limit must be configured when enabled.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LineClampPolicy {
-    /// Positive maximum number of output lines.
+    /// Maximum number of output lines: at least 1.
     pub max_lines: Option<usize>,
-    /// Positive finite maximum block extent, except that one line is mandatory.
+    /// Maximum block extent: finite and positive, except that one line is
+    /// mandatory.
     pub max_block_size: Option<f32>,
     /// Synthesized suffix; empty means silent truncation.
     pub ellipsis: Box<str>,
@@ -419,9 +469,9 @@ pub struct LineClampPolicy {
 impl LineClampPolicy {
     /// Truncates after `n` lines, with the ellipsis `"…"`.
     #[must_use]
-    pub fn max_lines(n: u32) -> Self {
+    pub fn max_lines(n: usize) -> Self {
         Self {
-            max_lines: Some(n as usize),
+            max_lines: Some(n),
             max_block_size: None,
             ellipsis: "…".into(),
         }
@@ -465,7 +515,7 @@ impl LayoutConstraints {
             return Err(super::LayoutInputError::InvalidLineGeometry);
         }
         let geometry = self.resolve_line_geometry(line_index, block_start, block_end);
-        if !geometry.is_valid(block_start) {
+        if !geometry.is_valid(block_start, self.wrap_width) {
             return Err(super::LayoutInputError::InvalidLineGeometry);
         }
         if previous.is_some_and(|p| {
@@ -559,6 +609,108 @@ mod tests {
         assert_ne!(HangEndMode::Allow, HangEndMode::Force);
         assert_eq!(HangEndMode::default(), HangEndMode::None);
         assert_eq!(HangStartMode::default(), HangStartMode::None);
+    }
+
+    #[test]
+    fn line_height_multipliers_must_be_finite_and_positive() {
+        assert!(LineHeight::Normal.is_valid());
+        assert!(LineHeight::Fixed(1.5).is_valid());
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(!LineHeight::Fixed(bad).is_valid(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_line_limit_takes_the_field_type() {
+        let policy = LineClampPolicy::max_lines(usize::MAX);
+        assert_eq!(policy.max_lines, Some(usize::MAX));
+        assert!(policy.is_valid());
+        assert!(!LineClampPolicy::max_lines(0).is_valid());
+    }
+
+    fn constraints(first: f32, hanging: f32, wrap_width: f32) -> LayoutConstraints {
+        LayoutConstraints {
+            first_line_indent: first,
+            hanging_indent: hanging,
+            wrap_width,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn standard_slots_start_inside_the_wrap_envelope() {
+        assert!(constraints(0.0, 0.0, 100.0).is_valid());
+        assert!(constraints(99.0, 50.0, 100.0).is_valid());
+        // Unbounded width: any non-negative finite indent.
+        assert!(constraints(1e9, 0.0, f32::INFINITY).is_valid());
+        for (first, hanging) in [
+            (-1.0, 0.0),
+            (0.0, -1.0),
+            (-0.0 - f32::MIN_POSITIVE, 0.0),
+            (100.0, 0.0),
+            (0.0, 100.0),
+            (f32::NAN, 0.0),
+            (0.0, f32::INFINITY),
+        ] {
+            assert!(
+                !constraints(first, hanging, 100.0).is_valid(),
+                "{first} {hanging}"
+            );
+        }
+        assert!(!constraints(-1.0, 0.0, f32::INFINITY).is_valid());
+        // The indents are the standard slot's start: a provider replaces the
+        // slots, so there they only have to be finite.
+        let mut with_provider = constraints(-5.0, 500.0, 100.0);
+        with_provider.geometry_provider = Some(Arc::new(NoSlots));
+        assert!(with_provider.is_valid());
+        with_provider.first_line_indent = f32::NAN;
+        assert!(!with_provider.is_valid());
+    }
+
+    #[derive(Debug)]
+    struct NoSlots;
+
+    impl LineGeometryProvider for NoSlots {
+        fn query_line_geometry(&self, _: usize, _: f32, _: f32) -> LineGeometry {
+            LineGeometry {
+                slots: SmallVec::new(),
+                next_feature_block_offset: None,
+                max_unobstructed_width: 100.0,
+            }
+        }
+    }
+
+    #[test]
+    fn provider_slots_lie_inside_the_wrap_envelope() {
+        let geometry = |start: f32, end: f32, width: f32| LineGeometry {
+            slots: smallvec![InlineSlotConstraint { start, end }],
+            next_feature_block_offset: None,
+            max_unobstructed_width: width,
+        };
+        // A finite container is `[0, wrap_width]`.
+        assert!(geometry(0.0, 100.0, 100.0).is_valid(0.0, 100.0));
+        assert!(geometry(10.0, 90.0, 100.0).is_valid(0.0, 100.0));
+        for (start, end) in [
+            (-1.0, 50.0),
+            (0.0, 101.0),
+            (50.0, 150.0),
+            (0.0, f32::INFINITY),
+            (-5.0, 200.0),
+        ] {
+            assert!(
+                !geometry(start, end, 100.0).is_valid(0.0, 100.0),
+                "{start}..{end}"
+            );
+        }
+        // Tolerance absorbs f32 noise, but only that.
+        assert!(geometry(-1e-4, 100.0001, 100.0).is_valid(0.0, 100.0));
+        assert!(!geometry(-1e-2, 100.0, 100.0).is_valid(0.0, 100.0));
+        // An infinite container only needs `start >= 0`.
+        assert!(geometry(0.0, f32::INFINITY, 100.0).is_valid(0.0, f32::INFINITY));
+        assert!(geometry(5.0, 1e9, 100.0).is_valid(0.0, f32::INFINITY));
+        assert!(!geometry(-1.0, 5.0, 100.0).is_valid(0.0, f32::INFINITY));
+        // `start < end` still holds first.
+        assert!(!geometry(5.0, 5.0, 100.0).is_valid(0.0, 100.0));
     }
 
     #[test]

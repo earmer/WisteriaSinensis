@@ -8,14 +8,14 @@ fn reject_negative_strut() {
     let mut a = ast("abc");
     a.strut_metrics.ascent = -8.;
     a.strut_metrics.descent = -2.;
-    assert!(check(&a, "abc").is_err());
+    assert_eq!(check(&a, "abc"), Err(LayoutInputError::InvalidStrut));
 }
 
 #[test]
 fn zero_strut_font_size_is_rejected() {
     let mut a = ast("abc");
     a.strut_font_size = 0.;
-    assert!(check(&a, "abc").is_err());
+    assert_eq!(check(&a, "abc"), Err(LayoutInputError::InvalidStrut));
 }
 
 #[test]
@@ -35,7 +35,7 @@ fn zero_fixed_multiplier_is_rejected() {
         line_height: LineHeight::Fixed(0.),
         ..Default::default()
     };
-    assert!(
+    assert_eq!(
         check_layout_inputs(
             &a,
             "abc",
@@ -47,8 +47,8 @@ fn zero_fixed_multiplier_is_rejected() {
                 tab_stops: TabStops { step: 8. }
             },
             &options
-        )
-        .is_err()
+        ),
+        Err(LayoutInputError::InvalidStrut)
     );
 }
 
@@ -80,7 +80,7 @@ fn negative_half_leading_with_positive_total_is_allowed() {
 fn raw_metrics_with_one_negative_depth_are_rejected() {
     let mut a = ast("abc");
     a.strut_metrics.descent = -1.;
-    assert!(check(&a, "abc").is_err());
+    assert_eq!(check(&a, "abc"), Err(LayoutInputError::InvalidStrut));
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn zero_total_raw_metrics_are_rejected() {
     let mut a = ast("abc");
     a.strut_metrics.ascent = 0.;
     a.strut_metrics.descent = 0.;
-    assert!(check(&a, "abc").is_err());
+    assert_eq!(check(&a, "abc"), Err(LayoutInputError::InvalidStrut));
 }
 
 #[test]
@@ -115,12 +115,19 @@ fn font_metrics_all_fields_and_overflow() {
             &mut m.mathematical_baseline_offset,
         ];
         *fields.into_iter().nth(i).unwrap() = f32::NAN;
-        assert!(check(&a, "a").is_err(), "field {i}");
+        // The first three fields are the horizontal strut itself; the rest are
+        // metrics the strut does not use.
+        let expected = if i < 3 {
+            LayoutInputError::InvalidStrut
+        } else {
+            LayoutInputError::InvalidFontMetrics
+        };
+        assert_eq!(check(&a, "a"), Err(expected), "field {i}");
     }
     let mut a = ast("a");
     a.strut_metrics.ascent = f32::MAX;
     a.strut_metrics.descent = f32::MAX;
-    assert!(check(&a, "a").is_err());
+    assert_eq!(check(&a, "a"), Err(LayoutInputError::InvalidFontMetrics));
     a.strut_metrics = valid;
     a.strut_metrics.vertical_ascent = -1.0;
     assert_eq!(check(&a, "a"), Err(LayoutInputError::InvalidFontMetrics));

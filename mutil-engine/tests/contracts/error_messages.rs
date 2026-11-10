@@ -37,7 +37,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidConstraints,
-            "invalid wrap width or tab stops",
+            "invalid wrap width, indentation or tab stops (without a geometry provider each indent must lie in [0, wrap width))",
         ),
         (
             LayoutInputError::ParagraphSeparatorInText,
@@ -53,7 +53,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidShapingRun { run: 1 },
-            "run 1 has an unresolved script or an invalid font size, bidi level or variation",
+            "run 1 has an unresolved script, an invalid font size, bidi level or variation, or bytes that are inverted or start before the previous run ends",
         ),
         (
             LayoutInputError::InvalidRunStorage { run: 1 },
@@ -93,7 +93,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidHyphenOpportunity { item: 2 },
-            "item 2 has a hyphenation opportunity off its atoms",
+            "item 2 is a hyphenation break that is not flagged, does not join two non-empty text boxes of one run at its offset, or has a cut off the atoms of its hyphen chain",
         ),
         (
             LayoutInputError::InvalidSpanBoundary { item: 2 },
@@ -105,7 +105,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidDecorationSpan { span: 3 },
-            "decoration span 3 is invalid or duplicated",
+            "decoration span 3 is invalid, duplicated, out of order or badly nested",
         ),
         (
             LayoutInputError::ItemsOutOfOrder { item: 2 },
@@ -128,8 +128,12 @@ fn layout_input_error_messages() {
             "item 2 has an atom whose atomic-span flag is wrong",
         ),
         (
+            LayoutInputError::InvalidTab { item: 2 },
+            "tab 2 owns no source bytes",
+        ),
+        (
             LayoutInputError::InvalidAtomicSpan { span: 3 },
-            "atomic span 3 is invalid or duplicated",
+            "atomic span 3 is invalid, duplicated, out of order or overlapping",
         ),
     ] {
         assert_eq!(error.to_string(), expected);
@@ -186,6 +190,10 @@ fn line_invariant_error_messages() {
         (
             LineInvariantError::VisibleEndOutsideRange,
             "visible_byte_end lies outside byte_range",
+        ),
+        (
+            LineInvariantError::VisibleEndNotOnBoundary,
+            "visible_byte_end is not a line end or the start or end of a glyph, inline box or tab",
         ),
         (
             LineInvariantError::EmptyLineHasVisualRuns,
@@ -251,7 +259,7 @@ fn line_invariant_error_messages() {
                 expected: 1.5,
                 actual: 2.5,
             },
-            "Left hanging extent is 2.5 but the glyphs occupy 1.5",
+            "left hanging extent is 2.5 but the glyphs occupy 1.5",
         ),
         (
             LineInvariantError::InvalidInlineBox { index: 4 },
@@ -312,6 +320,14 @@ fn line_invariant_error_messages() {
             "line width 4.5 exceeds the wrap width 5.5 and is not a single overflowing entity",
         ),
         (
+            LineInvariantError::SlotOverflow {
+                slot: 1,
+                visual_width: 4.5,
+                capacity: 3.5,
+            },
+            "slot 1 content width 4.5 exceeds its capacity 3.5 and is not a single overflowing entity",
+        ),
+        (
             LineInvariantError::InvalidTab { index: 4 },
             "tab 4 has a non-finite coordinate, a negative width, or empty or out-of-line bytes",
         ),
@@ -347,7 +363,7 @@ fn line_invariant_error_messages() {
             LineInvariantError::HangingNotAllowed {
                 side: HangSide::Left,
             },
-            "Left hanging punctuation is not allowed by the hang mode",
+            "left hanging punctuation is not allowed by the hang mode",
         ),
     ] {
         assert_eq!(error.to_string(), expected);

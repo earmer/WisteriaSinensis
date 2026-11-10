@@ -53,6 +53,20 @@ pub struct FrontendOptions {
     pub default_locale: LocaleTag,
 }
 
+impl FrontendOptions {
+    /// `true` when every numeric field of the options and of the profiles they
+    /// hold is within its legal range.
+    ///
+    /// Every field is an enum or a locale tag today, so any value is valid and
+    /// this returns `true`. The frontend entry point will call it before
+    /// analysing a paragraph, and a numeric field added later must be checked
+    /// here (finite, with its sign and range documented on the field).
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        true
+    }
+}
+
 /// Language inference policy. Heuristics require explicit opt-in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LocalePolicy {
@@ -65,4 +79,21 @@ pub enum LocalePolicy {
     /// selecting this policy currently has no effect; it is
     /// reserved for the script-based rules in spec §3 Step 4.
     ExperimentalHeuristics,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn options_without_numeric_fields_are_always_valid() {
+        assert!(FrontendOptions::default().is_valid());
+        let every_policy = FrontendOptions {
+            locale_policy: LocalePolicy::ExperimentalHeuristics,
+            autospace_profile: AutospaceProfile::CssCompat,
+            quote_policy: QuotePolicy::CjkAware,
+            ..Default::default()
+        };
+        assert!(every_policy.is_valid());
+    }
 }

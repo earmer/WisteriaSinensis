@@ -158,7 +158,10 @@ fn vertical_lr_paragraph_uses_line_under_for_block_start() {
     p.lines = vec![l];
     assert_eq!(p.validate("a", None, &ctx()), Ok(()));
     p.lines[0].baseline_y = 1.0;
-    assert!(p.validate("a", None, &ctx()).is_err());
+    assert_eq!(
+        p.validate("a", None, &ctx()),
+        Err((0, LineInvariantError::InvalidParagraph))
+    );
 }
 
 #[test]
@@ -187,7 +190,10 @@ fn vertical_lr_under_annotation_moves_first_baseline() {
     // baseline to the strut descent alone pushes the line into negative block
     // space once the annotation has extended descent.
     p.lines[0].baseline_y = 2.0;
-    assert!(p.validate("a", None, &ctx()).is_err());
+    assert_eq!(
+        p.validate("a", None, &ctx()),
+        Err((0, LineInvariantError::InvalidParagraph))
+    );
 }
 
 #[test]

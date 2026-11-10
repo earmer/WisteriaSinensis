@@ -155,11 +155,9 @@ pub trait TextShaper: Send + Sync {
     /// Re-shapes a window around a break, hyphenation point or word split
     /// (§5 Stage 1.4).
     ///
-    /// **Deviation from the §4.1 signature** (two parameters added, both
-    /// needed for a sound splice):
-    /// * `atoms`: the *same* run atom slice, `&ast.atoms[run.atom_range]`,
-    ///   that was given to `shape_run` for this run (O(1) to obtain, no copy);
-    /// * All features, variations, size and families come from `run`.
+    /// `atoms` is the *same* run atom slice, `&ast.atoms[run.atom_range]`, that
+    /// was given to `shape_run` for this run (O(1) to obtain, no copy). All
+    /// features, variations, size and families come from `run`.
     ///
     /// Contract:
     /// * `window` is in paragraph text coordinates, lies within

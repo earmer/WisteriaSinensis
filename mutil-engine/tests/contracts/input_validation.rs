@@ -15,7 +15,10 @@ fn reject_level_mismatch(target: usize) {
     if target == 2 {
         a.clusters[0].bidi_level = 1;
     }
-    assert!(check(&a, "abc").is_err());
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::ItemOutsideRun { item: 0 })
+    );
 }
 
 #[test]
@@ -38,19 +41,28 @@ fn safety_flags_must_be_consistent() {
     let mut a = ast("abc");
     a.clusters[0].safe_to_break_before = false;
     assert!(!a.clusters[0].safety_flags_consistent());
-    assert!(check(&a, "abc").is_err());
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::ItemNotSelfContained { item: 0 })
+    );
 }
 
 fn font_scale_must_be_finite(v: f32) {
     let mut a = ast("abc");
     a.clusters[0].font.scale = v;
-    assert!(check(&a, "abc").is_err());
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::InvalidTextWidth { item: 0 })
+    );
 }
 
 fn natural_width_must_be_finite(v: f32) {
     let mut a = ast("abc");
     a.clusters[0].natural_width = v;
-    assert!(check(&a, "abc").is_err());
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::InvalidTextWidth { item: 0 })
+    );
 }
 
 macro_rules! nonfinite_cases {
@@ -167,7 +179,10 @@ fn explicit_spacing_and_discretionary_equations() {
     if let WordNode::Box(BoxNode::Text { natural_width, .. }) = &mut a.items[0] {
         *natural_width = -1.0;
     }
-    assert!(check(&a, "a").is_err());
+    assert_eq!(
+        check(&a, "a"),
+        Err(LayoutInputError::InvalidTextWidth { item: 0 })
+    );
     for spacing in [-0.25, 0.25] {
         let mut a = ast("ab");
         let mut disc = DiscretionaryNode::direct(1);
@@ -186,7 +201,10 @@ fn explicit_spacing_and_discretionary_equations() {
     if let WordNode::Discretionary(d) = &mut a.items[1] {
         d.no_break_width = 1.0;
     }
-    assert!(check(&a, "a").is_err());
+    assert_eq!(
+        check(&a, "a"),
+        Err(LayoutInputError::InvalidDiscretionary { item: 1 })
+    );
 }
 
 /// Every opportunity of a long single-run chain cuts back to the chain start
@@ -227,10 +245,13 @@ fn a_hyphen_cut_one_byte_past_the_chain_end_is_rejected() {
         };
         ((offset - 1) as u32, past_end as u32)
     });
-    assert!(matches!(
+    // The opportunity at offset 10 follows box 8 (see the test above).
+    assert_eq!(
         check(&a, &t),
-        Err(LayoutInputError::InvalidHyphenOpportunity { .. })
-    ));
+        Err(LayoutInputError::InvalidHyphenOpportunity {
+            item: 2 + 2 * 9 - 1
+        })
+    );
 }
 
 #[test]
@@ -273,4 +294,43 @@ fn atom_script_must_match_its_run() {
         check(&a, "abc"),
         Err(LayoutInputError::ScriptMismatch { item: 0 })
     );
+}
+
+#[test]
+fn a_tab_owns_source_bytes() {
+    let build = |tab: TextRange| {
+        let mut a = ast("a\tb");
+        rebuild_items(&mut a, |b| {
+            vec![
+                boxed(b, 0, 1, false),
+                WordNode::Tab { byte_range: tab },
+                boxed(b, 2, 3, false),
+                end(3),
+            ]
+        });
+        a
+    };
+    assert!(check(&build(TextRange::new(1, 2)), "a\tb").is_ok());
+    // Zero bytes are not a tab, wherever they sit.
+    for at in [1, 2] {
+        assert_eq!(
+            check(&build(TextRange::empty_at(at)), "a\tb"),
+            Err(LayoutInputError::InvalidTab { item: 1 }),
+            "empty tab at {at}"
+        );
+    }
+}
+
+#[test]
+fn a_zero_width_tab_stop_geometry_is_not_constrained() {
+    // Tab widths are decided during layout; only the stops are validated.
+    let positioned = PositionedTab {
+        byte_range: TextRange::new(0, 1),
+        x: 10.,
+        width: 0.,
+    };
+    let mut l = line();
+    l.visual_runs = vec![run(glyph(0., 100., false))];
+    l.tabs = vec![positioned];
+    assert_eq!(l.validate(&ctx()), Ok(()));
 }

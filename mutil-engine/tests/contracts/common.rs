@@ -318,7 +318,7 @@ pub fn set_visual_width(line: &mut PositionedLine, width: f32) {
 
 pub fn line() -> PositionedLine {
     PositionedLine {
-        slots: single_slot(100., f32::INFINITY),
+        slots: single_slot(100., 100.),
         annotations: Vec::new(),
         is_ellipsized: false,
         resolved_slot_constraints: smallvec::SmallVec::new(),
@@ -366,6 +366,10 @@ pub fn ctx() -> LineContext {
             line_gap: 0.,
         },
         wrap_width: 100.,
+        slot_constraints: smallvec![InlineSlotConstraint {
+            start: 0.,
+            end: 100.
+        }],
         ..Default::default()
     }
 }

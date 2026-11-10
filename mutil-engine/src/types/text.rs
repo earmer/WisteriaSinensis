@@ -69,11 +69,17 @@ impl TextRange {
         self.start <= offset && offset < self.end
     }
 
-    /// `true` when `other` lies entirely within `self`.
+    /// `true` when `other` lies entirely within `self`. Both ranges must be
+    /// well formed: an inverted `self` or `other` (`start > end`) is contained
+    /// in nothing and contains nothing, so the relation is reflexive on valid
+    /// ranges and transitive.
     #[inline]
     #[must_use]
     pub const fn contains_range(&self, other: TextRange) -> bool {
-        self.start <= other.start && other.end <= self.end
+        self.start <= self.end
+            && other.start <= other.end
+            && self.start <= other.start
+            && other.end <= self.end
     }
 
     /// Converts to a standard [`Range`].
@@ -119,6 +125,29 @@ mod tests {
         assert!(r.contains_range(TextRange::new(3, 5)));
         assert!(!r.contains_range(TextRange::new(1, 3)));
         assert!(TextRange::empty_at(7).is_empty());
+    }
+
+    #[test]
+    fn containment_is_reflexive_transitive_and_rejects_inverted_ranges() {
+        let (outer, middle, inner) = (
+            TextRange::new(0, 9),
+            TextRange::new(2, 7),
+            TextRange::new(3, 4),
+        );
+        for r in [outer, middle, inner, TextRange::empty_at(5)] {
+            assert!(r.contains_range(r));
+        }
+        assert!(outer.contains_range(middle) && middle.contains_range(inner));
+        assert!(outer.contains_range(inner));
+        // An inverted range is neither a container nor contained, even when its
+        // endpoints happen to lie inside (or around) the other range.
+        let inverted = TextRange { start: 5, end: 3 };
+        assert!(!inverted.contains_range(inverted));
+        assert!(!outer.contains_range(inverted));
+        assert!(!inverted.contains_range(TextRange::new(4, 4)));
+        let wide_inverted = TextRange { start: 8, end: 1 };
+        assert!(!wide_inverted.contains_range(inner));
+        assert!(!outer.contains_range(wide_inverted));
     }
 
     #[test]

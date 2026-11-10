@@ -12,7 +12,13 @@ fn reject_negative_line_height() {
     let mut c = ctx();
     c.strut.ascent = -8.;
     c.strut.descent = -2.;
-    assert!(l.validate(&c).is_err());
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::NonPositiveLineHeight {
+            expected: -10.0,
+            actual: -10.0
+        })
+    );
 }
 
 #[test]
@@ -29,13 +35,22 @@ fn tab_stop_advances_at_large_coordinates() {
 #[test]
 fn partial_hanging_counts_only_overflow() {
     let mut l = line();
-    l.visual_runs = vec![run(glyph(96., 10., true))];
+    // The body glyph and the 4 units of the hanging mark inside the body span
+    // the slot; the mark's last 6 units hang.
+    l.visual_runs = vec![run(glyph(0., 96., false)), run(glyph(96., 10., true))];
     l.hanging_right = 6.;
     let mut c = ctx();
     c.hang_mode.end = HangEndMode::Allow;
     assert_eq!(l.validate(&c), Ok(()));
     l.hanging_right = 10.;
-    assert!(l.validate(&c).is_err());
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::HangingExtentMismatch {
+            side: HangSide::Right,
+            expected: 6.0,
+            actual: 10.0
+        })
+    );
 }
 
 #[test]
@@ -55,6 +70,7 @@ fn nbsp_remains_visible_in_collapsible_output() {
 #[test]
 fn malformed_atomic_fragments_are_rejected() {
     let mut l = line();
+    l.visual_runs = vec![run(glyph(0., 100., false))];
     l.atomic_fragments = vec![AtomicFragment {
         atomic_id: 1,
         full_byte_range: TextRange::new(0, 1),
@@ -109,13 +125,16 @@ fn false_hanging_flag_inside_body_is_rejected() {
     l.visual_runs = vec![run(glyph(90., 5., true))];
     let mut c = ctx();
     c.hang_mode.end = HangEndMode::Allow;
-    assert!(l.validate(&c).is_err());
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 0 })
+    );
 }
 
 #[test]
 fn negative_advance_partial_hang_uses_normalized_envelope() {
     let mut l = line();
-    l.visual_runs = vec![run(glyph(106., -10., true))];
+    l.visual_runs = vec![run(glyph(0., 96., false)), run(glyph(106., -10., true))];
     l.hanging_right = 6.;
     let mut c = ctx();
     c.hang_mode.end = HangEndMode::Allow;
@@ -125,7 +144,7 @@ fn negative_advance_partial_hang_uses_normalized_envelope() {
 #[test]
 fn left_partial_hanging_counts_only_overflow() {
     let mut l = line();
-    l.visual_runs = vec![run(glyph(-6., 10., true))];
+    l.visual_runs = vec![run(glyph(-6., 10., true)), run(glyph(4., 96., false))];
     l.hanging_left = 6.;
     let mut c = ctx();
     c.hang_mode.start = HangStartMode::AllLines;
@@ -139,16 +158,26 @@ fn hanging_requires_overflow_beyond_tolerance() {
     // A non-zero-advance hanging glyph inside the block is still rejected.
     let mut l = line();
     l.visual_runs = vec![run(glyph(99., 1.00001, true))];
-    assert!(l.validate(&c).is_err());
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 0 })
+    );
     // Zero-advance marks are exempt from containment and hanging.
     let mut l = line();
-    l.visual_runs = vec![run(glyph(50., 0., true))];
+    l.visual_runs = vec![run(glyph(0., 100., false)), run(glyph(50., 0., true))];
     assert_eq!(l.validate(&c), Ok(()));
     // But they cannot fake a declared hanging extent.
     let mut l = line();
     l.hanging_right = 5.;
-    l.visual_runs = vec![run(glyph(99., 0., true))];
-    assert!(l.validate(&c).is_err());
+    l.visual_runs = vec![run(glyph(0., 100., false)), run(glyph(99., 0., true))];
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::HangingExtentMismatch {
+            side: HangSide::Right,
+            expected: 0.0,
+            actual: 5.0
+        })
+    );
 }
 
 #[test]
@@ -157,11 +186,14 @@ fn multi_slot_containment_and_conserved_width() {
     assert_eq!(valid.validate(&c), Ok(()));
     let mut bad = valid.clone();
     bad.visual_runs[0].glyphs[0].advance = 151.0;
-    assert!(bad.validate(&c).is_err());
+    assert_eq!(
+        bad.validate(&c),
+        Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
+    );
     let mut bad = valid.clone();
     bad.slots[0].visual_width = 151.0;
     bad.visual_width = 251.0;
-    assert!(bad.validate(&c).is_err());
+    assert_eq!(bad.validate(&c), Err(LineInvariantError::InvalidSlots));
     let mut bad = valid.clone();
     bad.visual_width += 1.0;
     assert_eq!(bad.validate(&c), Err(LineInvariantError::InvalidSlots));
@@ -178,7 +210,10 @@ fn multi_slot_containment_and_conserved_width() {
         descent: 2.0,
         overflow_policy: BoxOverflowPolicy::Clip,
     });
-    assert!(bad.validate(&c).is_err());
+    assert_eq!(
+        bad.validate(&c),
+        Err(LineInvariantError::InlineBoxOutsideBlock { index: 0 })
+    );
     let mut bad = valid;
     bad.span_fragments.push(PositionedSpanFragment {
         span_id: 1,
@@ -191,7 +226,10 @@ fn multi_slot_containment_and_conserved_width() {
         is_first_fragment: true,
         is_last_fragment: true,
     });
-    assert!(bad.validate(&c).is_err());
+    assert_eq!(
+        bad.validate(&c),
+        Err(LineInvariantError::SpanFragmentOutsideBlock { index: 0 })
+    );
 }
 
 #[test]
@@ -206,7 +244,10 @@ fn empty_slot_hanging_and_trailing_whitespace() {
     hanging.byte_range = Some(TextRange::new(0, 1));
     l.visual_runs[0].glyphs.push(hanging);
     l.hanging_left = 5.0;
-    assert!(l.validate(&c).is_err());
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 1 })
+    );
     l.visual_runs[0].glyphs.pop();
     l.hanging_left = 0.0;
     let trailing = PositionedGlyph {
@@ -218,12 +259,15 @@ fn empty_slot_hanging_and_trailing_whitespace() {
     c.whitespace = HangingWhitespaceMode::Preserved;
     assert_eq!(l.validate(&c), Ok(()));
     l.visual_runs[0].glyphs.last_mut().unwrap().x = 145.0;
-    assert!(l.validate(&c).is_err());
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::TrailingWhitespaceOnWrongSide { run: 0, glyph: 1 })
+    );
 }
 
 fn one_glyph_line() -> PositionedLine {
     let mut l = line();
-    l.visual_runs = vec![run(glyph(0., 10., false))];
+    l.visual_runs = vec![run(glyph(0., 100., false))];
     l
 }
 
@@ -321,6 +365,7 @@ fn ellipsis_only_line_rejects_every_body_entity() {
     r.byte_range = TextRange::empty_at(0);
     r.glyphs = vec![ellipsis];
     l.visual_runs = vec![r];
+    set_visual_width(&mut l, 10.);
     assert_eq!(l.validate(&ctx()), Ok(()));
     let mut body = l.clone();
     body.visual_runs[0].glyphs.push(glyph(10., 10., false));
@@ -373,4 +418,278 @@ fn empty_slots_are_invalid() {
     let mut l = one_glyph_line();
     l.slots.clear();
     assert_eq!(l.validate(&ctx()), Err(LineInvariantError::InvalidSlots));
+}
+
+/// A one-slot line whose slot starts at `start` with capacity `capacity`, holding
+/// one glyph of `width`; the context has wrap width `wrap_width`.
+fn slot_line(
+    start: f32,
+    capacity: f32,
+    width: f32,
+    wrap_width: f32,
+) -> (PositionedLine, LineContext) {
+    let mut l = line();
+    l.slots = smallvec::smallvec![PositionedSlot {
+        start,
+        visual_width: width,
+        constraint_width: capacity,
+    }];
+    l.visual_width = width;
+    l.visual_runs = vec![run(glyph(start, width, false))];
+    let c = ctx().with_slots(
+        smallvec::smallvec![InlineSlotConstraint {
+            start,
+            end: start + capacity
+        }],
+        wrap_width,
+    );
+    (l, c)
+}
+
+#[test]
+fn context_slots_must_lie_inside_the_wrap_envelope() {
+    let invalid = Err(LineInvariantError::InvalidSlots);
+    for (start, capacity, wrap_width) in
+        [(0., 100., 100.), (10., 90., 100.), (5., 50., f32::INFINITY)]
+    {
+        let (l, c) = slot_line(start, capacity, 50., wrap_width);
+        assert_eq!(l.validate(&c), Ok(()), "{start} {capacity} {wrap_width}");
+    }
+    // Starts before 0, or ends beyond a finite wrap width.
+    for (start, capacity, wrap_width) in [
+        (-10., 100., 100.),
+        (0., 150., 100.),
+        (50., 100., 100.),
+        (-1., 100., f32::INFINITY),
+    ] {
+        let (l, c) = slot_line(start, capacity, 50., wrap_width);
+        assert_eq!(l.validate(&c), invalid, "{start} {capacity} {wrap_width}");
+    }
+    // An unbounded slot needs an unbounded container.
+    let (l, mut c) = slot_line(0., f32::INFINITY, 50., 100.);
+    assert_eq!(l.validate(&c), invalid);
+    c.wrap_width = f32::INFINITY;
+    assert_eq!(l.validate(&c), Ok(()));
+}
+
+#[test]
+fn slot_overflow_names_the_slot_and_its_capacity() {
+    // Two slots under a 250-wide container: the first holds 110 units of
+    // content in a 100-unit slot, but the line as a whole still fits.
+    let (mut l, c) = two_slots();
+    l.visual_runs[0].glyphs[0].advance = 110.;
+    l.slots[0].visual_width = 110.;
+    l.visual_width = 210.;
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::SlotOverflow {
+            slot: 0,
+            visual_width: 110.,
+            capacity: 100.
+        })
+    );
+    // The same for the second slot.
+    let (mut l, c) = two_slots();
+    l.visual_runs[0].glyphs[1].advance = 105.;
+    l.slots[1].visual_width = 105.;
+    l.visual_width = 205.;
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::SlotOverflow {
+            slot: 1,
+            visual_width: 105.,
+            capacity: 100.
+        })
+    );
+}
+
+#[test]
+fn line_wider_than_wrap_width_reports_the_container_not_the_slot() {
+    // An indented slot has capacity 92 in a 100-wide container.
+    let (l, c) = slot_line(8., 92., 95., 100.);
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::SlotOverflow {
+            slot: 0,
+            visual_width: 95.,
+            capacity: 92.
+        })
+    );
+    // Wider than the container itself: the report is the container's width.
+    let (l, c) = slot_line(8., 92., 105., 100.);
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::LineWiderThanWrapWidth {
+            visual_width: 105.,
+            wrap_width: 100.
+        })
+    );
+}
+
+#[test]
+fn rigid_boxes_are_compared_with_the_wrap_width_not_the_slot_capacity() {
+    let object = |x: f32, width: f32| PositionedInlineBox {
+        baseline_align: BaselineAlignment::Auto,
+        box_id: 1,
+        byte_range: TextRange::new(0, 1),
+        x,
+        y: 0.,
+        width,
+        ascent: 5.,
+        descent: 1.,
+        overflow_policy: BoxOverflowPolicy::Clip,
+    };
+    // An indented 50-unit slot in a 200-wide container.
+    let boxed = |x: f32, width: f32| {
+        let (mut l, c) = slot_line(50., 50., width, 200.);
+        l.visual_runs.clear();
+        l.visual_boxes = vec![object(x, width)];
+        (l, c)
+    };
+    // 60 units overrun the slot's own capacity but not the container: the slot
+    // is what overflows.
+    let (l, c) = boxed(50., 60.);
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::SlotOverflow {
+            slot: 0,
+            visual_width: 60.,
+            capacity: 50.
+        })
+    );
+    // Past the container's edge the box itself is too wide.
+    let (l, c) = slot_line(50., 150., 160., 200.);
+    let mut l = l;
+    l.visual_runs.clear();
+    l.visual_boxes = vec![object(50., 160.)];
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::InlineBoxWiderThanWrapWidth { index: 0 })
+    );
+    // Within the slot and the container it is fine.
+    let (l, c) = boxed(50., 50.);
+    assert_eq!(l.validate(&c), Ok(()));
+}
+
+fn empty_line_with_metrics(ascent: f32, descent: f32) -> PositionedLine {
+    let mut l = line();
+    l.byte_range = TextRange::empty_at(0);
+    l.visible_byte_end = 0;
+    set_visual_width(&mut l, 0.);
+    l.ascent = ascent;
+    l.descent = descent;
+    l.line_height = 10.;
+    l
+}
+
+#[test]
+fn an_empty_line_keeps_the_fixed_strut_metrics() {
+    // Strut 8 / 2, a fixed line box of 10.
+    let fixed = LineContext {
+        line_height: LineHeight::Fixed(1.),
+        ..ctx()
+    };
+    assert_eq!(empty_line_with_metrics(8., 2.).validate(&fixed), Ok(()));
+    assert_eq!(
+        empty_line_with_metrics(9., 1.).validate(&fixed),
+        Err(LineInvariantError::LineMetricsMismatch {
+            expected_ascent: 8.,
+            expected_descent: 2.,
+            actual_ascent: 9.,
+            actual_descent: 1.,
+        })
+    );
+    // Under `Normal` only the line height is pinned, as before.
+    assert_eq!(empty_line_with_metrics(9., 1.).validate(&ctx()), Ok(()));
+}
+
+#[test]
+fn the_visible_end_sits_on_a_cluster_boundary() {
+    // One glyph (one cluster) over bytes 0..3.
+    let mut g = glyph(0., 100., false);
+    g.byte_range = Some(TextRange::new(0, 3));
+    let mut l = line();
+    l.byte_range = TextRange::new(0, 3);
+    l.visual_runs = vec![run(g)];
+    l.visible_byte_end = 3;
+    assert_eq!(l.validate(&ctx()), Ok(()));
+    l.visible_byte_end = 1;
+    assert_eq!(
+        l.validate(&ctx()),
+        Err(LineInvariantError::VisibleEndNotOnBoundary)
+    );
+    // Outside the line it is still the older error.
+    l.visible_byte_end = 4;
+    assert_eq!(
+        l.validate(&ctx()),
+        Err(LineInvariantError::VisibleEndOutsideRange)
+    );
+    // The edges of a box or a tab on the line are boundaries too.
+    let mut l = line();
+    l.byte_range = TextRange::new(0, 5);
+    let mut first = glyph(0., 20., false);
+    first.byte_range = Some(TextRange::new(0, 2));
+    l.visual_runs = vec![run(first)];
+    l.visual_boxes = vec![PositionedInlineBox {
+        baseline_align: BaselineAlignment::Auto,
+        box_id: 1,
+        byte_range: TextRange::new(2, 4),
+        x: 20.,
+        y: 0.,
+        width: 30.,
+        ascent: 5.,
+        descent: 1.,
+        overflow_policy: BoxOverflowPolicy::Clip,
+    }];
+    l.tabs = vec![PositionedTab {
+        byte_range: TextRange::new(4, 5),
+        x: 50.,
+        width: 50.,
+    }];
+    for visible in [2, 4, 5] {
+        l.visible_byte_end = visible;
+        // A tab at or after the visible end is trailing whitespace: collapsed.
+        let mut accepted = l.clone();
+        if visible <= 4 {
+            accepted.tabs[0].width = 0.;
+            set_visual_width(&mut accepted, 50.);
+        } else {
+            set_visual_width(&mut accepted, 100.);
+        }
+        assert_eq!(accepted.validate(&ctx()), Ok(()), "visible end {visible}");
+    }
+    for visible in [1, 3] {
+        l.visible_byte_end = visible;
+        assert_eq!(
+            l.validate(&ctx()),
+            Err(LineInvariantError::VisibleEndNotOnBoundary),
+            "visible end {visible}"
+        );
+    }
+}
+
+#[test]
+fn a_slot_is_as_wide_as_the_content_placed_in_it() {
+    let (valid, c) = two_slots();
+    assert_eq!(valid.validate(&c), Ok(()));
+    // The second slot's content is gone but its width is not.
+    let mut empty_second = valid.clone();
+    empty_second.visual_runs[0].glyphs.pop();
+    assert_eq!(
+        empty_second.validate(&c),
+        Err(LineInvariantError::InvalidSlots)
+    );
+    // Content narrower than its slot's declared width.
+    let mut narrow = valid.clone();
+    narrow.visual_runs[0].glyphs[1].advance = 60.;
+    assert_eq!(narrow.validate(&c), Err(LineInvariantError::InvalidSlots));
+    // The slot may be narrower than its capacity when its content is.
+    narrow.slots[1].visual_width = 60.;
+    narrow.visual_width = 160.;
+    assert_eq!(narrow.validate(&c), Ok(()));
+    // Content that starts after the slot's start leaves the span short.
+    let mut shifted = valid;
+    shifted.visual_runs[0].glyphs[1].x = 160.;
+    shifted.visual_runs[0].glyphs[1].advance = 90.;
+    assert_eq!(shifted.validate(&c), Err(LineInvariantError::InvalidSlots));
 }

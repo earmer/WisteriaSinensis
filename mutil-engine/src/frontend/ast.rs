@@ -209,9 +209,13 @@ pub enum BreakAction {
     Direct,
     /// Mandatory line termination (`penalty == MANDATORY_BREAK_PENALTY`).
     ///
-    /// `is_paragraph_end == false` is an explicit UAX #14 terminator present in
-    /// the text (`\n`, `\r\n`, U+2028, ...): its `byte_range` is non-empty and
-    /// is exactly those bytes. `is_paragraph_end == true` is the synthetic
+    /// `is_paragraph_end == false` is an explicit line terminator present in
+    /// the text. Inside one paragraph that is **U+2028 only**: `\n`, `\r\n` and
+    /// the other paragraph separators end the paragraph and are handled by
+    /// [`split_paragraphs`](crate::frontend::split_paragraphs), and
+    /// `check_layout_inputs` rejects them in a node or in the text. Its
+    /// `byte_range` is non-empty and is exactly the three bytes of U+2028.
+    /// `is_paragraph_end == true` is the synthetic
     /// end-of-paragraph sentinel: its `byte_range` is the empty range
     /// `text.len()..text.len()` and it is the **last** discretionary of the
     /// paragraph, at most once. Text ending in `\n` therefore ends with a real
@@ -259,9 +263,11 @@ pub struct DiscretionaryNode {
     /// Bytes this opportunity owns. An **empty** range at the break position
     /// for every soft opportunity (after a space, between ideographs,
     /// hyphenation, a math operator); for a [`BreakAction::HardBreak`] the exact
-    /// newline sequence (`\n` 1 byte, `\r\n` 2, U+2028 3), or an empty range
-    /// at the end of the paragraph. The next line starts at `byte_range.end`, so
-    /// no byte is left unowned.
+    /// U+2028 line separator (3 bytes; `\n` and `\r\n` are paragraph separators
+    /// that [`split_paragraphs`](crate::frontend::split_paragraphs) removes
+    /// before a paragraph exists), or an empty range at the end of the
+    /// paragraph. The next line starts at `byte_range.end`, so no byte is left
+    /// unowned.
     pub byte_range: TextRange,
     /// Knuth-Plass penalty; see the associated constants for the canonical scale.
     pub penalty: i32,
@@ -292,7 +298,7 @@ pub struct DiscretionaryNode {
 }
 
 impl DiscretionaryNode {
-    /// Mandatory break (`\n`, `\r\n`, U+2028, end of paragraph): `-INF_PENALTY`.
+    /// Mandatory break (U+2028 inside a paragraph, or the end of paragraph): `-INF_PENALTY`.
     pub const MANDATORY_BREAK_PENALTY: i32 = -10_000;
     /// An unpenalised natural break.
     pub const NATURAL_PENALTY: i32 = 0;
@@ -525,10 +531,19 @@ pub struct ParagraphAst {
     /// Rich-text decoration spans (chips, code spans): padding and
     /// fragmentation behaviour. Their boundaries appear in `items` as
     /// `BoxNode::SpanBoundary`.
+    ///
+    /// **Order:** ascending by `byte_range.start`, then descending by
+    /// `byte_range.end` (an outer span before the spans it contains; equal
+    /// ranges keep their nesting order). `check_layout_inputs` rejects any
+    /// other order with `InvalidDecorationSpan`.
     pub decoration_spans: Vec<InlineDecorationSpan>,
     /// Spans the caret and deletion treat as one unit (mentions, chips).
     /// Orthogonal to `decoration_spans`: a span may be either, both or neither.
     /// The atoms inside carry `AtomFlags::IN_ATOMIC_EDIT_SPAN`, and no others do.
+    ///
+    /// **Order:** ascending by `byte_range.start` and pairwise disjoint
+    /// (`prev.end <= next.start`). `check_layout_inputs` rejects any other
+    /// order, an overlap or a nesting with `InvalidAtomicSpan`.
     pub atomic_spans: Vec<AtomicEditSpan>,
 }
 

@@ -12,14 +12,22 @@ fn valid_control() {
 fn sentinel_cannot_replace_source() {
     let mut a = ast("abc");
     rebuild_items(&mut a, |_| vec![end(3)]);
-    assert!(check(&a, "abc").is_err(), "all bytes unowned");
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::ItemOutsideText { item: 0 }),
+        "all bytes unowned"
+    );
 }
 
 #[test]
 fn source_cannot_have_gaps() {
     let mut a = ast("abc");
     rebuild_items(&mut a, |b| vec![boxed(b, 0, 2, false), end(3)]);
-    assert!(check(&a, "abc").is_err(), "2..3 unowned");
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::ItemOutsideText { item: 1 }),
+        "2..3 unowned"
+    );
 }
 
 #[test]
@@ -28,7 +36,10 @@ fn source_cannot_overlap() {
     rebuild_items(&mut a, |b| {
         vec![boxed(b, 0, 2, false), boxed(b, 1, 3, false), end(3)]
     });
-    assert!(check(&a, "abc").is_err());
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
+    );
 }
 
 fn reject_separator_in_source(sep: &str) {
@@ -44,7 +55,11 @@ fn reject_separator_in_source(sep: &str) {
         overflow_policy: BoxOverflowPolicy::Clip,
     });
     clear_text(&mut a);
-    assert!(check(&a, &t).is_err(), "separator {sep:?}");
+    assert_eq!(
+        check(&a, &t),
+        Err(LayoutInputError::ParagraphSeparatorInText),
+        "separator {sep:?}"
+    );
 }
 
 fn reject_hard_break(sep: &str) {
@@ -58,7 +73,11 @@ fn reject_hard_break(sep: &str) {
             end(sep.len()),
         ]
     });
-    assert!(check(&a, sep).is_err(), "hard break {sep:?}");
+    assert_eq!(
+        check(&a, sep),
+        Err(LayoutInputError::ParagraphSeparatorInText),
+        "hard break {sep:?}"
+    );
 }
 
 #[test]
@@ -173,7 +192,10 @@ fn source_coverage_cannot_skip_an_internal_byte() {
     rebuild_items(&mut a, |b| {
         vec![boxed(b, 0, 1, false), boxed(b, 2, 3, false), end(3)]
     });
-    assert!(check(&a, "abc").is_err());
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::ItemOutsideText { item: 1 })
+    );
 }
 
 #[test]
@@ -195,7 +217,10 @@ fn glue_only_source_must_cover_every_byte() {
             end(3),
         ]
     });
-    assert!(check(&a, "   ").is_err());
+    assert_eq!(
+        check(&a, "   "),
+        Err(LayoutInputError::ItemOutsideText { item: 1 })
+    );
     if let WordNode::Glue(g) = &mut a.items[0] {
         g.byte_range.end = 3;
     }

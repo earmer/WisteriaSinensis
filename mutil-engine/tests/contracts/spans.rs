@@ -146,12 +146,21 @@ fn same_start_outer_span_precedes_inner() {
 
 #[test]
 fn same_start_inner_first_is_rejected() {
-    assert!(check(&decorated(&[(0, 2), (0, 4)]), "abcd").is_err());
+    assert_eq!(
+        check(&decorated(&[(0, 2), (0, 4)]), "abcd"),
+        Err(LayoutInputError::InvalidDecorationSpan { span: 1 })
+    );
 }
 
 #[test]
 fn decreasing_span_starts_are_rejected() {
-    assert!(check(&decorated(&[(2, 4), (0, 2)]), "abcd").is_err());
+    for ranges in [[(2, 4), (0, 2)], [(2, 4), (0, 4)]] {
+        assert_eq!(
+            check(&decorated(&ranges), "abcd"),
+            Err(LayoutInputError::InvalidDecorationSpan { span: 1 }),
+            "{ranges:?}"
+        );
+    }
 }
 
 #[test]
@@ -164,7 +173,57 @@ fn atomic_spans_require_increasing_starts() {
     let (t, mut a) = spanned(2);
     assert!(check(&a, &t).is_ok());
     a.atomic_spans.reverse();
-    assert!(check(&a, &t).is_err());
+    assert_eq!(
+        check(&a, &t),
+        Err(LayoutInputError::InvalidAtomicSpan { span: 1 })
+    );
+}
+
+#[test]
+fn atomic_spans_are_ascending_and_disjoint() {
+    let (t, mut a) = spanned(4);
+    // Later start first, then a span reaching back over it.
+    a.atomic_spans = vec![
+        AtomicEditSpan {
+            span_id: 1,
+            byte_range: TextRange::new(2, 4),
+        },
+        AtomicEditSpan {
+            span_id: 2,
+            byte_range: TextRange::new(0, 4),
+        },
+    ];
+    assert_eq!(
+        check(&a, &t),
+        Err(LayoutInputError::InvalidAtomicSpan { span: 1 })
+    );
+    // Ascending starts but overlapping, or nested in the first.
+    for second in [(1, 3), (1, 2)] {
+        a.atomic_spans = vec![
+            AtomicEditSpan {
+                span_id: 1,
+                byte_range: TextRange::new(0, 2),
+            },
+            AtomicEditSpan {
+                span_id: 2,
+                byte_range: TextRange::new(second.0, second.1),
+            },
+        ];
+        assert_eq!(
+            check(&a, &t),
+            Err(LayoutInputError::InvalidAtomicSpan { span: 1 }),
+            "{second:?}"
+        );
+    }
+}
+
+#[test]
+fn thousands_of_spans_validate() {
+    // Deterministic, untimed counterpart of `five_thousand_spans_scale_linearly`.
+    let (t, a) = spanned(3000);
+    assert_eq!(a.decoration_spans.len(), 3000);
+    assert_eq!(a.atomic_spans.len(), 3000);
+    assert!(check(&a, &t).is_ok());
 }
 
 fn bidi_span(id: u64, start: usize, end: usize) -> ExplicitBidiSpan {

@@ -65,31 +65,54 @@ mod tests {
     }
 }
 
-/// Original UAX #9 bidi class, retained for line-local L1 processing.
-#[allow(missing_docs)]
+/// Original UAX #9 bidi class (`Bidi_Class`), retained for line-local
+/// L1 processing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BidiClass {
+    /// Left-to-Right (L).
     L,
+    /// Right-to-Left (R).
     R,
+    /// Arabic Letter (AL).
     Al,
+    /// European Number (EN).
     En,
+    /// European Separator (ES).
     Es,
+    /// European Terminator (ET).
     Et,
+    /// Arabic Number (AN).
     An,
+    /// Common Separator (CS).
     Cs,
+    /// Nonspacing Mark (NSM).
     Nsm,
+    /// Boundary Neutral (BN).
     Bn,
+    /// Paragraph Separator (B).
     B,
+    /// Segment Separator (S).
     S,
+    /// White Space (WS).
     Ws,
+    /// Other Neutrals (ON).
     On,
+    /// Left-to-Right Embedding (LRE).
     Lre,
+    /// Left-to-Right Override (LRO).
     Lro,
+    /// Right-to-Left Embedding (RLE).
     Rle,
+    /// Right-to-Left Override (RLO).
     Rlo,
+    /// Pop Directional Format (PDF).
     Pdf,
+    /// Left-to-Right Isolate (LRI).
     Lri,
+    /// Right-to-Left Isolate (RLI).
     Rli,
+    /// First Strong Isolate (FSI).
     Fsi,
+    /// Pop Directional Isolate (PDI).
     Pdi,
 }

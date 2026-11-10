@@ -112,10 +112,10 @@ fn runs_must_tile_the_atom_storage() {
     // Atoms no run owns.
     let mut a = two_runs();
     a.atoms.push(atom(3));
-    assert!(matches!(
+    assert_eq!(
         check(&a, TEXT),
-        Err(LayoutInputError::InvalidRunStorage { .. })
-    ));
+        Err(LayoutInputError::InvalidRunStorage { run: 1 })
+    );
 }
 
 #[test]
@@ -134,10 +134,10 @@ fn runs_must_tile_the_cluster_storage() {
     );
     let mut a = two_runs();
     a.clusters.pop();
-    assert!(matches!(
+    assert_eq!(
         check(&a, TEXT),
-        Err(LayoutInputError::InvalidRunStorage { .. })
-    ));
+        Err(LayoutInputError::InvalidRunStorage { run: 1 })
+    );
 }
 
 #[test]
@@ -284,4 +284,109 @@ fn a_box_reaching_into_the_next_run_is_not_self_contained() {
     }
     a.clusters[2].atom_range = 2..3;
     assert!(!a.is_self_contained(1));
+}
+
+#[test]
+fn body_runs_progress_through_the_text_without_overlap() {
+    // Touching runs ("ab" | "cd") are the baseline.
+    assert!(check(&two_runs(), TEXT).is_ok());
+    // The second run starts before the first one ends. Every box still lies
+    // inside its own run, so only the order of the runs is wrong.
+    let mut a = two_runs();
+    a.runs[0].byte_range = TextRange::new(0, 3);
+    assert_eq!(
+        check(&a, TEXT),
+        Err(LayoutInputError::InvalidShapingRun { run: 1 })
+    );
+    // Runs out of text order.
+    let mut a = two_runs();
+    a.runs[0].byte_range = TextRange::new(2, 4);
+    a.runs[1].byte_range = TextRange::new(0, 2);
+    assert_eq!(
+        check(&a, TEXT),
+        Err(LayoutInputError::InvalidShapingRun { run: 1 })
+    );
+    // An inverted range is not a range of the text at all.
+    let mut a = two_runs();
+    a.runs[1].byte_range = TextRange { start: 4, end: 2 };
+    assert_eq!(
+        check(&a, TEXT),
+        Err(LayoutInputError::RunOutsideText { run: 1 })
+    );
+    // An empty run is allowed anywhere between its neighbours.
+    let mut a = two_runs();
+    let empty = ShapingRun {
+        byte_range: TextRange::empty_at(2),
+        atom_range: 2..2,
+        cluster_range: 2..2,
+        ..a.runs[0].clone()
+    };
+    a.runs.insert(1, empty);
+    for item in &mut a.items {
+        if let WordNode::Box(BoxNode::Text { run_index, .. }) = item {
+            *run_index += usize::from(*run_index >= 1);
+        }
+    }
+    assert!(check(&a, TEXT).is_ok());
+}
+
+#[test]
+fn inverted_index_ranges_are_rejected_rather_than_read_as_empty() {
+    let inverted = |from: usize, to: usize| core::ops::Range {
+        start: from,
+        end: to,
+    };
+    // A run's own ranges.
+    let mut a = two_runs();
+    a.runs[1].atom_range = inverted(4, 2);
+    assert_eq!(
+        check(&a, TEXT),
+        Err(LayoutInputError::InvalidRunStorage { run: 1 })
+    );
+    let mut a = two_runs();
+    a.runs[1].cluster_range = inverted(4, 2);
+    assert_eq!(
+        check(&a, TEXT),
+        Err(LayoutInputError::InvalidRunStorage { run: 1 })
+    );
+    // A box's ranges.
+    let mut a = two_runs();
+    if let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[3] {
+        *atom_range = inverted(4, 3);
+    }
+    assert!(a.text_box(3).is_none());
+    assert_eq!(
+        check(&a, TEXT),
+        Err(LayoutInputError::ItemNotSelfContained { item: 3 })
+    );
+    let mut a = two_runs();
+    if let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &mut a.items[3] {
+        *cluster_range = inverted(4, 3);
+    }
+    assert_eq!(
+        check(&a, TEXT),
+        Err(LayoutInputError::ItemNotSelfContained { item: 3 })
+    );
+    // A cluster's run-local atoms.
+    let mut a = two_runs();
+    a.clusters[3].atom_range = inverted(2, 1);
+    assert_eq!(
+        check(&a, TEXT),
+        Err(LayoutInputError::ItemNotSelfContained { item: 3 })
+    );
+    // An annotation's own storage.
+    let mut a = ast("ab");
+    a.annotations = vec![annotation(TextRange::new(0, 2), AnnotationSide::Over)];
+    a.annotations[0].run.atom_range = inverted(1, 0);
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
+    );
+    let mut a = ast("ab");
+    a.annotations = vec![annotation(TextRange::new(0, 2), AnnotationSide::Over)];
+    a.annotations[0].clusters[0].atom_range = inverted(1, 0);
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
+    );
 }

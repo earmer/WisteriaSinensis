@@ -1,12 +1,13 @@
 //! Pure-logic primitives, geometry and the shared data model.
 //!
 //! This layer depends on nothing else in the crate. The frontend, shaping and
-//! middle-end layers all build on it, which keeps the module graph acyclic:
+//! middle-end layers all build on it, which keeps the module graph acyclic.
+//! Layers (dependencies point left or up), as in the crate root:
 //!
 //! ```text
 //! types  <-  frontend  <-  shaping
-//!   ^           ^
-//!   +-----  middleend
+//!   ^           ^           ^
+//!   +-----  middleend  -----+
 //! ```
 
 mod atom;

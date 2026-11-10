@@ -28,6 +28,10 @@ pub enum BoxDecorationBreak {
 ///
 /// Paddings are the horizontal advance of border plus padding; the vertical
 /// extent of the box comes from the line.
+///
+/// A paragraph holds its spans in `ParagraphAst::decoration_spans`, ordered
+/// ascending by `byte_range.start` and, for equal starts, descending by
+/// `byte_range.end`, so an outer span precedes the spans it contains.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InlineDecorationSpan {
     /// Caller-assigned identifier, unique among decoration spans.
@@ -70,6 +74,9 @@ impl InlineDecorationSpan {
 ///
 /// It may still wrap across lines when its `InlineDecorationSpan` allows it;
 /// atomicity concerns editing only.
+///
+/// A paragraph holds its spans in `ParagraphAst::atomic_spans`, ascending by
+/// `byte_range.start` and pairwise disjoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AtomicEditSpan {
     /// Caller-assigned identifier, unique among atomic spans.

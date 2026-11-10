@@ -111,14 +111,22 @@ pub struct ShapedCluster {
 }
 
 impl ShapedCluster {
-    /// Number of atoms covered (`K`).
+    /// Number of atoms covered (`K`). Assumes a validated cluster
+    /// (`atom_range.start <= atom_range.end`); an inverted range counts as 0
+    /// rather than panicking or wrapping.
     #[inline]
     #[must_use]
     pub fn atom_count(&self) -> usize {
-        self.atom_range.len()
+        self.atom_range.end.saturating_sub(self.atom_range.start)
     }
 
-    /// `true` when the cluster covers more than one atom (a ligature).
+    /// `true` when the cluster covers more than one atom. Assumes a validated
+    /// cluster, like [`atom_count`](Self::atom_count).
+    ///
+    /// This is also `true` for a tate-chu-yoko cluster
+    /// (`GlyphOrientation::HorizontalInVertical`), which is one merged run of
+    /// several atoms and not a ligature: a caller placing caret sub-slots must
+    /// check the cluster's `orientation` first.
     #[inline]
     #[must_use]
     pub fn is_ligature(&self) -> bool {
@@ -166,6 +174,14 @@ mod tests {
         assert!(!cluster(3..4, true, true).is_ligature());
         assert!(cluster(3..5, true, true).is_ligature());
         assert_eq!(cluster(3..5, true, true).atom_count(), 2);
+    }
+
+    #[test]
+    fn an_inverted_atom_range_counts_zero_atoms() {
+        let inverted = cluster(Range { start: 5, end: 3 }, true, true);
+        assert_eq!(inverted.atom_count(), 0);
+        assert!(!inverted.is_ligature());
+        assert_eq!(cluster(4..4, true, true).atom_count(), 0);
     }
 
     #[test]

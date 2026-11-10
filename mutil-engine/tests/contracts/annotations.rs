@@ -54,7 +54,10 @@ fn annotation_input_boundaries_and_local_partition() {
             end(2),
         ]
     });
-    assert!(check(&a, "ab").is_err());
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
+    );
 }
 
 #[test]
@@ -67,16 +70,28 @@ fn annotation_output_and_synthesized_ownership() {
     assert_eq!(l.validate(&c), Ok(()));
     let mut bad = l.clone();
     bad.annotations[0].glyphs[0].byte_range = Some(TextRange::new(0, 1));
-    assert!(bad.validate(&c).is_err());
+    assert_eq!(
+        bad.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+    );
     let mut bad = l.clone();
     bad.annotations[0].base_byte_range.end = 2;
-    assert!(bad.validate(&c).is_err());
+    assert_eq!(
+        bad.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+    );
     let mut bad = l.clone();
     bad.ascent -= 3.0;
-    assert!(bad.validate(&c).is_err());
+    assert_eq!(
+        bad.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+    );
     let mut bad = l.clone();
     bad.annotations[0].glyphs[0].x = f32::NAN;
-    assert!(bad.validate(&c).is_err());
+    assert_eq!(
+        bad.validate(&c),
+        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+    );
     let mut bad = l;
     bad.visual_runs[0].glyphs[0].is_synthesized = true;
     assert_eq!(
@@ -90,7 +105,8 @@ fn annotation_base_allows_glyph_less_source_gaps() {
     let mut l = line();
     l.byte_range = TextRange::new(0, 3);
     l.visible_byte_end = 3;
-    set_visual_width(&mut l, 100.0);
+    // The body spans the first glyph, the glyph-less gap and the last glyph.
+    set_visual_width(&mut l, 80.0);
     l.ascent += 3.0;
     l.line_height += 3.0;
     l.baseline_y += 3.0;
@@ -265,6 +281,7 @@ fn an_annotation_id_appears_once_per_paragraph() {
         let mut g = glyph(0.0, 10.0, false);
         g.byte_range = Some(l.byte_range);
         l.visual_runs = vec![run(g)];
+        set_visual_width(&mut l, 10.0);
         let mut ann = positioned_annotation();
         ann.annotation_id = id;
         ann.base_byte_range = l.byte_range;

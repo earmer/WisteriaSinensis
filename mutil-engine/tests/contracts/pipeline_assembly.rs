@@ -303,8 +303,12 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
         ..blank_line()
     };
 
+    // The block extent ends at the bottom of the last line: its baseline plus
+    // its descent.
+    let total_block_size = line2.baseline_y + line2.descent;
     let mut para = PositionedParagraph::empty(ast.base_direction);
     para.lines = vec![line0, line1, line2];
+    para.total_block_size = total_block_size;
     para
 }
 
@@ -462,6 +466,44 @@ fn middle_end_assembles_three_valid_lines() {
 }
 
 #[test]
+fn the_assembled_paragraph_validates_as_a_whole() {
+    let (_, ctx, para) = assembled();
+    // Lines at baselines 12, 32 and 48 with ascent 12 and descent 4 end at 52.
+    assert_eq!(para.total_block_size, 52.0);
+    // Each line is judged against the paragraph context with its own index
+    // (line 1 hangs its comma at the end edge, which `layout_options` allows).
+    assert_eq!(para.validate_geometry(&ctx), Ok(()));
+    assert_eq!(para.validate(TEXT, None, &ctx), Ok(()));
+    // A block extent shorter than the lines is wrong ...
+    let mut short = para.clone();
+    short.total_block_size = 51.0;
+    assert_eq!(
+        short.validate_geometry(&ctx),
+        Err((2, LineInvariantError::InvalidParagraph))
+    );
+    // ... and so are lines that stop short of the text.
+    assert_eq!(
+        para.validate(&format!("{TEXT}x"), None, &ctx),
+        Err((2, LineInvariantError::InvalidParagraph))
+    );
+    // The hanging comma is only legal on line 1 because the context allows an
+    // end-edge hang; a context that forbids it fails line 1.
+    let forbidding = LineContext {
+        hang_mode: HangMode::NONE,
+        ..ctx
+    };
+    assert_eq!(
+        para.validate(TEXT, None, &forbidding),
+        Err((
+            1,
+            LineInvariantError::HangingNotAllowed {
+                side: HangSide::Right
+            }
+        ))
+    );
+}
+
+#[test]
 fn assembled_output_owns_its_data() {
     assert_send_sync_static::<ParagraphAst>();
     assert_send_sync_static::<PositionedParagraph>();
@@ -482,10 +524,11 @@ fn hanging_comma_counted_in_visual_width_is_rejected() {
     let widened = bad.visual_width + ADV;
     set_visual_width(&mut bad, widened);
     bad.hanging_right = 0.0;
-    assert!(matches!(
+    // The comma is the last glyph of the run: "atje" (4), "go" (2), ",".
+    assert_eq!(
         bad.validate(&ctx),
-        Err(LineInvariantError::HangingGlyphInsideBlock { .. })
-    ));
+        Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 6 })
+    );
 }
 
 #[test]
@@ -858,7 +901,10 @@ fn l1_trailing_whitespace_sits_on_the_far_edge_of_the_base_direction() {
     // Whitespace in the middle of the body is wrong in both directions.
     let inside = trailing_space_line(10.0);
     for d in [BidiDirection::Ltr, BidiDirection::Rtl] {
-        assert!(inside.validate(&ctx(d)).is_err());
+        assert_eq!(
+            inside.validate(&ctx(d)),
+            Err(LineInvariantError::TrailingWhitespaceOnWrongSide { run: 0, glyph: 1 })
+        );
     }
     // It never counts as hanging punctuation, on either side.
     assert_eq!(
