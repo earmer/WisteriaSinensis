@@ -377,3 +377,161 @@ fn line_invariant_error_messages() {
         let _: &dyn std::error::Error = &error;
     }
 }
+
+#[test]
+fn storage_coverage_and_ordering_error_messages() {
+    assert_eq!(
+        LayoutInputError::InvalidGlyphStorage { cluster: 3 }.to_string(),
+        "cluster 3 has a glyph range that does not tile the paragraph's glyphs"
+    );
+    assert_eq!(
+        LayoutInputError::UncoveredSource { byte: 7 }.to_string(),
+        "no item owns byte 7 of the text"
+    );
+    for (error, expected) in [
+        (
+            LineInvariantError::GlyphsOutOfVisualOrder { run: 1, glyph: 5 },
+            "glyph 5 of run 1 lies left of the glyph before it",
+        ),
+        (
+            LineInvariantError::SpanFragmentEdgeMismatch { index: 4 },
+            "span fragment 4 lies outside its span, or its first or last flag disagrees with where it starts or ends",
+        ),
+        (
+            LineInvariantError::HangingWithoutOverflow {
+                side: HangSide::Right,
+            },
+            "right hanging punctuation would have fitted the line, which the allow-end mode does not hang",
+        ),
+    ] {
+        assert_eq!(error.to_string(), expected);
+    }
+}
+
+#[test]
+fn every_reason_completes_its_error_message() {
+    use AnnotationErrorReason as A;
+    use ParagraphErrorReason as P;
+    use SlotErrorReason as S;
+    let slots = [
+        (S::InvalidWrapWidth, "the wrap width is not positive"),
+        (S::NoSlots, "the line has no slot"),
+        (
+            S::InvalidConstraint,
+            "a constraint is malformed, outside the wrap envelope or out of order",
+        ),
+        (
+            S::InvalidContent,
+            "a content block is not finite, is negative or starts outside its constraint",
+        ),
+        (
+            S::WidthNotConserved,
+            "the slot widths do not sum to the line's visual width",
+        ),
+        (
+            S::WidthNotContentSpan,
+            "a content block is not the span of the content placed in it",
+        ),
+        (
+            S::ContentOutsideSlots,
+            "the line has content but no slot holds any of it",
+        ),
+    ];
+    for (reason, expected) in slots {
+        assert_eq!(
+            LineInvariantError::InvalidSlots { reason }.to_string(),
+            format!("invalid slots: {expected}")
+        );
+    }
+    let annotations = [
+        (A::OnEmptyLine, "the line has no source bytes"),
+        (
+            A::InvalidMetrics,
+            "a size, scale, offset, extent or variation is invalid",
+        ),
+        (
+            A::OrientationMismatch,
+            "the orientation does not match the writing mode",
+        ),
+        (
+            A::BaseOutsideLine,
+            "the base is empty or outside the visible part of the line",
+        ),
+        (A::NoGlyphs, "it has no glyphs"),
+        (
+            A::InvalidGlyph,
+            "a glyph is not synthesized, has a byte range or is not finite",
+        ),
+        (A::DuplicateId, "its id repeats on the line"),
+        (
+            A::OverlapsOnSide,
+            "it shares base bytes with another annotation on its side",
+        ),
+        (
+            A::GlyphStraddlesBase,
+            "a body glyph straddles an edge of the base",
+        ),
+        (A::NoBaseGlyphs, "no body glyph lies in the base"),
+        (A::BaseSpansSlots, "the base does not lie in one slot"),
+        (
+            A::OutsideOverhang,
+            "a glyph lies beyond the overhang allowance or the slot",
+        ),
+        (
+            A::InsideBase,
+            "it sits closer to the baseline than its base",
+        ),
+        (
+            A::DoesNotFitLineBox,
+            "the line box is too small for the base and the annotation",
+        ),
+    ];
+    for (reason, expected) in annotations {
+        assert_eq!(
+            LineInvariantError::InvalidAnnotation { index: 2, reason }.to_string(),
+            format!("annotation 2 is invalid: {expected}")
+        );
+    }
+    let paragraphs = [
+        (P::InvalidPolicy, "the recorded policy is invalid"),
+        (P::NoLines, "it has no line"),
+        (
+            P::InvalidBlockSize,
+            "the total block size is not finite, is negative or ends above the last line",
+        ),
+        (
+            P::LineBoxesOverlap,
+            "a line box is not finite, is inverted or overlaps the previous line",
+        ),
+        (
+            P::LineBoxExceedsLineHeight,
+            "a line's ascent plus descent exceeds its line height",
+        ),
+        (
+            P::SourceNotCovered,
+            "the lines do not tile the rendered text on character boundaries",
+        ),
+        (
+            P::InvalidTruncation,
+            "the ellipsized line, the truncated range and the clamp policy disagree",
+        ),
+        (
+            P::DuplicateAnnotation,
+            "an annotation id repeats across lines",
+        ),
+        (
+            P::InconsistentSpanFragments,
+            "the fragments of a decoration span disagree about its range or do not hold exactly one first and one last fragment",
+        ),
+        (
+            P::InconsistentAtomicFragments,
+            "the fragments of an atomic span disagree about its range or do not cover its rendered part",
+        ),
+    ];
+    for (reason, expected) in paragraphs {
+        assert_eq!(
+            LineInvariantError::InvalidParagraph { reason }.to_string(),
+            format!("invalid paragraph: {expected}")
+        );
+    }
+}

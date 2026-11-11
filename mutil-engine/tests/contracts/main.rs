@@ -12,6 +12,7 @@ mod geometry;
 mod input_validation;
 mod line_validation;
 mod metrics;
+mod paragraph_validation;
 mod pipeline_assembly;
 mod pipeline_types;
 mod rich_inline_spans;

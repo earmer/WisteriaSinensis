@@ -1140,10 +1140,9 @@ impl PositionedLine {
             // into the body, it would not fit the slot it hangs from.
             let at_line_end = !side.is_line_start(ctx.base_direction);
             let capacity = slot.constraint.width();
-            if at_line_end
-                && ctx.hang_mode.end == HangEndMode::Allow
-                && slot.visual_width + expected <= capacity - tolerance(capacity, 0.0)
-            {
+            let would_fit = capacity == f32::INFINITY
+                || slot.visual_width + expected <= capacity - tolerance(capacity, 0.0);
+            if at_line_end && ctx.hang_mode.end == HangEndMode::Allow && would_fit {
                 return Err(E::HangingWithoutOverflow { side });
             }
         }

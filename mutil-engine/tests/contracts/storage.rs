@@ -393,3 +393,122 @@ fn inverted_index_ranges_are_rejected_rather_than_read_as_empty() {
         Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
     );
 }
+
+#[test]
+fn cluster_glyph_ranges_tile_the_paragraph_glyphs() {
+    let a = ast("abc");
+    assert_eq!(a.glyphs.len(), 3);
+    for (i, c) in a.clusters.iter().enumerate() {
+        assert_eq!(c.glyph_range, i..i + 1);
+        assert_eq!(a.cluster_glyphs(c), &a.glyphs[i..i + 1]);
+    }
+    assert_eq!(check(&a, "abc"), Ok(()));
+    let rejected = |edit: fn(&mut ParagraphAst)| {
+        let mut a = ast("abc");
+        edit(&mut a);
+        check(&a, "abc")
+    };
+    let invalid = |cluster| Err(LayoutInputError::InvalidGlyphStorage { cluster });
+    // A gap, an overlap and a range past the end.
+    assert_eq!(rejected(|a| a.clusters[1].glyph_range = 2..2), invalid(1));
+    assert_eq!(rejected(|a| a.clusters[1].glyph_range = 0..2), invalid(1));
+    assert_eq!(rejected(|a| a.clusters[2].glyph_range = 2..4), invalid(2));
+    // A cluster that drops its glyph leaves it to no one.
+    assert_eq!(rejected(|a| a.clusters[0].glyph_range = 0..0), invalid(1));
+    // A glyph no cluster owns.
+    assert_eq!(
+        rejected(|a| a.glyphs.push(RawShapedGlyph::default())),
+        invalid(2)
+    );
+    // A cluster may render nothing.
+    assert_eq!(
+        rejected(|a| {
+            a.clusters[1].glyph_range = 1..1;
+            a.clusters[2].glyph_range = 1..2;
+            a.glyphs.pop();
+        }),
+        Ok(())
+    );
+}
+
+/// The paragraph-level index of the first cluster of the text box at `item`.
+fn first_cluster(a: &ParagraphAst, item: usize) -> usize {
+    let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &a.items[item] else {
+        panic!("items[{item}] is not a text box");
+    };
+    cluster_range.start
+}
+
+fn window(atoms: core::ops::Range<usize>, bytes: (usize, usize)) -> ReshapeWindow {
+    ReshapeWindow {
+        run_index: 0,
+        atom_range: atoms,
+        byte_range: TextRange::new(bytes.0, bytes.1),
+    }
+}
+
+#[test]
+fn a_taken_break_reshapes_the_chain_cells_its_cuts_touch() {
+    // "xaaaa": the boxes "a" are items 2, 4, 6, 8 (bytes 1..5), joined by the
+    // seams 3, 5, 7 at offsets 2, 3, 4.
+    let chain = |prefix: u32, suffix: u32| {
+        hyphen_chain_ast(4, move |offset, _| {
+            if offset == 3 {
+                (prefix, suffix)
+            } else {
+                (0, 0)
+            }
+        })
+        .1
+    };
+    // Without a cut: the box on each side of the break.
+    assert_eq!(chain(0, 0).break_window(5), Some(window(2..4, (2, 4))));
+    // A cut inside the neighbouring box changes nothing.
+    assert_eq!(chain(1, 1).break_window(5), Some(window(2..4, (2, 4))));
+    // A cut that crosses an unchosen seam pulls the next cell in.
+    assert_eq!(chain(2, 0).break_window(5), Some(window(1..4, (1, 4))));
+    assert_eq!(chain(0, 2).break_window(5), Some(window(2..5, (2, 5))));
+    assert_eq!(chain(2, 2).break_window(5), Some(window(1..5, (1, 5))));
+    // A cut that leaves the chain has no window (and fails validation).
+    let (text, escaping) =
+        hyphen_chain_ast(4, |offset, _| if offset == 3 { (3, 0) } else { (0, 0) });
+    assert_eq!(escaping.break_window(5), None);
+    assert_eq!(
+        check(&escaping, &text),
+        Err(LayoutInputError::InvalidHyphenOpportunity { item: 5 })
+    );
+    // Only hyphenation seams have one.
+    let a = chain(0, 0);
+    for item in [0, 1, 2, 4, a.items.len() - 1, a.items.len()] {
+        assert_eq!(a.break_window(item), None, "item {item}");
+    }
+}
+
+#[test]
+fn untaken_unsafe_seams_are_rejoined_in_merged_windows() {
+    let (_, mut a) = hyphen_chain_ast(4, |_, _| (0, 0));
+    assert!(a.rejoin_windows([3, 5, 7]).is_empty());
+    // The seams before items 4 and 6 split a cluster.
+    for item in [4, 6] {
+        let cluster = first_cluster(&a, item);
+        a.clusters[cluster].safe_to_concat_before = false;
+    }
+    // Each unsafe seam alone: the two boxes it joins.
+    assert_eq!(a.rejoin_windows([3])[..], [window(1..3, (1, 3))]);
+    assert_eq!(a.rejoin_windows([5])[..], [window(2..4, (2, 4))]);
+    // Together they share the box between them: one window, in any order,
+    // and the safe seam 7 adds nothing.
+    for untaken in [[3, 5, 7], [7, 5, 3]] {
+        assert_eq!(a.rejoin_windows(untaken)[..], [window(1..4, (1, 4))]);
+    }
+    // Windows that only touch stay apart: the seam between them is not
+    // rejoined.
+    let cluster = first_cluster(&a, 6);
+    a.clusters[cluster].safe_to_concat_before = true;
+    let cluster = first_cluster(&a, 8);
+    a.clusters[cluster].safe_to_concat_before = false;
+    assert_eq!(
+        a.rejoin_windows([7, 3])[..],
+        [window(1..3, (1, 3)), window(3..5, (3, 5))]
+    );
+}

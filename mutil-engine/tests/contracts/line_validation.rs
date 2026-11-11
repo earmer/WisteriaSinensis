@@ -778,3 +778,293 @@ fn the_content_block_separates_alignment_offset_from_leading_glue() {
         })
     );
 }
+
+/// A full one-slot line over bytes `0..2`: glyphs `[0, 50]` and `[50, 100]`,
+/// one byte each, in one run.
+fn two_glyph_line() -> PositionedLine {
+    let mut l = line();
+    l.byte_range = TextRange::new(0, 2);
+    l.visible_byte_end = 2;
+    let mut second = glyph(50., 50., false);
+    second.byte_range = Some(TextRange::new(1, 2));
+    let mut r = run(glyph(0., 50., false));
+    r.byte_range = l.byte_range;
+    r.glyphs.push(second);
+    l.visual_runs = vec![r];
+    l
+}
+
+#[test]
+fn the_glyphs_of_a_run_are_in_screen_order() {
+    let l = two_glyph_line();
+    assert_eq!(l.validate(&ctx()), Ok(()));
+    // A mark shares its base's pen position; its ink offset is not compared.
+    let mut marked = l.clone();
+    let mut mark = glyph(50., 0., false);
+    mark.byte_range = Some(TextRange::new(1, 2));
+    mark.x_offset = -30.;
+    marked.visual_runs[0].glyphs.push(mark);
+    assert_eq!(marked.validate(&ctx()), Ok(()));
+    // A negative advance (kerning past zero) leaves the pen positions ordered.
+    let mut kerned = l.clone();
+    kerned.visual_runs[0].glyphs[1].x = 100.;
+    kerned.visual_runs[0].glyphs[1].advance = -50.;
+    assert_eq!(kerned.validate(&ctx()), Ok(()));
+    let mut swapped = l;
+    swapped.visual_runs[0].glyphs.swap(0, 1);
+    assert_eq!(
+        swapped.validate(&ctx()),
+        Err(LineInvariantError::GlyphsOutOfVisualOrder { run: 0, glyph: 1 })
+    );
+}
+
+fn caret(x: f32, offset: usize, level: u8) -> CaretStop {
+    CaretStop {
+        x,
+        offset,
+        affinity: CaretAffinity::Downstream,
+        level,
+        line: 0,
+    }
+}
+
+#[test]
+fn a_caret_stop_carries_the_level_of_a_run_owning_its_offset() {
+    // "a" at level 0 in `[0, 50]`, "b" at level 1 in `[50, 100]`.
+    let mut l = two_glyph_line();
+    let mut rtl = l.visual_runs[0].clone();
+    rtl.bidi_level = 1;
+    rtl.byte_range = TextRange::new(1, 2);
+    rtl.glyphs.remove(0);
+    l.visual_runs[0].glyphs.pop();
+    l.visual_runs[0].byte_range = TextRange::new(0, 1);
+    l.visual_runs.push(rtl);
+    let with = |stops: Vec<CaretStop>| {
+        let mut l = l.clone();
+        l.caret_stops = stops;
+        l.validate(&ctx())
+    };
+    let invalid = |index| Err(LineInvariantError::InvalidCaretStop { index });
+    // Offset 1 is the run boundary: either run's level, and both stops sit
+    // at one x.
+    assert_eq!(
+        with(vec![
+            caret(0., 0, 0),
+            caret(50., 1, 0),
+            caret(50., 1, 1),
+            caret(50., 2, 1)
+        ]),
+        Ok(())
+    );
+    // Offset 0 belongs to the level-0 run only, offset 2 to the level-1 run.
+    assert_eq!(with(vec![caret(0., 0, 1)]), invalid(0));
+    assert_eq!(with(vec![caret(0., 0, 0), caret(50., 2, 0)]), invalid(1));
+    // A level no run has is wrong even at the boundary.
+    assert_eq!(with(vec![caret(50., 1, 2)]), invalid(0));
+
+    // Inline boxes carry no level, so a stop touching one is only
+    // range-checked; so is the stop of an empty line.
+    let mut boxed = l.clone();
+    boxed.visual_runs.pop();
+    boxed.visual_boxes = vec![PositionedInlineBox {
+        baseline_align: BaselineAlignment::Auto,
+        box_id: 1,
+        byte_range: TextRange::new(1, 2),
+        x: 50.,
+        y: 0.,
+        width: 50.,
+        ascent: 5.,
+        descent: 1.,
+        overflow_policy: BoxOverflowPolicy::Clip,
+    }];
+    boxed.caret_stops = vec![caret(50., 1, 1), caret(100., 2, 1)];
+    assert_eq!(boxed.validate(&ctx()), Ok(()));
+    let mut empty = line();
+    empty.byte_range = TextRange::empty_at(0);
+    empty.visible_byte_end = 0;
+    set_visual_width(&mut empty, 0.);
+    empty.caret_stops = vec![caret(0., 0, 1)];
+    assert_eq!(empty.validate(&ctx()), Ok(()));
+}
+
+/// A line whose body is `body` wide in a 100-unit slot, with a 5-unit mark
+/// hanging off its right edge.
+fn end_hanging_line(body: f32) -> PositionedLine {
+    let mut l = two_glyph_line();
+    set_visual_width(&mut l, body);
+    l.visual_runs[0].glyphs[0].advance = body;
+    l.visual_runs[0].glyphs[1] = PositionedGlyph {
+        byte_range: Some(TextRange::new(1, 2)),
+        ..glyph(body, 5., true)
+    };
+    l.hanging_right = 5.;
+    l
+}
+
+#[test]
+fn allow_end_hangs_a_mark_only_when_it_would_otherwise_wrap() {
+    let hang = |end| LineContext {
+        hang_mode: HangMode {
+            start: HangStartMode::None,
+            end,
+        },
+        ..ctx()
+    };
+    let unneeded = Err(LineInvariantError::HangingWithoutOverflow {
+        side: HangSide::Right,
+    });
+    // 100 + 5 and 96 + 5 do not fit 100 units: the mark had to hang.
+    assert_eq!(
+        end_hanging_line(100.).validate(&hang(HangEndMode::Allow)),
+        Ok(())
+    );
+    assert_eq!(
+        end_hanging_line(96.).validate(&hang(HangEndMode::Allow)),
+        Ok(())
+    );
+    // 94 + 5 and 60 + 5 fit: under `Allow` the mark belongs in the body.
+    assert_eq!(
+        end_hanging_line(94.).validate(&hang(HangEndMode::Allow)),
+        unneeded
+    );
+    assert_eq!(
+        end_hanging_line(60.).validate(&hang(HangEndMode::Allow)),
+        unneeded
+    );
+    // `Force` hangs it regardless.
+    assert_eq!(
+        end_hanging_line(60.).validate(&hang(HangEndMode::Force)),
+        Ok(())
+    );
+    // An unbounded line never needs to hang anything.
+    let mut unbounded = end_hanging_line(100.);
+    unbounded.slots[0].constraint.end = f32::INFINITY;
+    let no_wrap = LineContext {
+        wrap_width: f32::INFINITY,
+        ..hang(HangEndMode::Allow)
+    };
+    assert_eq!(unbounded.validate(&no_wrap), unneeded);
+    // The rule is about the line end: a start-edge hang is not subject to it.
+    let mut start = end_hanging_line(60.);
+    start.visual_runs[0].glyphs[0].x = 5.;
+    start.visual_runs[0].glyphs[1].x = 0.;
+    start.visual_runs[0].glyphs.swap(0, 1);
+    start.slots[0].content_start = 5.;
+    (start.hanging_left, start.hanging_right) = (5., 0.);
+    let first_line = LineContext {
+        hang_mode: HangMode {
+            start: HangStartMode::FirstLine,
+            end: HangEndMode::Allow,
+        },
+        ..ctx()
+    };
+    assert_eq!(start.validate(&first_line), Ok(()));
+}
+
+fn span_fragment(span: (usize, usize), bytes: (usize, usize)) -> PositionedSpanFragment {
+    PositionedSpanFragment {
+        span_id: 1,
+        span_range: TextRange::new(span.0, span.1),
+        byte_range: TextRange::new(bytes.0, bytes.1),
+        x: 0.,
+        width: 100.,
+        ascent: 8.,
+        descent: 2.,
+        is_first_fragment: bytes.0 == span.0,
+        is_last_fragment: bytes.1 == span.1,
+        bidi_level: 0,
+    }
+}
+
+#[test]
+fn span_fragment_flags_say_where_the_fragment_lies_in_its_span() {
+    let with = |fragment| {
+        let mut l = two_glyph_line();
+        l.span_fragments = vec![fragment];
+        l.validate(&ctx())
+    };
+    let mismatch = Err(LineInvariantError::SpanFragmentEdgeMismatch { index: 0 });
+    // The whole span, its first part, a middle part and its last part.
+    for span in [(0, 2), (0, 9), (0, 9), (0, 2)] {
+        assert_eq!(with(span_fragment(span, (0, 2))), Ok(()), "{span:?}");
+    }
+    let mut l = two_glyph_line();
+    l.byte_range = TextRange::new(4, 6);
+    l.visible_byte_end = 6;
+    l.visual_runs[0].byte_range = l.byte_range;
+    l.visual_runs[0].glyphs[0].byte_range = Some(TextRange::new(4, 5));
+    l.visual_runs[0].glyphs[1].byte_range = Some(TextRange::new(5, 6));
+    for span in [(0, 9), (0, 6), (4, 9)] {
+        l.span_fragments = vec![span_fragment(span, (4, 6))];
+        assert_eq!(l.validate(&ctx()), Ok(()), "{span:?}");
+    }
+    // Each flag is true exactly when the fragment reaches that end.
+    for flip in [
+        |f: &mut PositionedSpanFragment| f.is_first_fragment = !f.is_first_fragment,
+        |f: &mut PositionedSpanFragment| f.is_last_fragment = !f.is_last_fragment,
+    ] {
+        for span in [(0, 2), (0, 9)] {
+            let mut fragment = span_fragment(span, (0, 2));
+            flip(&mut fragment);
+            assert_eq!(with(fragment), mismatch, "{span:?}");
+        }
+    }
+    // The fragment lies inside its span.
+    let mut outside = span_fragment((1, 2), (0, 2));
+    outside.is_first_fragment = false;
+    assert_eq!(with(outside), mismatch);
+}
+
+fn atomic_fragment(full: (usize, usize), bytes: (usize, usize), x: f32) -> AtomicFragment {
+    AtomicFragment {
+        atomic_id: 7,
+        full_byte_range: TextRange::new(full.0, full.1),
+        fragment_byte_range: TextRange::new(bytes.0, bytes.1),
+        x,
+        width: 50.,
+        bidi_level: 0,
+    }
+}
+
+#[test]
+fn the_atomic_fragments_of_a_line_cover_the_span_on_that_line() {
+    let with = |fragments: Vec<AtomicFragment>| {
+        let mut l = two_glyph_line();
+        l.atomic_fragments = fragments;
+        l.validate(&ctx())
+    };
+    let invalid = |index| Err(LineInvariantError::InvalidAtomicFragment { index });
+    // One fragment, or two that bidi reordering split.
+    assert_eq!(with(vec![atomic_fragment((0, 2), (0, 2), 0.)]), Ok(()));
+    assert_eq!(
+        with(vec![
+            atomic_fragment((0, 2), (1, 2), 0.),
+            atomic_fragment((0, 2), (0, 1), 50.)
+        ]),
+        Ok(())
+    );
+    // A span that wraps: the line holds the part of it that is on the line.
+    assert_eq!(with(vec![atomic_fragment((0, 9), (0, 2), 0.)]), Ok(()));
+    assert_eq!(with(vec![atomic_fragment((1, 9), (1, 2), 50.)]), Ok(()));
+    // A fragment owns bytes, inside its span.
+    assert_eq!(with(vec![atomic_fragment((0, 2), (1, 1), 0.)]), invalid(0));
+    assert_eq!(with(vec![atomic_fragment((1, 2), (0, 2), 0.)]), invalid(0));
+    // Part of the span's bytes on the line is missing.
+    assert_eq!(with(vec![atomic_fragment((0, 2), (0, 1), 0.)]), invalid(0));
+    assert_eq!(with(vec![atomic_fragment((0, 2), (1, 2), 50.)]), invalid(0));
+    // Two fragments of one span overlap, or disagree about the span.
+    assert_eq!(
+        with(vec![
+            atomic_fragment((0, 2), (0, 2), 0.),
+            atomic_fragment((0, 2), (1, 2), 50.)
+        ]),
+        invalid(1)
+    );
+    assert_eq!(
+        with(vec![
+            atomic_fragment((0, 2), (0, 1), 0.),
+            atomic_fragment((0, 3), (1, 2), 50.)
+        ]),
+        invalid(1)
+    );
+}

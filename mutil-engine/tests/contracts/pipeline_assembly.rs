@@ -831,9 +831,14 @@ fn hang_mode_struct_gates_each_physical_edge() {
     l.byte_range = TextRange::new(0, 5);
     l.visible_byte_end = 5;
     l.hanging_right = 6.0;
+    // The body fills its slot, so the comma would not have fitted: `Allow`
+    // and `Force` both let it hang.
+    let body = l.visual_width;
+    l.slots[0].constraint.end = body;
     let with = |hang_mode, base_direction| LineContext {
         hang_mode,
         base_direction,
+        wrap_width: body,
         ..small_ctx()
     };
     let end = |end| HangMode {
