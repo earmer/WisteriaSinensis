@@ -74,7 +74,7 @@ fn annotation_output_and_synthesized_ownership() {
         bad.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {
             index: 0,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::InvalidGlyph
         })
     );
     let mut bad = l.clone();
@@ -83,7 +83,7 @@ fn annotation_output_and_synthesized_ownership() {
         bad.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {
             index: 0,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::BaseSpansSlots
         })
     );
     let mut bad = l.clone();
@@ -92,7 +92,7 @@ fn annotation_output_and_synthesized_ownership() {
         bad.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {
             index: 0,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::DoesNotFitLineBox
         })
     );
     let mut bad = l.clone();
@@ -101,7 +101,7 @@ fn annotation_output_and_synthesized_ownership() {
         bad.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {
             index: 0,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::InvalidGlyph
         })
     );
     let mut bad = l;
@@ -146,7 +146,7 @@ fn annotation_base_allows_glyph_less_source_gaps() {
         bad.validate(&ctx()),
         Err(LineInvariantError::InvalidAnnotation {
             index: 0,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::GlyphStraddlesBase
         })
     );
 
@@ -157,7 +157,7 @@ fn annotation_base_allows_glyph_less_source_gaps() {
         bad.validate(&ctx()),
         Err(LineInvariantError::InvalidAnnotation {
             index: 0,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::NoBaseGlyphs
         })
     );
 }
@@ -272,7 +272,7 @@ fn annotations_need_glyphs_unique_ids_and_disjoint_bases_per_side() {
         repeated.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {
             index: 1,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::DuplicateId
         })
     );
 
@@ -282,7 +282,7 @@ fn annotations_need_glyphs_unique_ids_and_disjoint_bases_per_side() {
         overlapping.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {
             index: 1,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::OverlapsOnSide
         })
     );
 
@@ -328,7 +328,7 @@ fn an_annotation_id_appears_once_per_paragraph() {
         Err((
             1,
             LineInvariantError::InvalidParagraph {
-                reason: ParagraphErrorReason::NoLines
+                reason: ParagraphErrorReason::DuplicateAnnotation
             }
         ))
     );
@@ -375,7 +375,7 @@ fn over_room_is_measured_from_the_base_not_the_strut() {
         tall.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {
             index: 0,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::DoesNotFitLineBox
         })
     );
     // With enough ascent it passes.
@@ -396,7 +396,7 @@ fn under_room_is_measured_from_the_base_not_the_strut() {
         tall.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {
             index: 0,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::DoesNotFitLineBox
         })
     );
     tall.descent = 9.0;
@@ -413,7 +413,7 @@ fn annotation_sits_beyond_its_base() {
         low.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {
             index: 0,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::InsideBase
         })
     );
     let (l, c) = single_annotation_line(AnnotationSide::Under);
@@ -423,7 +423,7 @@ fn annotation_sits_beyond_its_base() {
         low.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {
             index: 0,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::InsideBase
         })
     );
 }
@@ -438,7 +438,7 @@ fn base_extents_are_finite_and_nonnegative() {
             over.validate(&c),
             Err(LineInvariantError::InvalidAnnotation {
                 index: 0,
-                reason: AnnotationErrorReason::NoGlyphs
+                reason: AnnotationErrorReason::InvalidMetrics
             })
         );
         let mut under = l.clone();
@@ -447,7 +447,7 @@ fn base_extents_are_finite_and_nonnegative() {
             under.validate(&c),
             Err(LineInvariantError::InvalidAnnotation {
                 index: 0,
-                reason: AnnotationErrorReason::NoGlyphs
+                reason: AnnotationErrorReason::InvalidMetrics
             })
         );
     }
@@ -484,7 +484,7 @@ fn fixed_line_boxes_do_not_grow_for_annotations() {
         low.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {
             index: 0,
-            reason: AnnotationErrorReason::NoGlyphs
+            reason: AnnotationErrorReason::InsideBase
         })
     );
 }

@@ -162,7 +162,7 @@ fn vertical_lr_paragraph_uses_line_under_for_block_start() {
         Err((
             0,
             LineInvariantError::InvalidParagraph {
-                reason: ParagraphErrorReason::NoLines
+                reason: ParagraphErrorReason::LineBoxesOverlap
             }
         ))
     );
@@ -198,7 +198,7 @@ fn vertical_lr_under_annotation_moves_first_baseline() {
         Err((
             0,
             LineInvariantError::InvalidParagraph {
-                reason: ParagraphErrorReason::NoLines
+                reason: ParagraphErrorReason::LineBoxesOverlap
             }
         ))
     );
@@ -230,7 +230,7 @@ fn vertical_rl_over_annotation_needs_line_relative_ascent() {
             0,
             LineInvariantError::InvalidAnnotation {
                 index: 0,
-                reason: AnnotationErrorReason::NoGlyphs
+                reason: AnnotationErrorReason::DoesNotFitLineBox
             }
         ))
     );

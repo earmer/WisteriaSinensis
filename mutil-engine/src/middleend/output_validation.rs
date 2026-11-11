@@ -1256,16 +1256,21 @@ impl PositionedLine {
     }
 
     /// A slot's content ends inside its constraint, unless the line is one
-    /// slot as wide as the wrap width holding a single entity that cannot be
-    /// divided (`is_single_entity_overflow`).
+    /// slot as wide as the wrap width holding, from the slot's start, a
+    /// single entity that cannot be divided and is wider than the slot
+    /// (`is_single_entity_overflow`).
     fn check_slot_overflow(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
         for (index, slot) in self.slots.iter().enumerate() {
             let eps = tolerance(slot.visual_width, 0.0);
             let capacity = slot.constraint.width();
             let overflows = slot.content_end() > slot.constraint.end + eps;
+            // The exemption is for an entity that cannot fit: wider than the
+            // slot, and not pushed out of it by an alignment offset.
             let is_exempt = self.slots.len() == 1
                 && capacity >= ctx.wrap_width - eps
+                && slot.visual_width > capacity + eps
+                && approx_eq(slot.content_start, slot.constraint.start)
                 && self.is_single_entity_overflow(slot.content_start);
             if overflows && !is_exempt {
                 // The whole line is wider than the container, or only this

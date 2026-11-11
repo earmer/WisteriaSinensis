@@ -191,12 +191,14 @@ fn multi_slot_containment_and_conserved_width() {
         Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
     );
     let mut bad = valid.clone();
+    // A slot's content may not run on into the obstacle after it.
     bad.slots[0].visual_width = 151.0;
     bad.visual_width = 251.0;
     assert_eq!(
         bad.validate(&c),
-        Err(LineInvariantError::InvalidSlots {
-            reason: SlotErrorReason::NoSlots
+        Err(LineInvariantError::LineWiderThanWrapWidth {
+            visual_width: 251.0,
+            wrap_width: 250.0
         })
     );
     let mut bad = valid.clone();
@@ -204,7 +206,7 @@ fn multi_slot_containment_and_conserved_width() {
     assert_eq!(
         bad.validate(&c),
         Err(LineInvariantError::InvalidSlots {
-            reason: SlotErrorReason::NoSlots
+            reason: SlotErrorReason::WidthNotConserved /*auto*/
         })
     );
     let mut bad = valid.clone();
@@ -253,13 +255,13 @@ fn empty_slot_hanging_and_trailing_whitespace() {
     assert_eq!(l.validate(&c), Ok(()));
     let mut hanging = glyph(145.0, 5.0, true);
     hanging.byte_range = Some(TextRange::new(0, 1));
-    l.visual_runs[0].glyphs.push(hanging);
+    l.visual_runs[0].glyphs.insert(0, hanging);
     l.hanging_left = 5.0;
     assert_eq!(
         l.validate(&c),
-        Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 1 })
+        Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
     );
-    l.visual_runs[0].glyphs.pop();
+    l.visual_runs[0].glyphs.remove(0);
     l.hanging_left = 0.0;
     let trailing = PositionedGlyph {
         byte_range: Some(TextRange::new(2, 3)),
@@ -269,10 +271,12 @@ fn empty_slot_hanging_and_trailing_whitespace() {
     l.visual_runs[0].glyphs.push(trailing);
     c.whitespace = HangingWhitespaceMode::Preserved;
     assert_eq!(l.validate(&c), Ok(()));
+    // In the obstacle before the occupied slot (and so first on screen).
     l.visual_runs[0].glyphs.last_mut().unwrap().x = 145.0;
+    l.visual_runs[0].glyphs.swap(0, 1);
     assert_eq!(
         l.validate(&c),
-        Err(LineInvariantError::TrailingWhitespaceOnWrongSide { run: 0, glyph: 1 })
+        Err(LineInvariantError::TrailingWhitespaceOnWrongSide { run: 0, glyph: 0 })
     );
 }
 
@@ -412,7 +416,7 @@ fn a_slot_holding_only_a_tab_is_occupied() {
     assert_eq!(
         l.validate(&ctx()),
         Err(LineInvariantError::InvalidSlots {
-            reason: SlotErrorReason::NoSlots
+            reason: SlotErrorReason::ContentOutsideSlots
         })
     );
 }
@@ -429,7 +433,7 @@ fn occupancy_and_containment_share_one_tolerance() {
     assert_eq!(
         l.validate(&ctx()),
         Err(LineInvariantError::InvalidSlots {
-            reason: SlotErrorReason::NoSlots
+            reason: SlotErrorReason::ContentOutsideSlots
         })
     );
 }
@@ -468,7 +472,7 @@ fn slot_line(
 #[test]
 fn context_slots_must_lie_inside_the_wrap_envelope() {
     let invalid = Err(LineInvariantError::InvalidSlots {
-        reason: SlotErrorReason::NoSlots,
+        reason: SlotErrorReason::InvalidConstraint,
     });
     for (start, capacity, wrap_width) in
         [(0., 100., 100.), (10., 90., 100.), (5., 50., f32::INFINITY)]
@@ -699,7 +703,7 @@ fn a_slot_is_as_wide_as_the_content_placed_in_it() {
     assert_eq!(
         empty_second.validate(&c),
         Err(LineInvariantError::InvalidSlots {
-            reason: SlotErrorReason::NoSlots
+            reason: SlotErrorReason::WidthNotContentSpan
         })
     );
     // Content narrower than its slot's declared width.
@@ -708,21 +712,69 @@ fn a_slot_is_as_wide_as_the_content_placed_in_it() {
     assert_eq!(
         narrow.validate(&c),
         Err(LineInvariantError::InvalidSlots {
-            reason: SlotErrorReason::NoSlots
+            reason: SlotErrorReason::WidthNotContentSpan
         })
     );
     // The slot may be narrower than its capacity when its content is.
     narrow.slots[1].visual_width = 60.;
     narrow.visual_width = 160.;
     assert_eq!(narrow.validate(&c), Ok(()));
-    // Content that starts after the slot's start leaves the span short.
-    let mut shifted = valid;
-    shifted.visual_runs[0].glyphs[1].x = 160.;
-    shifted.visual_runs[0].glyphs[1].advance = 90.;
+}
+
+/// A one-slot line `[0, 100]` holding one 60-wide glyph at `x`, with the
+/// content block `[content_start, content_start + visual_width]`.
+fn aligned_line(x: f32, content_start: f32, visual_width: f32) -> PositionedLine {
+    let mut l = line();
+    l.slots[0].content_start = content_start;
+    l.slots[0].visual_width = visual_width;
+    l.visual_width = visual_width;
+    l.visual_runs = vec![run(glyph(x, 60., false))];
+    l
+}
+
+#[test]
+fn the_content_block_separates_alignment_offset_from_leading_glue() {
+    let rtl = LineContext {
+        base_direction: Direction::Rtl,
+        ..ctx()
+    };
+    // End-aligned: the 40 units before the content are alignment offset.
+    assert_eq!(aligned_line(40., 40., 60.).validate(&ctx()), Ok(()));
+    // Centred.
+    assert_eq!(aligned_line(20., 20., 60.).validate(&ctx()), Ok(()));
+    // Preserved leading glue: the block starts 10 units before the first
+    // glyph, and those 10 units are part of the line's width.
+    assert_eq!(aligned_line(10., 0., 70.).validate(&ctx()), Ok(()));
+    // The line-end edge is exact: the block ends where the last item does.
+    let span = Err(LineInvariantError::InvalidSlots {
+        reason: SlotErrorReason::WidthNotContentSpan,
+    });
+    assert_eq!(aligned_line(0., 0., 70.).validate(&ctx()), span);
+    // In an RTL paragraph the line starts on the right: leading glue follows
+    // the last item, and the block's left edge is the exact one.
+    assert_eq!(aligned_line(0., 0., 70.).validate(&rtl), Ok(()));
+    assert_eq!(aligned_line(10., 0., 70.).validate(&rtl), span);
+    // An item outside the block is outside the slot's content.
     assert_eq!(
-        shifted.validate(&c),
+        aligned_line(10., 20., 60.).validate(&ctx()),
+        Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
+    );
+    // The block starts inside its constraint ...
+    let mut before = aligned_line(-5., -5., 60.);
+    before.slots[0].constraint.start = 0.;
+    assert_eq!(
+        before.validate(&ctx()),
         Err(LineInvariantError::InvalidSlots {
-            reason: SlotErrorReason::NoSlots
+            reason: SlotErrorReason::InvalidContent
+        })
+    );
+    // ... and ends inside it: an offset can push fitting content out.
+    assert_eq!(
+        aligned_line(50., 50., 60.).validate(&ctx()),
+        Err(LineInvariantError::SlotOverflow {
+            slot: 0,
+            extent: 110.,
+            capacity: 100.
         })
     );
 }

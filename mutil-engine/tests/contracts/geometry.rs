@@ -98,7 +98,7 @@ fn truncation_and_multiple_synthesized_ellipsis_glyphs() {
         Err((
             0,
             LineInvariantError::InvalidParagraph {
-                reason: ParagraphErrorReason::NoLines
+                reason: ParagraphErrorReason::InvalidTruncation
             }
         ))
     );
@@ -117,7 +117,7 @@ fn truncation_and_multiple_synthesized_ellipsis_glyphs() {
         Err((
             0,
             LineInvariantError::InvalidParagraph {
-                reason: ParagraphErrorReason::NoLines
+                reason: ParagraphErrorReason::InvalidTruncation
             }
         ))
     );
@@ -129,7 +129,7 @@ fn truncation_and_multiple_synthesized_ellipsis_glyphs() {
         Err((
             0,
             LineInvariantError::InvalidParagraph {
-                reason: ParagraphErrorReason::NoLines
+                reason: ParagraphErrorReason::InvalidTruncation
             }
         ))
     );
@@ -141,7 +141,7 @@ fn truncation_and_multiple_synthesized_ellipsis_glyphs() {
         Err((
             0,
             LineInvariantError::InvalidParagraph {
-                reason: ParagraphErrorReason::NoLines
+                reason: ParagraphErrorReason::InvalidPolicy
             }
         ))
     );
@@ -262,7 +262,7 @@ fn infinity_does_not_equal_finite_slot_capacity() {
     assert_eq!(
         l.validate(&c),
         Err(LineInvariantError::InvalidSlots {
-            reason: SlotErrorReason::NoSlots
+            reason: SlotErrorReason::InvalidConstraint
         })
     );
     // A slot whose width overflows is malformed.
@@ -272,7 +272,7 @@ fn infinity_does_not_equal_finite_slot_capacity() {
     assert_eq!(
         l.validate(&c),
         Err(LineInvariantError::InvalidSlots {
-            reason: SlotErrorReason::NoSlots
+            reason: SlotErrorReason::InvalidConstraint
         })
     );
 }

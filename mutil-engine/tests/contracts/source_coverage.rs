@@ -14,7 +14,7 @@ fn sentinel_cannot_replace_source() {
     rebuild_items(&mut a, |_| vec![end(3)]);
     assert_eq!(
         check(&a, "abc"),
-        Err(LayoutInputError::ItemOutsideText { item: 0 }),
+        Err(LayoutInputError::UncoveredSource { byte: 0 }),
         "all bytes unowned"
     );
 }
@@ -25,7 +25,7 @@ fn source_cannot_have_gaps() {
     rebuild_items(&mut a, |b| vec![boxed(b, 0, 2, false), end(3)]);
     assert_eq!(
         check(&a, "abc"),
-        Err(LayoutInputError::ItemOutsideText { item: 1 }),
+        Err(LayoutInputError::UncoveredSource { byte: 2 }),
         "2..3 unowned"
     );
 }
@@ -194,7 +194,7 @@ fn source_coverage_cannot_skip_an_internal_byte() {
     });
     assert_eq!(
         check(&a, "abc"),
-        Err(LayoutInputError::ItemOutsideText { item: 1 })
+        Err(LayoutInputError::UncoveredSource { byte: 1 })
     );
 }
 
@@ -218,7 +218,7 @@ fn glue_only_source_must_cover_every_byte() {
     });
     assert_eq!(
         check(&a, "   "),
-        Err(LayoutInputError::ItemOutsideText { item: 1 })
+        Err(LayoutInputError::UncoveredSource { byte: 1 })
     );
     if let WordNode::Glue(g) = &mut a.items[0] {
         g.byte_range.end = 3;

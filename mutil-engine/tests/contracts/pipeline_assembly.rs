@@ -148,7 +148,7 @@ fn layout_options() -> LayoutOptions {
     LayoutOptions {
         hang_mode: HangMode {
             start: HangStartMode::None,
-            end: HangEndMode::Allow,
+            end: HangEndMode::Force,
         },
         ..Default::default()
     }
@@ -524,7 +524,7 @@ fn the_assembled_paragraph_validates_as_a_whole() {
         Err((
             2,
             LineInvariantError::InvalidParagraph {
-                reason: ParagraphErrorReason::NoLines
+                reason: ParagraphErrorReason::InvalidBlockSize /*auto*/
             }
         ))
     );
@@ -534,7 +534,7 @@ fn the_assembled_paragraph_validates_as_a_whole() {
         Err((
             2,
             LineInvariantError::InvalidParagraph {
-                reason: ParagraphErrorReason::NoLines
+                reason: ParagraphErrorReason::SourceNotCovered /*auto*/
             }
         ))
     );
@@ -909,7 +909,16 @@ fn trailing_space_line(x: f32) -> PositionedLine {
             is_hanging: false,
         },
     ];
+    // A run's glyphs are in screen order.
+    l.visual_runs[0].glyphs.sort_by(|a, b| a.x.total_cmp(&b.x));
     l
+}
+
+/// Index of the trailing space in the run's glyphs, which are in screen
+/// order.
+fn space_index(l: &PositionedLine) -> usize {
+    let glyphs = &l.visual_runs[0].glyphs;
+    glyphs.iter().position(|g| g.glyph_id == 3).unwrap()
 }
 
 #[test]
@@ -925,20 +934,29 @@ fn l1_trailing_whitespace_sits_on_the_far_edge_of_the_base_direction() {
     assert_eq!(right_of_body.validate(&ctx(BidiDirection::Ltr)), Ok(()));
     assert_eq!(
         left_of_body.validate(&ctx(BidiDirection::Ltr)),
-        Err(LineInvariantError::TrailingWhitespaceOnWrongSide { run: 0, glyph: 1 })
+        Err(LineInvariantError::TrailingWhitespaceOnWrongSide {
+            run: 0,
+            glyph: space_index(&left_of_body)
+        })
     );
     // RTL paragraph: mirrored.
     assert_eq!(left_of_body.validate(&ctx(BidiDirection::Rtl)), Ok(()));
     assert_eq!(
         right_of_body.validate(&ctx(BidiDirection::Rtl)),
-        Err(LineInvariantError::TrailingWhitespaceOnWrongSide { run: 0, glyph: 1 })
+        Err(LineInvariantError::TrailingWhitespaceOnWrongSide {
+            run: 0,
+            glyph: space_index(&right_of_body)
+        })
     );
     // Whitespace in the middle of the body is wrong in both directions.
     let inside = trailing_space_line(10.0);
     for d in [BidiDirection::Ltr, BidiDirection::Rtl] {
         assert_eq!(
             inside.validate(&ctx(d)),
-            Err(LineInvariantError::TrailingWhitespaceOnWrongSide { run: 0, glyph: 1 })
+            Err(LineInvariantError::TrailingWhitespaceOnWrongSide {
+                run: 0,
+                glyph: space_index(&inside)
+            })
         );
     }
     // It never counts as hanging punctuation, on either side.

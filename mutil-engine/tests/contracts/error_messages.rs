@@ -53,11 +53,11 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidShapingRun { run: 1 },
-            "run 1 has an unresolved script, an invalid font size, bidi level or variation, or bytes that are inverted or start before the previous run ends",
+            "run 1 has an unresolved script, an invalid font size, bidi level or variation, or bytes that start before the previous run ends",
         ),
         (
             LayoutInputError::InvalidRunStorage { run: 1 },
-            "run 1 has atom or cluster ranges that do not tile the paragraph storage",
+            "run 1 has atom or cluster ranges that do not tile the paragraph storage, or its text boxes do not cover them",
         ),
         (
             LayoutInputError::RunIndexOutOfRange { item: 2 },
@@ -69,39 +69,39 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::ItemOutsideRun { item: 2 },
-            "item 2 lies outside the shaping run it names",
+            "text box 2 lies outside the bytes of the shaping run it names, or has an atom or cluster at another bidi level",
         ),
         (
             LayoutInputError::InvalidTextWidth { item: 2 },
-            "item 2 has a width that is not its clusters' total",
+            "text box 2 has a width that is not its clusters' total, or a cluster with an invalid width, font scale or glyph measurement",
         ),
         (
             LayoutInputError::ItemNotSelfContained { item: 2 },
-            "item 2 does not partition its atoms",
+            "text box 2 has no atoms, does not partition them into clusters, has inconsistent break-safety flags, or has ranges outside or out of order in its run",
         ),
         (
             LayoutInputError::InvalidInlineBox { item: 2 },
-            "inline box 2 has a non-finite or negative size",
+            "inline object 2 has a non-finite or negative size, an invalid baseline alignment, or no source bytes",
         ),
         (
             LayoutInputError::InvalidGlue { item: 2 },
-            "glue 2 has a non-finite or negative size",
+            "glue 2 has an invalid size or bidi level, a compression pool that is not shrink only, or source bytes that do not match its kind",
         ),
         (
             LayoutInputError::InvalidDiscretionary { item: 2 },
-            "discretionary 2 has an invalid penalty or width",
+            "discretionary 2 has an invalid penalty, width, byte range or cloned-span list, or widths that do not match its action",
         ),
         (
             LayoutInputError::InvalidHyphenOpportunity { item: 2 },
-            "item 2 is a hyphenation break that is not flagged, does not join two non-empty text boxes of one run at its offset, or has a cut off the atoms of its hyphen chain",
+            "item 2 is a hyphenation break that is not flagged, does not join two text boxes of one run at its offset, or has a cut off the atoms of its hyphen chain",
         ),
         (
             LayoutInputError::InvalidSpanBoundary { item: 2 },
-            "span boundary 2 is not empty or has an invalid width",
+            "span boundary 2 has an invalid range, width, anchor, bidi level or nesting order",
         ),
         (
             LayoutInputError::UnknownSpan { item: 2 },
-            "item 2 refers to a span that does not exist",
+            "item 2 refers to a decoration span that does not exist, or clones one the break does not cut",
         ),
         (
             LayoutInputError::InvalidDecorationSpan { span: 3 },
@@ -148,7 +148,7 @@ fn line_invariant_error_messages() {
             LineInvariantError::InvalidSlots {
                 reason: SlotErrorReason::NoSlots,
             },
-            "invalid slot geometry or capacity",
+            "invalid slots: the line has no slot",
         ),
         (
             LineInvariantError::OrientationMismatch,
@@ -163,13 +163,13 @@ fn line_invariant_error_messages() {
                 index: 4,
                 reason: AnnotationErrorReason::NoGlyphs,
             },
-            "annotation 4 is invalid, has no glyphs, repeats an id, overlaps another on its side, has an invalid base extent, sits closer to the baseline than its base, or does not fit the line box",
+            "annotation 4 is invalid: it has no glyphs",
         ),
         (
             LineInvariantError::InvalidParagraph {
                 reason: ParagraphErrorReason::NoLines,
             },
-            "invalid paragraph coverage or block geometry",
+            "invalid paragraph: it has no line",
         ),
         (
             LineInvariantError::NonFiniteOrNegativeExtent,
@@ -192,7 +192,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidAtomicFragment { index: 4 },
-            "atomic fragment 4 has invalid geometry or ranges",
+            "atomic fragment 4 has invalid geometry or bytes, or the fragments of its span do not cover the span's part of the line exactly",
         ),
         (
             LineInvariantError::VisibleEndOutsideRange,
@@ -258,7 +258,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::BodyGlyphOutsideBlock { run: 1, glyph: 5 },
-            "body glyph 5 of run 1 lies outside the text block",
+            "body glyph 5 of run 1 lies outside the content of every slot",
         ),
         (
             LineInvariantError::HangingExtentMismatch {
@@ -270,11 +270,11 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidInlineBox { index: 4 },
-            "inline box 4 has a non-finite coordinate, a negative size, an invalid baseline alignment or bytes outside the line",
+            "inline box 4 has a non-finite coordinate, a negative size, an invalid baseline alignment, or bytes that are empty or outside the line",
         ),
         (
             LineInvariantError::InlineBoxOutsideBlock { index: 4 },
-            "inline box 4 lies outside the text block",
+            "inline box 4 lies outside the content of every slot",
         ),
         (
             LineInvariantError::EmptyLineHasTabs,
@@ -290,11 +290,11 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidSpanFragment { index: 4 },
-            "span fragment 4 has a non-finite coordinate or a negative size",
+            "span fragment 4 has a non-finite coordinate, a negative size or an unrepresentable bidi level",
         ),
         (
             LineInvariantError::SpanFragmentOutsideBlock { index: 4 },
-            "span fragment 4 lies outside the text block",
+            "span fragment 4 lies outside the content of every slot",
         ),
         (
             LineInvariantError::SpanFragmentOutsideLine { index: 4 },
@@ -340,7 +340,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::TabOutsideBlock { index: 4 },
-            "tab 4 lies outside the text block",
+            "tab 4 lies outside the content of every slot",
         ),
         (
             LineInvariantError::TrailingTabNotCollapsed { index: 4 },
@@ -356,7 +356,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidCaretStop { index: 4 },
-            "caret stop 4 is non-finite, out of visual order, outside the line or at an invalid level",
+            "caret stop 4 is non-finite, out of visual order, outside the line, or at a bidi level that no run owning its offset has",
         ),
         (
             LineInvariantError::InvalidDecoration { index: 4 },
