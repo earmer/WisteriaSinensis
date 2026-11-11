@@ -4,7 +4,7 @@
 //! `caret_geometry`, `move_cursor`, `selection_geometry`) are not implemented yet.
 
 use super::output::{AtomicFragment, CaretAffinity};
-use crate::types::{BidiLevel, ByteIndex, Rect};
+use crate::types::{BidiLevel, ByteIndex, Rect, WritingMode};
 
 /// A caret location: offset plus affinity (spec §6.1).
 ///
@@ -134,6 +134,7 @@ impl AtomicFragment {
         }
     }
 }
+
 /// Validates GDEF subdivisions or falls back to K equal atom slots.
 pub fn resolve_ligature_carets(width: f32, atom_count: usize, carets: &[f32]) -> Vec<f32> {
     // A non-finite or non-positive width cannot describe a ligature, so no
@@ -180,11 +181,13 @@ pub enum FlowMotion {
     /// Next block-axis line.
     BlockNext,
 }
+
 impl Motion {
     /// Resolves the four physical arrows; logical and word commands return `None`.
-    pub const fn flow_direction(self, mode: crate::types::WritingMode) -> Option<FlowMotion> {
-        use crate::types::WritingMode::*;
+    #[must_use]
+    pub const fn flow_direction(self, mode: WritingMode) -> Option<FlowMotion> {
         use FlowMotion::*;
+        use WritingMode::*;
         match (mode, self) {
             (HorizontalTb, Self::Left) | (VerticalRl | VerticalLr, Self::Up) => Some(InlinePrev),
             (HorizontalTb, Self::Right) | (VerticalRl | VerticalLr, Self::Down) => Some(InlineNext),

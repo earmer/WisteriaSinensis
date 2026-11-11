@@ -232,6 +232,17 @@ impl FontFeatures {
     }
 }
 
+/// Borrowed, complete physical font instance used by measurement queries.
+#[derive(Clone, Copy, Debug)]
+pub struct FontInstanceRef<'a> {
+    /// Face and fallback scale; FontId identifies a face, not variations.
+    pub font: FontRef,
+    /// Requested size in layout units.
+    pub font_size: f32,
+    /// Variable font coordinates.
+    pub variations: &'a [FontVariation],
+}
+
 /// Complete primary-font metrics (spec §2.5).
 ///
 /// The field set is a **[Design decision]** (the draft never defined it).
@@ -275,23 +286,19 @@ pub struct FontMetrics {
     pub use_typo_metrics: bool,
 }
 
-/// Borrowed, complete physical font instance used by measurement queries.
-#[derive(Clone, Copy, Debug)]
-pub struct FontInstanceRef<'a> {
-    /// Face and fallback scale; FontId identifies a face, not variations.
-    pub font: FontRef,
-    /// Requested size in layout units.
-    pub font_size: f32,
-    /// Variable font coordinates.
-    pub variations: &'a [FontVariation],
-}
-
 impl FontMetrics {
-    /// Total resolved horizontal line height.
+    /// The font's own horizontal line height: `ascent + descent + line_gap`.
+    #[must_use]
     pub fn natural_line_height(&self) -> f32 {
         self.ascent + self.descent + self.line_gap
     }
-    /// Checks raw font metrics, including finite derived heights.
+
+    /// Checks raw font metrics: every field finite, the depths non-negative
+    /// (ascent, descent, line gap and their vertical counterparts, underline
+    /// thickness, x-height, cap height), both line heights finite and both
+    /// `ascent + descent` sums positive. A resolved strut has other rules; see
+    /// `StrutMetrics`.
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         let nonnegative = [
             self.ascent,

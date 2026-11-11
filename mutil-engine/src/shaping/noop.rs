@@ -20,6 +20,7 @@ impl TextShaper for NoopShaper {
     fn font_metrics(&self, _instance: FontInstanceRef<'_>) -> FontMetrics {
         FontMetrics::default()
     }
+
     fn resolve_primary_font_metrics(
         &self,
         _families: &[FontFamily],

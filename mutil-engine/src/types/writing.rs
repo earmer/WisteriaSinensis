@@ -12,11 +12,13 @@ pub enum WritingMode {
     /// Inline down, block right.
     VerticalLr,
 }
+
 impl WritingMode {
     /// Whether the inline axis is physical vertical.
     pub const fn is_vertical(self) -> bool {
         !matches!(self, Self::HorizontalTb)
     }
+
     /// Converts a flow point to paragraph-local physical coordinates.
     pub fn flow_to_physical_point(self, p: Point, total_block_size: f32) -> Point {
         match self {
@@ -28,6 +30,7 @@ impl WritingMode {
             },
         }
     }
+
     /// Converts paragraph-local physical coordinates to flow coordinates.
     pub fn physical_to_flow_point(self, p: Point, total_block_size: f32) -> Point {
         match self {
@@ -39,6 +42,7 @@ impl WritingMode {
             },
         }
     }
+
     /// Transforms an axis-aligned flow rectangle, normalizing its corners.
     pub fn flow_to_physical_rect(self, r: Rect, total_block_size: f32) -> Rect {
         let a = self.flow_to_physical_point(Point { x: r.x, y: r.y }, total_block_size);
@@ -56,6 +60,7 @@ impl WritingMode {
             (a.y - b.y).abs(),
         )
     }
+
     /// Inverse of `flow_to_physical_rect` for a physical rectangle.
     pub fn physical_to_flow_rect(self, r: Rect, total_block_size: f32) -> Rect {
         let a = self.physical_to_flow_point(Point { x: r.x, y: r.y }, total_block_size);
@@ -73,6 +78,7 @@ impl WritingMode {
             (a.y - b.y).abs(),
         )
     }
+
     /// Converts a positive line-over offset into a signed block-axis offset.
     pub const fn over_to_block(self, offset: f32) -> f32 {
         match self {
@@ -80,6 +86,7 @@ impl WritingMode {
             _ => -offset,
         }
     }
+
     /// Block-axis bounds for a baseline and line-over/under extents.
     pub fn line_bounds(self, baseline: f32, ascent: f32, descent: f32) -> (f32, f32) {
         match self {
@@ -88,6 +95,7 @@ impl WritingMode {
         }
     }
 }
+
 /// Frontend policy for resolving vertical orientation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextOrientation {
@@ -99,6 +107,7 @@ pub enum TextOrientation {
     /// Shape horizontally and rotate clockwise.
     Sideways,
 }
+
 /// Resolved orientation of one shaping unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GlyphOrientation {
@@ -118,6 +127,7 @@ pub enum GlyphOrientation {
     /// no line break can fall inside it.
     HorizontalInVertical,
 }
+
 impl GlyphOrientation {
     /// Checks writing-mode compatibility and the required level parity.
     pub const fn is_valid(self, mode: WritingMode, level: u8) -> bool {
@@ -127,6 +137,7 @@ impl GlyphOrientation {
                 || level % 2 == 0)
     }
 }
+
 /// Baseline selected for an inline entity; offsets are positive toward line-over.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum BaselineAlignment {
@@ -150,6 +161,7 @@ pub enum BaselineAlignment {
     /// Explicit finite offset toward line-over.
     Offset(f32),
 }
+
 impl BaselineAlignment {
     /// Explicit offsets must be finite.
     pub fn is_valid(self) -> bool {

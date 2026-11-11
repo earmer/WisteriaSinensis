@@ -1,6 +1,6 @@
 //! Logical atoms: the extended-grapheme-cluster unit (spec §2.2).
 
-use super::{BidiLevel, ScriptTag, TextRange};
+use super::{BidiLevel, GlyphOrientation, ScriptTag, TextRange};
 use core::fmt;
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub};
 
@@ -279,12 +279,14 @@ impl BitOr for AtomFlags {
         Self(self.0 | rhs.0)
     }
 }
+
 impl BitOrAssign for AtomFlags {
     #[inline]
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
     }
 }
+
 impl BitAnd for AtomFlags {
     type Output = Self;
     #[inline]
@@ -292,12 +294,14 @@ impl BitAnd for AtomFlags {
         Self(self.0 & rhs.0)
     }
 }
+
 impl BitAndAssign for AtomFlags {
     #[inline]
     fn bitand_assign(&mut self, rhs: Self) {
         self.0 &= rhs.0;
     }
 }
+
 impl Sub for AtomFlags {
     type Output = Self;
     /// Set difference: flags in `self` that are not in `rhs`.
@@ -306,6 +310,7 @@ impl Sub for AtomFlags {
         Self(self.0 & !rhs.0)
     }
 }
+
 impl Not for AtomFlags {
     type Output = Self;
     /// Complement within the assigned bits.
@@ -344,7 +349,7 @@ impl fmt::Debug for AtomFlags {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphemeAtom {
     /// Resolved glyph orientation.
-    pub orientation: crate::types::GlyphOrientation,
+    pub orientation: GlyphOrientation,
     /// Bytes of the cluster in the paragraph text.
     pub byte_range: TextRange,
     /// Resolved script. After frontend resolution never `Zyyy` or `Zinh` (§2.1).
@@ -398,7 +403,7 @@ mod tests {
 
     fn atom_with(flags: AtomFlags) -> GraphemeAtom {
         GraphemeAtom {
-            orientation: crate::types::GlyphOrientation::Horizontal,
+            orientation: GlyphOrientation::Horizontal,
             byte_range: TextRange::new(0, 1),
             script: ScriptTag::LATIN,
             bidi_level: 0,

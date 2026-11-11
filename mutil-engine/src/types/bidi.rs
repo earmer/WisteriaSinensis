@@ -51,20 +51,6 @@ impl Direction {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn level_parity_gives_direction() {
-        assert_eq!(Direction::from_level(0), Direction::Ltr);
-        assert_eq!(Direction::from_level(1), Direction::Rtl);
-        assert_eq!(Direction::from_level(2), Direction::Ltr);
-        assert_eq!(Direction::from_level(BIDI_MAX_DEPTH), Direction::Rtl);
-        assert_eq!(Direction::Rtl.base_level(), 1);
-    }
-}
-
 /// Original UAX #9 bidi class (`Bidi_Class`), retained for line-local
 /// L1 processing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -115,4 +101,18 @@ pub enum BidiClass {
     Fsi,
     /// Pop Directional Isolate (PDI).
     Pdi,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn level_parity_gives_direction() {
+        assert_eq!(Direction::from_level(0), Direction::Ltr);
+        assert_eq!(Direction::from_level(1), Direction::Rtl);
+        assert_eq!(Direction::from_level(2), Direction::Ltr);
+        assert_eq!(Direction::from_level(BIDI_MAX_DEPTH), Direction::Rtl);
+        assert_eq!(Direction::Rtl.base_level(), 1);
+    }
 }

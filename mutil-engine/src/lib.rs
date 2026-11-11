@@ -39,6 +39,7 @@ pub struct ConformanceReport {
     /// Word segmentation Unicode data version.
     pub word: Option<&'static str>,
 }
+
 /// Reports installed components rather than claiming target-version conformance.
 pub fn conformance_report() -> ConformanceReport {
     ConformanceReport {
