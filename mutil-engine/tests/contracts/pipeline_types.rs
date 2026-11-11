@@ -12,7 +12,7 @@ use mutil_engine::*;
 const TEXT: &str = "Hello world";
 
 fn cluster(base: usize, local: usize) -> ShapedCluster {
-    crate::common::cluster(TEXT, base, local)
+    crate::common::cluster(base, local)
 }
 
 fn run() -> ShapingRun {
@@ -31,7 +31,7 @@ fn test_pipeline_types_compile() {
     let mut ast = ParagraphAst {
         annotations: Vec::new(),
         bidi_spans: Vec::new(),
-        writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
+        writing_mode: WritingMode::HorizontalTb,
         base_direction: BidiDirection::Ltr,
         strut_metrics: FontMetrics {
             vertical_ascent: 5.0,
@@ -45,6 +45,7 @@ fn test_pipeline_types_compile() {
         runs: vec![run()],
         atoms: vec![],
         clusters: vec![],
+        glyphs: Vec::new(),
         items: vec![],
         decoration_spans: vec![],
         atomic_spans: vec![],
@@ -59,7 +60,6 @@ fn test_pipeline_types_compile() {
 
             byte_range: TextRange::new(5, 6),
             kind: GlueKind::WordSpace,
-            tier: GlueTier::Tier0,
             natural_width: 4.0,
             max_stretch: 2.0,
             max_shrink: 1.0,
@@ -82,8 +82,8 @@ fn test_pipeline_types_compile() {
     assert_eq!(font_id, FontId(0));
     assert_eq!(metrics, FontMetrics::default());
 
-    let mut out = Vec::new();
-    shaper.shape_run(TEXT, r, &[], &mut out);
+    let (mut out, mut out_glyphs) = (Vec::new(), Vec::new());
+    shaper.shape_run(TEXT, r, &[], &mut out, &mut out_glyphs);
     let run_atoms = ast.run_atoms(0);
     assert_eq!(run_atoms.len(), 10); // "Hello" and "world"; the space is glue
     shaper.reshape_window(
@@ -94,8 +94,9 @@ fn test_pipeline_types_compile() {
         LeadingEdit::None,
         TrailingEdit::AppendHyphen { hyphen: '-' },
         &mut out,
+        &mut out_glyphs,
     );
-    assert!(out.is_empty());
+    assert!(out.is_empty() && out_glyphs.is_empty());
     assert!(
         shaper
             .ligature_carets(
@@ -116,7 +117,7 @@ fn test_pipeline_types_compile() {
     for item in 0..ast.items.len() {
         if let Some(view) = ast.text_box(item) {
             for c in view.clusters {
-                let g = c.glyphs[0];
+                let g = ast.cluster_glyphs(c)[0];
                 line_glyphs.push(PositionedGlyph {
                     glyph_id: g.glyph_id,
                     x: pen,
@@ -153,7 +154,6 @@ fn test_pipeline_types_compile() {
         slots: single_slot(pen + ADV, f32::INFINITY),
         annotations: Vec::new(),
         is_ellipsized: false,
-        resolved_slot_constraints: smallvec::SmallVec::new(),
         atomic_fragments: vec![],
 
         tabs: vec![],
@@ -169,7 +169,7 @@ fn test_pipeline_types_compile() {
         hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
-            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
+            orientation: GlyphOrientation::Horizontal,
             font_size: 16.0,
             variations: Default::default(),
 
@@ -189,9 +189,19 @@ fn test_pipeline_types_compile() {
         decorations: vec![],
     };
 
-    let mut para = PositionedParagraph::empty(ast.base_direction);
-    assert!(para.lines.is_empty());
-    para.lines.push(line);
+    let policy = LayoutPolicySnapshot::resolve(
+        &ast,
+        &LayoutConstraints::default(),
+        &LayoutOptions::default(),
+    )
+    .expect("the fixture's layout inputs are valid");
+    let para = PositionedParagraph {
+        policy,
+        base_direction: ast.base_direction,
+        truncated_range: None,
+        total_block_size: 0.0,
+        lines: vec![line],
+    };
     assert_eq!(para.lines.len(), 1);
 
     // Interaction types.
@@ -249,7 +259,7 @@ fn every_word_node_variant_is_constructible() {
     let nodes = [
         word(&mut ast, TextRange::new(0, 5)),
         WordNode::Box(BoxNode::InlineObject {
-            baseline_align: mutil_engine::types::BaselineAlignment::Auto,
+            baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(7, 8),
             box_id: 7,
             width: 12.0,
@@ -271,7 +281,6 @@ fn every_word_node_variant_is_constructible() {
 
             byte_range: TextRange::empty_at(5),
             kind: GlueKind::CjkAutospace,
-            tier: GlueKind::CjkAutospace.default_tier(),
             natural_width: 4.0,
             max_stretch: 8.0,
             max_shrink: 2.0,
@@ -310,7 +319,6 @@ fn every_word_node_variant_is_constructible() {
             is_paragraph_end: true,
         },
         BreakAction::Hyphenate(HyphenOpportunity {
-            byte_offset: 3,
             prefix_replacement: None,
             suffix_replacement: None,
             prefix_cut_bytes: 0,
@@ -318,7 +326,10 @@ fn every_word_node_variant_is_constructible() {
         }),
         BreakAction::CjkPunctAdjust,
         BreakAction::MathOperator {
-            repeat_glyph_id: Some(9),
+            repeat: Some(RepeatedOperator {
+                glyph_id: 9,
+                advance: 6.0,
+            }),
         },
     ];
     for a in &actions {
@@ -351,19 +362,15 @@ fn canonical_penalty_scale_is_ordered_and_tiers_are_ranked() {
     assert!(D::hard_break(TextRange::EMPTY, true).is_mandatory());
     assert!(!D::direct(0).is_mandatory());
     assert!(GlueTier::Tier0 < GlueTier::Tier1 && GlueTier::Tier1 < GlueTier::Tier2);
-    assert_eq!(GlueKind::WordSpace.default_tier(), GlueTier::Tier0);
-    assert_eq!(GlueKind::CjkAutospace.default_tier(), GlueTier::Tier1);
-    assert_eq!(
-        GlueKind::CjkPunctCompression.default_tier(),
-        GlueTier::Tier0
-    );
+    assert_eq!(GlueKind::WordSpace.tier(), GlueTier::Tier0);
+    assert_eq!(GlueKind::CjkAutospace.tier(), GlueTier::Tier1);
+    assert_eq!(GlueKind::CjkPunctCompression.tier(), GlueTier::Tier0);
     assert_eq!(GlueTier::Tier2 as u8, 2);
 }
 
 #[test]
 fn hyphen_opportunity_carries_prefix_and_suffix_replacements() {
     let h = HyphenOpportunity {
-        byte_offset: 3,
         prefix_replacement: Some("a".into()),
         suffix_replacement: Some("tje".into()),
         prefix_cut_bytes: 1,

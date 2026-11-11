@@ -145,7 +145,9 @@ fn layout_input_error_messages() {
 fn line_invariant_error_messages() {
     for (error, expected) in [
         (
-            LineInvariantError::InvalidSlots,
+            LineInvariantError::InvalidSlots {
+                reason: SlotErrorReason::NoSlots,
+            },
             "invalid slot geometry or capacity",
         ),
         (
@@ -157,11 +159,16 @@ fn line_invariant_error_messages() {
             "glyph 5 of run 1 has an invalid synthesized flag or source range",
         ),
         (
-            LineInvariantError::InvalidAnnotation { index: 4 },
+            LineInvariantError::InvalidAnnotation {
+                index: 4,
+                reason: AnnotationErrorReason::NoGlyphs,
+            },
             "annotation 4 is invalid, has no glyphs, repeats an id, overlaps another on its side, has an invalid base extent, sits closer to the baseline than its base, or does not fit the line box",
         ),
         (
-            LineInvariantError::InvalidParagraph,
+            LineInvariantError::InvalidParagraph {
+                reason: ParagraphErrorReason::NoLines,
+            },
             "invalid paragraph coverage or block geometry",
         ),
         (
@@ -322,10 +329,10 @@ fn line_invariant_error_messages() {
         (
             LineInvariantError::SlotOverflow {
                 slot: 1,
-                visual_width: 4.5,
+                extent: 4.5,
                 capacity: 3.5,
             },
-            "slot 1 content width 4.5 exceeds its capacity 3.5 and is not a single overflowing entity",
+            "the content of slot 1 reaches 4.5 into a capacity of 3.5 and is not a single overflowing entity",
         ),
         (
             LineInvariantError::InvalidTab { index: 4 },

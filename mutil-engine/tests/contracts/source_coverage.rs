@@ -46,7 +46,7 @@ fn reject_separator_in_source(sep: &str) {
     let t = format!("a{sep}b");
     let mut a = ast(&t);
     a.items[0] = WordNode::Box(BoxNode::InlineObject {
-        baseline_align: mutil_engine::types::BaselineAlignment::Auto,
+        baseline_align: BaselineAlignment::Auto,
         byte_range: TextRange::new(0, t.len()),
         box_id: 1,
         width: 1.,
@@ -209,7 +209,6 @@ fn glue_only_source_must_cover_every_byte() {
                 is_collapsible: true,
                 byte_range: TextRange::new(0, 1),
                 kind: GlueKind::WordSpace,
-                tier: GlueTier::Tier0,
                 natural_width: 1.,
                 max_stretch: 0.,
                 max_shrink: 0.,

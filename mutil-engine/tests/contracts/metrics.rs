@@ -59,21 +59,15 @@ fn negative_half_leading_with_positive_total_is_allowed() {
         line_height: LineHeight::Fixed(0.5),
         ..Default::default()
     };
-    let c = check_layout_inputs(
-        &a,
-        "abc",
-        &LayoutConstraints {
-            first_line_indent: 0.0,
-            geometry_provider: None,
-            hanging_indent: 0.0,
-            wrap_width: 100.,
-            tab_stops: TabStops { step: 8. },
-        },
-        &options,
-    )
-    .unwrap();
-    assert!(c.strut.descent < 0.);
-    assert_eq!(c.strut.natural_line_height(), 5.);
+    assert_eq!(
+        check_layout_inputs(&a, "abc", &constraints(), &options),
+        Ok(())
+    );
+    let strut = LayoutPolicySnapshot::resolve(&a, &constraints(), &options)
+        .unwrap()
+        .strut;
+    assert!(strut.descent < 0.);
+    assert_eq!(strut.line_height(), 5.);
 }
 
 #[test]
@@ -140,6 +134,9 @@ fn font_metrics_all_fields_and_overflow() {
         GlyphOrientation::VerticalUpright,
         0,
     );
-    let c = check(&a, "a").unwrap();
-    assert_eq!((c.strut.ascent, c.strut.descent), (9.0, 3.0));
+    assert_eq!(check(&a, "a"), Ok(()));
+    let strut = LayoutPolicySnapshot::resolve(&a, &constraints(), &LayoutOptions::default())
+        .unwrap()
+        .strut;
+    assert_eq!((strut.ascent, strut.descent), (9.0, 3.0));
 }

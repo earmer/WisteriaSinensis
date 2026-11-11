@@ -115,7 +115,6 @@ fn nbsp_glue_must_not_be_collapsible() {
                 is_collapsible: true,
                 byte_range: TextRange::new(0, 2),
                 kind: GlueKind::WordSpace,
-                tier: GlueTier::Tier0,
                 natural_width: 4.,
                 max_stretch: 0.,
                 max_shrink: 0.,
@@ -136,7 +135,7 @@ fn nbsp_glue_must_not_be_collapsible() {
 #[test]
 fn non_finite_cluster_glyph_measurement_is_rejected() {
     let mut a = ast("abc");
-    a.clusters[0].glyphs[0].x_advance = f32::NAN;
+    a.glyphs[0].x_advance = f32::NAN;
     assert_eq!(
         check(&a, "abc"),
         Err(LayoutInputError::InvalidTextWidth { item: 0 })

@@ -1,6 +1,8 @@
 //! Layout options (spec §5 Stage 1.3 and Stage 4).
 
-use super::HangSide;
+use super::tolerance::tolerance;
+use super::{HangSide, LayoutInputError};
+use crate::frontend::is_line_or_paragraph_separator;
 use crate::types::{Direction, FontMetrics, WritingMode};
 use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
@@ -65,11 +67,7 @@ impl HangMode {
     /// line is the paragraph's first (line index 0).
     #[must_use]
     pub const fn allows(self, side: HangSide, direction: Direction, is_first_line: bool) -> bool {
-        let at_start = matches!(
-            (side, direction),
-            (HangSide::Left, Direction::Ltr) | (HangSide::Right, Direction::Rtl)
-        );
-        if at_start {
+        if side.is_line_start(direction) {
             match self.start {
                 HangStartMode::None => false,
                 HangStartMode::FirstLine => is_first_line,
@@ -104,38 +102,85 @@ impl LineHeight {
         }
     }
 
-    /// Resolves the paragraph strut for `font` at `font_size` (spec §5 Stage 4.1).
+    /// Resolves the paragraph strut from the raw metrics of `font` at
+    /// `font_size`, for text set in `mode` (spec §5 Stage 4.1). A vertical
+    /// mode reads the font's vertical ascent, descent and line gap.
     ///
     /// * `Normal`: the font's own ascent, descent and line gap.
     /// * `Fixed(m)`: total height `m * font_size`; the leading
     ///   `total - (ascent + descent)` (possibly negative) is split in half above
     ///   and below, and the line gap becomes 0 (CSS half-leading).
     ///
-    /// `natural_line_height()` of the result is the line height of an empty line.
+    /// [`StrutMetrics::line_height`] of the result is the height of an empty
+    /// line.
     #[must_use]
-    pub fn resolve_strut(self, font: &FontMetrics, font_size: f32) -> FontMetrics {
-        self.resolve_strut_for_mode(font, font_size, WritingMode::HorizontalTb)
-    }
-    /// Resolves the active strut using horizontal or vertical raw metrics.
-    pub fn resolve_strut_for_mode(
+    pub fn resolve_strut(
         self,
-        raw: &FontMetrics,
+        font: &FontMetrics,
         font_size: f32,
         mode: WritingMode,
-    ) -> FontMetrics {
-        let mut font = *raw;
-        if mode.is_vertical() {
-            font.ascent = raw.vertical_ascent;
-            font.descent = raw.vertical_descent;
-            font.line_gap = raw.vertical_line_gap;
+    ) -> StrutMetrics {
+        let (ascent, descent, line_gap) = if mode.is_vertical() {
+            (
+                font.vertical_ascent,
+                font.vertical_descent,
+                font.vertical_line_gap,
+            )
+        } else {
+            (font.ascent, font.descent, font.line_gap)
+        };
+        match self {
+            Self::Normal => StrutMetrics {
+                ascent,
+                descent,
+                line_gap,
+            },
+            Self::Fixed(multiplier) => {
+                let half_leading = (multiplier * font_size - (ascent + descent)) / 2.0;
+                StrutMetrics {
+                    ascent: ascent + half_leading,
+                    descent: descent + half_leading,
+                    line_gap: 0.0,
+                }
+            }
         }
-        if let Self::Fixed(multiplier) = self {
-            let leading = multiplier * font_size - (font.ascent + font.descent);
-            font.ascent += leading / 2.0;
-            font.descent += leading / 2.0;
-            font.line_gap = 0.0;
-        }
-        font
+    }
+}
+
+/// The resolved paragraph strut: the line box every line has at least
+/// (`LineHeight::Normal`) or exactly (`LineHeight::Fixed`), produced by
+/// [`LineHeight::resolve_strut`] (spec §5 Stage 4.1).
+///
+/// Distinct from the raw [`FontMetrics`] it is resolved from: half-leading is
+/// folded into `ascent` and `descent`, so under a tight `Fixed` multiplier
+/// either may be **negative**, which raw font metrics never are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StrutMetrics {
+    /// Extent of the strut toward line-over, half-leading included.
+    pub ascent: f32,
+    /// Extent of the strut toward line-under, half-leading included.
+    pub descent: f32,
+    /// Font line gap; zero under `LineHeight::Fixed`.
+    pub line_gap: f32,
+}
+
+impl StrutMetrics {
+    /// Height of an empty line: `ascent + descent + line_gap`.
+    #[must_use]
+    pub fn line_height(&self) -> f32 {
+        self.ascent + self.descent + self.line_gap
+    }
+
+    /// `true` when every field is finite and the line height is finite and
+    /// positive.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        let height = self.line_height();
+        [self.ascent, self.descent, self.line_gap]
+            .iter()
+            .all(|v| v.is_finite())
+            && height.is_finite()
+            && height > 0.0
     }
 }
 
@@ -274,6 +319,18 @@ pub struct LayoutConstraints {
     pub tab_stops: TabStops,
 }
 
+impl Default for LayoutConstraints {
+    fn default() -> Self {
+        Self {
+            first_line_indent: 0.0,
+            hanging_indent: 0.0,
+            geometry_provider: None,
+            wrap_width: f32::INFINITY,
+            tab_stops: TabStops { step: 8.0 },
+        }
+    }
+}
+
 impl LayoutConstraints {
     /// Checks the width, the indents and the tab stops.
     ///
@@ -287,13 +344,64 @@ impl LayoutConstraints {
     pub fn is_valid(&self) -> bool {
         let indent_is_in_envelope = |indent: f32| indent >= 0.0 && indent < self.wrap_width;
         self.wrap_width > 0.0
-            && !self.wrap_width.is_nan()
             && self.first_line_indent.is_finite()
             && self.hanging_indent.is_finite()
             && (self.geometry_provider.is_some()
                 || (indent_is_in_envelope(self.first_line_indent)
                     && indent_is_in_envelope(self.hanging_indent)))
             && self.tab_stops.is_valid()
+    }
+
+    /// The geometry of line `line_index` over the block envelope
+    /// `[block_start, block_end)`: the provider's answer, or the standard
+    /// column `[indent, wrap_width]`. The response is not validated; see
+    /// [`query_checked_geometry`](Self::query_checked_geometry).
+    #[must_use]
+    pub fn resolve_line_geometry(
+        &self,
+        line_index: usize,
+        block_start: f32,
+        block_end: f32,
+    ) -> LineGeometry {
+        if let Some(provider) = &self.geometry_provider {
+            return provider.query_line_geometry(line_index, block_start, block_end);
+        }
+        let start = if line_index == 0 {
+            self.first_line_indent
+        } else {
+            self.hanging_indent
+        };
+        LineGeometry {
+            slots: smallvec![InlineSlotConstraint {
+                start,
+                end: self.wrap_width,
+            }],
+            next_feature_block_offset: None,
+        }
+    }
+
+    /// Queries and validates geometry, optionally checking an earlier smaller envelope.
+    ///
+    /// # Errors
+    /// Invalid query/response coordinates or a violation of provider monotonicity.
+    pub fn query_checked_geometry(
+        &self,
+        line_index: usize,
+        block_start: f32,
+        block_end: f32,
+        previous: Option<&LineGeometry>,
+    ) -> Result<LineGeometry, LayoutInputError> {
+        if !block_start.is_finite() || !block_end.is_finite() || block_end <= block_start {
+            return Err(LayoutInputError::InvalidLineGeometry);
+        }
+        let geometry = self.resolve_line_geometry(line_index, block_start, block_end);
+        if !geometry.is_valid(block_start, self.wrap_width) {
+            return Err(LayoutInputError::InvalidLineGeometry);
+        }
+        if previous.is_some_and(|p| !geometry.is_subset_of(p)) {
+            return Err(LayoutInputError::NonMonotonicGeometry);
+        }
+        Ok(geometry)
     }
 }
 
@@ -319,142 +427,6 @@ pub struct LayoutOptions {
     pub soft_hyphen: SoftHyphenPolicy,
 }
 
-/// One available inline interval; only its end may be positive infinity.
-///
-/// Besides being well formed ([`is_valid`](Self::is_valid)), a slot of a line
-/// lies in the line's inline envelope (see
-/// [`lies_in_envelope`](Self::lies_in_envelope)).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct InlineSlotConstraint {
-    /// Finite inline start; `>= 0` within the line's envelope.
-    pub start: f32,
-    /// End strictly beyond start, possibly positive infinity (only when the
-    /// wrap width is infinite); `<= wrap_width` within the line's envelope.
-    pub end: f32,
-}
-impl InlineSlotConstraint {
-    /// Available advance.
-    pub fn width(self) -> f32 {
-        self.end - self.start
-    }
-    /// Whether endpoints and their difference obey the geometry contract.
-    pub fn is_valid(self) -> bool {
-        self.start.is_finite()
-            && self.end > self.start
-            && (self.end == f32::INFINITY || (self.end.is_finite() && self.width().is_finite()))
-    }
-
-    /// Whether the slot lies in the inline envelope of a line whose wrap width
-    /// is `wrap_width`: `0 <= start` and, when `wrap_width` is finite,
-    /// `end <= wrap_width`, both within the crate's geometry tolerance. With an
-    /// infinite `wrap_width` only the lower bound applies. Assumes
-    /// [`is_valid`](Self::is_valid).
-    #[must_use]
-    pub fn lies_in_envelope(self, wrap_width: f32) -> bool {
-        self.start >= -super::output::tolerance(self.start, 0.0)
-            && (wrap_width == f32::INFINITY
-                || (self.end.is_finite()
-                    && self.end <= wrap_width + super::output::tolerance(self.end, wrap_width)))
-    }
-}
-/// Available slots for one block-axis envelope.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LineGeometry {
-    /// Sorted, nonoverlapping available intervals.
-    pub slots: SmallVec<[InlineSlotConstraint; 2]>,
-    /// Next block start at which geometry may change.
-    pub next_feature_block_offset: Option<f32>,
-    /// Original unobstructed container width, before indentation.
-    pub max_unobstructed_width: f32,
-}
-impl LineGeometry {
-    /// Checks a provider response at the given query start, for a container of
-    /// inline width `wrap_width`: every slot is well formed and lies in the
-    /// envelope `[0, wrap_width]` ([`InlineSlotConstraint::lies_in_envelope`]).
-    pub fn is_valid(&self, block_start: f32, wrap_width: f32) -> bool {
-        self.max_unobstructed_width > 0.0
-            && !self.max_unobstructed_width.is_nan()
-            && self
-                .slots
-                .iter()
-                .all(|s| s.is_valid() && s.lies_in_envelope(wrap_width))
-            && self
-                .slots
-                .windows(2)
-                .all(|w| w[0].start < w[1].start && w[0].end <= w[1].start)
-            && self
-                .next_feature_block_offset
-                .is_none_or(|v| v.is_finite() && v > block_start)
-    }
-    /// Checks that an expanded block envelope introduced no new inline area.
-    pub fn is_subset_of(&self, previous: &Self) -> bool {
-        let mut at = 0;
-        for slot in &self.slots {
-            while at < previous.slots.len() && previous.slots[at].end < slot.end {
-                at += 1;
-            }
-            if !previous
-                .slots
-                .get(at)
-                .is_some_and(|p| slot.start >= p.start && slot.end <= p.end)
-            {
-                return false;
-            }
-        }
-        true
-    }
-}
-/// Obstacle-aware geometry, queried in canonical flow coordinates.
-pub trait LineGeometryProvider: std::fmt::Debug + Send + Sync {
-    /// Increasing `block_end` for the same start/index may only remove space.
-    fn query_line_geometry(
-        &self,
-        line_index: usize,
-        block_start: f32,
-        block_end: f32,
-    ) -> LineGeometry;
-}
-impl Default for LayoutConstraints {
-    fn default() -> Self {
-        Self {
-            wrap_width: f32::INFINITY,
-            first_line_indent: 0.0,
-            hanging_indent: 0.0,
-            tab_stops: TabStops { step: 8.0 },
-            geometry_provider: None,
-        }
-    }
-}
-impl LayoutConstraints {
-    /// Queries custom geometry or constructs the standard indented column.
-    pub fn resolve_line_geometry(
-        &self,
-        line_index: usize,
-        block_start: f32,
-        block_end: f32,
-    ) -> LineGeometry {
-        if let Some(provider) = &self.geometry_provider {
-            return provider.query_line_geometry(line_index, block_start, block_end);
-        }
-        let start = if line_index == 0 {
-            self.first_line_indent
-        } else {
-            self.hanging_indent
-        };
-        LineGeometry {
-            slots: if start < self.wrap_width {
-                smallvec![InlineSlotConstraint {
-                    start,
-                    end: self.wrap_width
-                }]
-            } else {
-                SmallVec::new()
-            },
-            next_feature_block_offset: None,
-            max_unobstructed_width: self.wrap_width,
-        }
-    }
-}
 /// Truncation limits; at least one limit must be configured when enabled.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LineClampPolicy {
@@ -466,6 +438,7 @@ pub struct LineClampPolicy {
     /// Synthesized suffix; empty means silent truncation.
     pub ellipsis: Box<str>,
 }
+
 impl LineClampPolicy {
     /// Truncates after `n` lines, with the ellipsis `"…"`.
     #[must_use]
@@ -488,43 +461,120 @@ impl LineClampPolicy {
     }
 
     /// Checks configured limits and the suffix source.
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         (self.max_lines.is_some() || self.max_block_size.is_some())
             && self.max_lines != Some(0)
             && self.max_block_size.is_none_or(|h| h.is_finite() && h > 0.0)
-            && !self
-                .ellipsis
-                .chars()
-                .any(crate::frontend::is_line_or_paragraph_separator)
+            && !self.ellipsis.chars().any(is_line_or_paragraph_separator)
     }
 }
 
-impl LayoutConstraints {
-    /// Queries and validates geometry, optionally checking an earlier smaller envelope.
-    ///
-    /// # Errors
-    /// Invalid query/response coordinates or a violation of provider monotonicity.
-    pub fn query_checked_geometry(
+/// One available inline interval; only its end may be positive infinity.
+///
+/// Besides being well formed ([`is_valid`](Self::is_valid)), a slot of a line
+/// lies in the line's inline envelope (see
+/// [`lies_in_envelope`](Self::lies_in_envelope)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InlineSlotConstraint {
+    /// Finite inline start; `>= 0` within the line's envelope.
+    pub start: f32,
+    /// End strictly beyond start, possibly positive infinity (only when the
+    /// wrap width is infinite); `<= wrap_width` within the line's envelope.
+    pub end: f32,
+}
+
+impl InlineSlotConstraint {
+    /// Available advance.
+    #[must_use]
+    pub fn width(self) -> f32 {
+        self.end - self.start
+    }
+
+    /// Whether endpoints and their difference obey the geometry contract.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        self.start.is_finite()
+            && self.end > self.start
+            && (self.end == f32::INFINITY || (self.end.is_finite() && self.width().is_finite()))
+    }
+
+    /// Whether the slot lies in the inline envelope of a line whose wrap width
+    /// is `wrap_width`: `0 <= start` and, when `wrap_width` is finite,
+    /// `end <= wrap_width`, both within the crate's geometry tolerance. With an
+    /// infinite `wrap_width` only the lower bound applies. Assumes
+    /// [`is_valid`](Self::is_valid).
+    #[must_use]
+    pub fn lies_in_envelope(self, wrap_width: f32) -> bool {
+        self.start >= -tolerance(self.start, 0.0)
+            && (wrap_width == f32::INFINITY
+                || (self.end.is_finite()
+                    && self.end <= wrap_width + tolerance(self.end, wrap_width)))
+    }
+}
+
+/// `true` when `slots` are the slots of one line of a container `wrap_width`
+/// wide: each well formed and inside the envelope `[0, wrap_width]`, in
+/// ascending order and pairwise disjoint.
+pub(super) fn slots_are_valid(slots: &[InlineSlotConstraint], wrap_width: f32) -> bool {
+    slots
+        .iter()
+        .all(|s| s.is_valid() && s.lies_in_envelope(wrap_width))
+        && slots.windows(2).all(|w| w[0].end <= w[1].start)
+}
+
+/// Available slots for one block-axis envelope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineGeometry {
+    /// Sorted, nonoverlapping available intervals; empty when the envelope is
+    /// fully obstructed.
+    pub slots: SmallVec<[InlineSlotConstraint; 2]>,
+    /// Next block start at which geometry may change.
+    pub next_feature_block_offset: Option<f32>,
+}
+
+impl LineGeometry {
+    /// Checks a provider response at the given query start, for a container of
+    /// inline width `wrap_width`: every slot is well formed and lies in the
+    /// envelope `[0, wrap_width]` ([`InlineSlotConstraint::lies_in_envelope`]),
+    /// the slots are sorted and disjoint, and the next feature lies ahead.
+    #[must_use]
+    pub fn is_valid(&self, block_start: f32, wrap_width: f32) -> bool {
+        slots_are_valid(&self.slots, wrap_width)
+            && self
+                .next_feature_block_offset
+                .is_none_or(|v| v.is_finite() && v > block_start)
+    }
+
+    /// Checks that an expanded block envelope introduced no new inline area.
+    #[must_use]
+    pub fn is_subset_of(&self, previous: &Self) -> bool {
+        let mut at = 0;
+        for slot in &self.slots {
+            while at < previous.slots.len() && previous.slots[at].end < slot.end {
+                at += 1;
+            }
+            if !previous
+                .slots
+                .get(at)
+                .is_some_and(|p| slot.start >= p.start && slot.end <= p.end)
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Obstacle-aware geometry, queried in canonical flow coordinates.
+pub trait LineGeometryProvider: std::fmt::Debug + Send + Sync {
+    /// Increasing `block_end` for the same start/index may only remove space.
+    fn query_line_geometry(
         &self,
         line_index: usize,
         block_start: f32,
         block_end: f32,
-        previous: Option<&LineGeometry>,
-    ) -> Result<LineGeometry, super::LayoutInputError> {
-        if !block_start.is_finite() || !block_end.is_finite() || block_end <= block_start {
-            return Err(super::LayoutInputError::InvalidLineGeometry);
-        }
-        let geometry = self.resolve_line_geometry(line_index, block_start, block_end);
-        if !geometry.is_valid(block_start, self.wrap_width) {
-            return Err(super::LayoutInputError::InvalidLineGeometry);
-        }
-        if previous.is_some_and(|p| {
-            !geometry.is_subset_of(p) || geometry.max_unobstructed_width != p.max_unobstructed_width
-        }) {
-            return Err(super::LayoutInputError::NonMonotonicGeometry);
-        }
-        Ok(geometry)
-    }
+    ) -> LineGeometry;
 }
 
 #[cfg(test)]
@@ -542,17 +592,49 @@ mod tests {
             line_gap: 1.0,
             ..Default::default()
         };
-        let normal = LineHeight::Normal.resolve_strut(&font, 10.0);
-        assert_eq!(normal.natural_line_height(), 11.0);
-        let fixed = LineHeight::Fixed(1.5).resolve_strut(&font, 10.0);
+        let horizontal = WritingMode::HorizontalTb;
+        let normal = LineHeight::Normal.resolve_strut(&font, 10.0, horizontal);
+        assert_eq!(normal.line_height(), 11.0);
+        let fixed = LineHeight::Fixed(1.5).resolve_strut(&font, 10.0, horizontal);
         assert_eq!(
-            (fixed.ascent, fixed.descent, fixed.line_gap),
-            (10.5, 4.5, 0.0)
+            fixed,
+            StrutMetrics {
+                ascent: 10.5,
+                descent: 4.5,
+                line_gap: 0.0
+            }
         );
-        assert_eq!(fixed.natural_line_height(), 15.0);
-        // A line height below the glyph extent gives negative leading.
-        let tight = LineHeight::Fixed(0.5).resolve_strut(&font, 10.0);
-        assert_eq!(tight.natural_line_height(), 5.0);
+        assert_eq!(fixed.line_height(), 15.0);
+        // A line height below the glyph extent gives negative leading, and a
+        // descent no raw font metric could have.
+        let tight = LineHeight::Fixed(0.5).resolve_strut(&font, 10.0, horizontal);
+        assert_eq!(tight.line_height(), 5.0);
+        assert_eq!(tight.descent, -0.5);
+        assert!(tight.is_valid());
+        // A vertical mode reads the vertical metrics.
+        let vertical = LineHeight::Normal.resolve_strut(&font, 10.0, WritingMode::VerticalRl);
+        assert_eq!(
+            vertical,
+            StrutMetrics {
+                ascent: 5.0,
+                descent: 5.0,
+                line_gap: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn a_strut_needs_a_finite_positive_height() {
+        let strut = |ascent, descent, line_gap| StrutMetrics {
+            ascent,
+            descent,
+            line_gap,
+        };
+        assert!(strut(8.0, 2.0, 1.0).is_valid());
+        assert!(!strut(0.0, 0.0, 0.0).is_valid());
+        assert!(!strut(-8.0, 2.0, 0.0).is_valid());
+        assert!(!strut(f32::NAN, 2.0, 0.0).is_valid());
+        assert!(!strut(f32::MAX, f32::MAX, 0.0).is_valid());
     }
 
     #[test]
@@ -675,21 +757,19 @@ mod tests {
             LineGeometry {
                 slots: SmallVec::new(),
                 next_feature_block_offset: None,
-                max_unobstructed_width: 100.0,
             }
         }
     }
 
     #[test]
     fn provider_slots_lie_inside_the_wrap_envelope() {
-        let geometry = |start: f32, end: f32, width: f32| LineGeometry {
+        let geometry = |start: f32, end: f32| LineGeometry {
             slots: smallvec![InlineSlotConstraint { start, end }],
             next_feature_block_offset: None,
-            max_unobstructed_width: width,
         };
         // A finite container is `[0, wrap_width]`.
-        assert!(geometry(0.0, 100.0, 100.0).is_valid(0.0, 100.0));
-        assert!(geometry(10.0, 90.0, 100.0).is_valid(0.0, 100.0));
+        assert!(geometry(0.0, 100.0).is_valid(0.0, 100.0));
+        assert!(geometry(10.0, 90.0).is_valid(0.0, 100.0));
         for (start, end) in [
             (-1.0, 50.0),
             (0.0, 101.0),
@@ -697,20 +777,17 @@ mod tests {
             (0.0, f32::INFINITY),
             (-5.0, 200.0),
         ] {
-            assert!(
-                !geometry(start, end, 100.0).is_valid(0.0, 100.0),
-                "{start}..{end}"
-            );
+            assert!(!geometry(start, end).is_valid(0.0, 100.0), "{start}..{end}");
         }
         // Tolerance absorbs f32 noise, but only that.
-        assert!(geometry(-1e-4, 100.0001, 100.0).is_valid(0.0, 100.0));
-        assert!(!geometry(-1e-2, 100.0, 100.0).is_valid(0.0, 100.0));
+        assert!(geometry(-1e-4, 100.0001).is_valid(0.0, 100.0));
+        assert!(!geometry(-1e-2, 100.0).is_valid(0.0, 100.0));
         // An infinite container only needs `start >= 0`.
-        assert!(geometry(0.0, f32::INFINITY, 100.0).is_valid(0.0, f32::INFINITY));
-        assert!(geometry(5.0, 1e9, 100.0).is_valid(0.0, f32::INFINITY));
-        assert!(!geometry(-1.0, 5.0, 100.0).is_valid(0.0, f32::INFINITY));
+        assert!(geometry(0.0, f32::INFINITY).is_valid(0.0, f32::INFINITY));
+        assert!(geometry(5.0, 1e9).is_valid(0.0, f32::INFINITY));
+        assert!(!geometry(-1.0, 5.0).is_valid(0.0, f32::INFINITY));
         // `start < end` still holds first.
-        assert!(!geometry(5.0, 5.0, 100.0).is_valid(0.0, 100.0));
+        assert!(!geometry(5.0, 5.0).is_valid(0.0, 100.0));
     }
 
     #[test]

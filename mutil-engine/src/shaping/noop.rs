@@ -5,7 +5,7 @@ use super::{LeadingEdit, TextShaper, TrailingEdit};
 use crate::frontend::ShapingRun;
 use crate::types::{
     Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
-    GraphemeAtom, LocaleTag, ScriptTag, ShapedCluster, TextRange,
+    GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster, TextRange,
 };
 use smallvec::SmallVec;
 
@@ -38,6 +38,7 @@ impl TextShaper for NoopShaper {
         _run: &ShapingRun,
         _atoms: &[GraphemeAtom],
         _output_clusters: &mut Vec<ShapedCluster>,
+        _output_glyphs: &mut Vec<RawShapedGlyph>,
     ) {
     }
 
@@ -50,6 +51,7 @@ impl TextShaper for NoopShaper {
         _leading_edit: LeadingEdit,
         _trailing_edit: TrailingEdit,
         _output_clusters: &mut Vec<ShapedCluster>,
+        _output_glyphs: &mut Vec<RawShapedGlyph>,
     ) {
     }
 

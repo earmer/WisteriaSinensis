@@ -193,10 +193,20 @@ fn multi_slot_containment_and_conserved_width() {
     let mut bad = valid.clone();
     bad.slots[0].visual_width = 151.0;
     bad.visual_width = 251.0;
-    assert_eq!(bad.validate(&c), Err(LineInvariantError::InvalidSlots));
+    assert_eq!(
+        bad.validate(&c),
+        Err(LineInvariantError::InvalidSlots {
+            reason: SlotErrorReason::NoSlots
+        })
+    );
     let mut bad = valid.clone();
     bad.visual_width += 1.0;
-    assert_eq!(bad.validate(&c), Err(LineInvariantError::InvalidSlots));
+    assert_eq!(
+        bad.validate(&c),
+        Err(LineInvariantError::InvalidSlots {
+            reason: SlotErrorReason::NoSlots
+        })
+    );
     let mut bad = valid.clone();
     bad.visual_runs.clear();
     bad.visual_boxes.push(PositionedInlineBox {
@@ -217,6 +227,7 @@ fn multi_slot_containment_and_conserved_width() {
     let mut bad = valid;
     bad.span_fragments.push(PositionedSpanFragment {
         span_id: 1,
+        span_range: TextRange::new(0, 2),
         byte_range: TextRange::new(0, 2),
         x: 90.0,
         width: 70.0,
@@ -398,7 +409,12 @@ fn a_slot_holding_only_a_tab_is_occupied() {
     // A trailing tab does not occupy the slot.
     l.visible_byte_end = 0;
     l.tabs[0].byte_range = TextRange::new(0, 1);
-    assert_eq!(l.validate(&ctx()), Err(LineInvariantError::InvalidSlots));
+    assert_eq!(
+        l.validate(&ctx()),
+        Err(LineInvariantError::InvalidSlots {
+            reason: SlotErrorReason::NoSlots
+        })
+    );
 }
 
 #[test]
@@ -410,14 +426,24 @@ fn occupancy_and_containment_share_one_tolerance() {
     assert_eq!(l.validate(&ctx()), Ok(()));
     // Beyond the tolerance the slot stays empty although a glyph is present.
     l.visual_runs = vec![run(glyph(-1e-2, 0., false))];
-    assert_eq!(l.validate(&ctx()), Err(LineInvariantError::InvalidSlots));
+    assert_eq!(
+        l.validate(&ctx()),
+        Err(LineInvariantError::InvalidSlots {
+            reason: SlotErrorReason::NoSlots
+        })
+    );
 }
 
 #[test]
 fn empty_slots_are_invalid() {
     let mut l = one_glyph_line();
     l.slots.clear();
-    assert_eq!(l.validate(&ctx()), Err(LineInvariantError::InvalidSlots));
+    assert_eq!(
+        l.validate(&ctx()),
+        Err(LineInvariantError::InvalidSlots {
+            reason: SlotErrorReason::NoSlots
+        })
+    );
 }
 
 /// A one-slot line whose slot starts at `start` with capacity `capacity`, holding
@@ -429,26 +455,21 @@ fn slot_line(
     wrap_width: f32,
 ) -> (PositionedLine, LineContext) {
     let mut l = line();
-    l.slots = smallvec::smallvec![PositionedSlot {
-        start,
-        visual_width: width,
-        constraint_width: capacity,
-    }];
+    l.slots = smallvec::smallvec![slot(start, width, capacity)];
     l.visual_width = width;
     l.visual_runs = vec![run(glyph(start, width, false))];
-    let c = ctx().with_slots(
-        smallvec::smallvec![InlineSlotConstraint {
-            start,
-            end: start + capacity
-        }],
+    let c = LineContext {
         wrap_width,
-    );
+        ..ctx()
+    };
     (l, c)
 }
 
 #[test]
 fn context_slots_must_lie_inside_the_wrap_envelope() {
-    let invalid = Err(LineInvariantError::InvalidSlots);
+    let invalid = Err(LineInvariantError::InvalidSlots {
+        reason: SlotErrorReason::NoSlots,
+    });
     for (start, capacity, wrap_width) in
         [(0., 100., 100.), (10., 90., 100.), (5., 50., f32::INFINITY)]
     {
@@ -484,7 +505,7 @@ fn slot_overflow_names_the_slot_and_its_capacity() {
         l.validate(&c),
         Err(LineInvariantError::SlotOverflow {
             slot: 0,
-            visual_width: 110.,
+            extent: 110.,
             capacity: 100.
         })
     );
@@ -497,7 +518,7 @@ fn slot_overflow_names_the_slot_and_its_capacity() {
         l.validate(&c),
         Err(LineInvariantError::SlotOverflow {
             slot: 1,
-            visual_width: 105.,
+            extent: 105.,
             capacity: 100.
         })
     );
@@ -511,7 +532,7 @@ fn line_wider_than_wrap_width_reports_the_container_not_the_slot() {
         l.validate(&c),
         Err(LineInvariantError::SlotOverflow {
             slot: 0,
-            visual_width: 95.,
+            extent: 95.,
             capacity: 92.
         })
     );
@@ -553,7 +574,7 @@ fn rigid_boxes_are_compared_with_the_wrap_width_not_the_slot_capacity() {
         l.validate(&c),
         Err(LineInvariantError::SlotOverflow {
             slot: 0,
-            visual_width: 60.,
+            extent: 60.,
             capacity: 50.
         })
     );
@@ -677,12 +698,19 @@ fn a_slot_is_as_wide_as_the_content_placed_in_it() {
     empty_second.visual_runs[0].glyphs.pop();
     assert_eq!(
         empty_second.validate(&c),
-        Err(LineInvariantError::InvalidSlots)
+        Err(LineInvariantError::InvalidSlots {
+            reason: SlotErrorReason::NoSlots
+        })
     );
     // Content narrower than its slot's declared width.
     let mut narrow = valid.clone();
     narrow.visual_runs[0].glyphs[1].advance = 60.;
-    assert_eq!(narrow.validate(&c), Err(LineInvariantError::InvalidSlots));
+    assert_eq!(
+        narrow.validate(&c),
+        Err(LineInvariantError::InvalidSlots {
+            reason: SlotErrorReason::NoSlots
+        })
+    );
     // The slot may be narrower than its capacity when its content is.
     narrow.slots[1].visual_width = 60.;
     narrow.visual_width = 160.;
@@ -691,5 +719,10 @@ fn a_slot_is_as_wide_as_the_content_placed_in_it() {
     let mut shifted = valid;
     shifted.visual_runs[0].glyphs[1].x = 160.;
     shifted.visual_runs[0].glyphs[1].advance = 90.;
-    assert_eq!(shifted.validate(&c), Err(LineInvariantError::InvalidSlots));
+    assert_eq!(
+        shifted.validate(&c),
+        Err(LineInvariantError::InvalidSlots {
+            reason: SlotErrorReason::NoSlots
+        })
+    );
 }

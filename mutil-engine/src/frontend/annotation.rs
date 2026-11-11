@@ -1,8 +1,11 @@
 //! Explicit directional spans and independently shaped interlinear annotations.
+
 use super::ShapingRun;
-use crate::types::{BidiDirection, GraphemeAtom, ShapedCluster, TextRange};
+use crate::types::{BidiDirection, GraphemeAtom, RawShapedGlyph, ShapedCluster, TextRange};
+
 /// Maximum nesting of source-level directional spans.
 pub const MAX_BIDI_SPAN_DEPTH: usize = 63;
+
 /// Source-level directional control pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BidiControlKind {
@@ -11,6 +14,7 @@ pub enum BidiControlKind {
     /// LRO/RLO through PDF.
     Override(BidiDirection),
 }
+
 /// Nonempty, properly nested directional-control span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplicitBidiSpan {
@@ -23,6 +27,7 @@ pub struct ExplicitBidiSpan {
     /// Control pair.
     pub control: BidiControlKind,
 }
+
 /// Physical side of an interlinear annotation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AnnotationSide {
@@ -32,6 +37,7 @@ pub enum AnnotationSide {
     /// Below horizontal text, left of either vertical mode.
     Under,
 }
+
 /// Distribution of ruby glyphs over their base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AnnotationAlignment {
@@ -45,6 +51,7 @@ pub enum AnnotationAlignment {
     /// Align to inline start.
     Start,
 }
+
 /// Annotation payload policy.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AnnotationKind {
@@ -58,7 +65,11 @@ pub enum AnnotationKind {
     /// Repeat one shaped mark over eligible atoms.
     Emphasis,
 }
+
 /// Independently shaped annotation with local byte and atom coordinates.
+///
+/// The annotation stores its shaped text the way a paragraph does, in three
+/// flat arrays of its own: `atoms`, `clusters` and `glyphs`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnnotationSpan {
     /// Unique identifier.
@@ -82,4 +93,6 @@ pub struct AnnotationSpan {
     /// Local clusters partitioning the atoms, with `atom_range`s into `atoms`;
     /// `run.cluster_range` is `0..clusters.len()`.
     pub clusters: Vec<ShapedCluster>,
+    /// Local glyphs; the clusters' `glyph_range`s tile this vector.
+    pub glyphs: Vec<RawShapedGlyph>,
 }

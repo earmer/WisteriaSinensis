@@ -17,7 +17,7 @@ fn two_runs() -> ParagraphAst {
     a.runs.push(second);
     rebuild_items(&mut a, |a| {
         let mut word =
-            |run: usize, at: usize| push_text(a, run, vec![atom(at)], vec![cluster(TEXT, at, 0)]);
+            |run: usize, at: usize| push_text(a, run, vec![atom(at)], vec![cluster(at, 0)]);
         vec![word(0, 0), word(0, 1), word(1, 2), word(1, 3), end(4)]
     });
     a
@@ -254,7 +254,8 @@ fn reshape_window_takes_the_run_slice_of_the_paragraph_storage_directly() {
             .iter()
             .all(|c| c.atom_range.end <= atoms.len())
     );
-    let mut out = vec![cluster(TEXT, 2, 0)];
+    let mut out = vec![cluster(2, 0)];
+    let mut out_glyphs = Vec::new();
     NoopShaper.reshape_window(
         TEXT,
         run,
@@ -263,9 +264,11 @@ fn reshape_window_takes_the_run_slice_of_the_paragraph_storage_directly() {
         LeadingEdit::None,
         TrailingEdit::None,
         &mut out,
+        &mut out_glyphs,
     );
     // The no-op shaper appends nothing and never clears the buffer.
-    assert_eq!(out, vec![cluster(TEXT, 2, 0)]);
+    assert_eq!(out, vec![cluster(2, 0)]);
+    assert!(out_glyphs.is_empty());
 }
 
 #[test]

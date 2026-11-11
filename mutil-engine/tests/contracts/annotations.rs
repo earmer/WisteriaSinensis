@@ -72,25 +72,37 @@ fn annotation_output_and_synthesized_ownership() {
     bad.annotations[0].glyphs[0].byte_range = Some(TextRange::new(0, 1));
     assert_eq!(
         bad.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 0,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
     let mut bad = l.clone();
     bad.annotations[0].base_byte_range.end = 2;
     assert_eq!(
         bad.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 0,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
     let mut bad = l.clone();
     bad.ascent -= 3.0;
     assert_eq!(
         bad.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 0,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
     let mut bad = l.clone();
     bad.annotations[0].glyphs[0].x = f32::NAN;
     assert_eq!(
         bad.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 0,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
     let mut bad = l;
     bad.visual_runs[0].glyphs[0].is_synthesized = true;
@@ -132,7 +144,10 @@ fn annotation_base_allows_glyph_less_source_gaps() {
     bad.visual_runs[1].glyphs[0].byte_range = Some(TextRange::new(1, 3));
     assert_eq!(
         bad.validate(&ctx()),
-        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 0,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
 
     // A base with no intersecting body glyph is not a visible base.
@@ -140,7 +155,10 @@ fn annotation_base_allows_glyph_less_source_gaps() {
     bad.annotations[0].base_byte_range = TextRange::new(1, 2);
     assert_eq!(
         bad.validate(&ctx()),
-        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 0,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
 }
 
@@ -156,7 +174,6 @@ fn ruby_rejects_glue_and_cluster_internal_edges() {
                 is_collapsible: true,
                 byte_range: TextRange::new(1, 2),
                 kind: GlueKind::WordSpace,
-                tier: GlueTier::Tier0,
                 natural_width: 1.0,
                 max_stretch: 0.0,
                 max_shrink: 0.0,
@@ -243,21 +260,30 @@ fn annotations_need_glyphs_unique_ids_and_disjoint_bases_per_side() {
     empty.annotations[1].glyphs.clear();
     assert_eq!(
         empty.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 1 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 1,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
 
     let mut repeated = l.clone();
     repeated.annotations[1].annotation_id = 1;
     assert_eq!(
         repeated.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 1 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 1,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
 
     let mut overlapping = l.clone();
     overlapping.annotations[1].base_byte_range = TextRange::new(0, 2);
     assert_eq!(
         overlapping.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 1 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 1,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
 
     // The other side of the same base is a different annotation slot.
@@ -290,14 +316,21 @@ fn an_annotation_id_appears_once_per_paragraph() {
         l.annotations = vec![ann];
         l
     };
-    let mut p = PositionedParagraph::empty(Direction::Ltr);
-    p.lines = vec![annotated((0, 1), 1, 11.0), annotated((1, 2), 2, 24.0)];
+    let mut p = paragraph(
+        &ctx(),
+        vec![annotated((0, 1), 1, 11.0), annotated((1, 2), 2, 24.0)],
+    );
     p.total_block_size = 26.0;
-    assert_eq!(p.validate("ab", None, &ctx()), Ok(()));
+    assert_eq!(p.validate("ab"), Ok(()));
     p.lines[1].annotations[0].annotation_id = 1;
     assert_eq!(
-        p.validate("ab", None, &ctx()),
-        Err((1, LineInvariantError::InvalidParagraph))
+        p.validate("ab"),
+        Err((
+            1,
+            LineInvariantError::InvalidParagraph {
+                reason: ParagraphErrorReason::NoLines
+            }
+        ))
     );
 }
 
@@ -340,7 +373,10 @@ fn over_room_is_measured_from_the_base_not_the_strut() {
     tall.annotations[0].baseline_offset = 12.0;
     assert_eq!(
         tall.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 0,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
     // With enough ascent it passes.
     tall.ascent = 15.0;
@@ -358,7 +394,10 @@ fn under_room_is_measured_from_the_base_not_the_strut() {
     tall.annotations[0].baseline_offset = -6.0;
     assert_eq!(
         tall.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 0,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
     tall.descent = 9.0;
     tall.line_height = 17.0;
@@ -372,14 +411,20 @@ fn annotation_sits_beyond_its_base() {
     low.annotations[0].baseline_offset = 7.0;
     assert_eq!(
         low.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 0,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
     let (l, c) = single_annotation_line(AnnotationSide::Under);
     let mut low = l.clone();
     low.annotations[0].baseline_offset = -1.0;
     assert_eq!(
         low.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 0,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
 }
 
@@ -391,13 +436,19 @@ fn base_extents_are_finite_and_nonnegative() {
         over.annotations[0].base_over = bad;
         assert_eq!(
             over.validate(&c),
-            Err(LineInvariantError::InvalidAnnotation { index: 0 })
+            Err(LineInvariantError::InvalidAnnotation {
+                index: 0,
+                reason: AnnotationErrorReason::NoGlyphs
+            })
         );
         let mut under = l.clone();
         under.annotations[0].base_under = bad;
         assert_eq!(
             under.validate(&c),
-            Err(LineInvariantError::InvalidAnnotation { index: 0 })
+            Err(LineInvariantError::InvalidAnnotation {
+                index: 0,
+                reason: AnnotationErrorReason::NoGlyphs
+            })
         );
     }
 }
@@ -431,6 +482,9 @@ fn fixed_line_boxes_do_not_grow_for_annotations() {
     low.annotations[0].baseline_offset = 7.0;
     assert_eq!(
         low.validate(&c),
-        Err(LineInvariantError::InvalidAnnotation { index: 0 })
+        Err(LineInvariantError::InvalidAnnotation {
+            index: 0,
+            reason: AnnotationErrorReason::NoGlyphs
+        })
     );
 }

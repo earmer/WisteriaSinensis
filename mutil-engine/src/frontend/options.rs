@@ -1,6 +1,6 @@
 //! Frontend options (spec §3).
 
-use crate::types::LocaleTag;
+use crate::types::{LocaleTag, TextOrientation, WritingMode};
 
 /// How quotation marks and paired punctuation resolve their script
 /// (spec §3 Step 3).
@@ -40,9 +40,9 @@ pub enum AutospaceProfile {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FrontendOptions {
     /// Paragraph writing mode.
-    pub writing_mode: crate::types::WritingMode,
+    pub writing_mode: WritingMode,
     /// Vertical orientation policy.
-    pub text_orientation: crate::types::TextOrientation,
+    pub text_orientation: TextOrientation,
     /// Whether untagged text can trigger experimental locale inference.
     pub locale_policy: LocalePolicy,
     /// Profile for `GlueKind::CjkAutospace` sizes.
@@ -51,20 +51,6 @@ pub struct FrontendOptions {
     pub quote_policy: QuotePolicy,
     /// Locale for runs that carry none (spec §1.2 fallback rules).
     pub default_locale: LocaleTag,
-}
-
-impl FrontendOptions {
-    /// `true` when every numeric field of the options and of the profiles they
-    /// hold is within its legal range.
-    ///
-    /// Every field is an enum or a locale tag today, so any value is valid and
-    /// this returns `true`. The frontend entry point will call it before
-    /// analysing a paragraph, and a numeric field added later must be checked
-    /// here (finite, with its sign and range documented on the field).
-    #[must_use]
-    pub fn is_valid(&self) -> bool {
-        true
-    }
 }
 
 /// Language inference policy. Heuristics require explicit opt-in.
@@ -79,21 +65,4 @@ pub enum LocalePolicy {
     /// selecting this policy currently has no effect; it is
     /// reserved for the script-based rules in spec §3 Step 4.
     ExperimentalHeuristics,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn options_without_numeric_fields_are_always_valid() {
-        assert!(FrontendOptions::default().is_valid());
-        let every_policy = FrontendOptions {
-            locale_policy: LocalePolicy::ExperimentalHeuristics,
-            autospace_profile: AutospaceProfile::CssCompat,
-            quote_policy: QuotePolicy::CjkAware,
-            ..Default::default()
-        };
-        assert!(every_policy.is_valid());
-    }
 }

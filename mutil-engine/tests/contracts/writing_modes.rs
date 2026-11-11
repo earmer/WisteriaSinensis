@@ -152,15 +152,19 @@ fn vertical_lr_paragraph_uses_line_under_for_block_start() {
     let mut r = run(glyph(0.0, 100.0, false));
     r.orientation = GlyphOrientation::VerticalUpright;
     l.visual_runs = vec![r];
-    let mut p = PositionedParagraph::empty(Direction::Ltr);
-    p.writing_mode = WritingMode::VerticalLr;
+    let mut p = paragraph(&ctx(), vec![l]);
+    p.policy.writing_mode = WritingMode::VerticalLr;
     p.total_block_size = 10.0;
-    p.lines = vec![l];
-    assert_eq!(p.validate("a", None, &ctx()), Ok(()));
+    assert_eq!(p.validate("a"), Ok(()));
     p.lines[0].baseline_y = 1.0;
     assert_eq!(
-        p.validate("a", None, &ctx()),
-        Err((0, LineInvariantError::InvalidParagraph))
+        p.validate("a"),
+        Err((
+            0,
+            LineInvariantError::InvalidParagraph {
+                reason: ParagraphErrorReason::NoLines
+            }
+        ))
     );
 }
 
@@ -181,18 +185,22 @@ fn vertical_lr_under_annotation_moves_first_baseline() {
     ann.glyphs[0].x = 0.0;
     ann.glyphs[0].advance = 10.0;
     l.annotations.push(ann);
-    let mut p = PositionedParagraph::empty(Direction::Ltr);
-    p.writing_mode = WritingMode::VerticalLr;
+    let mut p = paragraph(&ctx(), vec![l]);
+    p.policy.writing_mode = WritingMode::VerticalLr;
     p.total_block_size = 11.0;
-    p.lines = vec![l];
-    assert_eq!(p.validate("a", None, &ctx()), Ok(()));
+    assert_eq!(p.validate("a"), Ok(()));
     // The line-under side is the block start in VerticalLr, so shrinking the
     // baseline to the strut descent alone pushes the line into negative block
     // space once the annotation has extended descent.
     p.lines[0].baseline_y = 2.0;
     assert_eq!(
-        p.validate("a", None, &ctx()),
-        Err((0, LineInvariantError::InvalidParagraph))
+        p.validate("a"),
+        Err((
+            0,
+            LineInvariantError::InvalidParagraph {
+                reason: ParagraphErrorReason::NoLines
+            }
+        ))
     );
 }
 
@@ -210,16 +218,21 @@ fn vertical_rl_over_annotation_needs_line_relative_ascent() {
     ann.glyphs[0].x = 0.0;
     ann.glyphs[0].advance = 10.0;
     l.annotations.push(ann);
-    let mut p = PositionedParagraph::empty(Direction::Ltr);
-    p.writing_mode = WritingMode::VerticalRl;
+    let mut p = paragraph(&ctx(), vec![l]);
+    p.policy.writing_mode = WritingMode::VerticalRl;
     p.total_block_size = 13.0;
-    p.lines = vec![l];
-    assert_eq!(p.validate("a", None, &ctx()), Ok(()));
+    assert_eq!(p.validate("a"), Ok(()));
     p.lines[0].annotations[0].base_over = 9.0;
     p.lines[0].annotations[0].baseline_offset = 9.0;
     assert_eq!(
-        p.validate("a", None, &ctx()),
-        Err((0, LineInvariantError::InvalidAnnotation { index: 0 }))
+        p.validate("a"),
+        Err((
+            0,
+            LineInvariantError::InvalidAnnotation {
+                index: 0,
+                reason: AnnotationErrorReason::NoGlyphs
+            }
+        ))
     );
 }
 
@@ -236,7 +249,7 @@ fn tcy_ast() -> ParagraphAst {
         let mut merged = clusters[0].clone();
         merged.byte_range = TextRange::new(0, 2);
         merged.atom_range = 0..2;
-        merged.glyphs.extend(clusters[1].glyphs.clone());
+        merged.glyph_range = 0..2;
         merged.natural_width = 2.;
         *clusters = vec![merged];
     });

@@ -9,11 +9,11 @@ use std::sync::Arc;
 fn unbounded_width_indent_and_clamp_options() {
     let a = ast("a");
     let mut constraints = LayoutConstraints::default();
-    let c = check_layout_inputs(&a, "a", &constraints, &LayoutOptions::default()).unwrap();
+    let c = LineContext::for_paragraph(&a, &constraints, &LayoutOptions::default(), 0).unwrap();
     assert!(c.wrap_width.is_infinite());
     let mut empty_body = line();
     set_visual_width(&mut empty_body, 0.0);
-    empty_body.slots[0].constraint_width = f32::INFINITY;
+    empty_body.slots[0].constraint.end = f32::INFINITY;
     assert_eq!(empty_body.validate(&c), Ok(()));
     constraints.wrap_width = 10.0;
     constraints.first_line_indent = 10.0;
@@ -35,8 +35,19 @@ fn unbounded_width_indent_and_clamp_options() {
     );
     constraints.hanging_indent = 0.0;
     constraints.first_line_indent = 2.0;
-    let c = check_layout_inputs(&a, "a", &constraints, &LayoutOptions::default()).unwrap();
-    assert_eq!(c.slot_constraints[0].start, 2.0);
+    assert_eq!(
+        check_layout_inputs(&a, "a", &constraints, &LayoutOptions::default()),
+        Ok(())
+    );
+    // The first line's standard slot starts at the indent.
+    assert_eq!(
+        constraints.resolve_line_geometry(0, 0.0, 10.0).slots[..],
+        [InlineSlotConstraint {
+            start: 2.0,
+            end: 10.0
+        }]
+    );
+    let c = LineContext::for_paragraph(&a, &constraints, &LayoutOptions::default(), 0).unwrap();
     assert_eq!(c.wrap_width, 10.0);
     for policy in [
         LineClampPolicy {
@@ -75,23 +86,21 @@ fn truncation_and_multiple_synthesized_ellipsis_glyphs() {
             ..glyph(x, 10.0, false)
         });
     }
-    let p = PositionedParagraph {
-        writing_mode: WritingMode::HorizontalTb,
-        base_direction: Direction::Ltr,
-        total_block_size: 10.0,
-        lines: vec![l],
-        truncated_range: Some(TextRange::new(1, 3)),
-    };
-    let options = LayoutOptions {
-        clamp: Some(LineClampPolicy::max_lines(1)),
-        ..Default::default()
-    };
-    assert_eq!(p.validate("abc", options.clamp.as_ref(), &ctx()), Ok(()));
+    let mut p = paragraph(&ctx(), vec![l]);
+    p.total_block_size = 10.0;
+    p.truncated_range = Some(TextRange::new(1, 3));
+    p.policy.clamp = Some(LineClampPolicy::max_lines(1));
+    assert_eq!(p.validate("abc"), Ok(()));
     let mut bad = p.clone();
     bad.truncated_range = Some(TextRange::new(2, 3));
     assert_eq!(
-        bad.validate("abc", options.clamp.as_ref(), &ctx()),
-        Err((0, LineInvariantError::InvalidParagraph))
+        bad.validate("abc"),
+        Err((
+            0,
+            LineInvariantError::InvalidParagraph {
+                reason: ParagraphErrorReason::NoLines
+            }
+        ))
     );
     let mut bad = p.clone();
     let mut next = bad.lines[0].clone();
@@ -104,12 +113,37 @@ fn truncation_and_multiple_synthesized_ellipsis_glyphs() {
     bad.total_block_size = 20.0;
     // Only the last line may carry the ellipsis.
     assert_eq!(
-        bad.validate("abc", options.clamp.as_ref(), &ctx()),
-        Err((0, LineInvariantError::InvalidParagraph))
+        bad.validate("abc"),
+        Err((
+            0,
+            LineInvariantError::InvalidParagraph {
+                reason: ParagraphErrorReason::NoLines
+            }
+        ))
     );
+    // A truncated paragraph was laid out under a clamp.
+    let mut unclamped = p.clone();
+    unclamped.policy.clamp = None;
     assert_eq!(
-        p.validate("abc", None, &ctx()),
-        Err((0, LineInvariantError::InvalidParagraph))
+        unclamped.validate("abc"),
+        Err((
+            0,
+            LineInvariantError::InvalidParagraph {
+                reason: ParagraphErrorReason::NoLines
+            }
+        ))
+    );
+    // The recorded clamp must itself be valid.
+    let mut invalid = p;
+    invalid.policy.clamp = Some(LineClampPolicy::max_lines(0));
+    assert_eq!(
+        invalid.validate("abc"),
+        Err((
+            0,
+            LineInvariantError::InvalidParagraph {
+                reason: ParagraphErrorReason::NoLines
+            }
+        ))
     );
 }
 
@@ -124,7 +158,6 @@ impl LineGeometryProvider for GrowingGeometry {
                 end: if end > 10.0 { 200.0 } else { 100.0 }
             }],
             next_feature_block_offset: None,
-            max_unobstructed_width: 200.0,
         }
     }
 }
@@ -162,7 +195,6 @@ fn provider_monotonicity_clearance_and_snapshots() {
             end: 100.0
         }],
         next_feature_block_offset: None,
-        max_unobstructed_width: 100.0,
     };
     let split = LineGeometry {
         slots: smallvec![
@@ -180,14 +212,9 @@ fn provider_monotonicity_clearance_and_snapshots() {
     assert!(split.is_subset_of(&previous));
     assert!(!previous.is_subset_of(&split));
     let (l, c) = two_slots();
-    let p = PositionedParagraph {
-        writing_mode: WritingMode::HorizontalTb,
-        base_direction: Direction::Ltr,
-        total_block_size: 10.0,
-        truncated_range: None,
-        lines: vec![l],
-    };
-    assert_eq!(p.validate("ab", None, &c), Ok(()));
+    let mut p = paragraph(&c, vec![l]);
+    p.total_block_size = 10.0;
+    assert_eq!(p.validate("ab"), Ok(()));
 }
 
 #[test]
@@ -221,20 +248,33 @@ fn probe_ignores_tall_input_after_first_break() {
             &NoopShaper,
             &constraints,
             &LayoutOptions::default()
-        ),
-        Ok(PositionedParagraph::empty(Direction::Ltr))
+        )
+        .map(|paragraph| paragraph.lines.len()),
+        Ok(0)
     );
 }
 
 #[test]
 fn infinity_does_not_equal_finite_slot_capacity() {
+    // Only an unbounded container admits an unbounded slot.
     let (mut l, c) = two_slots();
-    l.slots[0].constraint_width = f32::INFINITY;
-    assert_eq!(l.validate(&c), Err(LineInvariantError::InvalidSlots));
-    let mut c = c;
-    c.slot_constraints[0].start = -f32::MAX;
-    c.slot_constraints[0].end = f32::MAX;
-    assert_eq!(l.validate(&c), Err(LineInvariantError::InvalidSlots));
+    l.slots[1].constraint.end = f32::INFINITY;
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::InvalidSlots {
+            reason: SlotErrorReason::NoSlots
+        })
+    );
+    // A slot whose width overflows is malformed.
+    let (mut l, c) = two_slots();
+    l.slots[0].constraint.start = -f32::MAX;
+    l.slots[0].constraint.end = f32::MAX;
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::InvalidSlots {
+            reason: SlotErrorReason::NoSlots
+        })
+    );
 }
 
 #[test]
@@ -249,26 +289,28 @@ fn ellipsis_only_empty_and_empty_paragraph_contracts() {
     r.glyphs[0].is_synthesized = true;
     r.glyphs[0].byte_range = None;
     l.visual_runs = vec![r];
-    let mut p = PositionedParagraph::empty(Direction::Ltr);
+    let mut p = paragraph(&ctx(), vec![l]);
     p.total_block_size = 10.0;
-    p.lines = vec![l];
     p.truncated_range = Some(TextRange::new(0, 1));
-    let mut options = LayoutOptions {
-        clamp: Some(LineClampPolicy::max_lines(1)),
-        ..Default::default()
-    };
-    assert_eq!(p.validate("a", options.clamp.as_ref(), &ctx()), Ok(()));
+    p.policy.clamp = Some(LineClampPolicy::max_lines(1));
+    assert_eq!(p.validate("a"), Ok(()));
     p.lines[0].visual_runs.clear();
     set_visual_width(&mut p.lines[0], 0.0);
-    options.clamp.as_mut().unwrap().ellipsis = "".into();
-    assert_eq!(p.validate("a", options.clamp.as_ref(), &ctx()), Ok(()));
+    p.policy.clamp.as_mut().unwrap().ellipsis = "".into();
+    assert_eq!(p.validate("a"), Ok(()));
     p.truncated_range = None;
+    p.policy.clamp = None;
     p.lines[0].is_ellipsized = false;
-    assert_eq!(p.validate("", None, &ctx()), Ok(()));
+    assert_eq!(p.validate(""), Ok(()));
     p.lines.clear();
     assert_eq!(
-        p.validate("", None, &ctx()),
-        Err((0, LineInvariantError::InvalidParagraph))
+        p.validate(""),
+        Err((
+            0,
+            LineInvariantError::InvalidParagraph {
+                reason: ParagraphErrorReason::NoLines
+            }
+        ))
     );
 }
 
@@ -282,7 +324,6 @@ impl LineGeometryProvider for EmptyGeometry {
         LineGeometry {
             slots: smallvec![],
             next_feature_block_offset: self.next,
-            max_unobstructed_width: 100.0,
         }
     }
 }
@@ -323,7 +364,6 @@ fn geometry_rejects_empty_without_progress_and_invalid_intervals() {
             }
         ],
         next_feature_block_offset: None,
-        max_unobstructed_width: 200.0,
     };
     assert!(!geometry.is_valid(0.0, 200.0));
     geometry.slots[1].start = 100.0;
@@ -351,7 +391,6 @@ impl LineGeometryProvider for OneSlot {
                 end: self.end
             }],
             next_feature_block_offset: None,
-            max_unobstructed_width: 100.0,
         }
     }
 }
@@ -371,8 +410,9 @@ fn provider_slots_must_lie_inside_the_wrap_envelope() {
             &constraints,
             &LayoutOptions::default(),
         )
+        .map(|paragraph| paragraph.lines.len())
     };
-    let accepted = Ok(PositionedParagraph::empty(Direction::Ltr));
+    let accepted = Ok(0);
     assert_eq!(laid_out(100.0, 0.0, 100.0), accepted);
     assert_eq!(laid_out(100.0, 10.0, 60.0), accepted);
     for (start, end) in [(-5.0, 50.0), (0.0, 150.0), (0.0, f32::INFINITY)] {

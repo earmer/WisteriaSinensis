@@ -72,8 +72,8 @@ impl InlineDecorationSpan {
 /// A range the caret treats as a single unit (spec §2.2, §6): a mention, a
 /// page-reference chip, an inline code span.
 ///
-/// It may still wrap across lines when its `InlineDecorationSpan` allows it;
-/// atomicity concerns editing only.
+/// It may still wrap across lines (spec §6.1); atomicity concerns editing
+/// only.
 ///
 /// A paragraph holds its spans in `ParagraphAst::atomic_spans`, ascending by
 /// `byte_range.start` and pairwise disjoint.
@@ -93,6 +93,13 @@ impl AtomicEditSpan {
     pub const fn is_interior(&self, offset: ByteIndex) -> bool {
         self.byte_range.start < offset && offset < self.byte_range.end
     }
+}
+
+/// IME preedit styling over source bytes; never changes EGC segmentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompositionSpan {
+    /// UTF-8 code-point-aligned source range, which may lie inside an EGC.
+    pub byte_range: TextRange,
 }
 
 #[cfg(test)]
@@ -146,11 +153,4 @@ mod tests {
         assert!(!a.is_interior(9));
         assert!(!a.is_interior(2));
     }
-}
-
-/// IME preedit styling over source bytes; never changes EGC segmentation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CompositionSpan {
-    /// UTF-8 code-point-aligned source range, which may lie inside an EGC.
-    pub byte_range: TextRange,
 }

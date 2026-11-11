@@ -17,7 +17,9 @@ pub fn end(n: usize) -> WordNode {
 /// the paragraph-level `atom_range` / `cluster_range`.
 ///
 /// `clusters` carry `atom_range`s relative to `atoms` (the first cluster
-/// starts at 0); they are stored run-local. The caller places the node in
+/// starts at 0); they are stored run-local. A fixture cluster's `glyph_range`
+/// only says how many glyphs it has (its length); [`retile_glyphs`] gives the
+/// stored clusters their real ranges. The caller places the node in
 /// `ast.items`, in the order the run's boxes were pushed.
 pub fn push_text(
     ast: &mut ParagraphAst,
@@ -65,6 +67,7 @@ pub fn push_text(
             }
         }
     }
+    retile_glyphs(ast);
     WordNode::Box(BoxNode::Text {
         run_index: run,
         byte_range,
@@ -72,6 +75,23 @@ pub fn push_text(
         cluster_range: cluster_at..cluster_at + n_clusters,
         natural_width,
     })
+}
+
+/// Rebuilds `ast.glyphs` so that the clusters' `glyph_range`s tile it: each
+/// cluster keeps its glyph count and gets that many equal glyphs sharing its
+/// `natural_width`.
+pub fn retile_glyphs(ast: &mut ParagraphAst) {
+    ast.glyphs.clear();
+    for cluster in &mut ast.clusters {
+        let count = cluster.glyph_range.len();
+        let start = ast.glyphs.len();
+        ast.glyphs.extend((0..count).map(|_| RawShapedGlyph {
+            glyph_id: 1,
+            x_advance: cluster.natural_width / count as f32,
+            ..Default::default()
+        }));
+        cluster.glyph_range = start..start + count;
+    }
 }
 
 /// A text box over the one-byte atoms `s..e` of run 0, one unit-wide cluster
@@ -84,7 +104,7 @@ pub fn boxed(ast: &mut ParagraphAst, s: usize, e: usize, atomic: bool) -> WordNo
     };
     let atoms: Vec<_> = (s..e)
         .map(|i| GraphemeAtom {
-            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
+            orientation: GlyphOrientation::Horizontal,
             byte_range: TextRange::new(i, i + 1),
             script: ScriptTag::LATIN,
             bidi_level: 0,
@@ -96,18 +116,13 @@ pub fn boxed(ast: &mut ParagraphAst, s: usize, e: usize, atomic: bool) -> WordNo
         .iter()
         .enumerate()
         .map(|(i, a)| ShapedCluster {
-            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
+            orientation: GlyphOrientation::Horizontal,
             byte_range: a.byte_range,
             atom_range: i..i + 1,
             font: FontRef::unscaled(FontId(1)),
             bidi_level: 0,
             flags,
-            glyphs: smallvec![RawShapedGlyph {
-                glyph_id: 1,
-                cluster: a.byte_range.start as u32,
-                x_advance: 1.,
-                ..Default::default()
-            }],
+            glyph_range: 0..1,
             natural_width: 1.,
             safe_to_break_before: true,
             safe_to_concat_before: true,
@@ -142,11 +157,9 @@ pub fn hyphen_chain_ast(
                     post_break_width: 0.0,
                     no_break_width: 0.0,
                     action: BreakAction::Hyphenate(HyphenOpportunity {
-                        byte_offset: offset,
-                        prefix_replacement: None,
-                        suffix_replacement: None,
                         prefix_cut_bytes,
                         suffix_cut_bytes,
+                        ..Default::default()
                     }),
                     cloned_spans: Default::default(),
                 }));
@@ -176,6 +189,7 @@ pub fn rebuild_items(
 pub fn clear_text(ast: &mut ParagraphAst) {
     ast.atoms.clear();
     ast.clusters.clear();
+    ast.glyphs.clear();
     for run in &mut ast.runs {
         run.atom_range = 0..0;
         run.cluster_range = 0..0;
@@ -184,8 +198,9 @@ pub fn clear_text(ast: &mut ParagraphAst) {
 
 /// Lets `edit` change the atoms and clusters of the text box at `ast.items[item]`
 /// (add, drop or replace entries; cluster `atom_range`s are run-local, as
-/// stored) and repairs the ranges of the box, its run, later runs and later
-/// boxes so the storage still tiles.
+/// stored, and a `glyph_range` counts for its length only) and repairs the
+/// ranges of the box, its run, later runs, later boxes and the glyphs so the
+/// storage still tiles.
 pub fn edit_text_box(
     ast: &mut ParagraphAst,
     item: usize,
@@ -239,13 +254,14 @@ pub fn edit_text_box(
             }
         }
     }
+    retile_glyphs(ast);
 }
 
 pub fn ast(t: &str) -> ParagraphAst {
     let mut a = ParagraphAst {
         annotations: Vec::new(),
         bidi_spans: Vec::new(),
-        writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
+        writing_mode: WritingMode::HorizontalTb,
         base_direction: Direction::Ltr,
         strut_metrics: FontMetrics {
             vertical_ascent: 5.0,
@@ -258,9 +274,9 @@ pub fn ast(t: &str) -> ParagraphAst {
         strut_font_size: 10.,
         runs: vec![ShapingRun {
             word_spacing: 0.0,
-            baseline_align: mutil_engine::types::BaselineAlignment::Auto,
+            baseline_align: BaselineAlignment::Auto,
             letter_spacing: 0.0,
-            orientation: mutil_engine::types::GlyphOrientation::Horizontal,
+            orientation: GlyphOrientation::Horizontal,
             features: Default::default(),
 
             byte_range: TextRange::new(0, t.len()),
@@ -276,6 +292,7 @@ pub fn ast(t: &str) -> ParagraphAst {
         }],
         atoms: vec![],
         clusters: vec![],
+        glyphs: vec![],
         items: vec![],
         decoration_spans: vec![],
         atomic_spans: vec![],
@@ -285,29 +302,35 @@ pub fn ast(t: &str) -> ParagraphAst {
     a
 }
 
-pub fn check(a: &ParagraphAst, t: &str) -> Result<LineContext, LayoutInputError> {
-    check_layout_inputs(
-        a,
-        t,
-        &LayoutConstraints {
-            first_line_indent: 0.0,
-            geometry_provider: None,
-            hanging_indent: 0.0,
-            wrap_width: 100.,
-            tab_stops: TabStops { step: 8. },
+/// The 100-unit column most fixtures are laid out in.
+pub fn constraints() -> LayoutConstraints {
+    LayoutConstraints {
+        wrap_width: 100.,
+        tab_stops: TabStops { step: 8. },
+        ..Default::default()
+    }
+}
+
+pub fn check(a: &ParagraphAst, t: &str) -> Result<(), LayoutInputError> {
+    check_layout_inputs(a, t, &constraints(), &LayoutOptions::default())
+}
+
+/// A slot `capacity` wide from `start`, with content from its start.
+pub fn slot(start: f32, visual_width: f32, capacity: f32) -> PositionedSlot {
+    PositionedSlot {
+        constraint: InlineSlotConstraint {
+            start,
+            end: start + capacity,
         },
-        &LayoutOptions::default(),
-    )
+        content_start: start,
+        visual_width,
+    }
 }
 
 /// The one slot of a line laid out in a context whose wrap width is
 /// `wrap_width`: it starts at 0 and holds the whole `visual_width`.
 pub fn single_slot(visual_width: f32, wrap_width: f32) -> smallvec::SmallVec<[PositionedSlot; 1]> {
-    smallvec![PositionedSlot {
-        start: 0.0,
-        visual_width,
-        constraint_width: wrap_width,
-    }]
+    smallvec![slot(0.0, visual_width, wrap_width)]
 }
 
 /// Sets the width of a single-slot line, keeping its slot in step.
@@ -321,7 +344,6 @@ pub fn line() -> PositionedLine {
         slots: single_slot(100., 100.),
         annotations: Vec::new(),
         is_ellipsized: false,
-        resolved_slot_constraints: smallvec::SmallVec::new(),
         atomic_fragments: vec![],
 
         byte_range: TextRange::new(0, 1),
@@ -343,34 +365,46 @@ pub fn line() -> PositionedLine {
     }
 }
 
+/// An LTR horizontal context, 100 wide, with nothing hanging.
 pub fn ctx() -> LineContext {
     LineContext {
-        strut: FontMetrics {
-            vertical_descent: 5.0,
-            vertical_line_gap: 0.0,
-            x_height: 0.0,
-
-            underline_thickness: 0.0,
-            use_typo_metrics: false,
-            vertical_ascent: 5.0,
-            cap_height: 0.0,
-            strikeout_position: 0.0,
-            underline_position: 0.0,
-
-            ideographic_baseline_offset: 0.0,
-            mathematical_baseline_offset: 0.0,
-            central_baseline_offset: 0.0,
-            hanging_baseline_offset: 0.0,
+        writing_mode: WritingMode::HorizontalTb,
+        base_direction: Direction::Ltr,
+        strut: StrutMetrics {
             ascent: 8.,
             descent: 2.,
             line_gap: 0.,
         },
+        line_height: LineHeight::Normal,
+        whitespace: HangingWhitespaceMode::Collapsible,
+        hang_mode: HangMode::NONE,
         wrap_width: 100.,
-        slot_constraints: smallvec![InlineSlotConstraint {
-            start: 0.,
-            end: 100.
-        }],
-        ..Default::default()
+        line_index: 0,
+    }
+}
+
+/// The policy `ctx` describes, without a clamp.
+pub fn policy(ctx: &LineContext) -> LayoutPolicySnapshot {
+    LayoutPolicySnapshot {
+        writing_mode: ctx.writing_mode,
+        strut: ctx.strut,
+        line_height: ctx.line_height,
+        whitespace: ctx.whitespace,
+        hang_mode: ctx.hang_mode,
+        wrap_width: ctx.wrap_width,
+        clamp: None,
+    }
+}
+
+/// A paragraph of `lines` laid out under the policy and direction of `ctx`,
+/// with no block extent yet.
+pub fn paragraph(ctx: &LineContext, lines: Vec<PositionedLine>) -> PositionedParagraph {
+    PositionedParagraph {
+        policy: policy(ctx),
+        base_direction: ctx.base_direction,
+        truncated_range: None,
+        total_block_size: 0.0,
+        lines,
     }
 }
 
@@ -389,7 +423,7 @@ pub fn glyph(x: f32, advance: f32, hanging: bool) -> PositionedGlyph {
 
 pub fn run(g: PositionedGlyph) -> VisualGlyphRun {
     VisualGlyphRun {
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
+        orientation: GlyphOrientation::Horizontal,
         font_size: 16.0,
         variations: Default::default(),
 
@@ -420,6 +454,7 @@ pub fn annotation(base: TextRange, side: AnnotationSide) -> AnnotationSpan {
     let mut a = ast("x");
     let atoms = std::mem::take(&mut a.atoms);
     let clusters = std::mem::take(&mut a.clusters);
+    let glyphs = std::mem::take(&mut a.glyphs);
     let mut run = a.runs.remove(0);
     run.atom_range = 0..atoms.len();
     run.cluster_range = 0..clusters.len();
@@ -436,44 +471,29 @@ pub fn annotation(base: TextRange, side: AnnotationSide) -> AnnotationSpan {
         run,
         atoms,
         clusters,
+        glyphs,
     }
 }
 
+/// A line of two full slots, `[0, 100]` and `[150, 250]`, one glyph in each,
+/// and a context 250 wide.
 pub fn two_slots() -> (PositionedLine, LineContext) {
-    let constraints = smallvec![
-        InlineSlotConstraint {
-            start: 0.0,
-            end: 100.0
-        },
-        InlineSlotConstraint {
-            start: 150.0,
-            end: 250.0
-        }
-    ];
     let mut l = line();
     l.byte_range = TextRange::new(0, 2);
     l.visible_byte_end = 2;
     l.visual_width = 200.0;
-    l.slots = smallvec![
-        PositionedSlot {
-            start: 0.0,
-            visual_width: 100.0,
-            constraint_width: 100.0
-        },
-        PositionedSlot {
-            start: 150.0,
-            visual_width: 100.0,
-            constraint_width: 100.0
-        }
-    ];
-    l.resolved_slot_constraints = constraints.clone();
+    l.slots = smallvec![slot(0.0, 100.0, 100.0), slot(150.0, 100.0, 100.0)];
     let mut right = glyph(150.0, 100.0, false);
     right.byte_range = Some(TextRange::new(1, 2));
     let mut r = run(glyph(0.0, 100.0, false));
     r.byte_range = l.byte_range;
     r.glyphs.push(right);
     l.visual_runs = vec![r];
-    (l, ctx().with_slots(constraints, 250.0))
+    let ctx = LineContext {
+        wrap_width: 250.0,
+        ..ctx()
+    };
+    (l, ctx)
 }
 
 pub fn positioned_annotation() -> PositionedAnnotationRun {
@@ -516,7 +536,7 @@ pub fn atom(offset: usize) -> GraphemeAtom {
 /// One-glyph cluster for the atom at `local` index of a node starting at byte
 /// `base` of `text`; `atom_range` is relative to the node's own atoms (what
 /// [`push_text`] expects; it stores them run-local).
-pub fn cluster(text: &str, base: usize, local: usize) -> ShapedCluster {
+pub fn cluster(base: usize, local: usize) -> ShapedCluster {
     let off = base + local;
     ShapedCluster {
         orientation: GlyphOrientation::Horizontal,
@@ -525,12 +545,7 @@ pub fn cluster(text: &str, base: usize, local: usize) -> ShapedCluster {
         font: FontRef::unscaled(FontId(1)),
         bidi_level: 0,
         flags: AtomFlags::EMPTY,
-        glyphs: smallvec![RawShapedGlyph {
-            glyph_id: u32::from(text.as_bytes()[off]),
-            cluster: off as u32,
-            x_advance: ADV,
-            ..Default::default()
-        }],
+        glyph_range: 0..1,
         natural_width: ADV,
         safe_to_break_before: true,
         safe_to_concat_before: true,
@@ -550,7 +565,7 @@ pub fn shaping_run(text: &str, locale: &str) -> ShapingRun {
         font_size: 16.0,
         style: FontStyle::default(),
         script: ScriptTag::LATIN,
-        locale: LocaleTag::new(locale),
+        locale: locale.parse().expect("a well-formed locale"),
         bidi_level: 0,
         decoration: TextDecoration::default(),
         atom_range: 0..0,

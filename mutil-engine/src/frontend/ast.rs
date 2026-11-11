@@ -1,9 +1,9 @@
 //! Paragraph AST and the box-and-glue sequence (spec §2.4, §2.5).
 
-use super::{AtomicEditSpan, InlineDecorationSpan, ShapingRun};
+use super::{AnnotationSpan, AtomicEditSpan, ExplicitBidiSpan, InlineDecorationSpan, ShapingRun};
 use crate::types::{
-    AtomFlags, BidiDirection, BidiLevel, ByteIndex, FontMetrics, GraphemeAtom, ShapedCluster,
-    TextRange,
+    AtomFlags, BaselineAlignment, BidiClass, BidiDirection, BidiLevel, ByteIndex, FontMetrics,
+    GraphemeAtom, RawShapedGlyph, ShapedCluster, TextRange, WritingMode,
 };
 use core::ops::Range;
 use smallvec::SmallVec;
@@ -16,32 +16,36 @@ pub type ReplacementText = Box<str>;
 
 /// Hyphenation opportunity mirroring libhyphen's `(rep, pos, cut)` `[H3]`
 /// (spec §2.4). Example: Dutch "omaatje" becomes "oma-tje".
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// The break position is that of the [`DiscretionaryNode`] carrying the
+/// opportunity ([`DiscretionaryNode::byte_offset`]), in the **original** text:
+/// the prefix ends and the suffix begins there, before any replacement is
+/// applied.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HyphenOpportunity {
-    /// The break position in the **original** text: the prefix ends and the
-    /// suffix begins here, before any replacement is applied.
-    pub byte_offset: ByteIndex,
     /// Text replacing the bytes cut from the end of the prefix, if the
     /// spelling changes.
     pub prefix_replacement: Option<ReplacementText>,
     /// Text replacing the bytes cut from the start of the suffix, if the
     /// spelling changes.
     pub suffix_replacement: Option<ReplacementText>,
-    /// Original bytes removed immediately **before** `byte_offset`. A cut that
-    /// straddles the break is split between the two counts. Each cut ends on an
-    /// atom boundary within the word's contiguous same-run hyphen chain, so it
-    /// may cross an unchosen hyphenation point of the same word but never a run
-    /// or span boundary.
+    /// Original bytes removed immediately **before** the break position. A cut
+    /// that straddles the break is split between the two counts. Each cut ends
+    /// on an atom boundary within the word's contiguous same-run hyphen chain,
+    /// so it may cross an unchosen hyphenation point of the same word but never
+    /// a run or span boundary.
     pub prefix_cut_bytes: u32,
-    /// Original bytes removed immediately **after** `byte_offset`; the same
-    /// rules apply.
+    /// Original bytes removed immediately **after** the break position; the
+    /// same rules apply.
     pub suffix_cut_bytes: u32,
 }
 
 /// Kind of stretchable space (spec §2.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GlueKind {
-    /// An ordinary word space.
+    /// Space characters of the source text: a non-empty run of
+    /// [`is_word_space`](super::is_word_space) characters. The only kind that
+    /// owns source bytes.
     WordSpace,
     /// Automatic CJK / non-CJK spacing; sizes come from the active profile
     /// (`Jlreq` or `CssCompat`, §2.4).
@@ -55,16 +59,24 @@ pub enum GlueKind {
 }
 
 impl GlueKind {
-    /// The tier the frontend assigns: `WordSpace` and `CjkPunctCompression` to
-    /// [`GlueTier::Tier0`], `CjkAutospace` to [`GlueTier::Tier1`]. **No kind
-    /// maps to [`GlueTier::Tier2`]**: inter-ideographic stretch is derived from
-    /// `ALLOW_CJK_JUSTIFY_AFTER` on the clusters, not from glue nodes (spec §2.4).
+    /// The tier of this kind of glue: `WordSpace` and `CjkPunctCompression`
+    /// are [`GlueTier::Tier0`], `CjkAutospace` is [`GlueTier::Tier1`]. **No
+    /// kind maps to [`GlueTier::Tier2`]**: inter-ideographic stretch is derived
+    /// from `ALLOW_CJK_JUSTIFY_AFTER` on the clusters, not from glue nodes
+    /// (spec §2.4).
     #[must_use]
-    pub const fn default_tier(self) -> GlueTier {
+    pub const fn tier(self) -> GlueTier {
         match self {
             Self::WordSpace | Self::CjkPunctCompression => GlueTier::Tier0,
             Self::CjkAutospace => GlueTier::Tier1,
         }
+    }
+
+    /// `true` for the kinds the engine inserts (`CjkAutospace`,
+    /// `CjkPunctCompression`): they own no source bytes.
+    #[must_use]
+    pub const fn is_synthetic(self) -> bool {
+        !matches!(self, Self::WordSpace)
     }
 }
 
@@ -81,9 +93,8 @@ pub enum GlueTier {
     Tier1 = 1,
     /// Inter-ideographic expansion (`ALLOW_CJK_JUSTIFY_AFTER` gaps); zero
     /// natural width, stretch only. A tier of the middle-end's prefix-sum
-    /// tables: a `GlueNode` never carries it (`check_layout_inputs` rejects
-    /// one), because explicit Tier 2 glue would inflate a CJK paragraph's node
-    /// count by a third.
+    /// tables only: no [`GlueKind`] has it, because explicit Tier 2 glue would
+    /// inflate a CJK paragraph's node count by a third.
     Tier2 = 2,
 }
 
@@ -94,19 +105,18 @@ pub enum GlueTier {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlueNode {
     /// Original Unicode bidi class for L1.
-    pub original_bidi_class: crate::types::BidiClass,
+    pub original_bidi_class: BidiClass,
     /// Resolved level before line-local L1.
-    pub bidi_level: crate::types::BidiLevel,
-    /// Only collapsible trailing whitespace can disappear.
+    pub bidi_level: BidiLevel,
+    /// Only collapsible trailing whitespace can disappear. `false` for a
+    /// `WordSpace` over a no-break space
+    /// ([`is_no_break_space`](super::is_no_break_space)).
     pub is_collapsible: bool,
-    /// Source bytes (empty for `CjkAutospace` and `CjkPunctCompression`, which
-    /// have `start == end`).
+    /// Source bytes: the space characters of a `WordSpace`, an empty range for
+    /// the synthetic kinds.
     pub byte_range: TextRange,
-    /// Space kind.
+    /// Space kind, which also fixes the priority tier ([`GlueKind::tier`]).
     pub kind: GlueKind,
-    /// Priority tier: `Tier0` or `Tier1` (never `Tier2`). A
-    /// `CjkPunctCompression` node is `Tier0`.
-    pub tier: GlueTier,
     /// Natural width.
     pub natural_width: f32,
     /// Maximum added width.
@@ -156,21 +166,25 @@ pub enum BoxNode {
         /// Source bytes: first atom's start to last atom's end.
         byte_range: TextRange,
         /// The box's atoms, as **paragraph-level** indices: `ast.atoms[atom_range]`.
-        /// Inside the run's own [`ShapingRun::atom_range`].
+        /// Inside the run's own [`ShapingRun::atom_range`]. Never empty: a
+        /// text box owns at least one atom.
         atom_range: Range<usize>,
         /// The box's clusters, as **paragraph-level** indices:
         /// `ast.clusters[cluster_range]`. Inside the run's own
         /// [`ShapingRun::cluster_range`]. Each cluster's `atom_range` is
         /// **run-local** (see [`ShapedCluster`]).
         cluster_range: Range<usize>,
-        /// Sum of cluster widths.
+        /// Sum of the clusters' `natural_width`s, cached because the line
+        /// fitter reads it for every candidate; `check_layout_inputs` verifies
+        /// it against the clusters.
         natural_width: f32,
     },
     /// An embedded object with fixed extents.
     InlineObject {
         /// Alignment relative to the line baseline.
-        baseline_align: crate::types::BaselineAlignment,
-        /// Source bytes.
+        baseline_align: BaselineAlignment,
+        /// Source bytes the object stands for, usually one U+FFFC. Never
+        /// empty: carets and selections address the object through them.
         byte_range: TextRange,
         /// Caller-assigned identifier.
         box_id: u64,
@@ -229,9 +243,10 @@ pub enum BreakAction {
     /// single `ShapingRun`). The widths minus the cloned padding are the net
     /// prefix and suffix shaping deltas; the cuts stay within the contiguous
     /// same-run chain of text boxes joined by hyphenation points
-    /// (`check_layout_inputs`). When the break is **not** taken across a seam
-    /// that split a cluster, the two boxes are re-shaped together; see
-    /// [`ParagraphAst::rejoin_window`].
+    /// (`check_layout_inputs`). [`ParagraphAst::break_window`] gives the window
+    /// to re-shape when the break is taken. When it is **not** taken across a
+    /// seam that split a cluster, the two boxes are re-shaped together; see
+    /// [`ParagraphAst::rejoin_windows`].
     Hyphenate(HyphenOpportunity),
     /// Restore or trim `chws`-compressed CJK punctuation at the line edges.
     ///
@@ -246,9 +261,22 @@ pub enum BreakAction {
     CjkPunctAdjust,
     /// Break after a top-level math relation (`=`) or binary operator (`+`).
     MathOperator {
-        /// Glyph repeated at the start of the next line, if any.
-        repeat_glyph_id: Option<u32>,
+        /// The operator glyph repeated at the start of the next line, if any.
+        /// After the cloned padding is subtracted, `post_break_width` is
+        /// exactly its advance (zero without a repeat) and `pre_break_width`
+        /// is zero.
+        repeat: Option<RepeatedOperator>,
     },
+}
+
+/// The glyph a [`BreakAction::MathOperator`] break repeats at the start of the
+/// next line, with the advance it adds there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RepeatedOperator {
+    /// Backend glyph index in the font of the operator.
+    pub glyph_id: u32,
+    /// Advance of the repeated glyph. Finite and non-negative.
+    pub advance: f32,
 }
 
 /// Generalised three-state penalty node after Omega / LuaTeX (spec §2.4): the
@@ -275,12 +303,13 @@ pub struct DiscretionaryNode {
     pub flagged: bool,
     /// Width added to the end of line `k` if broken here: the `end_padding` of
     /// every span in `cloned_spans` plus the action's own delta (see
-    /// [`BreakAction`]); for `Direct`, a real `HardBreak` and
-    /// `MathOperator { repeat_glyph_id: None }` the padding sum alone.
+    /// [`BreakAction`]); for `Direct`, `HardBreak` and `MathOperator` the
+    /// padding sum alone.
     pub pre_break_width: f32,
     /// Width added to the start of line `k + 1` if broken here: the
     /// `start_padding` of every span in `cloned_spans` plus the action's own
-    /// delta.
+    /// delta; for `Direct` and `HardBreak` the padding sum alone, for
+    /// `MathOperator` the padding sum plus the repeated operator's advance.
     pub post_break_width: f32,
     /// Width contributed to the current line if **not** broken here (for
     /// example the letter-spacing of the skipped opportunity). Finite; zero for
@@ -422,24 +451,23 @@ impl WordNode {
     }
 }
 
-/// Checks the invariants documented on [`ShapedCluster`] for one text box.
-/// `atoms` and `clusters` are the box's resolved slices; `base` is the
-/// run-local index of the box's first atom (`box.atom_range.start -
-/// run.atom_range.start`), which converts each cluster's run-local
-/// `atom_range` into an index of `atoms`.
+/// Checks the invariants documented on [`ShapedCluster`] for one text payload
+/// (a text box, or an annotation's whole text). `atoms` and `clusters` are the
+/// payload's resolved slices; `base` is the run-local index of its first atom
+/// (`box.atom_range.start - run.atom_range.start`), which converts each
+/// cluster's run-local `atom_range` into an index of `atoms`. A payload without
+/// atoms is not self-contained: every text box owns source bytes.
 pub(crate) fn text_is_self_contained(
     byte_range: TextRange,
     atoms: &[GraphemeAtom],
     clusters: &[ShapedCluster],
     base: usize,
 ) -> bool {
-    let span_ok = match (atoms.first(), atoms.last()) {
-        (Some(first), Some(last)) => {
-            byte_range.start == first.byte_range.start && byte_range.end == last.byte_range.end
-        }
-        _ => byte_range.is_empty(),
+    let (Some(first), Some(last)) = (atoms.first(), atoms.last()) else {
+        return false;
     };
-    span_ok
+    byte_range.start == first.byte_range.start
+        && byte_range.end == last.byte_range.end
         && atoms
             .windows(2)
             .all(|w| w[0].byte_range.end == w[1].byte_range.start)
@@ -483,6 +511,9 @@ pub struct TextBoxView<'a> {
     pub run_index: usize,
     /// Source bytes: first atom's start to last atom's end.
     pub byte_range: TextRange,
+    /// Paragraph-level index of `atoms[0]`: the start of the box's
+    /// `atom_range`.
+    pub atom_start: usize,
     /// `ast.atoms[atom_range]` of the box.
     pub atoms: &'a [GraphemeAtom],
     /// `ast.clusters[cluster_range]` of the box.
@@ -491,20 +522,39 @@ pub struct TextBoxView<'a> {
     pub natural_width: f32,
 }
 
+/// A stretch of one shaping run to re-shape as a unit: the arguments
+/// `TextShaper::reshape_window` needs besides the edits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReshapeWindow {
+    /// Index into [`ParagraphAst::runs`] of the run that owns the window.
+    pub run_index: usize,
+    /// The window's atoms, as **paragraph-level** indices:
+    /// `ast.atoms[atom_range]`. The clusters to replace are those of the text
+    /// boxes covering exactly these atoms.
+    pub atom_range: Range<usize>,
+    /// The window in paragraph text coordinates; starts and ends on atom
+    /// boundaries.
+    pub byte_range: TextRange,
+}
+
 /// Frontend output: everything the middle-end needs, independent of column
 /// width (spec §2.5, §1.3).
 ///
 /// Owns all its data (no borrows), so it is `'static` and `Send + Sync`. The
 /// paragraph text is not stored here, matching the spec: shapers receive it as
 /// `&str` per call.
+///
+/// Shaped text is stored once, in three flat arrays: `atoms`, the `clusters`
+/// that group them, and the `glyphs` that render the clusters. Runs, text
+/// boxes and clusters name slices of the next array by range.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParagraphAst {
     /// Canonical-to-physical writing mode.
-    pub writing_mode: crate::types::WritingMode,
+    pub writing_mode: WritingMode,
     /// Explicit directional controls in source coordinates.
-    pub bidi_spans: Vec<super::ExplicitBidiSpan>,
+    pub bidi_spans: Vec<ExplicitBidiSpan>,
     /// Independent line-over and line-under annotations.
-    pub annotations: Vec<super::AnnotationSpan>,
+    pub annotations: Vec<AnnotationSpan>,
     /// Resolved paragraph base direction (UAX #9 P2/P3 or the caller's override).
     pub base_direction: BidiDirection,
     /// The **raw** primary-font metrics exactly as `TextShaper::
@@ -526,6 +576,10 @@ pub struct ParagraphAst {
     /// Run `i` owns `clusters[runs[i].cluster_range]`; the runs tile this
     /// vector. Each cluster's `atom_range` is run-local (see [`ShapedCluster`]).
     pub clusters: Vec<ShapedCluster>,
+    /// Every glyph of every body cluster, in cluster order then logical order.
+    /// Cluster `i` owns `glyphs[clusters[i].glyph_range]`; the clusters tile
+    /// this vector.
+    pub glyphs: Vec<RawShapedGlyph>,
     /// Box-and-glue sequence in logical order.
     pub items: Vec<WordNode>,
     /// Rich-text decoration spans (chips, code spans): padding and
@@ -570,6 +624,15 @@ impl ParagraphAst {
             .unwrap_or_default()
     }
 
+    /// The glyphs of a body cluster: `glyphs[cluster.glyph_range]`. Empty for
+    /// an out-of-range range (validation reports the error).
+    #[must_use]
+    pub fn cluster_glyphs(&self, cluster: &ShapedCluster) -> &[RawShapedGlyph] {
+        self.glyphs
+            .get(cluster.glyph_range.clone())
+            .unwrap_or_default()
+    }
+
     /// The text box at `items[item]` with its slices resolved, or `None` when
     /// that item is not a [`BoxNode::Text`] or one of its ranges is out of
     /// bounds.
@@ -588,6 +651,7 @@ impl ParagraphAst {
         Some(TextBoxView {
             run_index: *run_index,
             byte_range: *byte_range,
+            atom_start: atom_range.start,
             atoms: self.atoms.get(atom_range.clone())?,
             clusters: self.clusters.get(cluster_range.clone())?,
             natural_width: *natural_width,
@@ -595,8 +659,8 @@ impl ParagraphAst {
     }
 
     /// Checks the invariants documented on [`ShapedCluster`] for the text box at
-    /// `items[item]`: its atoms are contiguous and tile its `byte_range` (an
-    /// empty box has no atoms), its clusters partition its atoms in order with
+    /// `items[item]`: it has at least one atom, its atoms are contiguous and
+    /// tile its `byte_range`, its clusters partition its atoms in order with
     /// matching byte ranges, and each cluster's flags aggregate its atoms'.
     /// Every other node is trivially self-contained; an `item` past the end,
     /// or a text box whose ranges do not resolve or leave its run's ranges,
@@ -632,9 +696,87 @@ impl ParagraphAst {
         }
     }
 
-    /// The window to re-shape as **one** piece when the `Hyphenate`
-    /// discretionary at `items[index]` is *not* taken on a committed line
-    /// (spec §5 Stage 1.6.5, rejoin rule).
+    /// The two text boxes a hyphenation seam joins: `items[index]` is a
+    /// `Hyphenate` discretionary, `items[index - 1]` and `items[index + 1]`
+    /// are text boxes of one run, and the three meet end to end. `None`
+    /// otherwise.
+    ///
+    /// Seams link text boxes into **hyphen chains**: maximal sequences of text
+    /// boxes of one run joined solely by such seams. A chain stops at glue, a
+    /// tab, an inline object, a span boundary, a run change or any other
+    /// discretionary.
+    pub(crate) fn hyphen_seam(&self, index: usize) -> Option<(TextBoxView<'_>, TextBoxView<'_>)> {
+        let WordNode::Discretionary(DiscretionaryNode {
+            action: BreakAction::Hyphenate(_),
+            byte_range,
+            ..
+        }) = self.items.get(index)?
+        else {
+            return None;
+        };
+        let before = self.text_box(index.checked_sub(1)?)?;
+        let after = self.text_box(index + 1)?;
+        (before.run_index == after.run_index
+            && before.byte_range.end == byte_range.start
+            && byte_range.end == after.byte_range.start)
+            .then_some((before, after))
+    }
+
+    /// The window to re-shape when the `Hyphenate` discretionary at
+    /// `items[index]` **is taken** as a line end (spec §5 Stage 1.6.5).
+    ///
+    /// The window covers the text boxes the break touches: at least the box on
+    /// each side of it, extended along the hyphen chain as far as a spelling
+    /// change reaches (a cut may cross an unchosen hyphenation point of the
+    /// same word, so it can end in an earlier or later box). The break offset
+    /// ([`DiscretionaryNode::byte_offset`]) lies strictly inside it: line `k`
+    /// re-shapes `byte_range.start..offset` with the opportunity's
+    /// `TrailingEdit`, line `k + 1` re-shapes `offset..byte_range.end` with its
+    /// `LeadingEdit`.
+    ///
+    /// `None` when `items[index]` is not a hyphenation seam, or when a cut
+    /// leaves the seam's hyphen chain (which `check_layout_inputs` rejects).
+    #[must_use]
+    pub fn break_window(&self, index: usize) -> Option<ReshapeWindow> {
+        let WordNode::Discretionary(DiscretionaryNode {
+            action: BreakAction::Hyphenate(opportunity),
+            byte_range,
+            ..
+        }) = self.items.get(index)?
+        else {
+            return None;
+        };
+        let (before, after) = self.hyphen_seam(index)?;
+        // The first and the last original byte the break's edits touch. An
+        // edit without a cut still touches the neighbouring box: the hyphen
+        // attaches to the last cluster before the break.
+        let offset = byte_range.start;
+        let first = offset.checked_sub((opportunity.prefix_cut_bytes as usize).max(1))?;
+        let last = offset.checked_add((opportunity.suffix_cut_bytes as usize).max(1))? - 1;
+
+        let (mut start, mut start_item) = (before, index - 1);
+        while first < start.byte_range.start {
+            let seam = start_item.checked_sub(1)?;
+            (start, _) = self.hyphen_seam(seam)?;
+            start_item = seam - 1;
+        }
+        let (mut end, mut end_item) = (after, index + 1);
+        while last >= end.byte_range.end {
+            let seam = end_item + 1;
+            (_, end) = self.hyphen_seam(seam)?;
+            end_item = seam + 1;
+        }
+        Some(ReshapeWindow {
+            run_index: before.run_index,
+            atom_range: start.atom_start..end.atom_start + end.atoms.len(),
+            byte_range: TextRange::new(start.byte_range.start, end.byte_range.end),
+        })
+    }
+
+    /// The windows to re-shape as **one** piece each because a `Hyphenate`
+    /// discretionary was *not* taken on a committed line (spec §5 Stage 1.6.5,
+    /// rejoin rule). `untaken` are the indices into `items` of the untaken
+    /// discretionaries, in any order.
     ///
     /// A hyphenation opportunity inside a multi-atom cluster (the `of-fice`
     /// split of an `ffi` ligature) is resolved early by re-shaping the two
@@ -642,29 +784,51 @@ impl ParagraphAst {
     /// the first cluster after it `safe_to_concat_before == false`. If the
     /// break is then not taken, concatenating the two separately shaped boxes
     /// would lose the ligature and any kerning across the seam, so the
-    /// middle-end calls `TextShaper::reshape_window` once over the returned
-    /// range with `LeadingEdit::None` and `TrailingEdit::None`.
+    /// middle-end calls `TextShaper::reshape_window` once per returned window
+    /// with `LeadingEdit::None` and `TrailingEdit::None`.
     ///
-    /// Returns the byte range from the start of the preceding text box to the
-    /// end of the following one, or `None` when `items[index]` is not a
-    /// `Hyphenate` discretionary between two text boxes or its seam is safe to
-    /// concatenate. Windows of consecutive untaken seams overlap and should be
-    /// merged so that each atom is shaped once.
+    /// Each unsafe seam contributes the stretch from the start of the text box
+    /// before it to the end of the one after it; an index that is not a
+    /// hyphenation seam, or whose seam is safe to concatenate, contributes
+    /// nothing. Consecutive unsafe seams share a box, so their stretches
+    /// overlap and are merged: the result is in text order, pairwise disjoint,
+    /// and shapes every atom at most once.
     #[must_use]
-    pub fn rejoin_window(&self, index: usize) -> Option<TextRange> {
-        let WordNode::Discretionary(DiscretionaryNode {
-            action: BreakAction::Hyphenate(_),
-            ..
-        }) = self.items.get(index)?
-        else {
-            return None;
-        };
-        let before = self.text_box(index.checked_sub(1)?)?.byte_range;
-        let after = self.text_box(index + 1)?;
+    pub fn rejoin_windows(
+        &self,
+        untaken: impl IntoIterator<Item = usize>,
+    ) -> SmallVec<[ReshapeWindow; 4]> {
+        let mut windows: SmallVec<[ReshapeWindow; 4]> = untaken
+            .into_iter()
+            .filter_map(|index| self.rejoin_window(index))
+            .collect();
+        windows.sort_by_key(|window| window.byte_range.start);
+        let mut merged: SmallVec<[ReshapeWindow; 4]> = SmallVec::new();
+        for window in windows {
+            match merged.last_mut() {
+                Some(last) if window.byte_range.start < last.byte_range.end => {
+                    last.byte_range.end = last.byte_range.end.max(window.byte_range.end);
+                    last.atom_range.end = last.atom_range.end.max(window.atom_range.end);
+                }
+                _ => merged.push(window),
+            }
+        }
+        merged
+    }
+
+    /// The stretch one untaken, unsafe hyphenation seam needs re-shaped: the
+    /// two text boxes it joins. `None` when `items[index]` is not a seam or the
+    /// seam is safe to concatenate.
+    fn rejoin_window(&self, index: usize) -> Option<ReshapeWindow> {
+        let (before, after) = self.hyphen_seam(index)?;
         let seam_is_unsafe = after
             .clusters
             .first()
             .is_some_and(|c| !c.safe_to_concat_before);
-        seam_is_unsafe.then(|| TextRange::new(before.start, after.byte_range.end))
+        seam_is_unsafe.then(|| ReshapeWindow {
+            run_index: before.run_index,
+            atom_range: before.atom_start..after.atom_start + after.atoms.len(),
+            byte_range: TextRange::new(before.byte_range.start, after.byte_range.end),
+        })
     }
 }

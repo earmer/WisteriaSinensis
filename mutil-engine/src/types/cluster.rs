@@ -1,8 +1,7 @@
 //! Physical shaping output: glyphs grouped into clusters (spec §2.3).
 
-use super::{AtomFlags, BidiLevel, FontRef, TextRange};
+use super::{AtomFlags, BidiLevel, FontRef, GlyphOrientation, TextRange};
 use core::ops::Range;
-use smallvec::SmallVec;
 
 /// One glyph as produced by a shaping backend, before line layout.
 ///
@@ -11,16 +10,16 @@ use smallvec::SmallVec;
 /// all provide. The bridge normalizes the active inline advance into
 /// `x_advance`; orientation describes how glyph offsets are interpreted.
 ///
-/// Layout: five 4-byte fields plus a `bool`, 24 bytes with 3 bytes of tail
+/// A glyph carries no cluster value of its own: it belongs to the
+/// [`ShapedCluster`] whose `glyph_range` contains it, and that cluster owns the
+/// source bytes.
+///
+/// Layout: four 4-byte fields plus a `bool`, 20 bytes with 3 bytes of tail
 /// padding, alignment 4.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RawShapedGlyph {
     /// Backend glyph index within the cluster's [`FontRef`].
     pub glyph_id: u32,
-    /// HarfBuzz-style cluster value: the start index of the group this glyph
-    /// belongs to (spec §4.2 req. 4). Same coordinate space as the text handed
-    /// to the shaper.
-    pub cluster: u32,
     /// Advance along the active shaping axis (internal horizontal advance for TCY).
     pub x_advance: f32,
     /// Horizontal offset from the pen position (marks, kerning).
@@ -49,6 +48,14 @@ pub struct RawShapedGlyph {
 /// clusters index its own `atoms` the same way, with the run's ranges starting
 /// at 0. **[Design decision]**; the spec leaves the base unspecified.
 ///
+/// **`glyph_range` indexes the glyph buffer the cluster is stored beside**:
+/// `ast.glyphs` for a body cluster, `ann.glyphs` for an annotation's, and the
+/// `output_glyphs` buffer of the shaper call that produced it. A shaper appends
+/// to that buffer and writes absolute positions in it, so shaping every run of
+/// a paragraph into `ast.clusters` and `ast.glyphs` in turn yields the stored
+/// form directly. In cluster order the ranges tile the buffer: each starts
+/// where the previous one ends.
+///
 /// Three invariants make this safe (checked by `ParagraphAst::is_self_contained`):
 ///
 /// 1. **A cluster belongs to exactly one text box.** Each cluster in
@@ -61,7 +68,7 @@ pub struct RawShapedGlyph {
 ///    `LeadingEdit::None` and `TrailingEdit::None`) instead of cutting the cluster,
 ///    and gives the first cluster after the split `safe_to_concat_before ==
 ///    false`. If a `Hyphenate` break at that seam is not taken, the middle-end
-///    re-shapes both sides together (`ParagraphAst::rejoin_window`).
+///    re-shapes both sides together (`ParagraphAst::rejoin_windows`).
 /// 2. **Within a box, clusters partition the atoms.** In logical order the
 ///    `atom_range`s are contiguous, non-empty, start at the box's first atom
 ///    and end after its last, and each `byte_range` runs from its first atom's
@@ -77,14 +84,14 @@ pub struct RawShapedGlyph {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapedCluster {
     /// Resolved glyph orientation.
-    pub orientation: crate::types::GlyphOrientation,
+    pub orientation: GlyphOrientation,
     /// Source bytes covered by the cluster.
     pub byte_range: TextRange,
     /// Atoms covered: `K >= 1`, and a cluster never splits an atom. `K > 1`
     /// means a ligature (§6.2 gives it K caret sub-slots). Explicitly a
     /// [`Range<usize>`], **run-local**; see "Index spaces" above.
     pub atom_range: Range<usize>,
-    /// Font used for this cluster, with the fallback scale (was `font_id`).
+    /// Font used for this cluster, with the fallback scale.
     pub font: FontRef,
     /// Bidi level; a cluster never straddles two levels (§3 Step 2.3).
     pub bidi_level: BidiLevel,
@@ -93,10 +100,12 @@ pub struct ShapedCluster {
     /// `ALLOW_CJK_JUSTIFY_AFTER` and close-punctuation from the last, all other
     /// flags ORed.
     pub flags: AtomFlags,
-    /// Glyphs in **logical** order, including the order within the cluster.
-    /// Backends that return visual order for RTL must reverse (§4.2 req. 2).
-    /// Two inline slots: most clusters are one or two glyphs.
-    pub glyphs: SmallVec<[RawShapedGlyph; 2]>,
+    /// The cluster's glyphs, as a range of the glyph buffer it is stored
+    /// beside (see "Index spaces" above). Glyphs are in **logical** order,
+    /// including the order within the cluster; backends that return visual
+    /// order for RTL must reverse (§4.2 req. 2). May be empty (a default
+    /// ignorable that renders nothing).
+    pub glyph_range: Range<usize>,
     /// Final inline layout advance, including explicit spacing and ruby expansion.
     pub natural_width: f32,
     /// `true` iff HarfBuzz's `UNSAFE_TO_BREAK` is absent here: a line may begin
@@ -145,8 +154,10 @@ impl ShapedCluster {
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {
-    assert!(core::mem::size_of::<RawShapedGlyph>() == 24);
+    assert!(core::mem::size_of::<RawShapedGlyph>() == 20);
     assert!(core::mem::align_of::<RawShapedGlyph>() == 4);
+    // Half the size of the cluster that held its glyphs inline.
+    assert!(core::mem::size_of::<ShapedCluster>() == 72);
 };
 
 #[cfg(test)]
@@ -156,13 +167,13 @@ mod tests {
 
     fn cluster(atoms: Range<usize>, brk: bool, cat: bool) -> ShapedCluster {
         ShapedCluster {
-            orientation: crate::types::GlyphOrientation::Horizontal,
+            orientation: GlyphOrientation::Horizontal,
             byte_range: TextRange::new(0, 2),
             atom_range: atoms,
             font: FontRef::unscaled(FontId(0)),
             bidi_level: 0,
             flags: AtomFlags::EMPTY,
-            glyphs: SmallVec::new(),
+            glyph_range: 0..0,
             natural_width: 0.0,
             safe_to_break_before: brk,
             safe_to_concat_before: cat,

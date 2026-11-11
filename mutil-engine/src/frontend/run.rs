@@ -2,7 +2,10 @@
 
 use core::ops::Range;
 
-use crate::types::{BidiLevel, Direction, FamilyStack, FontStyle, LocaleTag, ScriptTag, TextRange};
+use crate::types::{
+    BaselineAlignment, BidiLevel, Direction, FamilyStack, FontFeatures, FontStyle,
+    GlyphOrientation, LocaleTag, ScriptTag, TextRange,
+};
 
 /// Text decoration requested for a run. Colour is deliberately absent: it is
 /// applied at paint time over a single shaping context (§3 Step 5).
@@ -19,15 +22,15 @@ pub struct TextDecoration {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapingRun {
     /// Alignment relative to the paragraph main baseline.
-    pub baseline_align: crate::types::BaselineAlignment,
+    pub baseline_align: BaselineAlignment,
     /// Finite extra spacing between eligible atoms.
     pub letter_spacing: f32,
     /// Finite extra advance for word spaces.
     pub word_spacing: f32,
     /// Resolved glyph orientation.
-    pub orientation: crate::types::GlyphOrientation,
+    pub orientation: GlyphOrientation,
     /// Complete shaping settings; the run is their single source of truth.
-    pub features: crate::types::FontFeatures,
+    pub features: FontFeatures,
     /// Bytes of the paragraph covered by the run.
     pub byte_range: TextRange,
     /// Ordered family stack; shared between runs by reference count.

@@ -31,7 +31,7 @@ fn atom(offset: usize) -> GraphemeAtom {
 fn cluster(base: usize, local: usize) -> ShapedCluster {
     ShapedCluster {
         flags: AtomFlags::for_cluster(&[atom(base + local)]),
-        ..crate::common::cluster(TEXT, base, local)
+        ..crate::common::cluster(base, local)
     }
 }
 
@@ -53,7 +53,6 @@ fn space(at: usize) -> WordNode {
 
         byte_range: TextRange::new(at, at + 1),
         kind: GlueKind::WordSpace,
-        tier: GlueTier::Tier0,
         natural_width: SPACE_W,
         max_stretch: 2.0,
         max_shrink: 1.0,
@@ -94,7 +93,7 @@ fn chip_ast() -> ParagraphAst {
     let mut ast = ParagraphAst {
         annotations: Vec::new(),
         bidi_spans: Vec::new(),
-        writing_mode: mutil_engine::types::WritingMode::HorizontalTb,
+        writing_mode: WritingMode::HorizontalTb,
         base_direction: BidiDirection::Ltr,
         strut_metrics: FontMetrics {
             vertical_ascent: 5.0,
@@ -108,6 +107,7 @@ fn chip_ast() -> ParagraphAst {
         runs: vec![run()],
         atoms: vec![],
         clusters: vec![],
+        glyphs: Vec::new(),
         items: vec![],
         decoration_spans: vec![InlineDecorationSpan {
             span_id: SPAN_ID,
@@ -162,6 +162,7 @@ fn fragment(
 ) -> PositionedSpanFragment {
     PositionedSpanFragment {
         span_id: SPAN_ID,
+        span_range: CHIP,
         byte_range: TextRange::new(range.0, range.1),
         x,
         width,
@@ -178,7 +179,6 @@ fn line(byte_range: (usize, usize), visible_end: usize, y: f32, width: f32) -> P
         slots: single_slot(width, 100.0),
         annotations: Vec::new(),
         is_ellipsized: false,
-        resolved_slot_constraints: smallvec::SmallVec::new(),
         atomic_fragments: vec![],
 
         byte_range: TextRange::new(byte_range.0, byte_range.1),
@@ -267,7 +267,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         .collect();
     glyphs0.extend((3..8).map(|i| pen_glyph((i, i + 1), 27.0 + (i - 3) as f32 * ADV)));
     l0.visual_runs = vec![VisualGlyphRun {
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
+        orientation: GlyphOrientation::Horizontal,
         font_size: 16.0,
         variations: Default::default(),
 
@@ -286,7 +286,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         .collect();
     glyphs1.extend((12..14).map(|i| pen_glyph((i, i + 1), 40.0 + (i - 12) as f32 * ADV)));
     l1.visual_runs = vec![VisualGlyphRun {
-        orientation: mutil_engine::types::GlyphOrientation::Horizontal,
+        orientation: GlyphOrientation::Horizontal,
         font_size: 16.0,
         variations: Default::default(),
 
@@ -320,17 +320,19 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         );
     }
 
-    let ctx = LineContext::from_options(
-        &ast.strut_metrics,
-        ast.strut_font_size,
-        ast.base_direction,
-        &LayoutOptions::default(),
-        100.0,
-    );
-    let mut para = PositionedParagraph::empty(ast.base_direction);
-    para.lines = vec![l0, l1];
-    para.total_block_size = 32.0;
-    assert_eq!(para.validate_geometry(&ctx), Ok(()));
+    let para = PositionedParagraph {
+        policy: LayoutPolicySnapshot::resolve(
+            &ast,
+            &crate::common::constraints(),
+            &LayoutOptions::default(),
+        )
+        .expect("the fixture's layout inputs are valid"),
+        base_direction: ast.base_direction,
+        truncated_range: None,
+        total_block_size: 32.0,
+        lines: vec![l0, l1],
+    };
+    assert_eq!(para.validate_geometry(), Ok(()));
 
     // Slice vs Clone is visible in the fragments: both pads exist on both lines
     // under Clone, so the first fragment is wider than its text by two pads.
@@ -347,7 +349,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
     let mut narrow = para.clone();
     narrow.lines[1].span_fragments[0].width = 20.0;
     assert_eq!(
-        narrow.validate_geometry(&ctx),
+        narrow.validate_geometry(),
         Err((
             1,
             LineInvariantError::GlyphOutsideSpanFragment {
@@ -365,7 +367,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     // everything inside braces, fractions or radicals would stay one object.
     let obj = |id: u64, at: usize| {
         WordNode::Box(BoxNode::InlineObject {
-            baseline_align: mutil_engine::types::BaselineAlignment::Auto,
+            baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(at, at + 1),
             box_id: id,
             width: 8.0,
@@ -382,9 +384,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
             pre_break_width: 0.0,
             post_break_width: 0.0,
             no_break_width: 0.0,
-            action: BreakAction::MathOperator {
-                repeat_glyph_id: None,
-            },
+            action: BreakAction::MathOperator { repeat: None },
             cloned_spans: Default::default(),
         })
     };
@@ -397,6 +397,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
         runs: vec![formula_run],
         atoms: vec![],
         clusters: vec![],
+        glyphs: Vec::new(),
         decoration_spans: vec![],
         atomic_spans: vec![],
         items: vec![
@@ -411,21 +412,13 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
         ],
         ..chip_ast()
     };
-    let constraints = LayoutConstraints {
-        first_line_indent: 0.0,
-        geometry_provider: None,
-        hanging_indent: 0.0,
-        wrap_width: 100.0,
-        tab_stops: TabStops { step: 8.0 },
-    };
     assert_eq!(
-        check_layout_inputs(&ast, "a+b=c", &constraints, &LayoutOptions::default()),
-        Ok(LineContext::from_options(
-            &ast.strut_metrics,
-            ast.strut_font_size,
-            ast.base_direction,
-            &LayoutOptions::default(),
-            100.0
-        ))
+        check_layout_inputs(
+            &ast,
+            "a+b=c",
+            &crate::common::constraints(),
+            &LayoutOptions::default()
+        ),
+        Ok(())
     );
 }

@@ -3,7 +3,7 @@
 use crate::frontend::{HyphenOpportunity, ShapingRun};
 use crate::types::{
     Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
-    GraphemeAtom, LocaleTag, ScriptTag, ShapedCluster, TextRange,
+    GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster, TextRange,
 };
 use smallvec::SmallVec;
 
@@ -99,8 +99,17 @@ impl TrailingEdit {
 /// backend can serve several layout threads; implementations needing interior
 /// mutability (caches) must synchronise it themselves.
 ///
-/// Output vectors are **appended to, never cleared**: callers own the buffer
-/// and may reuse its capacity.
+/// ## Output buffers
+///
+/// `shape_run` and `reshape_window` write to two caller-owned vectors,
+/// `output_clusters` and `output_glyphs`. Both are **appended to, never
+/// cleared**, so a caller can reuse their capacity or shape a whole paragraph
+/// into its `ParagraphAst::clusters` and `ParagraphAst::glyphs` run by run.
+/// Every appended cluster names its glyphs by a `glyph_range` of
+/// `output_glyphs` in **absolute** positions of that vector (not relative to
+/// the call's first glyph). In cluster order the appended ranges are
+/// contiguous: the first starts at the vector's length before the call and
+/// the last ends at its length after it.
 pub trait TextShaper: Send + Sync {
     /// Metrics of the actual font instance, without line-height policy.
     fn font_metrics(&self, instance: FontInstanceRef<'_>) -> FontMetrics;
@@ -120,7 +129,8 @@ pub trait TextShaper: Send + Sync {
 
     /// Shapes one complete run. Output is in **logical** order (§4.2 req. 2);
     /// `atoms` is the run's atom slice, `&ast.atoms[run.atom_range]`, and
-    /// `ShapedCluster::atom_range` indexes it. Implementations read the run's
+    /// `ShapedCluster::atom_range` indexes it; `ShapedCluster::glyph_range`
+    /// indexes `output_glyphs` (see "Output buffers"). Implementations read the run's
     /// settings from `run` but ignore `run.atom_range` and `run.cluster_range`,
     /// which locate the slices in the AST and are not meaningful to a shaper.
     ///
@@ -143,13 +153,13 @@ pub trait TextShaper: Send + Sync {
     /// backend kern or squeeze across the seam. Full-width punctuation
     /// squeezing across fonts is therefore a middle-end metrics-stage fallback
     /// (spec §4.2, §5).
-    #[allow(clippy::too_many_arguments)] // signature fixed by spec §4.1
     fn shape_run(
         &self,
         text: &str,
         run: &ShapingRun,
         atoms: &[GraphemeAtom],
         output_clusters: &mut Vec<ShapedCluster>,
+        output_glyphs: &mut Vec<RawShapedGlyph>,
     );
 
     /// Re-shapes a window around a break, hyphenation point or word split
@@ -166,6 +176,7 @@ pub trait TextShaper: Send + Sync {
     ///   re-based to the window), i.e. in the same coordinate space as the
     ///   clusters `shape_run` produced for the run. The caller splices by
     ///   replacing the clusters whose `atom_range` lies inside the window.
+    ///   Output `glyph_range`s index `output_glyphs` (see "Output buffers").
     /// * The output clusters partition exactly the atoms inside the window, in
     ///   logical order, and never split an atom.
     /// * For a run whose `orientation` is
@@ -198,6 +209,7 @@ pub trait TextShaper: Send + Sync {
         leading_edit: LeadingEdit,
         trailing_edit: TrailingEdit,
         output_clusters: &mut Vec<ShapedCluster>,
+        output_glyphs: &mut Vec<RawShapedGlyph>,
     );
 
     /// GDEF ligature caret positions: `n - 1` for `n` components, empty if the
@@ -267,7 +279,6 @@ mod tests {
         suffix_cut: u32,
     ) -> HyphenOpportunity {
         HyphenOpportunity {
-            byte_offset: 3,
             prefix_replacement: prefix.map(Into::into),
             suffix_replacement: suffix.map(Into::into),
             prefix_cut_bytes: prefix_cut,
