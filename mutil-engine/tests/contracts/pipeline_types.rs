@@ -125,7 +125,6 @@ fn test_pipeline_types_compile() {
                     y_offset: g.y_offset,
                     advance: g.x_advance,
                     byte_range: Some(c.byte_range),
-                    is_synthesized: false,
                     is_hanging: false,
                 });
                 pen += c.natural_width;
@@ -140,14 +139,13 @@ fn test_pipeline_types_compile() {
         y_offset: 0.0,
         advance: ADV,
         byte_range: None,
-        is_synthesized: true,
         is_hanging: false,
     });
     assert_eq!(line_glyphs.len(), 11);
     assert!(
         line_glyphs
             .last()
-            .is_some_and(|g| g.is_synthesized && g.byte_range.is_none())
+            .is_some_and(PositionedGlyph::is_synthesized)
     );
 
     let line = PositionedLine {
@@ -289,7 +287,6 @@ fn every_word_node_variant_is_constructible() {
         WordNode::Discretionary(DiscretionaryNode::direct(5)),
         WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(6, 7), false)),
         WordNode::Tab {
-            bidi_level: 0,
             byte_range: TextRange::new(5, 6),
         },
     ];
@@ -483,7 +480,6 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
     let mut tab = crate::common::ast("");
     rebuild_items(&mut tab, |_| {
         vec![WordNode::Tab {
-            bidi_level: 0,
             byte_range: TextRange::new(0, 1),
         }]
     });
@@ -552,12 +548,13 @@ fn hanging_punctuation_fits_negative_x_and_synthesized_flag_round_trips() {
         y_offset: 0.0,
         advance: ADV,
         byte_range: Some(TextRange::new(0, 1)),
-        is_synthesized: false,
         is_hanging: true,
     };
     assert!(hanging.x < 0.0);
 
-    // The shaper-level flag exists to feed PositionedGlyph::is_synthesized.
+    // The shaper marks a glyph it inserts (the hyphen of a `TrailingEdit`),
+    // since a raw glyph has no source range of its own; once positioned, the
+    // glyph carries `byte_range: None` instead.
     let g = RawShapedGlyph {
         is_synthesized: true,
         ..Default::default()

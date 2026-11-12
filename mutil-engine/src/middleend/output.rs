@@ -40,16 +40,28 @@ pub struct PositionedGlyph {
     pub y_offset: f32,
     /// Advance width.
     pub advance: f32,
-    /// Source bytes; absent if and only if this glyph is synthesized.
+    /// Source bytes, non-empty. `None` exactly for a **synthesized** glyph,
+    /// one with no source counterpart (an inserted hyphen, a repeated math
+    /// operator, an ellipsis), and for annotation glyphs, which never claim
+    /// body bytes (spec §1.5, A1). A glyph replacing source atoms after a
+    /// boundary re-shape keeps their range; an actual U+00AD in the source
+    /// is not synthesized.
     pub byte_range: Option<TextRange>,
-    /// `true` for the generated hyphen. Never copied to the clipboard (§6.6).
-    /// (An actual U+00AD in the source is *not* synthesized.)
-    pub is_synthesized: bool,
     /// `true` for punctuation hanging outside the text block (§5 Stage 1.3).
     /// May straddle the body edge; its normalized pen interval must overflow
     /// the content of the line's outer slots beyond tolerance. Only the
     /// overflow counts as hanging.
     pub is_hanging: bool,
+}
+
+impl PositionedGlyph {
+    /// `true` for a glyph with no source counterpart: `byte_range` is `None`,
+    /// the only marker of synthesis (spec §1.5, A1). Synthesized glyphs are
+    /// never copied to the clipboard (§6.6).
+    #[must_use]
+    pub const fn is_synthesized(&self) -> bool {
+        self.byte_range.is_none()
+    }
 }
 
 /// Glyphs of one font and one bidi level, in screen order.
@@ -149,10 +161,9 @@ pub struct PositionedTab {
     /// Left edge, line-local. The tab lies inside the content of one slot,
     /// except for a trailing tab under `Preserved` (trailing-whitespace rule).
     pub x: f32,
-    /// Width (non-negative).
+    /// Width (non-negative). A tab stores no bidi level: UAX #9 rule L1 puts
+    /// it at the paragraph level (spec §1.5, A2).
     pub width: f32,
-    /// The paragraph level, to which UAX #9 L1 resets every tab.
-    pub bidi_level: BidiLevel,
 }
 
 /// The visual box of one line fragment of an inline decoration span (spec

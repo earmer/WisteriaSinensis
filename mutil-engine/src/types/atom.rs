@@ -151,7 +151,9 @@ impl AtomFlags {
     /// §2.2, §6): caret stops strictly inside the span are suppressed and
     /// Backspace / Delete remove the whole span. Combined by bitwise OR across
     /// the atoms of a cluster, so it is neither a first-only nor a last-only flag.
-    /// `check_layout_inputs` requires it on exactly the atoms inside an atomic span.
+    /// A validated cache of `ParagraphAst::atomic_spans` (spec §1.5, A2), read
+    /// per atom by caret construction: `check_layout_inputs` requires it on
+    /// exactly the atoms inside an atomic span.
     pub const IN_ATOMIC_EDIT_SPAN: Self = Self(1 << 9);
 
     /// No flags set.

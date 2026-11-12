@@ -174,9 +174,9 @@ pub enum BoxNode {
         /// [`ShapingRun::cluster_range`]. Each cluster's `atom_range` is
         /// **run-local** (see [`ShapedCluster`]).
         cluster_range: Range<usize>,
-        /// Sum of the clusters' `natural_width`s, cached because the line
-        /// fitter reads it for every candidate; `check_layout_inputs` verifies
-        /// it against the clusters.
+        /// Sum of the clusters' `natural_width`s: a validated cache (spec §1.5,
+        /// A2), because the line fitter reads it for every candidate;
+        /// `check_layout_inputs` requires exact agreement with the clusters.
         natural_width: f32,
     },
     /// An embedded object with fixed extents.
@@ -313,6 +313,12 @@ pub struct DiscretionaryNode {
     /// `start_padding` of every span in `cloned_spans` plus the action's own
     /// delta; for `Direct` and `HardBreak` the padding sum alone, for
     /// `MathOperator` the padding sum plus the repeated operator's advance.
+    ///
+    /// Both widths are the only home of the shaping deltas of `Hyphenate` and
+    /// `CjkPunctAdjust`. The padding and the repeated advance folded into them
+    /// are a validated cache (spec §1.5, A2): the breaker reads them for every
+    /// candidate, and `check_layout_inputs` requires exact agreement with the
+    /// spans and the action.
     pub post_break_width: f32,
     /// Width contributed to the current line if **not** broken here (for
     /// example the letter-spacing of the skipped opportunity). Finite; zero for
@@ -426,11 +432,11 @@ pub enum WordNode {
     /// A tab; width is `next_tab_stop(x) - x`, evaluated during layout.
     Tab {
         /// Source bytes.
+        ///
+        /// A tab stores no bidi level: it is a segment separator, which UAX #9
+        /// rule L1 resets to the paragraph level,
+        /// `ParagraphAst::base_direction.base_level()` (spec §1.5, A2).
         byte_range: TextRange,
-        /// Resolved UAX #9 level. A tab is a segment separator, which rule L1
-        /// resets to the paragraph level, so this is always
-        /// `ParagraphAst::base_direction.base_level()`.
-        bidi_level: BidiLevel,
     },
 }
 
@@ -447,7 +453,7 @@ impl WordNode {
             | Self::Box(BoxNode::SpanBoundary { byte_range, .. })
             | Self::Glue(GlueNode { byte_range, .. })
             | Self::Discretionary(DiscretionaryNode { byte_range, .. })
-            | Self::Tab { byte_range, .. } => *byte_range,
+            | Self::Tab { byte_range } => *byte_range,
         }
     }
 

@@ -22,8 +22,8 @@ pub enum LineInvariantError {
     },
     /// Run orientation does not match the writing mode or level parity.
     OrientationMismatch,
-    /// A glyph's synthesized flag and source range disagree, or its source range
-    /// is empty, inverted or outside the line.
+    /// A glyph's source range is empty, inverted or outside the line, or a
+    /// glyph of an ellipsis-only line has a source range.
     InvalidGlyphSource {
         /// Index into `visual_runs`.
         run: usize,
@@ -243,9 +243,8 @@ pub enum LineInvariantError {
         /// The constraint's width.
         capacity: f32,
     },
-    /// A tab has a non-finite coordinate, a negative width, a bidi level other
-    /// than the paragraph level (UAX #9 L1), or empty bytes or bytes outside the
-    /// line.
+    /// A tab has a non-finite coordinate, a negative width, or empty bytes or
+    /// bytes outside the line.
     InvalidTab {
         /// Index into `tabs`.
         index: usize,
@@ -518,7 +517,7 @@ impl PositionedLine {
     /// `true` for a glyph of the trailing whitespace: source text at or after
     /// `visible_byte_end`.
     fn is_trailing_whitespace(&self, glyph: &PositionedGlyph) -> bool {
-        !glyph.is_synthesized
+        !glyph.is_synthesized()
             && glyph
                 .byte_range
                 .is_some_and(|range| range.start >= self.visible_byte_end)
@@ -704,7 +703,7 @@ impl PositionedLine {
         }
         if self.is_ellipsized {
             for (run, r) in self.visual_runs.iter().enumerate() {
-                if let Some(glyph) = r.glyphs.iter().position(|g| !g.is_synthesized) {
+                if let Some(glyph) = r.glyphs.iter().position(|g| !g.is_synthesized()) {
                     return Err(E::InvalidGlyphSource { run, glyph });
                 }
             }
@@ -783,9 +782,8 @@ impl PositionedLine {
     fn check_sources(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
         let valid_glyph = |g: &PositionedGlyph| {
-            g.is_synthesized == g.byte_range.is_none()
-                && g.byte_range
-                    .is_none_or(|r| r.start < r.end && self.byte_range.contains_range(r))
+            g.byte_range
+                .is_none_or(|r| r.start < r.end && self.byte_range.contains_range(r))
         };
         for (run, r) in self.visual_runs.iter().enumerate() {
             if r.bidi_level > BIDI_MAX_DEPTH + 1
@@ -822,10 +820,7 @@ impl PositionedLine {
             }
         }
         for (index, t) in self.tabs.iter().enumerate() {
-            if t.byte_range.is_empty()
-                || t.bidi_level != ctx.base_direction.base_level()
-                || !self.owns_bytes(t.byte_range)
-            {
+            if t.byte_range.is_empty() || !self.owns_bytes(t.byte_range) {
                 return Err(E::InvalidTab { index });
             }
         }
@@ -866,7 +861,9 @@ impl PositionedLine {
     ///
     /// A stop's owners are the glyphs, inline boxes and tabs whose bytes
     /// contain or touch its `offset`; at a boundary either neighbour qualifies,
-    /// and the stop's level must be the level of one of them. A stop with no
+    /// and the stop's level must be the level of one of them. A glyph lends
+    /// its run's level, a box its own, and a tab the paragraph level (UAX #9
+    /// L1). A stop with no
     /// owner is legal only on a line with no glyphs, boxes or tabs (an empty
     /// line), and there it carries the paragraph level.
     fn check_caret_stops(
@@ -878,7 +875,11 @@ impl PositionedLine {
             self.visual_boxes
                 .iter()
                 .map(|b| (b.byte_range, b.bidi_level))
-                .chain(self.tabs.iter().map(|t| (t.byte_range, t.bidi_level)))
+                .chain(
+                    self.tabs
+                        .iter()
+                        .map(|t| (t.byte_range, ctx.base_direction.base_level())),
+                )
                 .collect(),
         );
         let line_is_empty = self.visual_boxes.is_empty()
@@ -949,9 +950,7 @@ impl PositionedLine {
                     g.x + g.advance,
                     g.x + g.x_offset,
                 ];
-                !g.is_synthesized
-                    || g.byte_range.is_some()
-                    || !numbers.iter().all(|v| v.is_finite())
+                g.byte_range.is_some() || !numbers.iter().all(|v| v.is_finite())
             }) {
                 R::InvalidGlyph
             } else {
@@ -1423,11 +1422,13 @@ impl PositionedLine {
                         .flat_map(|r| r.glyphs.iter())
                         .filter(|g| {
                             !g.is_hanging
-                                && (!g.is_synthesized || self.is_ellipsized)
+                                && (!g.is_synthesized() || self.is_ellipsized)
                                 && g.byte_range.is_none_or(|b| b.start < self.visible_byte_end)
                         })
                 };
-                let mut ranges = glyphs().filter(|g| !g.is_synthesized).map(|g| g.byte_range);
+                let mut ranges = glyphs()
+                    .filter(|g| !g.is_synthesized())
+                    .map(|g| g.byte_range);
                 let first = ranges.next().unwrap_or_else(|| {
                     self.is_ellipsized
                         .then_some(TextRange::empty_at(self.visible_byte_end))
@@ -1859,7 +1860,6 @@ mod tests {
             y_offset: 0.0,
             advance,
             byte_range: Some(TextRange::new(0, 1)),
-            is_synthesized: false,
             is_hanging,
         }
     }
@@ -2525,7 +2525,6 @@ mod tests {
             byte_range: TextRange::new(2, 4),
             x: 5.0,
             width: 0.0,
-            bidi_level: 0,
         };
         l.visual_boxes = vec![object];
         l.tabs = vec![tab];
@@ -2537,16 +2536,16 @@ mod tests {
         assert_eq!(l.validate(&ctx()), Ok(()));
         l.caret_stops = vec![leveled(1, 1)];
         assert_eq!(l.validate(&ctx()), invalid(0));
-        // A tab is at the paragraph level (UAX #9 L1).
-        l.tabs = vec![PositionedTab {
-            bidi_level: 2,
-            ..tab
-        }];
-        l.caret_stops = vec![];
-        assert_eq!(
-            l.validate(&ctx()),
-            Err(LineInvariantError::InvalidTab { index: 0 })
-        );
+        // A tab lends the paragraph level (UAX #9 L1): level 1 in an RTL
+        // paragraph, where the glyph and the object keep their own levels.
+        let rtl = LineContext {
+            base_direction: BidiDirection::Rtl,
+            ..ctx()
+        };
+        l.caret_stops = vec![leveled(3, 1)];
+        assert_eq!(l.validate(&rtl), Ok(()));
+        l.caret_stops = vec![leveled(3, 0)];
+        assert_eq!(l.validate(&rtl), invalid(0));
     }
 
     #[test]
@@ -2610,7 +2609,6 @@ mod tests {
         );
         let mut t = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
         t.tabs.push(PositionedTab {
-            bidi_level: 0,
             byte_range: TextRange::new(1, 2),
             x: 3.0e38,
             width: 3.0e38,
@@ -2651,13 +2649,11 @@ mod tests {
         l.visible_byte_end = 4;
         l.visual_runs[0].glyphs[0].byte_range = Some(TextRange::new(0, 4));
         l.visual_runs[0].glyphs[1] = PositionedGlyph {
-            is_synthesized: true,
             byte_range: None,
             ..glyph(15.0, 5.0, false)
         };
         assert_eq!(l.validate(&ctx()), Ok(()));
         // Ordinary text must own at least one source byte.
-        l.visual_runs[0].glyphs[1].is_synthesized = false;
         l.visual_runs[0].glyphs[1].byte_range = Some(TextRange::empty_at(4));
         assert_eq!(
             l.validate(&ctx()),
@@ -2874,7 +2870,6 @@ mod tests {
         );
         let mut with_tab = l.clone();
         with_tab.tabs = vec![PositionedTab {
-            bidi_level: 0,
             byte_range: TextRange::new(0, 1),
             x: 50.0,
             width: 0.0,

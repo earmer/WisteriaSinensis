@@ -148,7 +148,6 @@ fn pen_glyph(range: (usize, usize), x: f32) -> PositionedGlyph {
         y_offset: 0.0,
         advance: ADV,
         byte_range: Some(TextRange::new(range.0, range.1)),
-        is_synthesized: false,
         is_hanging: false,
     }
 }

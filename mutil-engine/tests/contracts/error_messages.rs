@@ -129,7 +129,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidTab { item: 2 },
-            "tab 2 owns no source bytes or is not at the paragraph bidi level",
+            "tab 2 owns no source bytes",
         ),
         (
             LayoutInputError::InvalidAtomicSpan { span: 3 },
@@ -156,7 +156,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidGlyphSource { run: 1, glyph: 5 },
-            "glyph 5 of run 1 has an invalid synthesized flag or source range",
+            "glyph 5 of run 1 has an invalid source range",
         ),
         (
             LineInvariantError::InvalidAnnotation {
@@ -336,7 +336,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidTab { index: 4 },
-            "tab 4 has a non-finite coordinate, a negative width, a level other than the paragraph level, or empty or out-of-line bytes",
+            "tab 4 has a non-finite coordinate, a negative width, or empty or out-of-line bytes",
         ),
         (
             LineInvariantError::TabOutsideBlock { index: 4 },

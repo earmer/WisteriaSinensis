@@ -49,7 +49,6 @@ fn annotation_input_boundaries_and_local_partition() {
         vec![
             boxed(b, 0, 1, false),
             WordNode::Tab {
-                bidi_level: 0,
                 byte_range: TextRange::new(1, 2),
             },
             end(2),
@@ -105,8 +104,9 @@ fn annotation_output_and_synthesized_ownership() {
             reason: AnnotationErrorReason::InvalidGlyph
         })
     );
+    // A body glyph with an empty source range owns nothing.
     let mut bad = l;
-    bad.visual_runs[0].glyphs[0].is_synthesized = true;
+    bad.visual_runs[0].glyphs[0].byte_range = Some(TextRange::empty_at(0));
     assert_eq!(
         bad.validate(&c),
         Err(LineInvariantError::InvalidGlyphSource { run: 0, glyph: 0 })
@@ -132,7 +132,6 @@ fn annotation_base_allows_glyph_less_source_gaps() {
     ann.base_byte_range = TextRange::new(0, 3);
     ann.glyphs[0] = PositionedGlyph {
         byte_range: None,
-        is_synthesized: true,
         ..glyph(25.0, 50.0, false)
     };
     l.annotations.push(ann);

@@ -302,10 +302,7 @@ fn a_tab_owns_source_bytes() {
         rebuild_items(&mut a, |b| {
             vec![
                 boxed(b, 0, 1, false),
-                WordNode::Tab {
-                    bidi_level: 0,
-                    byte_range: tab,
-                },
+                WordNode::Tab { byte_range: tab },
                 boxed(b, 2, 3, false),
                 end(3),
             ]
@@ -324,27 +321,7 @@ fn a_tab_owns_source_bytes() {
 }
 
 #[test]
-fn a_tab_is_at_the_paragraph_level_and_an_object_at_a_representable_one() {
-    // UAX #9 L1 resets a tab (a segment separator) to the paragraph level.
-    let with_tab = |bidi_level, base_direction| {
-        let mut a = ast("a\tb");
-        a.base_direction = base_direction;
-        rebuild_items(&mut a, |b| {
-            vec![
-                boxed(b, 0, 1, false),
-                WordNode::Tab {
-                    bidi_level,
-                    byte_range: TextRange::new(1, 2),
-                },
-                boxed(b, 2, 3, false),
-                end(3),
-            ]
-        });
-        check(&a, "a\tb")
-    };
-    let bad_tab = Err(LayoutInputError::InvalidTab { item: 1 });
-    assert_eq!(with_tab(1, BidiDirection::Ltr), bad_tab);
-    assert_eq!(with_tab(0, BidiDirection::Rtl), bad_tab);
+fn an_inline_object_is_at_a_representable_level() {
     // An object's level comes from its context: any representable level.
     let with_object = |bidi_level| {
         let mut a = ast("ab\u{fffc}");
@@ -377,7 +354,6 @@ fn a_tab_is_at_the_paragraph_level_and_an_object_at_a_representable_one() {
 fn a_zero_width_tab_stop_geometry_is_not_constrained() {
     // Tab widths are decided during layout; only the stops are validated.
     let positioned = PositionedTab {
-        bidi_level: 0,
         byte_range: TextRange::new(0, 1),
         x: 10.,
         width: 0.,

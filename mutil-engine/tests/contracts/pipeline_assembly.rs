@@ -44,7 +44,6 @@ fn glyph(c: &ShapedCluster, x: f32, hanging: bool) -> PositionedGlyph {
         y_offset: 0.0,
         advance: c.natural_width,
         byte_range: Some(c.byte_range),
-        is_synthesized: false,
         is_hanging: hanging,
     }
 }
@@ -131,7 +130,6 @@ fn paragraph_ast() -> ParagraphAst {
             overflow_policy: BoxOverflowPolicy::Clip,
         }),
         WordNode::Tab {
-            bidi_level: 0,
             byte_range: TextRange::new(11, 12),
         },
         word(&mut ast, 12, 14),
@@ -234,7 +232,6 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
         y_offset: 0.0,
         advance: ADV,
         byte_range: None,
-        is_synthesized: true,
         is_hanging: false,
     });
     let line0 = PositionedLine {
@@ -286,7 +283,6 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
             overflow_policy: BoxOverflowPolicy::Clip,
         }],
         tabs: vec![PositionedTab {
-            bidi_level: 0,
             byte_range: TextRange::new(11, 12),
             x: box_x + BOX_W,
             width: TAB_W,
@@ -674,7 +670,6 @@ fn small_line() -> PositionedLine {
         y_offset: 0.0,
         advance: 10.0,
         byte_range: Some(TextRange::new(bytes.0, bytes.1)),
-        is_synthesized: false,
         is_hanging: false,
     };
     PositionedLine {
@@ -717,7 +712,6 @@ fn small_line() -> PositionedLine {
             overflow_policy: BoxOverflowPolicy::Clip,
         }],
         tabs: vec![PositionedTab {
-            bidi_level: 0,
             byte_range: TextRange::new(2, 3),
             x: 20.0,
             width: 10.0,
@@ -831,7 +825,6 @@ fn hang_mode_struct_gates_each_physical_edge() {
         y_offset: 0.0,
         advance: 10.0,
         byte_range: Some(TextRange::new(4, 5)),
-        is_synthesized: false,
         is_hanging: true,
     });
     l.byte_range = TextRange::new(0, 5);
@@ -856,11 +849,11 @@ fn hang_mode_struct_gates_each_physical_edge() {
         end: HangEndMode::None,
     };
     for mode in [end(HangEndMode::Allow), end(HangEndMode::Force)] {
-        assert_eq!(validate_in(&l, &with(mode, BidiDirection::Ltr)), Ok(()));
+        assert_eq!(l.validate(&with(mode, BidiDirection::Ltr)), Ok(()));
     }
     for mode in [HangMode::NONE, start_only] {
         assert_eq!(
-            validate_in(&l, &with(mode, BidiDirection::Ltr)),
+            l.validate(&with(mode, BidiDirection::Ltr)),
             Err(LineInvariantError::HangingNotAllowed {
                 side: HangSide::Right
             })
@@ -868,28 +861,22 @@ fn hang_mode_struct_gates_each_physical_edge() {
     }
     // In an RTL paragraph the right edge is the line *start*, so the same
     // geometry needs `start`, and `end` no longer permits it.
+    assert_eq!(l.validate(&with(start_only, BidiDirection::Rtl)), Ok(()));
     assert_eq!(
-        validate_in(&l, &with(start_only, BidiDirection::Rtl)),
-        Ok(())
-    );
-    assert_eq!(
-        validate_in(&l, &with(end(HangEndMode::Force), BidiDirection::Rtl)),
+        l.validate(&with(end(HangEndMode::Force), BidiDirection::Rtl)),
         Err(LineInvariantError::HangingNotAllowed {
             side: HangSide::Right
         })
     );
     // Both edges together are expressible.
     assert_eq!(
-        validate_in(
-            &l,
-            &with(
-                HangMode {
-                    start: HangStartMode::AllLines,
-                    end: HangEndMode::Force
-                },
-                BidiDirection::Rtl
-            )
-        ),
+        l.validate(&with(
+            HangMode {
+                start: HangStartMode::AllLines,
+                end: HangEndMode::Force
+            },
+            BidiDirection::Rtl
+        )),
         Ok(())
     );
 }
@@ -912,7 +899,6 @@ fn trailing_space_line(x: f32) -> PositionedLine {
             y_offset: 0.0,
             advance: 20.0,
             byte_range: Some(TextRange::new(0, 2)),
-            is_synthesized: false,
             is_hanging: false,
         },
         PositionedGlyph {
@@ -922,7 +908,6 @@ fn trailing_space_line(x: f32) -> PositionedLine {
             y_offset: 0.0,
             advance: 5.0,
             byte_range: Some(TextRange::new(2, 3)),
-            is_synthesized: false,
             is_hanging: false,
         },
     ];
@@ -993,7 +978,6 @@ fn trailing_tab_follows_the_same_l1_rule() {
     set_visual_width(&mut l, 10.0);
     l.visual_runs[0].byte_range = l.byte_range;
     l.tabs = vec![PositionedTab {
-        bidi_level: 0,
         byte_range: TextRange::new(2, 3),
         x: 10.0,
         width: 8.0,
@@ -1004,21 +988,18 @@ fn trailing_tab_follows_the_same_l1_rule() {
         ..small_ctx()
     };
     use HangingWhitespaceMode::{Collapsible, Preserved};
-    assert_eq!(validate_in(&l, &ctx(Preserved, BidiDirection::Ltr)), Ok(()));
+    assert_eq!(l.validate(&ctx(Preserved, BidiDirection::Ltr)), Ok(()));
     assert_eq!(
-        validate_in(&l, &ctx(Preserved, BidiDirection::Rtl)),
+        l.validate(&ctx(Preserved, BidiDirection::Rtl)),
         Err(LineInvariantError::TrailingTabOnWrongSide { index: 0 })
     );
     // Collapsible: a trailing tab must have collapsed to nothing.
     assert_eq!(
-        validate_in(&l, &ctx(Collapsible, BidiDirection::Ltr)),
+        l.validate(&ctx(Collapsible, BidiDirection::Ltr)),
         Err(LineInvariantError::TrailingTabNotCollapsed { index: 0 })
     );
     l.tabs[0].width = 0.0;
-    assert_eq!(
-        validate_in(&l, &ctx(Collapsible, BidiDirection::Ltr)),
-        Ok(())
-    );
+    assert_eq!(l.validate(&ctx(Collapsible, BidiDirection::Ltr)), Ok(()));
 }
 
 #[test]
@@ -1082,7 +1063,6 @@ fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
             y_offset: 0.0,
             advance: 10.0,
             byte_range: Some(TextRange::new(4, 5)),
-            is_synthesized: false,
             is_hanging: true,
         },
     );
@@ -1097,30 +1077,15 @@ fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
         ..small_ctx()
     };
     use HangStartMode::{AllLines, FirstLine, None as NoStart};
-    assert_eq!(
-        validate_in(&l, &ctx(FirstLine, BidiDirection::Ltr, 0)),
-        Ok(())
-    );
+    assert_eq!(l.validate(&ctx(FirstLine, BidiDirection::Ltr, 0)), Ok(()));
     let denied = Err(LineInvariantError::HangingNotAllowed {
         side: HangSide::Left,
     });
-    assert_eq!(
-        validate_in(&l, &ctx(FirstLine, BidiDirection::Ltr, 1)),
-        denied
-    );
-    assert_eq!(
-        validate_in(&l, &ctx(NoStart, BidiDirection::Ltr, 0)),
-        denied
-    );
-    assert_eq!(
-        validate_in(&l, &ctx(AllLines, BidiDirection::Ltr, 5)),
-        Ok(())
-    );
+    assert_eq!(l.validate(&ctx(FirstLine, BidiDirection::Ltr, 1)), denied);
+    assert_eq!(l.validate(&ctx(NoStart, BidiDirection::Ltr, 0)), denied);
+    assert_eq!(l.validate(&ctx(AllLines, BidiDirection::Ltr, 5)), Ok(()));
     // In an RTL paragraph the left edge is the line *end*: `start` never allows it.
-    assert_eq!(
-        validate_in(&l, &ctx(AllLines, BidiDirection::Rtl, 0)),
-        denied
-    );
+    assert_eq!(l.validate(&ctx(AllLines, BidiDirection::Rtl, 0)), denied);
 
     // The paragraph-level check supplies the index per line.
     let c = ctx(FirstLine, BidiDirection::Ltr, 0);
@@ -1239,14 +1204,4 @@ fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
     assert_eq!(p.base_direction, BidiDirection::Rtl);
     assert!(p.lines.is_empty());
     assert!(check_layout_inputs(&ast, "", &constraints, &options).is_ok());
-}
-
-/// Validates `l` under `ctx` with its tabs at `ctx`'s paragraph level, where
-/// UAX #9 L1 puts every tab, so one fixture serves both base directions.
-fn validate_in(l: &PositionedLine, ctx: &LineContext) -> Result<(), LineInvariantError> {
-    let mut l = l.clone();
-    for tab in &mut l.tabs {
-        tab.bidi_level = ctx.base_direction.base_level();
-    }
-    l.validate(ctx)
 }

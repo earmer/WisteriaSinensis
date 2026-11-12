@@ -133,9 +133,8 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A tab owns no source bytes (its `byte_range` is empty), or its bidi level
-    /// is not the paragraph level (UAX #9 L1). A tab's geometric width is
-    /// resolved during layout and is not constrained here.
+    /// A tab owns no source bytes (its `byte_range` is empty). A tab's geometric
+    /// width is resolved during layout and is not constrained here.
     InvalidTab {
         /// Index into `ParagraphAst::items`.
         item: usize,
@@ -1151,13 +1150,9 @@ impl<'a> ItemChecks<'a> {
             }) => self.check_span_boundary(item, *byte_range, *span_id, *edge, *width, *bidi_level),
             WordNode::Glue(glue) => self.check_glue(item, glue),
             WordNode::Discretionary(d) => self.check_discretionary(item, d),
-            WordNode::Tab {
-                byte_range,
-                bidi_level,
-            } => {
+            WordNode::Tab { byte_range } => {
                 // A tab is source text; its geometric width is resolved later.
-                // UAX #9 L1 resets a segment separator to the paragraph level.
-                if byte_range.is_empty() || *bidi_level != self.ast.base_direction.base_level() {
+                if byte_range.is_empty() {
                     return Err(LayoutInputError::InvalidTab { item });
                 }
                 Ok(())
@@ -3520,7 +3515,6 @@ mod tests {
                 max_shrink: 0.0,
             }),
             _ => WordNode::Tab {
-                bidi_level: 0,
                 byte_range: TextRange::new(range.0, range.1),
             },
         };

@@ -332,8 +332,6 @@ fn non_synthesized_glyphs_own_bytes_inside_the_line() {
     assert_eq!(l.validate(&ctx()), invalid);
     // A synthesized glyph carries no range at all.
     l.visual_runs[0].glyphs[1].byte_range = None;
-    assert_eq!(l.validate(&ctx()), invalid);
-    l.visual_runs[0].glyphs[1].is_synthesized = true;
     assert_eq!(l.validate(&ctx()), Ok(()));
 }
 
@@ -353,7 +351,6 @@ fn visual_runs_hold_glyphs_and_stay_inside_the_line() {
 #[test]
 fn tabs_own_non_empty_bytes_inside_the_line() {
     let tab = PositionedTab {
-        bidi_level: 0,
         byte_range: TextRange::new(0, 1),
         x: 10.,
         width: 8.,
@@ -377,7 +374,6 @@ fn ellipsis_only_line_rejects_every_body_entity() {
     l.visible_byte_end = 0;
     l.is_ellipsized = true;
     let mut ellipsis = glyph(0., 10., false);
-    ellipsis.is_synthesized = true;
     ellipsis.byte_range = None;
     let mut r = run(glyph(0., 10., false));
     r.byte_range = TextRange::empty_at(0);
@@ -393,7 +389,6 @@ fn ellipsis_only_line_rejects_every_body_entity() {
     );
     let mut tabbed = l;
     tabbed.tabs = vec![PositionedTab {
-        bidi_level: 0,
         byte_range: TextRange::empty_at(0),
         x: 0.,
         width: 0.,
@@ -409,7 +404,6 @@ fn a_slot_holding_only_a_tab_is_occupied() {
     let mut l = line();
     set_visual_width(&mut l, 0.);
     l.tabs = vec![PositionedTab {
-        bidi_level: 0,
         byte_range: TextRange::new(0, 1),
         x: 0.,
         width: 0.,
@@ -674,7 +668,6 @@ fn the_visible_end_sits_on_a_cluster_boundary() {
         overflow_policy: BoxOverflowPolicy::Clip,
     }];
     l.tabs = vec![PositionedTab {
-        bidi_level: 0,
         byte_range: TextRange::new(4, 5),
         x: 50.,
         width: 50.,

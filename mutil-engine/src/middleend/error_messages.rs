@@ -70,7 +70,7 @@ error_messages! {
         MissingParagraphEnd => "the items do not end with the paragraph-end sentinel",
         MissingSpanBoundary { span } => "decoration span {span} lacks a leading or trailing boundary",
         AtomicFlagMismatch { item } => "item {item} has an atom whose atomic-span flag is wrong",
-        InvalidTab { item } => "tab {item} owns no source bytes or is not at the paragraph bidi level",
+        InvalidTab { item } => "tab {item} owns no source bytes",
         InvalidAtomicSpan { span } => "atomic span {span} is invalid, duplicated, out of order or overlapping",
     }
 }
@@ -79,7 +79,7 @@ error_messages! {
     LineInvariantError {
         InvalidSlots { reason } => "invalid slots: {reason}",
         OrientationMismatch => "invalid visual orientation",
-        InvalidGlyphSource { run, glyph } => "glyph {glyph} of run {run} has an invalid synthesized flag or source range",
+        InvalidGlyphSource { run, glyph } => "glyph {glyph} of run {run} has an invalid source range",
         InvalidAnnotation { index, reason } => "annotation {index} is invalid: {reason}",
         InvalidParagraph { reason } => "invalid paragraph: {reason}",
         NonFiniteOrNegativeExtent => "visual_width or a hanging extent is negative or not finite",
@@ -116,7 +116,7 @@ error_messages! {
         InlineBoxWiderThanWrapWidth { index } => "inline box {index} exceeds the wrap width",
         LineWiderThanWrapWidth { visual_width, wrap_width } => "line width {visual_width} exceeds the wrap width {wrap_width} and is not a single overflowing entity",
         SlotOverflow { slot, extent, capacity } => "the content of slot {slot} reaches {extent} into a capacity of {capacity} and is not a single overflowing entity",
-        InvalidTab { index } => "tab {index} has a non-finite coordinate, a negative width, a level other than the paragraph level, or empty or out-of-line bytes",
+        InvalidTab { index } => "tab {index} has a non-finite coordinate, a negative width, or empty or out-of-line bytes",
         TabOutsideBlock { index } => "tab {index} lies outside the content of every slot",
         TrailingTabNotCollapsed { index } => "trailing tab {index} has width in Collapsible mode",
         TrailingWhitespaceOnWrongSide { run, glyph } => "trailing whitespace glyph {glyph} of run {run} is not on the far edge of the base direction",

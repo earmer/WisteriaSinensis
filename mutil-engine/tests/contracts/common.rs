@@ -420,7 +420,6 @@ pub fn glyph(x: f32, advance: f32, hanging: bool) -> PositionedGlyph {
         y_offset: 0.,
         advance,
         byte_range: Some(TextRange::new(0, 1)),
-        is_synthesized: false,
         is_hanging: hanging,
     }
 }
@@ -516,7 +515,6 @@ pub fn positioned_annotation() -> PositionedAnnotationRun {
         base_under: 2.0,
         glyphs: vec![PositionedGlyph {
             byte_range: None,
-            is_synthesized: true,
             ..glyph(25.0, 50.0, false)
         }],
     }

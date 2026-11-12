@@ -27,8 +27,9 @@ pub struct RawShapedGlyph {
     /// Vertical offset from the baseline.
     pub y_offset: f32,
     /// `true` for a glyph the engine generated rather than the source text
-    /// (the hyphen appended by `TrailingEdit`). Carried through to
-    /// `PositionedGlyph::is_synthesized`.
+    /// (the hyphen appended by `TrailingEdit`). A raw glyph has no source range
+    /// of its own, so the flag marks it; once positioned it carries
+    /// `PositionedGlyph::byte_range: None` instead.
     pub is_synthesized: bool,
 }
 
