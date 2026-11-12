@@ -1213,21 +1213,16 @@ impl<'a> ItemChecks<'a> {
         let widths_are_finite = [d.pre_break_width, d.post_break_width, d.no_break_width]
             .iter()
             .all(|v| v.is_finite());
-        let is_hard = matches!(d.action, BreakAction::HardBreak { .. });
+        let is_hard = matches!(d.action, BreakAction::HardBreak);
         // Ownership: a soft opportunity owns nothing; a hard break in the text
         // owns exactly its U+2028; the paragraph-end sentinel is the empty
         // range at the end of the text, on the last discretionary.
-        let owns_its_bytes = match d.action {
-            BreakAction::HardBreak {
-                is_paragraph_end: true,
-            } => {
-                d.byte_range == TextRange::empty_at(self.text.len())
-                    && Some(item) == self.last_break
-            }
-            BreakAction::HardBreak {
-                is_paragraph_end: false,
-            } => d.byte_range.slice(self.text) == Some("\u{2028}"),
-            _ => d.byte_range.is_empty(),
+        let owns_its_bytes = if d.is_paragraph_end() {
+            d.byte_range == TextRange::empty_at(self.text.len()) && Some(item) == self.last_break
+        } else if is_hard {
+            d.byte_range.slice(self.text) == Some("\u{2028}")
+        } else {
+            d.byte_range.is_empty()
         };
         let clones_are_unique = d
             .cloned_spans
@@ -1303,7 +1298,7 @@ impl<'a> ItemChecks<'a> {
                     return invalid;
                 }
             }
-            BreakAction::Direct | BreakAction::HardBreak { .. } => {
+            BreakAction::Direct | BreakAction::HardBreak => {
                 if !(is_zero(net_pre) && is_zero(net_post)) {
                     return invalid;
                 }
@@ -1438,12 +1433,7 @@ pub(super) fn validate_layout_inputs(
     }
     let ends_with_sentinel = matches!(
         ast.items.last(),
-        Some(WordNode::Discretionary(DiscretionaryNode {
-            action: BreakAction::HardBreak {
-                is_paragraph_end: true
-            },
-            ..
-        }))
+        Some(WordNode::Discretionary(d)) if d.is_paragraph_end()
     );
     if !ends_with_sentinel {
         return Err(E::MissingParagraphEnd);
@@ -1497,15 +1487,12 @@ mod tests {
 
     /// Line separator break (U+2028).
     fn hard_break() -> WordNode {
-        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(0, 3), false))
+        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(0, 3)))
     }
 
     /// The paragraph-end sentinel for a text of `len` bytes.
     fn sentinel(len: usize) -> WordNode {
-        WordNode::Discretionary(DiscretionaryNode::hard_break(
-            TextRange::empty_at(len),
-            true,
-        ))
+        WordNode::Discretionary(DiscretionaryNode::paragraph_end(len))
     }
 
     #[test]
@@ -1895,7 +1882,7 @@ mod tests {
         d.penalty = DiscretionaryNode::FORBIDDEN_BREAK_PENALTY;
         assert_eq!(check(d), bad);
         // HardBreak and a mandatory penalty go together.
-        let mut d = DiscretionaryNode::hard_break(TextRange::empty_at(4), true);
+        let mut d = DiscretionaryNode::paragraph_end(4);
         d.penalty = 0;
         assert_eq!(check(d), bad);
         let mut d = DiscretionaryNode::direct(2);
@@ -2429,7 +2416,7 @@ mod tests {
         let mut a = tiled(with_items_for(
             text.len(),
             vec![WordNode::Discretionary(DiscretionaryNode::hard_break(
-                newline, false,
+                newline,
             ))],
         ));
         a.runs[0].byte_range = TextRange::new(0, text.len());
@@ -2439,23 +2426,20 @@ mod tests {
         assert_eq!(
             check(
                 text,
-                DiscretionaryNode::hard_break(TextRange::new(1, 2 + separator_len), false)
+                DiscretionaryNode::hard_break(TextRange::new(1, 2 + separator_len))
             ),
             bad
         );
         // Not a terminator.
         assert_eq!(
-            check(
-                "abcd",
-                DiscretionaryNode::hard_break(TextRange::new(1, 2), false)
-            ),
+            check("abcd", DiscretionaryNode::hard_break(TextRange::new(1, 2))),
             bad
         );
         // A mid-paragraph hard break must own its newline; only the end may not.
         assert_eq!(
             check(
                 "abcd",
-                DiscretionaryNode::hard_break(TextRange::empty_at(1), false)
+                DiscretionaryNode::hard_break(TextRange::empty_at(1))
             ),
             bad
         );
@@ -2594,7 +2578,7 @@ mod tests {
             check_layout_inputs(&a, text, &constraints(), &o)
         };
         let newline = |a: usize, b: usize| {
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(a, b), false))
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(a, b)))
         };
         assert_eq!(
             check("abcd", vec![sentinel(4)]),
@@ -2622,15 +2606,10 @@ mod tests {
         assert_eq!(check("abcd", vec![sentinel(4), soft]), bad(0));
         // At most once.
         assert_eq!(check("abcd", vec![sentinel(4), sentinel(4)]), bad(0));
-        // A sentinel owns no bytes; a real break owns some.
+        // An empty hard break is the sentinel by definition, so one before
+        // the end is a sentinel out of place.
         assert_eq!(
-            check("ab\u{2028}", vec![newline(2, 5), newline(5, 5)]),
-            bad(1)
-        );
-        let mut owning = DiscretionaryNode::hard_break(TextRange::new(2, 5), true);
-        owning.byte_range = TextRange::new(2, 5);
-        assert_eq!(
-            check("ab\u{2028}", vec![WordNode::Discretionary(owning)]),
+            check("ab\u{2028}", vec![newline(2, 2), newline(2, 5), sentinel(5)]),
             bad(0)
         );
     }
@@ -2647,8 +2626,7 @@ mod tests {
         // No items at all, even for an empty paragraph.
         assert_eq!(check("", vec![]), missing);
         // A real hard break is not the sentinel: "ab\u{2028}" needs both.
-        let newline =
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(2, 5), false));
+        let newline = WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(2, 5)));
         assert_eq!(check("ab\u{2028}", vec![newline]), missing);
         // A soft opportunity or a box last.
         let soft = WordNode::Discretionary(DiscretionaryNode::direct(2));
@@ -2668,7 +2646,7 @@ mod tests {
                 .count()
         };
         let nl = |a: usize, b: usize| {
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(a, b), false))
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(a, b)))
         };
         let cases: [(&str, Vec<WordNode>); 4] = [
             ("", vec![sentinel(0)]),
@@ -3137,7 +3115,7 @@ mod tests {
             check_layout_inputs(&a, text, &constraints(), &o)
         };
         let nl = |a: usize, b: usize| {
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(a, b), false))
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(a, b)))
         };
         assert_eq!(
             run_over("a\r\nb", vec![nl(1, 3)]),

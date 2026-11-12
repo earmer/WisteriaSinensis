@@ -223,21 +223,21 @@ pub enum BreakAction {
     Direct,
     /// Mandatory line termination (`penalty == MANDATORY_BREAK_PENALTY`).
     ///
-    /// `is_paragraph_end == false` is an explicit line terminator present in
-    /// the text. Inside one paragraph that is **U+2028 only**: `\n`, `\r\n` and
-    /// the other paragraph separators end the paragraph and are handled by
-    /// [`split_paragraphs`](crate::frontend::split_paragraphs), and
-    /// `check_layout_inputs` rejects them in a node or in the text. Its
-    /// `byte_range` is non-empty and is exactly the three bytes of U+2028.
-    /// `is_paragraph_end == true` is the synthetic
-    /// end-of-paragraph sentinel: its `byte_range` is the empty range
-    /// `text.len()..text.len()` and it is the **last** discretionary of the
-    /// paragraph, at most once. Text ending in `\n` therefore ends with a real
-    /// hard break followed by the sentinel (the trailing blank line).
-    HardBreak {
-        /// `true` for the sentinel, `false` for a terminator in the text.
-        is_paragraph_end: bool,
-    },
+    /// The node's `byte_range` says which of the two it is
+    /// ([`DiscretionaryNode::is_paragraph_end`]), so the action stores
+    /// nothing (spec §1.5, A2):
+    ///
+    /// * a **non-empty** range is an explicit line terminator present in the
+    ///   text. Inside one paragraph that is **U+2028 only**: `\n`, `\r\n` and
+    ///   the other paragraph separators end the paragraph and are handled by
+    ///   [`split_paragraphs`](crate::frontend::split_paragraphs), and
+    ///   `check_layout_inputs` rejects them in a node or in the text. The range
+    ///   is exactly the three bytes of U+2028;
+    /// * an **empty** range is the synthetic end-of-paragraph sentinel: the
+    ///   empty range `text.len()..text.len()` on the **last** discretionary of
+    ///   the paragraph. Text ending in U+2028 therefore ends with a real hard
+    ///   break followed by the sentinel (the trailing blank line).
+    HardBreak,
     /// Hyphenation: `TextShaper::reshape_window` runs at materialisation. Both
     /// neighbouring text boxes share one `run_index` (a word is split within a
     /// single `ShapingRun`). The widths minus the cloned padding are the net
@@ -370,15 +370,13 @@ impl DiscretionaryNode {
         }
     }
 
-    /// A mandatory break. For `is_paragraph_end == false`, `newline` is the
-    /// exact non-empty range of a U+2028 line separator within a paragraph;
-    /// paragraph separators (`\n`, `\r`, `\r\n`, U+0085, U+2029, U+001C–U+001E)
-    /// are not allowed here because a paragraph AST covers one paragraph only.
-    /// Split document text with
-    /// [`split_paragraphs`](crate::frontend::split_paragraphs) first. For
-    /// `is_paragraph_end == true` the range is `text.len()..text.len()`.
+    /// A mandatory break at the line separator U+2028 that `newline` covers
+    /// exactly. Paragraph separators (`\n`, `\r`, `\r\n`, U+0085, U+2029,
+    /// U+001C–U+001E) are not allowed here because a paragraph AST covers one
+    /// paragraph only: split document text with
+    /// [`split_paragraphs`](crate::frontend::split_paragraphs) first.
     #[must_use]
-    pub fn hard_break(newline: TextRange, is_paragraph_end: bool) -> Self {
+    pub fn hard_break(newline: TextRange) -> Self {
         Self {
             byte_range: newline,
             penalty: Self::MANDATORY_BREAK_PENALTY,
@@ -386,9 +384,23 @@ impl DiscretionaryNode {
             pre_break_width: 0.0,
             post_break_width: 0.0,
             no_break_width: 0.0,
-            action: BreakAction::HardBreak { is_paragraph_end },
+            action: BreakAction::HardBreak,
             cloned_spans: SmallVec::new(),
         }
+    }
+
+    /// The paragraph-end sentinel of a paragraph whose text is `text_len`
+    /// bytes long: the mandatory break owning the empty range at its end.
+    #[must_use]
+    pub fn paragraph_end(text_len: ByteIndex) -> Self {
+        Self::hard_break(TextRange::empty_at(text_len))
+    }
+
+    /// Whether this is the paragraph-end sentinel: a hard break that owns no
+    /// bytes.
+    #[must_use]
+    pub fn is_paragraph_end(&self) -> bool {
+        matches!(self.action, BreakAction::HardBreak) && self.byte_range.is_empty()
     }
 
     /// The break position: where line `k` ends and, for a soft opportunity,

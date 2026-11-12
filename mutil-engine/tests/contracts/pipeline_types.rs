@@ -278,7 +278,7 @@ fn every_word_node_variant_is_constructible() {
             max_shrink: 2.0,
         }),
         WordNode::Discretionary(DiscretionaryNode::direct(5)),
-        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(6, 7), false)),
+        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(6, 7))),
         WordNode::Tab {
             byte_range: TextRange::new(5, 6),
         },
@@ -311,9 +311,7 @@ fn every_word_node_variant_is_constructible() {
     // Break actions are exhaustive too.
     let actions = [
         BreakAction::Direct,
-        BreakAction::HardBreak {
-            is_paragraph_end: true,
-        },
+        BreakAction::HardBreak,
         BreakAction::Hyphenate(HyphenOpportunity {
             prefix_replacement: None,
             suffix_replacement: None,
@@ -331,7 +329,7 @@ fn every_word_node_variant_is_constructible() {
     for a in &actions {
         match a {
             BreakAction::Direct
-            | BreakAction::HardBreak { .. }
+            | BreakAction::HardBreak
             | BreakAction::Hyphenate(_)
             | BreakAction::CjkPunctAdjust
             | BreakAction::MathOperator { .. } => {}
@@ -355,7 +353,7 @@ fn canonical_penalty_scale_is_ordered_and_tiers_are_ranked() {
         D::FORBIDDEN_BREAK_PENALTY,
     ];
     assert!(scale.windows(2).all(|w| w[0] < w[1]));
-    assert!(D::hard_break(TextRange::EMPTY, true).is_mandatory());
+    assert!(D::paragraph_end(0).is_mandatory());
     assert!(!D::direct(0).is_mandatory());
     assert!(GlueTier::Tier0 < GlueTier::Tier1 && GlueTier::Tier1 < GlueTier::Tier2);
     assert_eq!(GlueKind::WordSpace.tier(), GlueTier::Tier0);

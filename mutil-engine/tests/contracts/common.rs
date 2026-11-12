@@ -7,7 +7,7 @@ use smallvec::smallvec;
 use std::sync::Arc;
 
 pub fn end(n: usize) -> WordNode {
-    WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::empty_at(n), true))
+    WordNode::Discretionary(DiscretionaryNode::paragraph_end(n))
 }
 
 /// Appends a text box over `atoms` and `clusters` to body run `run` of `ast`

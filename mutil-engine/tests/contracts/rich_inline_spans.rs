@@ -53,10 +53,7 @@ fn boundary(edge: SpanEdge, at: usize) -> WordNode {
 }
 
 fn sentinel(len: usize) -> WordNode {
-    WordNode::Discretionary(DiscretionaryNode::hard_break(
-        TextRange::empty_at(len),
-        true,
-    ))
+    WordNode::Discretionary(DiscretionaryNode::paragraph_end(len))
 }
 
 fn chip_ast() -> ParagraphAst {

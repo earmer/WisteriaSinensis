@@ -171,7 +171,7 @@ mod tests {
     use crate::frontend::DiscretionaryNode;
     use crate::middleend::{LayoutPolicySnapshot, TabStops};
     use crate::shaping::NoopShaper;
-    use crate::types::{BidiDirection, FontMetrics, TextRange, WritingMode};
+    use crate::types::{BidiDirection, FontMetrics, WritingMode};
 
     fn constraints() -> LayoutConstraints {
         LayoutConstraints {
@@ -201,10 +201,7 @@ mod tests {
             atoms: vec![],
             clusters: vec![],
             glyphs: vec![],
-            items: vec![WordNode::Discretionary(DiscretionaryNode::hard_break(
-                TextRange::empty_at(0),
-                true,
-            ))],
+            items: vec![WordNode::Discretionary(DiscretionaryNode::paragraph_end(0))],
             decoration_spans: vec![],
             atomic_spans: vec![],
         }

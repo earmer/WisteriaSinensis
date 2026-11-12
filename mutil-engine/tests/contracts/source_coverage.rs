@@ -65,10 +65,7 @@ fn reject_hard_break(sep: &str) {
     let mut a = ast(sep);
     rebuild_items(&mut a, |_| {
         vec![
-            WordNode::Discretionary(DiscretionaryNode::hard_break(
-                TextRange::new(0, sep.len()),
-                false,
-            )),
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(0, sep.len()))),
             end(sep.len()),
         ]
     });
@@ -86,7 +83,7 @@ fn line_separator_remains_allowed() {
     rebuild_items(&mut a, |b| {
         vec![
             boxed(b, 0, 1),
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4), false)),
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4))),
             boxed(b, 4, 5),
             end(5),
         ]

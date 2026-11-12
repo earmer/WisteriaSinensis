@@ -139,10 +139,10 @@ fn paragraph_ast() -> ParagraphAst {
         // "," is fused to "go" by the absence of a discretionary.
         word(&mut ast, 14, 15),
         // The hard break owns U+2028: the next line starts at byte 18.
-        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(15, 18), false)),
+        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(15, 18))),
         // Every paragraph ends with the sentinel: it terminates the blank line
         // after the trailing line separator, so N separators give N + 1 lines.
-        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::empty_at(18), true)),
+        WordNode::Discretionary(DiscretionaryNode::paragraph_end(18)),
     ];
     ast
 }
@@ -1168,10 +1168,7 @@ fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
         clusters: vec![],
         glyphs: Vec::new(),
         // An empty paragraph is just the sentinel.
-        items: vec![WordNode::Discretionary(DiscretionaryNode::hard_break(
-            TextRange::empty_at(0),
-            true,
-        ))],
+        items: vec![WordNode::Discretionary(DiscretionaryNode::paragraph_end(0))],
         decoration_spans: vec![],
         atomic_spans: vec![],
     };

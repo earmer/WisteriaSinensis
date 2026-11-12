@@ -285,7 +285,7 @@ fn an_isolate_may_cover_only_a_hard_break() {
     rebuild_items(&mut a, |b| {
         vec![
             boxed(b, 0, 1),
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4), false)),
+            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4))),
             WordNode::Box(BoxNode::InlineObject {
                 bidi_level: BidiLevel::LTR,
                 baseline_align: BaselineAlignment::Auto,
