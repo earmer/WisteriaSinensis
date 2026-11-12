@@ -245,7 +245,6 @@ fn tcy_ast() -> ParagraphAst {
     );
     edit_text_box(&mut a, 0, |_, clusters| {
         let mut merged = clusters[0].clone();
-        merged.byte_range = TextRange::new(0, 2);
         merged.atom_range = 0..2;
         merged.glyph_range = 0..2;
         merged.natural_width = 2.;
@@ -288,10 +287,8 @@ fn tcy_run_split_across_two_boxes_is_rejected() {
 #[test]
 fn tcy_box_covering_part_of_the_run_is_rejected() {
     let mut a = tcy_ast();
-    let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[0] else {
-        panic!("not a text box");
-    };
-    atom_range.end = 1;
+    // The one cluster stops short of the run's second atom.
+    a.clusters[0].atom_range.end = 1;
     // With one box per TCY run, storage coverage already forces the box to
     // span the whole run, so the uncovered atom is the reported error.
     assert_eq!(

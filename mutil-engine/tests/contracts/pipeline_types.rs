@@ -5,15 +5,11 @@
 //! exercise ownership, visibility and trait closure from *outside* the crate.
 
 use crate::common::{
-    ADV, assert_send_sync_static, atom, push_text, rebuild_items, shaping_run, single_slot,
+    ADV, assert_send_sync_static, atom, cluster, push_text, rebuild_items, shaping_run, single_slot,
 };
 use mutil_engine::*;
 
 const TEXT: &str = "Hello world";
-
-fn cluster(base: usize, local: usize) -> ShapedCluster {
-    crate::common::cluster(base, local)
-}
 
 fn run() -> ShapingRun {
     shaping_run(TEXT, "en-GB")
@@ -21,7 +17,7 @@ fn run() -> ShapingRun {
 
 fn word(ast: &mut ParagraphAst, range: TextRange) -> WordNode {
     let atoms: Vec<_> = range.as_range().map(atom).collect();
-    let clusters: Vec<_> = (0..atoms.len()).map(|i| cluster(range.start, i)).collect();
+    let clusters: Vec<_> = (0..atoms.len()).map(cluster).collect();
     push_text(ast, 0, atoms, clusters)
 }
 
@@ -124,7 +120,7 @@ fn test_pipeline_types_compile() {
                     x_offset: g.x_offset,
                     y_offset: g.y_offset,
                     advance: g.x_advance,
-                    byte_range: Some(c.byte_range),
+                    byte_range: view.cluster_byte_range(c),
                     is_hanging: false,
                 });
                 pen += c.natural_width;
@@ -238,7 +234,7 @@ fn fixture_clusters_index_their_own_node_atoms() {
         // paragraph-level index adds the run's start.
         let covered = &run_atoms[c.atom_range.clone()];
         assert_eq!(covered.len(), 1);
-        assert_eq!(covered[0].byte_range, c.byte_range);
+        assert_eq!(Some(covered[0].byte_range), view.cluster_byte_range(c));
         assert_eq!(
             ast.atoms[run.atom_range.start + c.atom_range.start],
             covered[0]
@@ -306,8 +302,12 @@ fn every_word_node_variant_is_constructible() {
     assert_eq!(nodes.len(), 7);
     // A soft discretionary owns no bytes: its span is empty at the break. A
     // hard break owns its newline.
-    assert_eq!(nodes[4].byte_span(), TextRange::empty_at(5));
-    assert_eq!(nodes[5].byte_span(), TextRange::new(6, 7));
+    let owned = |n: &WordNode| match n {
+        WordNode::Discretionary(d) => d.byte_range,
+        _ => unreachable!(),
+    };
+    assert_eq!(owned(&nodes[4]), TextRange::empty_at(5));
+    assert_eq!(owned(&nodes[5]), TextRange::new(6, 7));
     // Break actions are exhaustive too.
     let actions = [
         BreakAction::Direct,
@@ -385,94 +385,50 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
     assert!(ast.is_self_contained(0));
 
     // A two-atom ligature cluster is fine while it stays inside one node...
-    let lig = |range: std::ops::Range<usize>, bytes: TextRange| {
-        let mut c = cluster(0, 0);
+    let lig = |range: std::ops::Range<usize>| {
+        let mut c = cluster(0);
         c.atom_range = range;
-        c.byte_range = bytes;
         c
     };
     let atoms: Vec<_> = (0..3).map(atom).collect();
-    // Whether one box with the given (possibly wrong) range, atoms and clusters
-    // is self-contained.
-    let contained = |range: TextRange, atoms: Vec<GraphemeAtom>, clusters: Vec<ShapedCluster>| {
+    // A paragraph whose only text box holds `atoms` and `clusters`.
+    let build = |atoms: Vec<GraphemeAtom>, clusters: Vec<ShapedCluster>| {
         let mut ast = crate::common::ast("");
-        rebuild_items(&mut ast, |ast| {
-            let mut node = push_text(ast, 0, atoms, clusters);
-            if let WordNode::Box(BoxNode::Text { byte_range, .. }) = &mut node {
-                *byte_range = range;
-            }
-            vec![node]
-        });
-        ast.is_self_contained(0)
+        rebuild_items(&mut ast, |ast| vec![push_text(ast, 0, atoms, clusters)]);
+        ast
     };
-    let ok = contained(
-        TextRange::new(0, 3),
-        atoms.clone(),
-        vec![
-            lig(0..2, TextRange::new(0, 2)),
-            lig(2..3, TextRange::new(2, 3)),
-        ],
-    );
-    assert!(ok);
+    let contained = |atoms, clusters| build(atoms, clusters).is_self_contained(0);
+    assert!(contained(atoms.clone(), vec![lig(0..2), lig(2..3)]));
 
-    // ...but cutting that ligature between two nodes leaves node A's cluster
-    // reaching past its atoms, which the check rejects (invariant 1).
-    let node_a = contained(
-        TextRange::new(0, 1),
-        atoms[..1].to_vec(),
-        vec![lig(0..2, TextRange::new(0, 2))],
-    );
-    assert!(!node_a);
+    // ...but a cluster reaching past the box's atoms does not resolve
+    // (invariant 1).
+    assert!(!contained(atoms[..1].to_vec(), vec![lig(0..2)]));
 
-    // Gaps and byte-range mismatches (invariant 2) are rejected too.
-    let gap = contained(
-        TextRange::new(0, 3),
-        atoms.clone(),
-        vec![lig(1..3, TextRange::new(1, 3))],
+    // A cluster that skips the run's first atom leaves it to no cluster: the
+    // box itself is consistent, the run's storage is not (invariant 2).
+    let gap = build(atoms.clone(), vec![lig(1..3)]);
+    assert!(gap.is_self_contained(0));
+    assert_eq!(
+        crate::common::check(&gap, "abc"),
+        Err(LayoutInputError::InvalidRunStorage { run: 0 })
     );
-    assert!(!gap);
-    let bad_bytes = contained(
-        TextRange::new(0, 1),
-        atoms[..1].to_vec(),
-        vec![lig(0..1, TextRange::new(0, 2))],
-    );
-    assert!(!bad_bytes);
-    // Atoms that run backwards or overlap are not a partition of the text either,
-    // even when every cluster matches its own atoms.
-    let backwards = contained(
-        TextRange::new(1, 1),
+    // Atoms that run backwards or overlap are not a partition of the text,
+    // even when every cluster covers its own atoms.
+    assert!(!contained(
         vec![atom(1), atom(0)],
-        vec![
-            lig(0..1, TextRange::new(1, 2)),
-            lig(1..2, TextRange::new(0, 1)),
-        ],
-    );
-    assert!(!backwards);
-    let overlap = contained(
-        TextRange::new(0, 3),
-        vec![
-            GraphemeAtom {
-                byte_range: TextRange::new(0, 2),
-                ..atom(0)
-            },
-            GraphemeAtom {
-                byte_range: TextRange::new(1, 3),
-                ..atom(1)
-            },
-        ],
-        vec![
-            lig(0..1, TextRange::new(0, 2)),
-            lig(1..2, TextRange::new(1, 3)),
-        ],
-    );
-    assert!(!overlap);
-    // The box's own range must run from its first atom to its last.
-    let wrong_range = contained(
-        TextRange::new(0, 2),
-        atoms[..1].to_vec(),
-        vec![lig(0..1, TextRange::new(0, 1))],
-    );
-    assert!(!wrong_range);
+        vec![lig(0..1), lig(1..2)]
+    ));
+    let overlapping = vec![
+        GraphemeAtom {
+            byte_range: TextRange::new(0, 2),
+            ..atom(0)
+        },
+        GraphemeAtom {
+            byte_range: TextRange::new(1, 3),
+            ..atom(1)
+        },
+    ];
+    assert!(!contained(overlapping, vec![lig(0..1), lig(1..2)]));
     // Every other node is trivially self-contained.
     let mut tab = crate::common::ast("");
     rebuild_items(&mut tab, |_| {

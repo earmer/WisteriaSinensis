@@ -16,8 +16,7 @@ fn two_runs() -> ParagraphAst {
     a.runs[0].byte_range = TextRange::new(0, 2);
     a.runs.push(second);
     rebuild_items(&mut a, |a| {
-        let mut word =
-            |run: usize, at: usize| push_text(a, run, vec![atom(at)], vec![cluster(at, 0)]);
+        let mut word = |run: usize, at: usize| push_text(a, run, vec![atom(at)], vec![cluster(0)]);
         vec![word(0, 0), word(0, 1), word(1, 2), word(1, 3), end(4)]
     });
     a
@@ -66,8 +65,8 @@ fn accessors_never_panic_on_bad_indices() {
     a.runs[1].cluster_range = 2..99;
     assert!(a.run_atoms(1).is_empty());
     assert!(a.run_clusters(1).is_empty());
-    if let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[0] {
-        *atom_range = 0..99;
+    if let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &mut a.items[0] {
+        *cluster_range = 0..99;
     }
     assert!(a.text_box(0).is_none());
     assert!(!a.is_self_contained(0));
@@ -77,12 +76,13 @@ fn accessors_never_panic_on_bad_indices() {
 fn a_cluster_range_that_is_not_run_local_is_not_self_contained() {
     let mut a = two_runs();
     // Item 3 is the second box of run 1; paragraph-level indices 3..4 are wrong
-    // for its cluster, which must say 1..2.
+    // for its cluster, which must say 1..2: the box does not resolve, and the
+    // run's clusters no longer partition its atoms.
     a.clusters[3].atom_range = 3..4;
     assert!(!a.is_self_contained(3));
     assert_eq!(
         check(&a, TEXT),
-        Err(LayoutInputError::ItemNotSelfContained { item: 3 })
+        Err(LayoutInputError::InvalidRunStorage { run: 1 })
     );
 }
 
@@ -120,11 +120,13 @@ fn runs_must_tile_the_atom_storage() {
 
 #[test]
 fn runs_must_tile_the_cluster_storage() {
+    // Run 0 keeps one cluster for its two atoms: found before the gap it
+    // leaves for run 1.
     let mut a = two_runs();
     a.runs[0].cluster_range = 0..1;
     assert_eq!(
         check(&a, TEXT),
-        Err(LayoutInputError::InvalidRunStorage { run: 1 })
+        Err(LayoutInputError::InvalidRunStorage { run: 0 })
     );
     let mut a = two_runs();
     a.runs[1].cluster_range = 1..4;
@@ -153,15 +155,6 @@ fn a_box_must_lie_inside_its_own_run() {
     );
     // A box stretched past the end of its run.
     let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[1] {
-        *atom_range = 1..3;
-    }
-    assert_eq!(
-        check(&a, TEXT),
-        Err(LayoutInputError::ItemNotSelfContained { item: 1 })
-    );
-    // Clusters likewise.
-    let mut a = two_runs();
     if let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &mut a.items[1] {
         *cluster_range = 1..3;
     }
@@ -181,10 +174,10 @@ fn the_boxes_of_a_run_take_consecutive_ranges_in_item_order() {
         check(&a, TEXT),
         Err(LayoutInputError::ItemNotSelfContained { item: 0 })
     );
-    // A gap inside the run: the second box skips an atom.
+    // A box with no cluster owns nothing.
     let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[1] {
-        *atom_range = 2..2;
+    if let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &mut a.items[1] {
+        *cluster_range = 2..2;
     }
     assert_eq!(
         check(&a, TEXT),
@@ -201,14 +194,14 @@ fn the_boxes_of_a_run_must_cover_all_its_atoms_and_clusters() {
         check(&a, TEXT),
         Err(LayoutInputError::InvalidRunStorage { run: 1 })
     );
-    // Same when only the clusters are left over.
+    // A box that gives up its cluster is empty, which no text box may be.
     let mut a = two_runs();
     if let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &mut a.items[3] {
         *cluster_range = 3..3;
     }
     assert_eq!(
         check(&a, TEXT),
-        Err(LayoutInputError::InvalidRunStorage { run: 1 })
+        Err(LayoutInputError::ItemNotSelfContained { item: 3 })
     );
 }
 
@@ -254,7 +247,7 @@ fn reshape_window_takes_the_run_slice_of_the_paragraph_storage_directly() {
             .iter()
             .all(|c| c.atom_range.end <= atoms.len())
     );
-    let mut out = vec![cluster(2, 0)];
+    let mut out = vec![cluster(0)];
     let mut out_glyphs = Vec::new();
     NoopShaper.reshape_window(
         TEXT,
@@ -267,7 +260,7 @@ fn reshape_window_takes_the_run_slice_of_the_paragraph_storage_directly() {
         &mut out_glyphs,
     );
     // The no-op shaper appends nothing and never clears the buffer.
-    assert_eq!(out, vec![cluster(2, 0)]);
+    assert_eq!(out, vec![cluster(0)]);
     assert!(out_glyphs.is_empty());
 }
 
@@ -276,14 +269,8 @@ fn a_box_reaching_into_the_next_run_is_not_self_contained() {
     // Box 1 (run 0) also claims run 1's first atom and cluster, with byte and
     // atom ranges that would be consistent if the run did not end at 2.
     let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text {
-        byte_range,
-        atom_range,
-        cluster_range,
-        ..
-    }) = &mut a.items[1]
-    {
-        (*byte_range, *atom_range, *cluster_range) = (TextRange::new(1, 3), 1..3, 1..3);
+    if let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &mut a.items[1] {
+        *cluster_range = 1..3;
     }
     a.clusters[2].atom_range = 2..3;
     assert!(!a.is_self_contained(1));
@@ -352,16 +339,7 @@ fn inverted_index_ranges_are_rejected_rather_than_read_as_empty() {
         check(&a, TEXT),
         Err(LayoutInputError::InvalidRunStorage { run: 1 })
     );
-    // A box's ranges.
-    let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[3] {
-        *atom_range = inverted(4, 3);
-    }
-    assert!(a.text_box(3).is_none());
-    assert_eq!(
-        check(&a, TEXT),
-        Err(LayoutInputError::ItemNotSelfContained { item: 3 })
-    );
+    // A box's range.
     let mut a = two_runs();
     if let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &mut a.items[3] {
         *cluster_range = inverted(4, 3);
@@ -370,12 +348,12 @@ fn inverted_index_ranges_are_rejected_rather_than_read_as_empty() {
         check(&a, TEXT),
         Err(LayoutInputError::ItemNotSelfContained { item: 3 })
     );
-    // A cluster's run-local atoms.
+    // A cluster's run-local atoms: the run's clusters no longer partition them.
     let mut a = two_runs();
     a.clusters[3].atom_range = inverted(2, 1);
     assert_eq!(
         check(&a, TEXT),
-        Err(LayoutInputError::ItemNotSelfContained { item: 3 })
+        Err(LayoutInputError::InvalidRunStorage { run: 1 })
     );
     // An annotation's own storage.
     let mut a = ast("ab");

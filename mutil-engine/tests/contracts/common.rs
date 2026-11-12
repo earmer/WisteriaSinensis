@@ -33,10 +33,6 @@ pub fn push_text(
     );
     let run_local = atom_at - ast.runs[run].atom_range.start;
     let (n_atoms, n_clusters) = (atoms.len(), clusters.len());
-    let byte_range = match (atoms.first(), atoms.last()) {
-        (Some(first), Some(last)) => TextRange::new(first.byte_range.start, last.byte_range.end),
-        _ => TextRange::EMPTY,
-    };
     let natural_width = clusters.iter().map(|c| c.natural_width).sum();
     ast.atoms.splice(atom_at..atom_at, atoms);
     ast.clusters.splice(
@@ -56,13 +52,11 @@ pub fn push_text(
     for item in &mut ast.items {
         if let WordNode::Box(BoxNode::Text {
             run_index,
-            atom_range,
             cluster_range,
             ..
         }) = item
         {
             if *run_index > run {
-                *atom_range = atom_range.start + n_atoms..atom_range.end + n_atoms;
                 *cluster_range = cluster_range.start + n_clusters..cluster_range.end + n_clusters;
             }
         }
@@ -70,8 +64,6 @@ pub fn push_text(
     retile_glyphs(ast);
     WordNode::Box(BoxNode::Text {
         run_index: run,
-        byte_range,
-        atom_range: atom_at..atom_at + n_atoms,
         cluster_range: cluster_at..cluster_at + n_clusters,
         natural_width,
     })
@@ -108,8 +100,7 @@ pub fn boxed(ast: &mut ParagraphAst, s: usize, e: usize) -> WordNode {
     let clusters = atoms
         .iter()
         .enumerate()
-        .map(|(i, a)| ShapedCluster {
-            byte_range: a.byte_range,
+        .map(|(i, _)| ShapedCluster {
             atom_range: i..i + 1,
             font: FontRef::unscaled(FontId(1)),
             flags,
@@ -188,8 +179,8 @@ pub fn clear_text(ast: &mut ParagraphAst) {
 }
 
 /// Lets `edit` change the atoms and clusters of the text box at `ast.items[item]`
-/// (add, drop or replace entries; cluster `atom_range`s are run-local, as
-/// stored, and a `glyph_range` counts for its length only) and repairs the
+/// (add, drop or replace entries; cluster `atom_range`s are relative to the
+/// box's first atom, and a `glyph_range` counts for its length only) and repairs the
 /// ranges of the box, its run, later runs, later boxes and the glyphs so the
 /// storage still tiles.
 pub fn edit_text_box(
@@ -197,50 +188,70 @@ pub fn edit_text_box(
     item: usize,
     edit: impl FnOnce(&mut Vec<GraphemeAtom>, &mut Vec<ShapedCluster>),
 ) {
-    let WordNode::Box(BoxNode::Text {
-        run_index,
-        atom_range,
-        cluster_range,
-        ..
-    }) = &ast.items[item]
-    else {
-        panic!("items[{item}] is not a text box");
+    let view = ast
+        .text_box(item)
+        .unwrap_or_else(|| panic!("items[{item}] is not a resolvable text box"));
+    let run = view.run_index;
+    let (atom_base, atom_range) = (
+        view.atom_base,
+        view.atom_start..view.atom_start + view.atoms.len(),
+    );
+    let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &ast.items[item] else {
+        unreachable!();
     };
-    let (run, atom_range, cluster_range) = (*run_index, atom_range.clone(), cluster_range.clone());
+    let cluster_range = cluster_range.clone();
     let mut atoms = ast.atoms[atom_range.clone()].to_vec();
-    let mut clusters = ast.clusters[cluster_range.clone()].to_vec();
+    // The edit sees cluster atom ranges relative to the box's atoms.
+    let mut clusters: Vec<_> = ast.clusters[cluster_range.clone()]
+        .iter()
+        .cloned()
+        .map(|mut c| {
+            c.atom_range = c.atom_range.start - atom_base..c.atom_range.end - atom_base;
+            c
+        })
+        .collect();
     edit(&mut atoms, &mut clusters);
     let delta_atoms = atoms.len() as isize - atom_range.len() as isize;
     let delta_clusters = clusters.len() as isize - cluster_range.len() as isize;
     ast.atoms.splice(atom_range.clone(), atoms);
-    ast.clusters.splice(cluster_range.clone(), clusters);
+    ast.clusters.splice(
+        cluster_range.clone(),
+        clusters.into_iter().map(|mut c| {
+            c.atom_range = c.atom_range.start + atom_base..c.atom_range.end + atom_base;
+            c
+        }),
+    );
     let shift = |r: &mut Range<usize>, by: isize| {
         *r = r.start.wrapping_add_signed(by)..r.end.wrapping_add_signed(by);
     };
+    // Later clusters of the same run index atoms after the edited ones.
+    let edited_end = cluster_range
+        .start
+        .wrapping_add_signed(cluster_range.len() as isize + delta_clusters);
+    let run_cluster_end = ast.runs[run]
+        .cluster_range
+        .end
+        .wrapping_add_signed(delta_clusters);
+    for c in &mut ast.clusters[edited_end..run_cluster_end] {
+        shift(&mut c.atom_range, delta_atoms);
+    }
     ast.runs[run].atom_range.end = ast.runs[run]
         .atom_range
         .end
         .wrapping_add_signed(delta_atoms);
-    ast.runs[run].cluster_range.end = ast.runs[run]
-        .cluster_range
-        .end
-        .wrapping_add_signed(delta_clusters);
+    ast.runs[run].cluster_range.end = run_cluster_end;
     for later in ast.runs.iter_mut().skip(run + 1) {
         shift(&mut later.atom_range, delta_atoms);
         shift(&mut later.cluster_range, delta_clusters);
     }
     for (i, node) in ast.items.iter_mut().enumerate() {
         if let WordNode::Box(BoxNode::Text {
-            atom_range: a,
-            cluster_range: c,
-            ..
+            cluster_range: c, ..
         }) = node
         {
             if i == item {
-                a.end = a.end.wrapping_add_signed(delta_atoms);
                 c.end = c.end.wrapping_add_signed(delta_clusters);
-            } else if a.start >= atom_range.end && c.start >= cluster_range.end {
-                shift(a, delta_atoms);
+            } else if c.start >= cluster_range.end {
                 shift(c, delta_clusters);
             }
         }
@@ -510,13 +521,11 @@ pub fn atom(offset: usize) -> GraphemeAtom {
     }
 }
 
-/// One-glyph cluster for the atom at `local` index of a node starting at byte
-/// `base` of `text`; `atom_range` is relative to the node's own atoms (what
-/// [`push_text`] expects; it stores them run-local).
-pub fn cluster(base: usize, local: usize) -> ShapedCluster {
-    let off = base + local;
+/// One-glyph cluster for the atom at `local` index of a node; `atom_range` is
+/// relative to the node's own atoms (what [`push_text`] expects; it stores them
+/// run-local).
+pub fn cluster(local: usize) -> ShapedCluster {
     ShapedCluster {
-        byte_range: TextRange::new(off, off + 1),
         atom_range: local..local + 1,
         font: FontRef::unscaled(FontId(1)),
         flags: AtomFlags::EMPTY,

@@ -4,7 +4,7 @@
 //! and is atomic for editing, and a flattened inline formula. Every width and
 //! position is a hand-written fixture; no layout algorithm runs.
 
-use crate::common::{ADV, push_text, shaping_run, single_slot};
+use crate::common::{ADV, cluster, push_text, shaping_run, single_slot};
 use mutil_engine::*;
 
 // bytes: 0..2 "go" | 2..3 " " | 3..11 "@Ann-Lee" | 11..12 " " | 12..14 "ok"
@@ -18,21 +18,13 @@ fn atom(offset: usize) -> GraphemeAtom {
     crate::common::atom(offset)
 }
 
-/// The cluster's flags are the aggregate of its atoms (spec §2.2).
-fn cluster(base: usize, local: usize) -> ShapedCluster {
-    ShapedCluster {
-        flags: AtomFlags::for_cluster(&[atom(base + local)]),
-        ..crate::common::cluster(base, local)
-    }
-}
-
 fn run() -> ShapingRun {
     shaping_run(TEXT, "en-GB")
 }
 
 fn text(ast: &mut ParagraphAst, start: usize, end: usize) -> WordNode {
     let atoms: Vec<_> = (start..end).map(atom).collect();
-    let clusters: Vec<_> = (0..atoms.len()).map(|i| cluster(start, i)).collect();
+    let clusters: Vec<_> = (0..atoms.len()).map(cluster).collect();
     push_text(ast, 0, atoms, clusters)
 }
 

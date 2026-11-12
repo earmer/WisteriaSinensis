@@ -10,7 +10,7 @@ use crate::frontend::{
     AnnotationKind, AnnotationSide, AnnotationSpan, BoxDecorationBreak, BoxNode, BreakAction,
     DiscretionaryNode, GlueKind, GlueNode, HyphenOpportunity, InlineDecorationSpan,
     MAX_BIDI_SPAN_DEPTH, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, ShapingRun, SpanEdge,
-    TextBoxView, WordNode, is_line_or_paragraph_separator, is_no_break_space,
+    TextBoxView, WordNode, atoms_byte_range, is_line_or_paragraph_separator, is_no_break_space,
     is_paragraph_separator, is_word_space, text_is_self_contained,
 };
 use crate::types::{
@@ -71,7 +71,8 @@ pub enum LayoutInputError {
     },
     /// A run's `atom_range` / `cluster_range` do not tile `ParagraphAst::atoms` /
     /// `ParagraphAst::clusters` (a gap, an overlap or an out-of-bounds range),
-    /// or the run's atoms or clusters are not fully covered by its text boxes.
+    /// its clusters do not partition its atoms, or its clusters are not fully
+    /// covered by its text boxes.
     InvalidRunStorage {
         /// Index into `ParagraphAst::runs`.
         run: usize,
@@ -114,9 +115,9 @@ pub enum LayoutInputError {
         item: usize,
     },
     /// A `BoxNode::Text` violates `ParagraphAst::is_self_contained` (which
-    /// includes owning at least one atom), has a cluster whose break-safety
-    /// flags are inconsistent, or its `atom_range` / `cluster_range` lies
-    /// outside its run's ranges or out of order among the run's boxes.
+    /// includes owning at least one cluster), has a cluster whose break-safety
+    /// flags are inconsistent, or its `cluster_range` lies outside its run's
+    /// or out of order among the run's boxes.
     ItemNotSelfContained {
         /// Index into `ParagraphAst::items`.
         item: usize,
@@ -279,6 +280,12 @@ fn is_range_edge(ranges: &[TextRange], offset: usize) -> bool {
         .is_some_and(|r| r.start == offset || r.end == offset)
 }
 
+/// The bytes of `items[item]`. Called only after [`check_storage`], which
+/// proves every text box resolves, so the fallback is never taken.
+fn item_bytes(ast: &ParagraphAst, item: usize) -> TextRange {
+    ast.item_range(item).unwrap_or(TextRange::EMPTY)
+}
+
 /// Whether `atoms` (byte-ordered) has an atom starting or ending at `offset`.
 fn is_atom_boundary(atoms: &[GraphemeAtom], offset: usize) -> bool {
     let at = atoms.partition_point(|a| a.byte_range.end < offset);
@@ -314,9 +321,12 @@ fn check_glyph_ranges(clusters: &[ShapedCluster], glyph_count: usize) -> Result<
 ///
 /// * the runs' `atom_range`s tile `ast.atoms` and their `cluster_range`s tile
 ///   `ast.clusters`, in run order, in bounds;
+/// * the clusters of each run partition its atoms: their run-local
+///   `atom_range`s are non-empty and tile the run's atom slice in order;
 /// * the clusters' `glyph_range`s tile `ast.glyphs`, in cluster order;
-/// * in item order, the text boxes of one run take consecutive ranges inside
-///   the run's own, and together cover them exactly.
+/// * in item order, the text boxes of one run take consecutive, non-empty
+///   cluster ranges inside the run's own and together cover it exactly, so
+///   every text box resolves ([`ParagraphAst::text_box`]).
 fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     use LayoutInputError as E;
     let (mut atom_at, mut cluster_at) = (0, 0);
@@ -331,6 +341,17 @@ fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
         {
             return Err(E::InvalidRunStorage { run });
         }
+        let mut next_atom = 0;
+        for cluster in &ast.clusters[c.clone()] {
+            let local = &cluster.atom_range;
+            if local.start != next_atom || local.end <= local.start {
+                return Err(E::InvalidRunStorage { run });
+            }
+            next_atom = local.end;
+        }
+        if next_atom != a.len() {
+            return Err(E::InvalidRunStorage { run });
+        }
         (atom_at, cluster_at) = (a.end, c.end);
     }
     if atom_at != ast.atoms.len() || cluster_at != ast.clusters.len() {
@@ -341,16 +362,11 @@ fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     check_glyph_ranges(&ast.clusters, ast.glyphs.len())
         .map_err(|cluster| E::InvalidGlyphStorage { cluster })?;
 
-    // The next unclaimed atom and cluster of each run.
-    let mut next: Vec<(usize, usize)> = ast
-        .runs
-        .iter()
-        .map(|r| (r.atom_range.start, r.cluster_range.start))
-        .collect();
+    // The next unclaimed cluster of each run.
+    let mut next: Vec<usize> = ast.runs.iter().map(|r| r.cluster_range.start).collect();
     for (item, node) in ast.items.iter().enumerate() {
         let WordNode::Box(BoxNode::Text {
             run_index,
-            atom_range,
             cluster_range,
             ..
         }) = node
@@ -361,20 +377,17 @@ fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
             .runs
             .get(*run_index)
             .ok_or(E::RunIndexOutOfRange { item })?;
-        let (next_atom, next_cluster) = &mut next[*run_index];
-        if atom_range.start != *next_atom
-            || atom_range.end < atom_range.start
-            || atom_range.end > run.atom_range.end
-            || cluster_range.start != *next_cluster
-            || cluster_range.end < cluster_range.start
+        let next_cluster = &mut next[*run_index];
+        if cluster_range.start != *next_cluster
+            || cluster_range.end <= cluster_range.start
             || cluster_range.end > run.cluster_range.end
         {
             return Err(E::ItemNotSelfContained { item });
         }
-        (*next_atom, *next_cluster) = (atom_range.end, cluster_range.end);
+        *next_cluster = cluster_range.end;
     }
-    for (run, (r, (atom_end, cluster_end))) in ast.runs.iter().zip(next).enumerate() {
-        if atom_end != r.atom_range.end || cluster_end != r.cluster_range.end {
+    for (run, (r, cluster_end)) in ast.runs.iter().zip(next).enumerate() {
+        if cluster_end != r.cluster_range.end {
             return Err(E::InvalidRunStorage { run });
         }
     }
@@ -446,7 +459,6 @@ fn check_presentation(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     for (item, node) in ast.items.iter().enumerate() {
         let WordNode::Box(BoxNode::Text {
             run_index,
-            atom_range,
             cluster_range,
             ..
         }) = node
@@ -458,10 +470,10 @@ fn check_presentation(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
             .get(*run_index)
             .ok_or(E::RunIndexOutOfRange { item })?;
         let view = ast.text_box(item).ok_or(E::ItemNotSelfContained { item })?;
+        // The run's clusters partition its atoms, so one cluster that is the
+        // whole run covers all of its atoms.
         if run.orientation == GlyphOrientation::HorizontalInVertical
-            && (view.clusters.len() != 1
-                || *atom_range != run.atom_range
-                || *cluster_range != run.cluster_range)
+            && (view.clusters.len() != 1 || *cluster_range != run.cluster_range)
         {
             return Err(E::OrientationMismatch);
         }
@@ -506,14 +518,14 @@ impl ContentEdges {
                         edges.atom_starts.insert(range.start, stretch);
                         edges.atom_ends.insert(range.end, stretch);
                     }
-                    for cluster in view.clusters {
-                        let range = cluster.byte_range;
+                    let run_atoms = ast.run_atoms(view.run_index);
+                    for range in view.clusters.iter().filter_map(|c| c.byte_range(run_atoms)) {
                         edges.cluster_edges.extend([range.start, range.end]);
                     }
                 }
                 WordNode::Box(BoxNode::SpanBoundary { .. }) => {}
                 _ => {
-                    let range = node.byte_span();
+                    let range = item_bytes(ast, item);
                     edges.node_edges.extend([range.start, range.end]);
                     stretch += 1;
                 }
@@ -609,6 +621,7 @@ fn annotation_payload_is_valid(ann: &AnnotationSpan, mode: WritingMode) -> bool 
     let storage_is_valid = !text.is_empty()
         && !text.chars().any(is_line_or_paragraph_separator)
         && run.byte_range == TextRange::new(0, text.len())
+        && atoms_byte_range(&ann.atoms) == Some(run.byte_range)
         && run.atom_range == (0..ann.atoms.len())
         && run.cluster_range == (0..ann.clusters.len())
         && check_glyph_ranges(&ann.clusters, ann.glyphs.len()).is_ok();
@@ -621,6 +634,7 @@ fn annotation_payload_is_valid(ann: &AnnotationSpan, mode: WritingMode) -> bool 
         run_index: 0,
         byte_range: run.byte_range,
         atom_start: 0,
+        atom_base: 0,
         atoms: &ann.atoms,
         clusters: &ann.clusters,
         natural_width: ann.clusters.iter().map(|c| c.natural_width).sum(),
@@ -629,7 +643,7 @@ fn annotation_payload_is_valid(ann: &AnnotationSpan, mode: WritingMode) -> bool 
         && kind_is_valid
         && check_run_presentation(run, mode).is_ok()
         && check_run(run, text, 0).is_ok()
-        && check_text_payload(text, run, &payload, &ann.glyphs, 0, 0).is_ok()
+        && check_text_payload(text, run, &payload, &ann.glyphs, 0).is_ok()
         && check_text_presentation(run, &ann.atoms).is_ok()
         && (run.orientation != GlyphOrientation::HorizontalInVertical || ann.clusters.len() == 1)
 }
@@ -650,19 +664,18 @@ fn cluster_measurements_are_valid(cluster: &ShapedCluster, glyphs: &[RawShapedGl
 }
 
 /// Checks one text payload (a text box, or an annotation's text) against its
-/// run. `glyphs` is the glyph buffer its clusters index; `base` is the
-/// run-local index of the payload's first atom (0 for an annotation).
+/// run. `glyphs` is the glyph buffer its clusters index.
 fn check_text_payload(
     text: &str,
     run: &ShapingRun,
     payload: &TextBoxView<'_>,
     glyphs: &[RawShapedGlyph],
-    base: usize,
     item: usize,
 ) -> Result<(), LayoutInputError> {
     use LayoutInputError as E;
     let TextBoxView {
         byte_range,
+        atom_base,
         atoms,
         clusters,
         natural_width,
@@ -671,7 +684,7 @@ fn check_text_payload(
     if !atoms.iter().all(|a| fits(text, a.byte_range)) {
         return Err(E::ItemOutsideText { item });
     }
-    if !text_is_self_contained(byte_range, atoms, clusters, base)
+    if !text_is_self_contained(atoms, clusters, atom_base)
         || !clusters.iter().all(ShapedCluster::safety_flags_consistent)
     {
         return Err(E::ItemNotSelfContained { item });
@@ -798,8 +811,8 @@ impl SpanIndex {
         let mut touching_start = Vec::with_capacity(ast.items.len() + 1);
         let mut levels = vec![(None, None); ast.decoration_spans.len()];
         let (mut next, mut active) = (0, Vec::<usize>::new());
-        for (item, node) in ast.items.iter().enumerate() {
-            let r = node.byte_span();
+        for item in 0..ast.items.len() {
+            let r = item_bytes(ast, item);
             active.retain(|&i| ast.decoration_spans[i].byte_range.end >= r.start);
             while next < ast.decoration_spans.len()
                 && ast.decoration_spans[next].byte_range.start <= r.end
@@ -846,16 +859,16 @@ impl SpanIndex {
 /// breakable space's glue precedes its discretionary (so the spacing stays on
 /// the line that ends there): `[Glue(CjkAutospace), Discretionary]`.
 fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
-    for (i, w) in ast.items.windows(2).enumerate() {
-        if w[0].byte_span().end > w[1].byte_span().start {
-            return Err(LayoutInputError::ItemsOutOfOrder { item: i + 1 });
+    for item in 1..ast.items.len() {
+        if item_bytes(ast, item - 1).end > item_bytes(ast, item).start {
+            return Err(LayoutInputError::ItemsOutOfOrder { item });
         }
     }
     // Offset of the break opportunity seen in the current run of zero-width
     // nodes, if any.
     let mut break_opportunity_offset: Option<usize> = None;
     for (item, node) in ast.items.iter().enumerate() {
-        let range = node.byte_span();
+        let range = item_bytes(ast, item);
         if !range.is_empty() || break_opportunity_offset != Some(range.start) {
             break_opportunity_offset = None;
         }
@@ -897,7 +910,7 @@ fn check_span_enclosure(ast: &ParagraphAst, index: &SpanIndex) -> Result<(), Lay
         }
     }
     for (item, node) in ast.items.iter().enumerate() {
-        let item_range = node.byte_span();
+        let item_range = item_bytes(ast, item);
         for &span_index in index.touching(item) {
             let span = &ast.decoration_spans[span_index];
             if matches!(node, WordNode::Box(BoxNode::SpanBoundary { span_id, .. }) if *span_id == span.span_id)
@@ -1131,8 +1144,7 @@ impl<'a> ItemChecks<'a> {
         let Some(run) = ast.runs.get(view.run_index) else {
             return Err(E::RunIndexOutOfRange { item });
         };
-        let base = view.atom_start.saturating_sub(run.atom_range.start);
-        check_text_payload(self.text, run, &view, &ast.glyphs, base, item)
+        check_text_payload(self.text, run, &view, &ast.glyphs, item)
     }
 
     /// A span boundary: an empty range at its span's start (`Leading`) or end
@@ -1355,8 +1367,8 @@ impl<'a> ItemChecks<'a> {
 /// coverage cursor.
 fn check_coverage(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
     let mut covered = 0;
-    for node in &ast.items {
-        let range = node.byte_span();
+    for item in 0..ast.items.len() {
+        let range = item_bytes(ast, item);
         if range.start != covered {
             break;
         }
@@ -1426,11 +1438,7 @@ pub(super) fn validate_layout_inputs(
     // them, so the index is built on ordered ranges and cannot scan or clone
     // unboundedly for a malformed AST. The item checks may assume every item
     // fits inside `text`.
-    if let Some(item) = ast
-        .items
-        .iter()
-        .position(|node| !fits(text, node.byte_span()))
-    {
+    if let Some(item) = (0..ast.items.len()).find(|&item| !fits(text, item_bytes(ast, item))) {
         return Err(E::ItemOutsideText { item });
     }
     check_item_order(ast)?;
@@ -1587,8 +1595,7 @@ mod tests {
             const { RefCell::new(Vec::new()) };
     }
 
-    /// A text box over `atoms`, one cluster per atom. The range is built
-    /// without the `start <= end` assertion so out-of-order atoms can be tested.
+    /// A text box over `atoms`, one cluster per atom.
     ///
     /// The box is *staged*: its atoms and clusters wait in a thread-local queue
     /// until [`settle`] (called by every `with_*` builder and by [`tiled`])
@@ -1597,8 +1604,7 @@ mod tests {
         let clusters = atoms
             .iter()
             .enumerate()
-            .map(|(i, a)| ShapedCluster {
-                byte_range: a.byte_range,
+            .map(|(i, _)| ShapedCluster {
                 atom_range: i..i + 1,
                 font: crate::types::FontRef::unscaled(crate::types::FontId(0)),
                 flags: AtomFlags::EMPTY,
@@ -1608,13 +1614,6 @@ mod tests {
                 safe_to_concat_before: true,
             })
             .collect();
-        let byte_range = match (atoms.first(), atoms.last()) {
-            (Some(f), Some(l)) => TextRange {
-                start: f.byte_range.start,
-                end: l.byte_range.end,
-            },
-            _ => TextRange::EMPTY,
-        };
         let slot = STAGE.with(|stage| {
             let mut stage = stage.borrow_mut();
             stage.push((atoms, clusters));
@@ -1622,8 +1621,6 @@ mod tests {
         });
         WordNode::Box(BoxNode::Text {
             run_index: 0,
-            byte_range,
-            atom_range: slot..slot + 1,
             cluster_range: slot..slot + 1,
             natural_width: 0.0,
         })
@@ -1635,41 +1632,59 @@ mod tests {
     /// run, and boxes dropped from `items` leave no storage behind. A box's
     /// clusters keep their offsets relative to its first atom.
     fn settle(a: &mut ParagraphAst) {
-        let (old_atoms, old_clusters) = (
-            std::mem::take(&mut a.atoms),
-            std::mem::take(&mut a.clusters),
-        );
-        // Per run: its atoms and clusters, plus each box's local starts.
+        // Each text box's atoms and clusters, cluster atom ranges relative to
+        // the box's first atom.
+        let boxes: Vec<_> = (0..a.items.len())
+            .map(|item| {
+                let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &a.items[item] else {
+                    return None;
+                };
+                if cluster_range.start >= STAGED {
+                    let slot = cluster_range.start - STAGED;
+                    return Some(STAGE.with(|stage| stage.borrow()[slot].clone()));
+                }
+                // Resolve through the run that stores the clusters, which a
+                // fixture may have re-pointed `run_index` away from.
+                let owner = a
+                    .runs
+                    .iter()
+                    .find(|r| {
+                        r.cluster_range.start <= cluster_range.start
+                            && cluster_range.end <= r.cluster_range.end
+                    })
+                    .expect("a stored fixture box lies in a run");
+                let clusters = &a.clusters[cluster_range.clone()];
+                let base = clusters.first().map_or(0, |c| c.atom_range.start);
+                let end = clusters.last().map_or(0, |c| c.atom_range.end);
+                let atoms = a.atoms[owner.atom_range.clone()][base..end].to_vec();
+                let clusters = clusters
+                    .iter()
+                    .cloned()
+                    .map(|mut c| {
+                        c.atom_range = c.atom_range.start - base..c.atom_range.end - base;
+                        c
+                    })
+                    .collect::<Vec<_>>();
+                Some((atoms, clusters))
+            })
+            .collect();
+        a.atoms.clear();
+        a.clusters.clear();
+        // Per run: its atoms and clusters, plus each box's local cluster start.
         let mut per_run = vec![(Vec::new(), Vec::new()); a.runs.len()];
         let mut starts = Vec::new();
-        for node in &a.items {
-            let WordNode::Box(BoxNode::Text {
-                run_index,
-                atom_range,
-                cluster_range,
-                ..
-            }) = node
+        for (node, payload) in a.items.iter().zip(boxes) {
+            let (WordNode::Box(BoxNode::Text { run_index, .. }), Some((atoms, clusters))) =
+                (node, payload)
             else {
                 continue;
             };
-            let (atoms, clusters, first) = if atom_range.start >= STAGED {
-                let slot = atom_range.start - STAGED;
-                let (atoms, clusters) = STAGE.with(|stage| stage.borrow()[slot].clone());
-                (atoms, clusters, 0)
-            } else {
-                let clusters = old_clusters[cluster_range.clone()].to_vec();
-                let first = clusters.first().map_or(0, |c| c.atom_range.start);
-                (old_atoms[atom_range.clone()].to_vec(), clusters, first)
-            };
             let (run_atoms, run_clusters) = &mut per_run[*run_index];
-            starts.push((
-                (run_atoms.len(), atoms.len()),
-                (run_clusters.len(), clusters.len()),
-            ));
+            starts.push((run_clusters.len(), clusters.len()));
             let shift = run_atoms.len();
             run_atoms.extend(atoms);
             run_clusters.extend(clusters.into_iter().map(|mut c| {
-                c.atom_range = c.atom_range.start - first + shift..c.atom_range.end - first + shift;
+                c.atom_range = c.atom_range.start + shift..c.atom_range.end + shift;
                 c
             }));
         }
@@ -1678,7 +1693,7 @@ mod tests {
         for (run, (atoms, clusters)) in a.runs.iter_mut().zip(per_run) {
             run.atom_range = atom_at..atom_at + atoms.len();
             run.cluster_range = cluster_at..cluster_at + clusters.len();
-            run_starts.push((atom_at, cluster_at));
+            run_starts.push(cluster_at);
             (atom_at, cluster_at) = (run.atom_range.end, run.cluster_range.end);
             a.atoms.extend(atoms);
             a.clusters.extend(clusters);
@@ -1687,16 +1702,13 @@ mod tests {
         for node in &mut a.items {
             if let WordNode::Box(BoxNode::Text {
                 run_index,
-                atom_range,
                 cluster_range,
                 ..
             }) = node
             {
-                let ((local_atom, n_atoms), (local_cluster, n_clusters)) = starts.next().unwrap();
-                let (run_atom, run_cluster) = run_starts[*run_index];
-                *atom_range = run_atom + local_atom..run_atom + local_atom + n_atoms;
-                *cluster_range =
-                    run_cluster + local_cluster..run_cluster + local_cluster + n_clusters;
+                let (local, count) = starts.next().unwrap();
+                let run_cluster = run_starts[*run_index];
+                *cluster_range = run_cluster + local..run_cluster + local + count;
             }
         }
     }
@@ -1750,8 +1762,10 @@ mod tests {
     fn tiled(mut a: ParagraphAst) -> ParagraphAst {
         let mut items = Vec::new();
         let mut covered = 0;
-        for node in std::mem::take(&mut a.items) {
-            let r = node.byte_span();
+        let ranges: Vec<_> = (0..a.items.len())
+            .map(|item| a.item_range(item).expect("a resolvable fixture item"))
+            .collect();
+        for (node, r) in std::mem::take(&mut a.items).into_iter().zip(ranges) {
             if r.start > covered {
                 items.push(text_box(
                     (covered..r.start).map(|i| atom(i, i + 1)).collect(),
@@ -1774,11 +1788,9 @@ mod tests {
     fn closed(mut a: ParagraphAst) -> ParagraphAst {
         let spans = a.decoration_spans.clone();
         for sp in spans.iter().rev() {
-            let at = a
-                .items
-                .iter()
-                .position(|n| {
-                    let r = n.byte_span();
+            let at = (0..a.items.len())
+                .position(|item| {
+                    let (n, r) = (&a.items[item], a.item_range(item).unwrap_or_default());
                     let seam = n.is_break_opportunity()
                         || matches!(n, WordNode::Glue(g) if g.kind == GlueKind::CjkAutospace);
                     r.start >= sp.byte_range.start
@@ -1789,10 +1801,8 @@ mod tests {
                 .insert(at, bnd(sp.span_id, SpanEdge::Leading, sp.byte_range.start));
         }
         for sp in &spans {
-            let at = a
-                .items
-                .iter()
-                .position(|n| n.byte_span().start >= sp.byte_range.end)
+            let at = (0..a.items.len())
+                .position(|item| a.item_range(item).unwrap_or_default().start >= sp.byte_range.end)
                 .unwrap_or(a.items.len() - 1);
             a.items
                 .insert(at, bnd(sp.span_id, SpanEdge::Trailing, sp.byte_range.end));
@@ -1975,19 +1985,17 @@ mod tests {
     #[test]
     fn unordered_atoms_report_the_item_error_before_hyphen_or_span_errors() {
         let o = LayoutOptions::default();
-        // The tail box's atoms are out of byte order. The hyphen at 1 must not
-        // binary-search them; the box itself is reported.
-        let mut a = with_items(vec![
+        // The tail box's atoms are out of byte order, so its bytes (first atom's
+        // start to last atom's end) do not meet the hyphen at 1: the hyphen
+        // reports itself without binary-searching them.
+        let a = with_items(vec![
             text_box(vec![atom(0, 1)]),
             hyphenated(1, opportunity(0, 1)).items[1].clone(),
             text_box(vec![atom(3, 4), atom(1, 2), atom(2, 3)]),
         ]);
-        if let WordNode::Box(BoxNode::Text { byte_range, .. }) = &mut a.items[2] {
-            *byte_range = TextRange::new(1, 4);
-        }
         assert_eq!(
             check_layout_inputs(&a, "abcd", &constraints(), &o),
-            Err(LayoutInputError::ItemNotSelfContained { item: 2 })
+            Err(LayoutInputError::InvalidHyphenOpportunity { item: 1 })
         );
         // Items out of order: the atomic span is not checked against them.
         let mut a = with_items(vec![text_box(vec![atom(1, 2)]), text_box(vec![atom(0, 1)])]);
@@ -2290,15 +2298,6 @@ mod tests {
             check_layout_inputs(&a, "abcd", &constraints(), &o),
             Err(LayoutInputError::ItemOutsideText { item: 0 })
         );
-        // A byte range that disagrees with its atoms is not self-contained.
-        let mut a = with_items(vec![text_box(vec![atom(0, 1), atom(1, 2)])]);
-        if let WordNode::Box(BoxNode::Text { byte_range, .. }) = &mut a.items[0] {
-            *byte_range = TextRange::new(0, 3);
-        }
-        assert_eq!(
-            check_layout_inputs(&a, "abcd", &constraints(), &o),
-            Err(LayoutInputError::ItemNotSelfContained { item: 0 })
-        );
         // A text box naming a run that does not exist.
         let mut a = with_items(vec![text_box(vec![atom(0, 1)])]);
         a.runs.clear();
@@ -2477,12 +2476,12 @@ mod tests {
     /// A staged text box (see [`text_box`]) with every cluster 4 wide.
     fn with_width(mut n: WordNode) -> WordNode {
         if let WordNode::Box(BoxNode::Text {
-            atom_range,
             natural_width,
+            cluster_range,
             ..
         }) = &mut n
         {
-            let slot = atom_range.start - STAGED;
+            let slot = cluster_range.start - STAGED;
             STAGE.with(|stage| {
                 let clusters = &mut stage.borrow_mut()[slot].1;
                 clusters.iter_mut().for_each(|c| c.natural_width = 4.0);

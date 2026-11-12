@@ -163,16 +163,13 @@ pub enum BoxNode {
     Text {
         /// Index into [`ParagraphAst::runs`].
         run_index: usize,
-        /// Source bytes: first atom's start to last atom's end.
-        byte_range: TextRange,
-        /// The box's atoms, as **paragraph-level** indices: `ast.atoms[atom_range]`.
-        /// Inside the run's own [`ShapingRun::atom_range`]. Never empty: a
-        /// text box owns at least one atom.
-        atom_range: Range<usize>,
         /// The box's clusters, as **paragraph-level** indices:
         /// `ast.clusters[cluster_range]`. Inside the run's own
-        /// [`ShapingRun::cluster_range`]. Each cluster's `atom_range` is
-        /// **run-local** (see [`ShapedCluster`]).
+        /// [`ShapingRun::cluster_range`] and never empty. Each cluster's
+        /// `atom_range` is **run-local** (see [`ShapedCluster`]).
+        ///
+        /// The box stores no atom or byte range: both follow in O(1) from its
+        /// first and last cluster ([`ParagraphAst::text_box`], spec §1.5, A2).
         cluster_range: Range<usize>,
         /// Sum of the clusters' `natural_width`s: a validated cache (spec §1.5,
         /// A2), because the line fitter reads it for every candidate;
@@ -441,22 +438,6 @@ pub enum WordNode {
 }
 
 impl WordNode {
-    /// The source bytes this node covers: the stored range for every variant
-    /// (a `Discretionary` owns its `byte_range`: empty for a soft opportunity,
-    /// the newline for a hard break). Zero-width nodes report an empty
-    /// `offset..offset` range, so every node has a position in the source.
-    #[must_use]
-    pub fn byte_span(&self) -> TextRange {
-        match self {
-            Self::Box(BoxNode::Text { byte_range, .. })
-            | Self::Box(BoxNode::InlineObject { byte_range, .. })
-            | Self::Box(BoxNode::SpanBoundary { byte_range, .. })
-            | Self::Glue(GlueNode { byte_range, .. })
-            | Self::Discretionary(DiscretionaryNode { byte_range, .. })
-            | Self::Tab { byte_range } => *byte_range,
-        }
-    }
-
     /// `true` for the only node a line may end at.
     #[must_use]
     pub const fn is_break_opportunity(&self) -> bool {
@@ -466,26 +447,31 @@ impl WordNode {
 
 /// Checks the invariants documented on [`ShapedCluster`] for one text payload
 /// (a text box, or an annotation's whole text). `atoms` and `clusters` are the
-/// payload's resolved slices; `base` is the run-local index of its first atom
-/// (`box.atom_range.start - run.atom_range.start`), which converts each
-/// cluster's run-local `atom_range` into an index of `atoms`. A payload without
-/// atoms is not self-contained: every text box owns source bytes.
+/// payload's resolved slices; `base` is the run-local index of its first atom,
+/// which converts each cluster's run-local `atom_range` into an index of
+/// `atoms`. A payload without atoms is not self-contained: every text box owns
+/// source bytes.
 pub(crate) fn text_is_self_contained(
-    byte_range: TextRange,
     atoms: &[GraphemeAtom],
     clusters: &[ShapedCluster],
     base: usize,
 ) -> bool {
-    let (Some(first), Some(last)) = (atoms.first(), atoms.last()) else {
-        return false;
-    };
-    byte_range.start == first.byte_range.start
-        && byte_range.end == last.byte_range.end
+    !atoms.is_empty()
         && atoms
             .windows(2)
             .all(|w| w[0].byte_range.end == w[1].byte_range.start)
         && atoms.iter().all(|a| a.byte_range.start < a.byte_range.end)
         && clusters_partition_atoms(atoms, clusters, base)
+}
+
+/// The source bytes of a non-empty, byte-ordered atom slice: the first atom's
+/// start to the last atom's end. `None` for an empty slice.
+pub(crate) fn atoms_byte_range(atoms: &[GraphemeAtom]) -> Option<TextRange> {
+    // A literal: validation, not construction, rejects an inverted span.
+    Some(TextRange {
+        start: atoms.first()?.byte_range.start,
+        end: atoms.last()?.byte_range.end,
+    })
 }
 
 fn clusters_partition_atoms(
@@ -500,10 +486,6 @@ fn clusters_partition_atoms(
             return false;
         }
         let local = r.start - base..r.end - base;
-        let (first, last) = (&atoms[local.start], &atoms[local.end - 1]);
-        if c.byte_range.start != first.byte_range.start || c.byte_range.end != last.byte_range.end {
-            return false;
-        }
         // Invariant 3: the cluster's flags are the per-flag aggregate of its atoms.
         if c.flags != AtomFlags::for_cluster(&atoms[local]) {
             return false;
@@ -524,15 +506,29 @@ pub struct TextBoxView<'a> {
     pub run_index: usize,
     /// Source bytes: first atom's start to last atom's end.
     pub byte_range: TextRange,
-    /// Paragraph-level index of `atoms[0]`: the start of the box's
-    /// `atom_range`.
+    /// Paragraph-level index of `atoms[0]`.
     pub atom_start: usize,
+    /// Run-local index of `atoms[0]`: subtracted from a cluster's run-local
+    /// `atom_range` it indexes `atoms`.
+    pub atom_base: usize,
     /// `ast.atoms[atom_range]` of the box.
     pub atoms: &'a [GraphemeAtom],
     /// `ast.clusters[cluster_range]` of the box.
     pub clusters: &'a [ShapedCluster],
     /// Sum of cluster widths, as cached on the box.
     pub natural_width: f32,
+}
+
+impl TextBoxView<'_> {
+    /// The source bytes of `cluster`, one of this box's clusters: its first
+    /// atom's start to its last atom's end, in O(1). `None` when the cluster's
+    /// run-local `atom_range` does not index this box's atoms.
+    #[must_use]
+    pub fn cluster_byte_range(&self, cluster: &ShapedCluster) -> Option<TextRange> {
+        let start = cluster.atom_range.start.checked_sub(self.atom_base)?;
+        let end = cluster.atom_range.end.checked_sub(self.atom_base)?;
+        atoms_byte_range(self.atoms.get(start..end)?)
+    }
 }
 
 /// A stretch of one shaping run to re-shape as a unit: the arguments
@@ -663,62 +659,73 @@ impl ParagraphAst {
     }
 
     /// The text box at `items[item]` with its slices resolved, or `None` when
-    /// that item is not a [`BoxNode::Text`] or one of its ranges is out of
-    /// bounds.
+    /// that item is not a [`BoxNode::Text`], has no cluster, or names a run or
+    /// a range that does not resolve.
+    ///
+    /// The atoms run from the first cluster's first atom to the last cluster's
+    /// last atom of the box's run, and the bytes from the first of those atoms
+    /// to the last: O(1), with nothing stored twice.
     #[must_use]
     pub fn text_box(&self, item: usize) -> Option<TextBoxView<'_>> {
         let WordNode::Box(BoxNode::Text {
             run_index,
-            byte_range,
-            atom_range,
             cluster_range,
             natural_width,
         }) = self.items.get(item)?
         else {
             return None;
         };
+        let run = self.runs.get(*run_index)?;
+        let clusters = self.clusters.get(cluster_range.clone())?;
+        let local = clusters.first()?.atom_range.start..clusters.last()?.atom_range.end;
+        let atoms = self.run_atoms(*run_index).get(local.clone())?;
         Some(TextBoxView {
             run_index: *run_index,
-            byte_range: *byte_range,
-            atom_start: atom_range.start,
-            atoms: self.atoms.get(atom_range.clone())?,
-            clusters: self.clusters.get(cluster_range.clone())?,
+            byte_range: atoms_byte_range(atoms)?,
+            atom_start: run.atom_range.start + local.start,
+            atom_base: local.start,
+            atoms,
+            clusters,
             natural_width: *natural_width,
         })
     }
 
+    /// The source bytes of `items[item]`: the stored range of every node but a
+    /// text box, whose bytes are those of its atoms
+    /// ([`text_box`](Self::text_box)). Zero-width nodes report an empty
+    /// `offset..offset` range, so every node has a position in the source.
+    /// `None` for an `item` past the end or a text box that does not resolve.
+    #[must_use]
+    pub fn item_range(&self, item: usize) -> Option<TextRange> {
+        match self.items.get(item)? {
+            WordNode::Box(BoxNode::Text { .. }) => Some(self.text_box(item)?.byte_range),
+            WordNode::Box(BoxNode::InlineObject { byte_range, .. })
+            | WordNode::Box(BoxNode::SpanBoundary { byte_range, .. })
+            | WordNode::Glue(GlueNode { byte_range, .. })
+            | WordNode::Discretionary(DiscretionaryNode { byte_range, .. })
+            | WordNode::Tab { byte_range } => Some(*byte_range),
+        }
+    }
+
     /// Checks the invariants documented on [`ShapedCluster`] for the text box at
-    /// `items[item]`: it has at least one atom, its atoms are contiguous and
-    /// tile its `byte_range`, its clusters partition its atoms in order with
-    /// matching byte ranges, and each cluster's flags aggregate its atoms'.
-    /// Every other node is trivially self-contained; an `item` past the end,
-    /// or a text box whose ranges do not resolve or leave its run's ranges,
-    /// is not.
+    /// `items[item]`: it resolves, its clusters lie inside its run's, its
+    /// atoms are non-empty and contiguous, its clusters partition them in
+    /// order, and each cluster's flags aggregate its atoms'. Every other node
+    /// is trivially self-contained; an `item` past the end, or a text box that
+    /// does not resolve or leaves its run's clusters, is not.
     #[must_use]
     pub fn is_self_contained(&self, item: usize) -> bool {
         match self.items.get(item) {
-            Some(WordNode::Box(BoxNode::Text {
-                atom_range,
-                cluster_range,
-                ..
-            })) => {
+            Some(WordNode::Box(BoxNode::Text { cluster_range, .. })) => {
                 let Some(view) = self.text_box(item) else {
                     return false;
                 };
                 let Some(run) = self.runs.get(view.run_index) else {
                     return false;
                 };
-                let inside_run = run.atom_range.start <= atom_range.start
-                    && atom_range.end <= run.atom_range.end
-                    && run.cluster_range.start <= cluster_range.start
-                    && cluster_range.end <= run.cluster_range.end;
-                inside_run
-                    && text_is_self_contained(
-                        view.byte_range,
-                        view.atoms,
-                        view.clusters,
-                        atom_range.start - run.atom_range.start,
-                    )
+                run.cluster_range.start <= cluster_range.start
+                    && cluster_range.end <= run.cluster_range.end
+                    && text_is_self_contained(view.atoms, view.clusters, view.atom_base)
             }
             Some(_) => true,
             None => false,
