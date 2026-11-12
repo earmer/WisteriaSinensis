@@ -98,9 +98,8 @@ pub enum LineInvariantError {
         /// The line's `line_height`.
         actual: f32,
     },
-    /// A visual run has no glyphs, bytes outside the line, or a font size,
-    /// fallback scale or variation coordinate that is non-finite or
-    /// non-positive.
+    /// A visual run has no glyphs, bytes outside the line, or a font size or
+    /// fallback scale that is non-finite or non-positive.
     InvalidVisualRun {
         /// Index into `visual_runs`.
         run: usize,
@@ -319,8 +318,8 @@ pub enum SlotErrorReason {
 pub enum AnnotationErrorReason {
     /// The line has no source bytes to annotate.
     OnEmptyLine,
-    /// A size, scale, offset, extent or variation coordinate is not finite,
-    /// or one that must be positive or non-negative is not.
+    /// A size, scale, offset or extent is not finite, or one that must be
+    /// positive or non-negative is not.
     InvalidMetrics,
     /// The orientation does not match the writing mode.
     OrientationMismatch,
@@ -611,8 +610,7 @@ impl PositionedLine {
             if !(r.font_size.is_finite()
                 && r.font_size > 0.0
                 && r.font.scale.is_finite()
-                && r.font.scale > 0.0
-                && r.variations.iter().all(|v| v.value().is_finite()))
+                && r.font.scale > 0.0)
             {
                 return Err(E::InvalidVisualRun { run });
             }
@@ -971,8 +969,7 @@ impl PositionedLine {
                 && finite_nonnegative(ann.max_overhang)
                 && finite_nonnegative(ann.block_extent)
                 && finite_nonnegative(ann.base_over)
-                && finite_nonnegative(ann.base_under)
-                && ann.variations.iter().all(|v| v.value().is_finite()))
+                && finite_nonnegative(ann.base_under))
             {
                 R::InvalidMetrics
             } else if !ann.orientation.is_valid(ctx.writing_mode, BidiLevel::LTR) {

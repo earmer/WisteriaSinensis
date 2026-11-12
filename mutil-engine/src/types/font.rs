@@ -141,11 +141,9 @@ pub struct FontFeature {
 /// One variable-font axis setting, for example `("wght", 650.0)` (spec §4.2
 /// req. 5: the cache key includes "variation settings").
 ///
-/// Fields are private so that `Eq` and `Hash` are sound for `f32`: the
-/// constructor maps `-0.0` to `0.0` and every NaN to the one canonical
-/// `f32::NAN`, and equality and hashing both use the bit pattern. A NaN
-/// coordinate is therefore representable (and rejected by input validation)
-/// rather than silently becoming a number.
+/// Parsed, not validated (spec §1.5, A3): [`new`](Self::new) refuses a
+/// coordinate that is not finite and maps `-0.0` to `0.0`, so equality and
+/// hashing by bit pattern are sound and agree with numeric equality.
 #[derive(Clone, Copy, Debug)]
 pub struct FontVariation {
     tag: [u8; 4],
@@ -153,18 +151,12 @@ pub struct FontVariation {
 }
 
 impl FontVariation {
-    /// Builds a setting, canonicalising `-0.0` to `0.0` and every NaN to
-    /// `f32::NAN`.
+    /// The setting of axis `tag` to `value`, with `-0.0` canonicalised to
+    /// `0.0`; `None` unless `value` is finite.
     #[must_use]
-    pub fn new(tag: [u8; 4], value: f32) -> Self {
-        let value = if value.is_nan() {
-            f32::NAN
-        } else if value == 0.0 {
-            0.0
-        } else {
-            value
-        };
-        Self { tag, value }
+    pub fn new(tag: [u8; 4], value: f32) -> Option<Self> {
+        let value = if value == 0.0 { 0.0 } else { value };
+        value.is_finite().then_some(Self { tag, value })
     }
 
     /// Four-byte axis tag.
@@ -224,8 +216,8 @@ impl FontFeatures {
     }
 
     /// Appends a variation-axis setting.
-    pub fn push_variation(&mut self, tag: [u8; 4], value: f32) {
-        self.variations.push(FontVariation::new(tag, value));
+    pub fn push_variation(&mut self, variation: FontVariation) {
+        self.variations.push(variation);
     }
 
     /// The feature settings as a slice.
@@ -379,9 +371,9 @@ mod tests {
         f.push(*b"kern", 1);
         f.push(*b"chws", 1);
         f.push(*b"kern", 0); // later wins
-        f.push_variation(*b"wght", 400.0);
-        f.push_variation(*b"wdth", 100.0);
-        f.push_variation(*b"wght", 650.0);
+        f.push_variation(FontVariation::new(*b"wght", 400.0).unwrap());
+        f.push_variation(FontVariation::new(*b"wdth", 100.0).unwrap());
+        f.push_variation(FontVariation::new(*b"wght", 650.0).unwrap());
         f.normalize();
         assert_eq!(
             f.as_slice(),
@@ -402,19 +394,22 @@ mod tests {
     }
 
     #[test]
-    fn variation_nan_is_canonical_and_equal_to_itself() {
-        let v = FontVariation::new(*b"wght", f32::NAN);
-        assert!(v.value().is_nan());
-        assert_eq!(v, FontVariation::new(*b"wght", -f32::NAN));
-        assert_ne!(v, FontVariation::new(*b"wght", 0.0));
+    fn a_variation_is_finite_by_construction() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(FontVariation::new(*b"wght", bad), None);
+        }
+        assert_eq!(
+            FontVariation::new(*b"wght", 650.0).map(|v| v.value()),
+            Some(650.0)
+        );
     }
 
     #[test]
     fn variation_negative_zero_hashes_like_zero() {
         use std::hash::{BuildHasher, RandomState};
         let s = RandomState::new();
-        let a = FontVariation::new(*b"slnt", -0.0);
-        let b = FontVariation::new(*b"slnt", 0.0);
+        let a = FontVariation::new(*b"slnt", -0.0).unwrap();
+        let b = FontVariation::new(*b"slnt", 0.0).unwrap();
         assert_eq!(a, b);
         assert_eq!(s.hash_one(a), s.hash_one(b));
     }

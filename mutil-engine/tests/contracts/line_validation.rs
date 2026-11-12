@@ -88,13 +88,6 @@ fn invalid_visual_run_font_instance_is_rejected() {
         Err(LineInvariantError::InvalidVisualRun { run: 0 })
     );
     l.visual_runs[0].font_size = 16.;
-    l.visual_runs[0]
-        .variations
-        .push(FontVariation::new(*b"wght", f32::INFINITY));
-    assert_eq!(
-        l.validate(&ctx()),
-        Err(LineInvariantError::InvalidVisualRun { run: 0 })
-    );
 }
 
 #[test]

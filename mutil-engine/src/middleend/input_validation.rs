@@ -59,9 +59,8 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::runs`.
         run: usize,
     },
-    /// A run's font size is not positive and finite, its script is unresolved (`Zyyy` / `Zinh`), one of
-    /// its font variation coordinates is not finite, or its `byte_range`
-    /// starts before the previous body run's `byte_range` ends (the body runs
+    /// A run's font size is not positive and finite, its script is unresolved
+    /// (`Zyyy` / `Zinh`), or its `byte_range` starts before the previous body run's `byte_range` ends (the body runs
     /// must be non-decreasing and non-overlapping in run order).
     InvalidShapingRun {
         /// Index into `ParagraphAst::runs`.
@@ -390,22 +389,14 @@ fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     Ok(())
 }
 
-/// A run's own shaping settings: its bytes fit `text`, its size is positive,
-/// its script resolved, its level representable and its variations finite.
+/// A run's own shaping settings: its bytes fit `text`, its size is positive
+/// and its script resolved.
 fn check_run(run: &ShapingRun, text: &str, index: usize) -> Result<(), LayoutInputError> {
     use LayoutInputError as E;
     if !fits(text, run.byte_range) {
         return Err(E::RunOutsideText { run: index });
     }
-    if !(run.font_size.is_finite()
-        && run.font_size > 0.0
-        && !run.script.is_unresolved()
-        && run
-            .features
-            .variations
-            .iter()
-            .all(|v| v.value().is_finite()))
-    {
+    if !(run.font_size.is_finite() && run.font_size > 0.0 && !run.script.is_unresolved()) {
         return Err(E::InvalidShapingRun { run: index });
     }
     Ok(())
@@ -2609,7 +2600,10 @@ mod tests {
         // An empty hard break is the sentinel by definition, so one before
         // the end is a sentinel out of place.
         assert_eq!(
-            check("ab\u{2028}", vec![newline(2, 2), newline(2, 5), sentinel(5)]),
+            check(
+                "ab\u{2028}",
+                vec![newline(2, 2), newline(2, 5), sentinel(5)]
+            ),
             bad(0)
         );
     }

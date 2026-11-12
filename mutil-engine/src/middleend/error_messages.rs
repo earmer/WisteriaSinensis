@@ -48,7 +48,7 @@ error_messages! {
         ParagraphSeparatorInText => "text contains a paragraph separator; split it first",
         InvalidStrut => "invalid strut metrics, font size or line height",
         RunOutsideText { run } => "run {run} does not fit the text",
-        InvalidShapingRun { run } => "run {run} has an unresolved script, an invalid font size or variation, or bytes that start before the previous run ends",
+        InvalidShapingRun { run } => "run {run} has an unresolved script, an invalid font size, or bytes that start before the previous run ends",
         InvalidRunStorage { run } => "run {run} has atom or cluster ranges that do not tile the paragraph storage, clusters that do not partition its atoms, or text boxes that do not cover its clusters",
         InvalidGlyphStorage { cluster } => "cluster {cluster} has a glyph range that does not tile the paragraph's glyphs",
         RunIndexOutOfRange { item } => "item {item} refers to a run that does not exist",
@@ -139,7 +139,7 @@ display_messages! {
 display_messages! {
     AnnotationErrorReason {
         OnEmptyLine => "the line has no source bytes",
-        InvalidMetrics => "a size, scale, offset, extent or variation is invalid",
+        InvalidMetrics => "a size, scale, offset or extent is invalid",
         OrientationMismatch => "the orientation does not match the writing mode",
         BaseOutsideLine => "the base is empty or outside the visible part of the line",
         NoGlyphs => "it has no glyphs",

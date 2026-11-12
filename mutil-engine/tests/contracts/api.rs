@@ -160,7 +160,7 @@ fn report_does_not_claim_uninstalled_unicode_components() {
 }
 #[test]
 fn font_instance_queries_accept_variations_without_changing_face_identity() {
-    let variations = [FontVariation::new(*b"wght", 650.)];
+    let variations = [FontVariation::new(*b"wght", 650.).unwrap()];
     let instance = FontInstanceRef {
         font: FontRef::unscaled(FontId(7)),
         font_size: 18.,

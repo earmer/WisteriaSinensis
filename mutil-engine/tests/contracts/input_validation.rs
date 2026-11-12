@@ -124,19 +124,6 @@ fn non_finite_cluster_glyph_measurement_is_rejected() {
 }
 
 #[test]
-fn non_finite_variation_and_impossible_bidi_level_are_rejected() {
-    let mut a = ast("abc");
-    a.runs[0]
-        .features
-        .variations
-        .push(FontVariation::new(*b"wght", f32::INFINITY));
-    assert_eq!(
-        check(&a, "abc"),
-        Err(LayoutInputError::InvalidShapingRun { run: 0 })
-    );
-}
-
-#[test]
 fn explicit_spacing_and_discretionary_equations() {
     let mut a = ast("a");
     a.runs[0].letter_spacing = 1.0;
@@ -228,23 +215,10 @@ fn a_hyphen_cut_one_byte_past_the_chain_end_is_rejected() {
 }
 
 #[test]
-fn nan_variation_is_rejected() {
-    let mut a = ast("abc");
-    a.runs[0]
-        .features
-        .variations
-        .push(FontVariation::new(*b"wght", f32::NAN));
-    assert_eq!(
-        check(&a, "abc"),
-        Err(LayoutInputError::InvalidShapingRun { run: 0 })
-    );
-}
-
-#[test]
-fn nan_variations_are_equal_and_canonical() {
-    let a = FontVariation::new(*b"wght", f32::NAN);
-    assert_eq!(a, FontVariation::new(*b"wght", -f32::NAN));
-    assert!(a.value().is_nan());
+fn a_non_finite_variation_cannot_be_built() {
+    for bad in [f32::NAN, f32::INFINITY] {
+        assert_eq!(FontVariation::new(*b"wght", bad), None);
+    }
 }
 
 #[test]

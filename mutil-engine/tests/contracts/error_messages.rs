@@ -49,7 +49,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidShapingRun { run: 1 },
-            "run 1 has an unresolved script, an invalid font size or variation, or bytes that start before the previous run ends",
+            "run 1 has an unresolved script, an invalid font size, or bytes that start before the previous run ends",
         ),
         (
             LayoutInputError::InvalidRunStorage { run: 1 },
@@ -423,7 +423,7 @@ fn every_reason_completes_its_error_message() {
         (A::OnEmptyLine, "the line has no source bytes"),
         (
             A::InvalidMetrics,
-            "a size, scale, offset, extent or variation is invalid",
+            "a size, scale, offset or extent is invalid",
         ),
         (
             A::OrientationMismatch,
