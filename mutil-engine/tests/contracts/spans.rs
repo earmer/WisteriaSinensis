@@ -269,6 +269,7 @@ fn bidi_spans_order_ids_boundaries_and_depth() {
         atoms.truncate(1);
         atoms[0].byte_range = TextRange::new(atoms[0].byte_range.start(), 2);
         clusters.truncate(1);
+        clusters[0].byte_range.end = 2;
         clusters[0].natural_width = 2.0;
     });
     a.bidi_spans = vec![bidi_span(1, 1, 2)];

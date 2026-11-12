@@ -128,6 +128,7 @@ fn explicit_spacing_and_discretionary_equations() {
     let mut a = ast("a");
     a.runs[0].letter_spacing = 1.0;
     a.atoms[0].flags |= AtomFlags::NO_LETTER_SPACING;
+    a.clusters[0].flags = a.atoms[0].flags;
     assert_eq!(check(&a, "a"), Err(LayoutInputError::InvalidSpacing));
     for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         let mut a = ast("a");

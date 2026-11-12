@@ -9,8 +9,8 @@
 //! structural fixture, not real Dutch).
 
 use crate::common::{
-    ADV, assert_send_sync_static, atom, cluster, ctx, paragraph, push_text, rebuild_items,
-    set_visual_width, shaping_run, single_slot,
+    ADV, assert_send_sync_static, atom, ctx, paragraph, push_text, rebuild_items, set_visual_width,
+    shaping_run, single_slot,
 };
 use mutil_engine::*;
 
@@ -22,37 +22,34 @@ const TAB_W: f32 = 8.0;
 const SPACE_W: f32 = 4.0;
 const WRAP_WIDTH: f32 = 200.0;
 
+fn cluster(base: usize, local: usize) -> ShapedCluster {
+    crate::common::cluster(base, local)
+}
+
 fn run() -> ShapingRun {
     shaping_run(TEXT, "nl-NL")
 }
 
 fn word(ast: &mut ParagraphAst, start: usize, end: usize) -> WordNode {
     let atoms: Vec<_> = (start..end).map(atom).collect();
-    let clusters: Vec<_> = (0..atoms.len()).map(cluster).collect();
+    let clusters: Vec<_> = (0..atoms.len()).map(|i| cluster(start, i)).collect();
     push_text(ast, 0, atoms, clusters)
 }
 
-/// A glyph pen-positioned at `x` for a cluster with source bytes `bytes`.
-fn glyph(&(c, bytes): &(&ShapedCluster, TextRange), x: f32, hanging: bool) -> PositionedGlyph {
+fn glyph(c: &ShapedCluster, x: f32, hanging: bool) -> PositionedGlyph {
     PositionedGlyph {
         glyph_id: 1,
         x,
         x_offset: 0.0,
         y_offset: 0.0,
         advance: c.natural_width,
-        byte_range: Some(bytes),
+        byte_range: Some(c.byte_range),
         is_hanging: hanging,
     }
 }
 
-/// The clusters of text box `item`, each with its source bytes.
-fn clusters_of(ast: &ParagraphAst, item: usize) -> Vec<(&ShapedCluster, TextRange)> {
-    ast.text_box(item).map_or_else(Vec::new, |view| {
-        view.clusters
-            .iter()
-            .map(|c| (c, view.cluster_byte_range(c).expect("a resolvable cluster")))
-            .collect()
-    })
+fn clusters_of(ast: &ParagraphAst, item: usize) -> &[ShapedCluster] {
+    ast.text_box(item).map_or(&[], |view| view.clusters)
 }
 
 /// `true` when every item of `ast` is self-contained.
@@ -217,7 +214,7 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
     let oma = clusters_of(ast, 0);
     let atje = clusters_of(ast, 2);
     let word_b = clusters_of(ast, 7);
-    let comma = clusters_of(ast, 8)[0];
+    let comma = &clusters_of(ast, 8)[0];
 
     // Line 0: "oma" + generated hyphen. Hyphen glyph is synthesized, no bytes.
     let mut l0_glyphs: Vec<_> = oma
@@ -248,19 +245,19 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
     // `PositionedInlineBox` and `PositionedTab`. `visual_width` stops before ",".
     let mut pen = 0.0;
     let mut l1_glyphs = Vec::new();
-    for c in &atje {
+    for c in atje.iter() {
         l1_glyphs.push(glyph(c, pen, false));
-        pen += c.0.natural_width;
+        pen += c.natural_width;
     }
     pen += SPACE_W;
     let box_x = pen;
     pen += BOX_W + TAB_W;
-    for c in &word_b {
+    for c in word_b {
         l1_glyphs.push(glyph(c, pen, false));
-        pen += c.0.natural_width;
+        pen += c.natural_width;
     }
     let body_width = pen;
-    l1_glyphs.push(glyph(&comma, body_width, true));
+    l1_glyphs.push(glyph(comma, body_width, true));
     let line1 = PositionedLine {
         byte_range: TextRange::new(3, 18),
         visible_byte_end: 15,
@@ -331,7 +328,7 @@ fn frontend_ast_uses_every_word_node_variant_and_tiles_the_text() {
     // Nodes tile the text exactly: no cluster was split or lost.
     let covered: usize = (0..ast.items.len())
         .flat_map(|item| clusters_of(&ast, item))
-        .map(|(_, bytes)| bytes.len())
+        .map(|c| c.byte_range.len())
         .sum();
     assert_eq!(covered, 7 + 2 + 1); // "omaatje" + "go" + ","
 }
@@ -398,7 +395,7 @@ fn shaping_bridge_applies_both_spelling_edits() {
         }
     );
     // Seeded: shapers append to the buffers and never clear them.
-    let mut out = vec![cluster(0)];
+    let mut out = vec![cluster(0, 0)];
     let mut out_glyphs = vec![RawShapedGlyph::default()];
     // Regular break: line 0 ends at the break, line 1 starts after it.
     shaper.reshape_window(
@@ -432,7 +429,7 @@ fn shaping_bridge_applies_both_spelling_edits() {
         &mut out,
         &mut out_glyphs,
     );
-    assert_eq!(out, vec![cluster(0)]);
+    assert_eq!(out, vec![cluster(0, 0)]);
     assert_eq!(out_glyphs, vec![RawShapedGlyph::default()]);
 }
 
@@ -590,8 +587,10 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
             .map(|i| {
                 let atoms = vec![atom(i)];
                 let cluster = ShapedCluster {
+                    byte_range: atoms[0].byte_range,
                     atom_range: 0..1,
                     font: FontRef::unscaled(FontId(1)),
+                    flags: AtomFlags::EMPTY,
                     glyph_range: 0..0,
                     natural_width: 0.0,
                     safe_to_break_before: true,
@@ -603,9 +602,9 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
     });
     assert!(all_self_contained(&ast));
     let mut next = 0;
-    for (_, bytes) in (0..ast.items.len()).flat_map(|item| clusters_of(&ast, item)) {
-        assert_eq!(bytes.start(), next);
-        next = bytes.end();
+    for c in (0..ast.items.len()).flat_map(|item| clusters_of(&ast, item)) {
+        assert_eq!(c.byte_range.start, next);
+        next = c.byte_range.end;
     }
     assert_eq!(next, text_len);
 }
@@ -613,36 +612,42 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
 #[test]
 fn ligature_cluster_takes_justify_after_from_its_last_atom_only() {
     let atom_with = |off: usize, flags: AtomFlags| GraphemeAtom { flags, ..atom(off) };
-    // The flags of the one cluster of a box over `atoms`, derived from them.
-    let flags_of = |atoms: Vec<GraphemeAtom>| {
-        let mut c = cluster(0);
+    // Whether one box over `atoms` with a single cluster of `flags` is self-contained.
+    let contained = |atoms: Vec<GraphemeAtom>, flags: AtomFlags| {
+        let mut c = cluster(0, 0);
         c.atom_range = 0..atoms.len();
+        c.byte_range = TextRange::new(0, atoms.len());
+        c.flags = flags;
         let mut ast = crate::common::ast("");
         rebuild_items(&mut ast, |ast| vec![push_text(ast, 0, atoms, vec![c])]);
-        assert!(ast.is_self_contained(0));
-        let view = ast.text_box(0).unwrap();
-        view.cluster_flags(&view.clusters[0]).unwrap()
+        ast.is_self_contained(0)
     };
     let allow = AtomFlags::ALLOW_CJK_JUSTIFY_AFTER;
 
     // Only the last atom has the opportunity: the cluster has it.
     let atoms = vec![atom_with(0, AtomFlags::EMPTY), atom_with(1, allow)];
-    assert!(flags_of(atoms).contains(allow));
+    let aggregated = AtomFlags::for_cluster(&atoms);
+    assert!(aggregated.contains(allow));
+    assert!(contained(atoms.clone(), aggregated));
+    // A naive OR is the same here, but the cluster flags must equal the aggregate.
+    assert!(!contained(atoms, AtomFlags::EMPTY));
+
     // Only the first atom has it: the opportunity lies *inside* the ligature,
-    // so the cluster does not have it (a naive OR would).
+    // so the cluster must not have it, and a naive OR is rejected.
     let atoms = vec![atom_with(0, allow), atom_with(1, AtomFlags::EMPTY)];
-    assert!(!flags_of(atoms).contains(allow));
+    let aggregated = AtomFlags::for_cluster(&atoms);
+    assert!(!aggregated.contains(allow));
+    assert!(contained(atoms.clone(), aggregated));
+    assert!(!contained(atoms.clone(), allow));
+
     // Open punctuation from the first atom, close punctuation from the last.
     let atoms = vec![
         atom_with(0, AtomFlags::IS_OPEN_PUNCT),
         atom_with(1, AtomFlags::IS_CLOSE_PUNCT),
     ];
-    assert!(flags_of(atoms).contains(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT));
-    let atoms = vec![
-        atom_with(0, AtomFlags::IS_CLOSE_PUNCT),
-        atom_with(1, AtomFlags::IS_OPEN_PUNCT),
-    ];
-    assert!(!flags_of(atoms).intersects(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT));
+    let f = AtomFlags::for_cluster(&atoms);
+    assert!(f.contains(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT));
+    assert!(contained(atoms, f));
 }
 
 // Counter-examples on the assembled line.

@@ -148,12 +148,11 @@ fn zero_width_node_may_sit_on_a_content_boundary() {
 #[test]
 fn text_box_atoms_must_tile_their_byte_range() {
     let mut a = ast("abc");
-    // Drop the middle atom (and its cluster): the clusters still partition
-    // the two remaining atoms, but `0..1` + `2..3` leaves byte 1 unrepresented.
+    // Drop the middle atom (and its cluster): `0..1` + `2..3` still spans
+    // `0..3`, but byte 1 is unrepresented.
     edit_text_box(&mut a, 0, |atoms, clusters| {
         atoms.remove(1);
-        clusters.remove(1);
-        clusters[1].atom_range = 1..2;
+        clusters.retain(|c| c.byte_range != TextRange::new(1, 2));
     });
     if let WordNode::Box(BoxNode::Text { natural_width, .. }) = &mut a.items[0] {
         *natural_width = 2.;

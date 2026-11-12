@@ -12,17 +12,19 @@ pub type ByteIndex = usize;
 
 /// Half-open byte range `[start, end)` (spec §2.1).
 ///
-/// Parsed, not validated (spec §1.5, A3): the fields are private, and every
-/// constructor keeps `start <= end`, so a range that exists is ordered.
-/// [`new`](Self::new) asserts it, for ranges the caller computes;
-/// [`try_new`](Self::try_new) returns `None` instead, for offsets read from
-/// outside. Whether a range fits a text and falls on its code point
-/// boundaries depends on the text, and is checked where the text is known.
+/// The fields are public: a range is a coordinate primitive used throughout
+/// the engine (spec §2.1). [`new`](Self::new) asserts `start <= end` for ranges
+/// the caller computes; [`try_new`](Self::try_new) returns `None` for offsets
+/// read from outside. Whether a range falls on the code point boundaries of a
+/// particular text depends on that text, so it is checked where the text is
+/// known, not by a constructor (spec §1.5, A3).
 /// Layout: two `usize`s, 16 bytes on 64-bit targets, no padding.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TextRange {
-    start: ByteIndex,
-    end: ByteIndex,
+    /// Inclusive start offset.
+    pub start: ByteIndex,
+    /// Exclusive end offset.
+    pub end: ByteIndex,
 }
 
 impl TextRange {

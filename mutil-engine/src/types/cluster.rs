@@ -1,6 +1,6 @@
 //! Physical shaping output: glyphs grouped into clusters (spec §2.3).
 
-use super::{FontRef, GraphemeAtom, TextRange};
+use super::{AtomFlags, FontRef, TextRange};
 use core::ops::Range;
 
 /// One glyph as produced by a shaping backend, before line layout.
@@ -71,12 +71,10 @@ pub struct RawShapedGlyph {
 ///    false`. If a `Hyphenate` break at that seam is not taken, the middle-end
 ///    re-shapes both sides together (`ParagraphAst::rejoin_windows`).
 /// 2. **Within a box, clusters partition the atoms.** In logical order the
-///    `atom_range`s are contiguous and non-empty, and start at the box's
-///    first atom and end after its last. A cluster stores no byte range: its
-///    bytes are its atoms' ([`ShapedCluster::byte_range`]).
-/// 3. **Flags are derived.** A cluster stores no flags: they are the
-///    per-flag aggregate of its atoms (`AtomFlags::for_cluster`,
-///    `TextBoxView::cluster_flags`).
+///    `atom_range`s are contiguous, non-empty, start at the box's first atom
+///    and end after its last, and each `byte_range` runs from its first atom's
+///    start to its last atom's end.
+/// 3. **Flags aggregate per flag.** `flags == AtomFlags::for_cluster(atoms[atom_range])`.
 ///
 /// ## Break-safety polarity (HarfBuzz `[B1]`)
 ///
@@ -86,12 +84,19 @@ pub struct RawShapedGlyph {
 /// safe. `true` means the corresponding HarfBuzz unsafe flag is absent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapedCluster {
+    /// Source bytes covered by the cluster.
+    pub byte_range: TextRange,
     /// Atoms covered: `K >= 1`, and a cluster never splits an atom. `K > 1`
     /// means a ligature (§6.2 gives it K caret sub-slots). Explicitly a
     /// [`Range<usize>`], **run-local**; see "Index spaces" above.
     pub atom_range: Range<usize>,
     /// Font used for this cluster, with the fallback scale.
     pub font: FontRef,
+    /// Per-flag aggregate of the covered atoms' flags, as computed by
+    /// `AtomFlags::for_cluster`: open-punctuation from the first atom,
+    /// `ALLOW_CJK_JUSTIFY_AFTER` and close-punctuation from the last, all other
+    /// flags ORed.
+    pub flags: AtomFlags,
     /// The cluster's glyphs, as a range of the glyph buffer it is stored
     /// beside (see "Index spaces" above). Glyphs are in **logical** order,
     /// including the order within the cluster; backends that return visual
@@ -112,21 +117,6 @@ pub struct ShapedCluster {
 }
 
 impl ShapedCluster {
-    /// The source bytes of the cluster: from its first atom's start to its
-    /// last atom's end, where `run_atoms` is the slice its run-local
-    /// `atom_range` indexes (the run's atoms, or an annotation's). `None` when
-    /// the range does not resolve, is empty, or covers atoms that run
-    /// backwards.
-    #[must_use]
-    pub fn byte_range(&self, run_atoms: &[GraphemeAtom]) -> Option<TextRange> {
-        let atoms = run_atoms.get(self.atom_range.clone())?;
-        // Atoms out of byte order give no range.
-        TextRange::try_new(
-            atoms.first()?.byte_range.start(),
-            atoms.last()?.byte_range.end(),
-        )
-    }
-
     /// Number of atoms covered (`K`). Assumes a validated cluster
     /// (`atom_range.start <= atom_range.end`); an inverted range counts as 0
     /// rather than panicking or wrapping.
@@ -164,7 +154,7 @@ const _: () = {
     assert!(core::mem::size_of::<RawShapedGlyph>() == 20);
     assert!(core::mem::align_of::<RawShapedGlyph>() == 4);
     // The glyphs live in the paragraph buffer; run-wide properties on the run.
-    assert!(core::mem::size_of::<ShapedCluster>() == 48);
+    assert!(core::mem::size_of::<ShapedCluster>() == 64);
 };
 
 #[cfg(test)]
@@ -174,8 +164,10 @@ mod tests {
 
     fn cluster(atoms: Range<usize>, brk: bool, cat: bool) -> ShapedCluster {
         ShapedCluster {
+            byte_range: TextRange::new(0, 2),
             atom_range: atoms,
             font: FontRef::unscaled(FontId(0)),
+            flags: AtomFlags::EMPTY,
             glyph_range: 0..0,
             natural_width: 0.0,
             safe_to_break_before: brk,

@@ -192,6 +192,7 @@ fn ruby_rejects_glue_and_cluster_internal_edges() {
     let mut a = ast("ab");
     edit_text_box(&mut a, 0, |_, clusters| {
         clusters.truncate(1);
+        clusters[0].byte_range.end = 2;
         clusters[0].atom_range.end = 2;
         clusters[0].natural_width = 2.0;
     });
@@ -212,6 +213,7 @@ fn emphasis_mark_is_one_atom_even_when_it_is_two_chars() {
     ann.annotation_text = "\u{FE45}\u{FE00}".into();
     ann.run.byte_range = TextRange::new(0, 6);
     ann.atoms[0].byte_range = TextRange::new(0, 6);
+    ann.clusters[0].byte_range = TextRange::new(0, 6);
     assert!(check(&a, "ab").is_ok());
 }
 

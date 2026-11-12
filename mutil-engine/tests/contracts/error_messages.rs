@@ -53,7 +53,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidRunStorage { run: 1 },
-            "run 1 has atom or cluster ranges that do not tile the paragraph storage, clusters that do not partition its atoms, or text boxes that do not cover its clusters",
+            "run 1 has atom or cluster ranges that do not tile the paragraph storage, or its text boxes do not cover them",
         ),
         (
             LayoutInputError::RunIndexOutOfRange { item: 2 },
@@ -73,7 +73,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::ItemNotSelfContained { item: 2 },
-            "text box 2 has no clusters, does not resolve to contiguous atoms, has inconsistent break-safety flags, or has a cluster range outside or out of order in its run",
+            "text box 2 has no atoms, does not partition them into clusters, has inconsistent break-safety flags, or has ranges outside or out of order in its run",
         ),
         (
             LayoutInputError::InvalidInlineBox { item: 2 },

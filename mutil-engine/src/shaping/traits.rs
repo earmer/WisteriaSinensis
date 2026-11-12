@@ -143,9 +143,8 @@ pub trait TextShaper: Send + Sync {
     /// merges per-character shaping clusters itself.
     ///
     /// `text` is the **whole paragraph text**, with `run.byte_range` selecting
-    /// the run, so that atom byte offsets are absolute paragraph indices and
-    /// need no translation between layers. A cluster stores no bytes: they are
-    /// its atoms' (`ShapedCluster::byte_range`). The backend may use the text outside
+    /// the run, so that cluster byte offsets are absolute paragraph indices and
+    /// need no translation between layers. The backend may use the text outside
     /// the run as shaping context (e.g. HarfBuzz pre- and post-context).
     ///
     /// **Cross-font limit.** OpenType contextual lookups, kerning and `chws`

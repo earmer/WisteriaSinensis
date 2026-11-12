@@ -16,12 +16,12 @@ pub use annotation::{
     AnnotationAlignment, AnnotationKind, AnnotationSide, AnnotationSpan, BidiControlKind,
     ExplicitBidiSpan, MAX_BIDI_SPAN_DEPTH,
 };
+pub(crate) use ast::text_is_self_contained;
 pub use ast::{
     BoxNode, BoxOverflowPolicy, BreakAction, DiscretionaryNode, GlueKind, GlueNode, GlueTier,
     HyphenOpportunity, ParagraphAst, RepeatedOperator, ReplacementText, ReshapeWindow, SpanEdge,
     TextBoxView, WordNode,
 };
-pub(crate) use ast::{atoms_byte_range, text_is_self_contained};
 pub use options::{AutospaceProfile, FrontendOptions, LocalePolicy, QuotePolicy};
 pub use run::{ShapingRun, TextDecoration};
 pub use span::{
