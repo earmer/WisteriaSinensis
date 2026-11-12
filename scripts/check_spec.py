@@ -95,10 +95,11 @@ def matching(code: str, open_at: int, pair: str = "{}") -> int:
 def split_top(body: str) -> list[str]:
     """Splits `body` at commas that are not nested in brackets or generics."""
     parts, depth, cur = [], 0, []
-    for ch in body:
+    for i, ch in enumerate(body):
         if ch in "([{<":
             depth += 1
-        elif ch in ")]}>":
+        elif ch in ")]}>" and not (ch == ">" and i > 0 and body[i - 1] == "-"):
+            # The `>` of a `->` arrow closes nothing.
             depth -= 1
         if ch == "," and depth == 0:
             parts.append("".join(cur))
@@ -132,7 +133,7 @@ def parse_types(code: str, public_only: bool) -> dict[str, TypeDef]:
         elif code[j] == "(":
             end = matching(code, j, "()")
             items = split_top(code[j + 1 : end - 1])
-            public = [i for i in items if strip_attrs(i).startswith("pub")]
+            public = [i for i in items if re.match(r"pub\s", strip_attrs(i))]
             t.tuple_arity = len(public)
             t.opaque = bool(items) and not public
         else:
@@ -286,12 +287,15 @@ def main() -> int:
         seen[rm.group(1)] = seen.get(rm.group(1), 0) + 1
     errors += [f"requirement id {i} appears {n} times" for i, n in sorted(seen.items()) if n > 1]
 
-    # 5. Every cited requirement id is defined (ids of a known prefix only, so
-    # that names such as UTF-8 are not mistaken for citations).
+    # 5. Every cited requirement id is defined. A bare id counts only with a
+    # known prefix, so that names such as UTF-8 are not mistaken for
+    # citations; a bracketed one counts whatever its prefix, so that a typo
+    # such as [AAX-1] is caught.
     prefixes = {i.rsplit("-", 1)[0] for i in seen}
-    for cm in re.finditer(rf"\b({REQ_ID})\b", spec):
-        rid = cm.group(1)
-        if rid.rsplit("-", 1)[0] in prefixes and rid not in seen:
+    for cm in re.finditer(rf"(\[)?\b({REQ_ID})\b(\])?", spec):
+        rid, bracketed = cm.group(2), bool(cm.group(1) and cm.group(3))
+        known = rid.rsplit("-", 1)[0] in prefixes
+        if (known or bracketed) and rid not in seen:
             errors.append(f"requirement {rid} is cited but never defined")
 
     for e in dict.fromkeys(errors):

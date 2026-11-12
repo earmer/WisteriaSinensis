@@ -98,18 +98,19 @@ impl TextRange {
         Self { start, end }
     }
 
-    /// Length in bytes.
+    /// Length in bytes. An inverted range (`start > end`, which the public
+    /// fields can express) covers no bytes, so its length is 0.
     #[inline]
     #[must_use]
     pub const fn len(&self) -> usize {
-        self.end - self.start
+        self.end.saturating_sub(self.start)
     }
 
-    /// `true` when the range covers no bytes.
+    /// `true` when the range covers no bytes: empty or inverted.
     #[inline]
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.start == self.end
+        self.start >= self.end
     }
 
     /// `true` when `offset` lies in `[start, end)`.

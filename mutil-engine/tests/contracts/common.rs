@@ -217,11 +217,21 @@ pub fn edit_text_box(
     edit(&mut atoms, &mut clusters);
     let delta_atoms = atoms.len() as isize - atom_range.len() as isize;
     let delta_clusters = clusters.len() as isize - cluster_range.len() as isize;
+    let new_cluster_end = cluster_range.start + clusters.len();
     ast.atoms.splice(atom_range.clone(), atoms);
     ast.clusters.splice(cluster_range.clone(), clusters);
     let shift = |r: &mut Range<usize>, by: isize| {
         *r = r.start.wrapping_add_signed(by)..r.end.wrapping_add_signed(by);
     };
+    // The run's later clusters index its atoms run-locally: rebase them past
+    // the edit. Other runs' run-local indices do not move.
+    let run_cluster_end = ast.runs[run]
+        .cluster_range
+        .end
+        .wrapping_add_signed(delta_clusters);
+    for c in &mut ast.clusters[new_cluster_end..run_cluster_end] {
+        shift(&mut c.atom_range, delta_atoms);
+    }
     ast.runs[run].atom_range.end = ast.runs[run]
         .atom_range
         .end

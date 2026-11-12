@@ -924,9 +924,15 @@ impl PositionedLine {
                 )
                 .collect(),
         );
-        let line_is_empty = self.visual_boxes.is_empty()
+        // No entity owns a source offset: an empty line, or an ellipsis-only
+        // line whose glyphs are all synthesized. Its one anchor is the base
+        // level at the line's offset.
+        let nothing_owns_source = self.visual_boxes.is_empty()
             && self.tabs.is_empty()
-            && self.visual_runs.iter().all(|r| r.glyphs.is_empty());
+            && self
+                .visual_runs
+                .iter()
+                .all(|r| r.glyphs.iter().all(|g| g.byte_range.is_none()));
         for (index, stop) in self.caret_stops.iter().enumerate() {
             let in_order = index == 0 || {
                 let previous = self.caret_stops[index - 1].x;
@@ -939,7 +945,7 @@ impl PositionedLine {
                     .chain(objects.touching(stop.offset).map(|(_, level)| *level))
                     .peekable();
                 if owners.peek().is_none() {
-                    line_is_empty && stop.level == ctx.base_direction.base_level()
+                    nothing_owns_source && stop.level == ctx.base_direction.base_level()
                 } else {
                     owners.any(|level| level == stop.level)
                 }

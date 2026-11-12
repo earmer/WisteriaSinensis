@@ -71,6 +71,23 @@ fn malformed_atomic_fragments_are_rejected() {
         bidi_level: BidiLevel::LTR,
     }];
     assert_eq!(l.validate(&ctx()), Ok(()));
+    // Inverted ranges, which the public fields can express, are rejected
+    // rather than accepted as coverage.
+    for (full, fragment) in [((2, 1), (2, 1)), ((0, 1), (1, 0))] {
+        let mut inverted = l.clone();
+        inverted.atomic_fragments[0].full_byte_range = TextRange {
+            start: full.0,
+            end: full.1,
+        };
+        inverted.atomic_fragments[0].fragment_byte_range = TextRange {
+            start: fragment.0,
+            end: fragment.1,
+        };
+        assert_eq!(
+            inverted.validate(&ctx()),
+            Err(LineInvariantError::InvalidAtomicFragment { index: 0 })
+        );
+    }
     l.atomic_fragments[0].width = f32::NAN;
     assert_eq!(
         l.validate(&ctx()),
@@ -342,6 +359,22 @@ fn ellipsis_only_line_rejects_every_body_entity() {
     l.visual_runs = vec![r];
     set_visual_width(&mut l, 10.);
     assert_eq!(l.validate(&ctx()), Ok(()));
+    // The truncation anchor: a base-level caret stop at the line's offset,
+    // although the synthesized glyph owns no source.
+    let mut anchored = l.clone();
+    anchored.caret_stops = vec![CaretStop {
+        x: 0.,
+        offset: 0,
+        affinity: CaretAffinity::Downstream,
+        level: BidiLevel::LTR,
+        line: 0,
+    }];
+    assert_eq!(anchored.validate(&ctx()), Ok(()));
+    anchored.caret_stops[0].level = BidiLevel::RTL;
+    assert_eq!(
+        anchored.validate(&ctx()),
+        Err(LineInvariantError::InvalidCaretStop { index: 0 })
+    );
     let mut body = l.clone();
     body.visual_runs[0].glyphs.push(glyph(10., 10., false));
     assert_eq!(

@@ -153,6 +153,9 @@ fn text_box_atoms_must_tile_their_byte_range() {
     edit_text_box(&mut a, 0, |atoms, clusters| {
         atoms.remove(1);
         clusters.retain(|c| c.byte_range != TextRange::new(1, 2));
+        // Keep the last cluster on the last atom, so that only the byte gap
+        // is wrong.
+        clusters[1].atom_range = 1..2;
     });
     if let WordNode::Box(BoxNode::Text { natural_width, .. }) = &mut a.items[0] {
         *natural_width = 2.;
