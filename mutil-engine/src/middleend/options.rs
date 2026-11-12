@@ -4,7 +4,7 @@ use super::tolerance::tolerance;
 use super::{HangSide, LayoutInputError};
 use crate::frontend::is_line_or_paragraph_separator;
 use crate::types::{Direction, FontMetrics, WritingMode};
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// Hanging at the trailing edge of a line (spec §5 Stage 1.3; CSS Text 4
@@ -260,25 +260,37 @@ pub enum SoftHyphenPolicy {
 /// Tab-stop configuration: stops at every multiple of `step` from the line's
 /// left edge. **[Design decision]**: the spec names `next_tab_stop(x)` without
 /// defining the stops; a uniform step is the minimal configuration.
+///
+/// Parsed, not validated (spec §1.5, A3): [`new`](Self::new) refuses a step
+/// that is not finite and positive, so a `TabStops` that exists is usable.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabStops {
-    /// Distance between stops, in layout units. Must be finite and positive
-    /// ([`TabStops::is_valid`]; `InvalidConstraints` otherwise).
-    pub step: f32,
+    step: f32,
 }
 
 impl TabStops {
-    /// `true` when `step` is finite and positive.
+    /// Stops every 8 layout units, the default of [`LayoutConstraints`].
+    pub const DEFAULT: Self = Self { step: 8.0 };
+
+    /// Stops every `step` layout units, or `None` unless `step` is finite and
+    /// positive.
     #[must_use]
-    pub fn is_valid(&self) -> bool {
-        self.step.is_finite() && self.step > 0.0
+    pub fn new(step: f32) -> Option<Self> {
+        (step.is_finite() && step > 0.0).then_some(Self { step })
+    }
+
+    /// The distance between stops: finite and positive.
+    #[must_use]
+    pub const fn step(self) -> f32 {
+        self.step
     }
 
     /// The first stop strictly right of `x` (`x` on a stop moves to the next).
-    /// Returns None when invalid or no finite forward stop is representable.
+    /// Returns None when `x` is not finite or no finite forward stop is
+    /// representable.
     #[must_use]
     pub fn next_stop(&self, x: f32) -> Option<f32> {
-        if !self.is_valid() || !x.is_finite() {
+        if !x.is_finite() {
             return None;
         }
         let next = ((x / self.step).floor() + 1.0) * self.step;
@@ -326,20 +338,19 @@ impl Default for LayoutConstraints {
             hanging_indent: 0.0,
             geometry_provider: None,
             wrap_width: f32::INFINITY,
-            tab_stops: TabStops { step: 8.0 },
+            tab_stops: TabStops::DEFAULT,
         }
     }
 }
 
 impl LayoutConstraints {
-    /// Checks the width, the indents and the tab stops.
+    /// Checks the width and the indents (tab stops are valid by construction).
     ///
     /// * `wrap_width` is positive and not NaN (positive infinity is allowed);
     /// * both indents are finite;
     /// * without a geometry provider the standard slot starts at the indent and
     ///   must lie in the wrap envelope `[0, wrap_width]`, so each indent is in
-    ///   `[0, wrap_width)`; negative indentation is not representable;
-    /// * the tab stops are valid.
+    ///   `[0, wrap_width)`; negative indentation is not representable.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         let indent_is_in_envelope = |indent: f32| indent >= 0.0 && indent < self.wrap_width;
@@ -349,7 +360,6 @@ impl LayoutConstraints {
             && (self.geometry_provider.is_some()
                 || (indent_is_in_envelope(self.first_line_indent)
                     && indent_is_in_envelope(self.hanging_indent)))
-            && self.tab_stops.is_valid()
     }
 
     /// The geometry of line `line_index` over the block envelope
@@ -371,11 +381,12 @@ impl LayoutConstraints {
         } else {
             self.hanging_indent
         };
+        // An indent that leaves no well-formed slot (which
+        // `LayoutConstraints::is_valid` rejects) leaves no slot at all.
         LineGeometry {
-            slots: smallvec![InlineSlotConstraint {
-                start,
-                end: self.wrap_width,
-            }],
+            slots: InlineSlotConstraint::new(start, self.wrap_width)
+                .into_iter()
+                .collect(),
             next_feature_block_offset: None,
         }
     }
@@ -472,38 +483,53 @@ impl LineClampPolicy {
 
 /// One available inline interval; only its end may be positive infinity.
 ///
-/// Besides being well formed ([`is_valid`](Self::is_valid)), a slot of a line
-/// lies in the line's inline envelope (see
-/// [`lies_in_envelope`](Self::lies_in_envelope)).
+/// Parsed, not validated (spec §1.5, A3): [`new`](Self::new) accepts only a
+/// finite start, an end strictly beyond it and a finite width (or an end of
+/// positive infinity), so a constraint that exists is well formed. Whether it
+/// suits a particular line, inside that line's inline envelope, depends on
+/// the container and is checked there
+/// ([`lies_in_envelope`](Self::lies_in_envelope)).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InlineSlotConstraint {
-    /// Finite inline start; `>= 0` within the line's envelope.
-    pub start: f32,
-    /// End strictly beyond start, possibly positive infinity (only when the
-    /// wrap width is infinite); `<= wrap_width` within the line's envelope.
-    pub end: f32,
+    start: f32,
+    end: f32,
 }
 
 impl InlineSlotConstraint {
+    /// The interval `[start, end)`, or `None` unless `start` is finite, `end`
+    /// lies strictly beyond it, and `end` is finite with a finite width or is
+    /// positive infinity.
+    #[must_use]
+    pub fn new(start: f32, end: f32) -> Option<Self> {
+        let is_well_formed = start.is_finite()
+            && end > start
+            && (end == f32::INFINITY || (end.is_finite() && (end - start).is_finite()));
+        is_well_formed.then_some(Self { start, end })
+    }
+
+    /// Finite inline start; `>= 0` within the line's envelope.
+    #[must_use]
+    pub const fn start(self) -> f32 {
+        self.start
+    }
+
+    /// End strictly beyond the start, possibly positive infinity (only when
+    /// the wrap width is infinite); `<= wrap_width` within the line's envelope.
+    #[must_use]
+    pub const fn end(self) -> f32 {
+        self.end
+    }
+
     /// Available advance.
     #[must_use]
     pub fn width(self) -> f32 {
         self.end - self.start
     }
 
-    /// Whether endpoints and their difference obey the geometry contract.
-    #[must_use]
-    pub fn is_valid(self) -> bool {
-        self.start.is_finite()
-            && self.end > self.start
-            && (self.end == f32::INFINITY || (self.end.is_finite() && self.width().is_finite()))
-    }
-
     /// Whether the slot lies in the inline envelope of a line whose wrap width
     /// is `wrap_width`: `0 <= start` and, when `wrap_width` is finite,
     /// `end <= wrap_width`, both within the crate's geometry tolerance. With an
-    /// infinite `wrap_width` only the lower bound applies. Assumes
-    /// [`is_valid`](Self::is_valid).
+    /// infinite `wrap_width` only the lower bound applies.
     #[must_use]
     pub fn lies_in_envelope(self, wrap_width: f32) -> bool {
         self.start >= -tolerance(self.start, 0.0)
@@ -514,12 +540,10 @@ impl InlineSlotConstraint {
 }
 
 /// `true` when `slots` are the slots of one line of a container `wrap_width`
-/// wide: each well formed and inside the envelope `[0, wrap_width]`, in
+/// wide: each inside the envelope `[0, wrap_width]`, in
 /// ascending order and pairwise disjoint.
 pub(super) fn slots_are_valid(slots: &[InlineSlotConstraint], wrap_width: f32) -> bool {
-    slots
-        .iter()
-        .all(|s| s.is_valid() && s.lies_in_envelope(wrap_width))
+    slots.iter().all(|s| s.lies_in_envelope(wrap_width))
         && slots.windows(2).all(|w| w[0].end <= w[1].start)
 }
 
@@ -535,7 +559,7 @@ pub struct LineGeometry {
 
 impl LineGeometry {
     /// Checks a provider response at the given query start, for a container of
-    /// inline width `wrap_width`: every slot is well formed and lies in the
+    /// inline width `wrap_width`: every slot lies in the
     /// envelope `[0, wrap_width]` ([`InlineSlotConstraint::lies_in_envelope`]),
     /// the slots are sorted and disjoint, and the next feature lies ahead.
     #[must_use]
@@ -580,6 +604,7 @@ pub trait LineGeometryProvider: std::fmt::Debug + Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smallvec::smallvec;
 
     #[test]
     fn strut_resolution_folds_half_leading() {
@@ -764,7 +789,7 @@ mod tests {
     #[test]
     fn provider_slots_lie_inside_the_wrap_envelope() {
         let geometry = |start: f32, end: f32| LineGeometry {
-            slots: smallvec![InlineSlotConstraint { start, end }],
+            slots: smallvec![InlineSlotConstraint::new(start, end).unwrap()],
             next_feature_block_offset: None,
         };
         // A finite container is `[0, wrap_width]`.
@@ -786,18 +811,23 @@ mod tests {
         assert!(geometry(0.0, f32::INFINITY).is_valid(0.0, f32::INFINITY));
         assert!(geometry(5.0, 1e9).is_valid(0.0, f32::INFINITY));
         assert!(!geometry(-1.0, 5.0).is_valid(0.0, f32::INFINITY));
-        // `start < end` still holds first.
-        assert!(!geometry(5.0, 5.0).is_valid(0.0, 100.0));
+        // A malformed interval is not representable at all.
+        assert_eq!(InlineSlotConstraint::new(5.0, 5.0), None);
+        assert_eq!(InlineSlotConstraint::new(f32::NAN, 5.0), None);
+        assert_eq!(InlineSlotConstraint::new(0.0, f32::NAN), None);
+        assert_eq!(InlineSlotConstraint::new(f32::NEG_INFINITY, 5.0), None);
+        assert_eq!(InlineSlotConstraint::new(-f32::MAX, f32::MAX), None);
     }
 
     #[test]
     fn tab_stops_step_and_validity() {
-        let t = TabStops { step: 8.0 };
+        let t = TabStops::DEFAULT;
+        assert_eq!(TabStops::new(8.0), Some(t));
         assert_eq!(t.next_stop(0.0), Some(8.0));
         assert_eq!(t.next_stop(7.9), Some(8.0));
         assert_eq!(t.next_stop(8.0), Some(16.0)); // on a stop: advance to the next
         for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert!(!TabStops { step: bad }.is_valid());
+            assert_eq!(TabStops::new(bad), None);
         }
         // At large x the f32 product rounds back to x; a stop still lies ahead.
         let x = 3.0e7_f32;

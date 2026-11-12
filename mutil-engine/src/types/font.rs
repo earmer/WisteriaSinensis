@@ -70,15 +70,35 @@ pub enum FontFamily {
 /// pointer identity or a precomputed hash (spec §4.2 req. 5 keys on the stack).
 pub type FamilyStack = Arc<[FontFamily]>;
 
-/// CSS-scale font weight (1 to 1000; 400 normal, 700 bold).
+/// CSS-scale font weight: 1 to 1000, 400 normal, 700 bold.
+///
+/// Parsed, not validated (spec §1.5, A3): the field is private and
+/// [`new`](Self::new) refuses a value outside the scale, so a weight that
+/// exists is in range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FontWeight(pub u16);
+pub struct FontWeight(u16);
 
 impl FontWeight {
     /// 400.
     pub const NORMAL: Self = Self(400);
     /// 700.
     pub const BOLD: Self = Self(700);
+
+    /// The weight `value`, or `None` outside `1..=1000`.
+    #[must_use]
+    pub const fn new(value: u16) -> Option<Self> {
+        if 1 <= value && value <= 1000 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    /// The weight on the CSS scale.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
 }
 
 impl Default for FontWeight {
@@ -331,6 +351,17 @@ impl FontMetrics {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn font_weight_is_parsed_onto_the_css_scale() {
+        assert_eq!(FontWeight::new(400), Some(FontWeight::NORMAL));
+        assert_eq!(FontWeight::new(1).map(FontWeight::get), Some(1));
+        assert_eq!(FontWeight::new(1000).map(FontWeight::get), Some(1000));
+        assert_eq!(FontWeight::new(0), None);
+        assert_eq!(FontWeight::new(1001), None);
+        assert_eq!(FontWeight::default(), FontWeight::NORMAL);
+    }
+
     use super::*;
 
     #[test]

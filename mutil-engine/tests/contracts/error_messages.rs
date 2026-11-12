@@ -33,7 +33,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidConstraints,
-            "invalid wrap width, indentation or tab stops (without a geometry provider each indent must lie in [0, wrap width))",
+            "invalid wrap width or indentation (without a geometry provider each indent must lie in [0, wrap width))",
         ),
         (
             LayoutInputError::ParagraphSeparatorInText,
@@ -398,7 +398,7 @@ fn every_reason_completes_its_error_message() {
         (S::NoSlots, "the line has no slot"),
         (
             S::InvalidConstraint,
-            "a constraint is malformed, outside the wrap envelope or out of order",
+            "a constraint lies outside the wrap envelope or out of order",
         ),
         (
             S::InvalidContent,

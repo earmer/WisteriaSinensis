@@ -45,8 +45,7 @@ pub enum LayoutInputError {
     InvalidLineGeometry,
     /// Expanding a block envelope introduced available inline space.
     NonMonotonicGeometry,
-    /// Invalid width, indentation or tab stops; positive-infinite width is
-    /// allowed. Without a geometry provider each indent must lie in
+    /// Invalid width or indentation; positive-infinite width is allowed. Without a geometry provider each indent must lie in
     /// `[0, wrap_width)`.
     InvalidConstraints,
     /// `text` contains a paragraph separator; split it with
@@ -1475,7 +1474,7 @@ mod tests {
     fn constraints() -> LayoutConstraints {
         LayoutConstraints {
             wrap_width: 100.0,
-            tab_stops: TabStops { step: 8.0 },
+            tab_stops: TabStops::DEFAULT,
             ..Default::default()
         }
     }

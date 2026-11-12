@@ -189,7 +189,7 @@ fn chip_inputs_are_accepted_and_atoms_carry_the_atomic_flag() {
         geometry_provider: None,
         hanging_indent: 0.0,
         wrap_width: 100.0,
-        tab_stops: TabStops { step: 8.0 },
+        tab_stops: TabStops::DEFAULT,
     };
     assert!(check_layout_inputs(&ast, TEXT, &constraints, &LayoutOptions::default()).is_ok());
     assert!((0..ast.items.len()).all(|item| ast.is_self_contained(item)));

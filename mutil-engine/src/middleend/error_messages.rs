@@ -44,7 +44,7 @@ error_messages! {
         InvalidLayoutOptions => "invalid layout options",
         InvalidLineGeometry => "invalid line geometry",
         NonMonotonicGeometry => "geometry grew with an expanded block envelope",
-        InvalidConstraints => "invalid wrap width, indentation or tab stops (without a geometry provider each indent must lie in [0, wrap width))",
+        InvalidConstraints => "invalid wrap width or indentation (without a geometry provider each indent must lie in [0, wrap width))",
         ParagraphSeparatorInText => "text contains a paragraph separator; split it first",
         InvalidStrut => "invalid strut metrics, font size or line height",
         RunOutsideText { run } => "run {run} does not fit the text",
@@ -129,7 +129,7 @@ display_messages! {
     SlotErrorReason {
         InvalidWrapWidth => "the wrap width is not positive",
         NoSlots => "the line has no slot",
-        InvalidConstraint => "a constraint is malformed, outside the wrap envelope or out of order",
+        InvalidConstraint => "a constraint lies outside the wrap envelope or out of order",
         InvalidContent => "a content block is not finite, is negative or starts outside its constraint",
         WidthNotContentSpan => "a content block is not the span of the content placed in it",
         ContentOutsideSlots => "the line has content but no slot holds any of it",

@@ -176,7 +176,7 @@ mod tests {
     fn constraints() -> LayoutConstraints {
         LayoutConstraints {
             wrap_width: 100.0,
-            tab_stops: TabStops { step: 8.0 },
+            tab_stops: TabStops::DEFAULT,
             ..Default::default()
         }
     }

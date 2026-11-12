@@ -44,7 +44,7 @@ fn zero_fixed_multiplier_is_rejected() {
                 geometry_provider: None,
                 hanging_indent: 0.0,
                 wrap_width: 100.,
-                tab_stops: TabStops { step: 8. }
+                tab_stops: TabStops::DEFAULT
             },
             &options
         ),

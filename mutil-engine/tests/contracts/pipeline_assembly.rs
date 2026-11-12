@@ -815,7 +815,7 @@ fn hang_mode_struct_gates_each_physical_edge() {
     // The body fills its slot, so the comma would not have fitted: `Allow`
     // and `Force` both let it hang.
     let body = l.visual_width();
-    l.slots[0].constraint.end = body;
+    l.slots[0].constraint = InlineSlotConstraint::new(l.slots[0].constraint.start(), body).unwrap();
     let with = |hang_mode, base_direction| LineContext {
         hang_mode,
         base_direction,
@@ -1177,7 +1177,7 @@ fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
         geometry_provider: None,
         hanging_indent: 0.0,
         wrap_width: 120.0,
-        tab_stops: TabStops { step: 16.0 },
+        tab_stops: TabStops::new(16.0).unwrap(),
     };
     let options = LayoutOptions::default();
     let shaper: &dyn TextShaper = &NoopShaper;

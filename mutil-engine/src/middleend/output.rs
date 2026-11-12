@@ -468,21 +468,22 @@ pub enum SlotSource {
 impl SlotSource {
     /// The one slot line `line_index` must have under
     /// [`Standard`](Self::Standard) in a container `wrap_width` wide; `None`
-    /// for [`Provider`](Self::Provider).
+    /// for [`Provider`](Self::Provider), and for indents that leave no
+    /// well-formed slot (a policy [`LayoutPolicySnapshot::is_valid`] rejects).
     #[must_use]
     pub fn standard_slot(self, line_index: usize, wrap_width: f32) -> Option<InlineSlotConstraint> {
         match self {
             Self::Standard {
                 first_line_indent,
                 hanging_indent,
-            } => Some(InlineSlotConstraint {
-                start: if line_index == 0 {
+            } => InlineSlotConstraint::new(
+                if line_index == 0 {
                     first_line_indent
                 } else {
                     hanging_indent
                 },
-                end: wrap_width,
-            }),
+                wrap_width,
+            ),
             Self::Provider => None,
         }
     }

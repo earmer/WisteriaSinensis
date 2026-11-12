@@ -302,8 +302,8 @@ pub enum SlotErrorReason {
     InvalidWrapWidth,
     /// The line has no slot.
     NoSlots,
-    /// A slot's constraint is malformed, lies outside the wrap envelope, or
-    /// overlaps or precedes the previous slot's.
+    /// A slot's constraint lies outside the wrap envelope, or overlaps or
+    /// precedes the previous slot's.
     InvalidConstraint,
     /// A slot's `content_start` or `visual_width` is not finite, the width is
     /// negative, or the content starts outside the slot's constraint.
@@ -1038,9 +1038,9 @@ impl PositionedLine {
         Ok(())
     }
 
-    /// Pass 4: the slots. Each constraint is well formed, inside the wrap
-    /// envelope and right of the previous one; each content block is finite
-    /// and starts inside its constraint; the content widths sum to the line's.
+    /// Pass 4: the slots. Each constraint lies inside the wrap envelope and
+    /// right of the previous one; each content block is finite and starts
+    /// inside its constraint.
     /// Whether a block also *ends* inside its constraint is the overflow rule
     /// of pass 5.
     fn check_slots(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
@@ -1058,13 +1058,13 @@ impl PositionedLine {
             return invalid(R::InvalidConstraint);
         }
         for slot in &self.slots {
-            let eps = tolerance(slot.content_start, slot.constraint.start);
+            let eps = tolerance(slot.content_start, slot.constraint.start());
             if !(slot.content_start.is_finite()
                 && slot.visual_width.is_finite()
                 && slot.visual_width >= 0.0
                 && slot.content_end().is_finite()
-                && slot.content_start >= slot.constraint.start - eps
-                && slot.content_start <= slot.constraint.end + eps)
+                && slot.content_start >= slot.constraint.start() - eps
+                && slot.content_start <= slot.constraint.end() + eps)
             {
                 return invalid(R::InvalidContent);
             }
@@ -1291,13 +1291,13 @@ impl PositionedLine {
         for (index, slot) in self.slots.iter().enumerate() {
             let eps = tolerance(slot.visual_width, 0.0);
             let capacity = slot.constraint.width();
-            let overflows = slot.content_end() > slot.constraint.end + eps;
+            let overflows = slot.content_end() > slot.constraint.end() + eps;
             // The exemption is for an entity that cannot fit: wider than the
             // slot, and not pushed out of it by an alignment offset.
             let is_exempt = self.slots.len() == 1
                 && capacity >= ctx.wrap_width - eps
                 && slot.visual_width > capacity + eps
-                && approx_eq(slot.content_start, slot.constraint.start)
+                && approx_eq(slot.content_start, slot.constraint.start())
                 && self.is_single_entity_overflow(slot.content_start);
             if overflows && !is_exempt {
                 // The whole line is wider than the container, or only this
@@ -1312,7 +1312,7 @@ impl PositionedLine {
                 } else {
                     E::SlotOverflow {
                         slot: index,
-                        extent: slot.content_end() - slot.constraint.start,
+                        extent: slot.content_end() - slot.constraint.start(),
                         capacity,
                     }
                 });
@@ -1489,9 +1489,9 @@ impl PositionedLine {
             && approx_eq(right - origin, vw)
     }
 
-    /// Span fragments (spec §2.6, Pass 5 (g)). Each fragment covers a
-    /// well-formed part of its span inside the line, and its first / last flags
-    /// say exactly whether it starts / ends where the span does. Every glyph
+    /// Span fragments (spec §2.6, Pass 5 (g)). Each fragment covers a part of
+    /// its span inside the line (its first / last edges follow from the two
+    /// ranges). Every glyph
     /// or inline box that belongs to a span lies inside one of its fragments.
     fn check_span_fragments(&self) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
@@ -1854,10 +1854,7 @@ mod tests {
     /// A slot `capacity` wide from `start`, with content from its start.
     fn slot(start: f32, visual_width: f32, capacity: f32) -> PositionedSlot {
         PositionedSlot {
-            constraint: InlineSlotConstraint {
-                start,
-                end: start + capacity,
-            },
+            constraint: InlineSlotConstraint::new(start, start + capacity).unwrap(),
             content_start: start,
             visual_width,
         }
@@ -2677,7 +2674,8 @@ mod tests {
     impl ValidateAt for PositionedLine {
         fn validate_at(&self, w: f32) -> Result<(), LineInvariantError> {
             let mut l = self.clone();
-            l.slots[0].constraint.end = w;
+            l.slots[0].constraint =
+                InlineSlotConstraint::new(l.slots[0].constraint.start(), w).unwrap();
             PositionedLine::validate(&l, &wrap(w))
         }
     }
@@ -2966,10 +2964,12 @@ mod tests {
             30.0,
         );
         let mut p = paragraph(&wrap(30.0), vec![two]);
-        p.lines[0].slots[0].constraint.end = 30.0;
+        p.lines[0].slots[0].constraint =
+            InlineSlotConstraint::new(p.lines[0].slots[0].constraint.start(), 30.0).unwrap();
         assert!(p.validate_geometry().is_ok());
         p.policy.wrap_width = 10.0;
-        p.lines[0].slots[0].constraint.end = 10.0;
+        p.lines[0].slots[0].constraint =
+            InlineSlotConstraint::new(p.lines[0].slots[0].constraint.start(), 10.0).unwrap();
         assert_eq!(
             p.validate_geometry(),
             Err((

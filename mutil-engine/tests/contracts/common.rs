@@ -307,7 +307,7 @@ pub fn ast(t: &str) -> ParagraphAst {
 pub fn constraints() -> LayoutConstraints {
     LayoutConstraints {
         wrap_width: 100.,
-        tab_stops: TabStops { step: 8. },
+        tab_stops: TabStops::DEFAULT,
         ..Default::default()
     }
 }
@@ -319,10 +319,7 @@ pub fn check(a: &ParagraphAst, t: &str) -> Result<(), LayoutInputError> {
 /// A slot `capacity` wide from `start`, with content from its start.
 pub fn slot(start: f32, visual_width: f32, capacity: f32) -> PositionedSlot {
     PositionedSlot {
-        constraint: InlineSlotConstraint {
-            start,
-            end: start + capacity,
-        },
+        constraint: InlineSlotConstraint::new(start, start + capacity).unwrap(),
         content_start: start,
         visual_width,
     }

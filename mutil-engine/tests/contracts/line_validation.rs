@@ -24,7 +24,7 @@ fn reject_negative_line_height() {
 #[test]
 fn tab_stop_advances_at_large_coordinates() {
     let x = 1e10_f32;
-    let next = TabStops { step: 8. }.next_stop(x);
+    let next = TabStops::DEFAULT.next_stop(x);
     assert!(
         next.is_none_or(|next| next > x),
         "{x} -> {next:?}; unchanged input cannot signal termination"
@@ -725,7 +725,8 @@ fn the_content_block_separates_alignment_offset_from_leading_glue() {
     );
     // The block starts inside its constraint ...
     let mut before = aligned_line(-5., -5., 60.);
-    before.slots[0].constraint.start = 0.;
+    before.slots[0].constraint =
+        InlineSlotConstraint::new(0., before.slots[0].constraint.end()).unwrap();
     assert_eq!(
         before.validate(&ctx()),
         Err(LineInvariantError::InvalidSlots {
@@ -906,7 +907,8 @@ fn allow_end_hangs_a_mark_only_when_it_would_otherwise_wrap() {
     );
     // An unbounded line never needs to hang anything.
     let mut unbounded = end_hanging_line(100.);
-    unbounded.slots[0].constraint.end = f32::INFINITY;
+    unbounded.slots[0].constraint =
+        InlineSlotConstraint::new(unbounded.slots[0].constraint.start(), f32::INFINITY).unwrap();
     let no_wrap = LineContext {
         wrap_width: f32::INFINITY,
         ..hang(HangEndMode::Allow)

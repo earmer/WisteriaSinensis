@@ -140,8 +140,8 @@ fn information_separators_split_paragraphs() {
 }
 #[test]
 fn tab_precision_exhaustion_returns_none() {
-    assert_eq!(TabStops { step: 8. }.next_stop(1e10), None);
-    assert_eq!(TabStops { step: 8. }.next_stop(f32::MAX), None);
+    assert_eq!(TabStops::DEFAULT.next_stop(1e10), None);
+    assert_eq!(TabStops::DEFAULT.next_stop(f32::MAX), None);
 }
 #[test]
 fn locale_heuristics_require_opt_in() {
@@ -193,7 +193,7 @@ fn tier_two_without_primary_capacity_starts_at_zero() {
 
 #[test]
 fn standard_tab_stops_remain_strictly_forward() {
-    let stops = TabStops { step: 8. };
+    let stops = TabStops::DEFAULT;
     assert_eq!(stops.next_stop(0.), Some(8.));
     assert_eq!(stops.next_stop(8.), Some(16.));
     for x in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
