@@ -20,10 +20,6 @@ fn layout_input_error_messages() {
             "annotation 2 is invalid",
         ),
         (
-            LayoutInputError::ScriptMismatch { item: 4 },
-            "item 4 has an atom whose script differs from its run",
-        ),
-        (
             LayoutInputError::InvalidLayoutOptions,
             "invalid layout options",
         ),
@@ -69,7 +65,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::ItemOutsideRun { item: 2 },
-            "text box 2 lies outside the bytes of the shaping run it names, or has an atom or cluster at another bidi level",
+            "text box 2 lies outside the bytes of the shaping run it names",
         ),
         (
             LayoutInputError::InvalidTextWidth { item: 2 },

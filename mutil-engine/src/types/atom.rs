@@ -1,6 +1,6 @@
 //! Logical atoms: the extended-grapheme-cluster unit (spec §2.2).
 
-use super::{BidiLevel, GlyphOrientation, ScriptTag, TextRange};
+use super::{ScriptTag, TextRange};
 use core::fmt;
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub};
 
@@ -333,22 +333,19 @@ impl fmt::Debug for AtomFlags {
 }
 
 /// One extended grapheme cluster (EGC) per UAX #29 including GB9c `[U2]`
-/// (spec §2.2). The logical unit for carets, script, bidi level and break
-/// classes.
+/// (spec §2.2). The logical unit for carets and break classes.
 ///
-/// Layout on 64-bit targets is 32 bytes, aligned to 8, including orientation
-/// and padding; asserted at compile time below.
+/// An atom stores only what can differ between the atoms of one run. Its
+/// script, bidi level and glyph orientation are the owning
+/// [`ShapingRun`](crate::frontend::ShapingRun)'s: runs are split wherever any
+/// of them changes (spec §3 Step 5), so a per-atom copy could only repeat the
+/// run or contradict it (spec §1.5, A2 and A7).
+///
+/// Layout on 64-bit targets is asserted at compile time below.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphemeAtom {
-    /// Resolved glyph orientation.
-    pub orientation: GlyphOrientation,
     /// Bytes of the cluster in the paragraph text.
     pub byte_range: TextRange,
-    /// Resolved script. After frontend resolution never `Zyyy` or `Zinh` (§2.1).
-    pub script: ScriptTag,
-    /// UAX #9 level of the atom's first code point; non-spacing marks follow
-    /// their base (§3 Step 2.3).
-    pub bidi_level: BidiLevel,
     /// `Line_Break` class of the atom's **base (first) code point**
     /// **[Design decision, §2.2]**. The segmenter itself runs over the original
     /// text so that LB9/LB10 see the real sequence.
@@ -359,7 +356,7 @@ pub struct GraphemeAtom {
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {
-    assert!(core::mem::size_of::<GraphemeAtom>() == 32);
+    assert!(core::mem::size_of::<GraphemeAtom>() == 24);
     assert!(core::mem::align_of::<GraphemeAtom>() == 8);
     assert!(core::mem::size_of::<AtomFlags>() == 2);
     assert!(core::mem::size_of::<LineBreakClass>() == 1);
@@ -395,10 +392,7 @@ mod tests {
 
     fn atom_with(flags: AtomFlags) -> GraphemeAtom {
         GraphemeAtom {
-            orientation: GlyphOrientation::Horizontal,
             byte_range: TextRange::new(0, 1),
-            script: ScriptTag::LATIN,
-            bidi_level: 0,
             linebreak_class: LineBreakClass::Al,
             flags,
         }

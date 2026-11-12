@@ -100,10 +100,7 @@ pub fn boxed(ast: &mut ParagraphAst, s: usize, e: usize) -> WordNode {
     let flags = AtomFlags::EMPTY;
     let atoms: Vec<_> = (s..e)
         .map(|i| GraphemeAtom {
-            orientation: GlyphOrientation::Horizontal,
             byte_range: TextRange::new(i, i + 1),
-            script: ScriptTag::LATIN,
-            bidi_level: 0,
             linebreak_class: LineBreakClass::Al,
             flags,
         })
@@ -112,11 +109,9 @@ pub fn boxed(ast: &mut ParagraphAst, s: usize, e: usize) -> WordNode {
         .iter()
         .enumerate()
         .map(|(i, a)| ShapedCluster {
-            orientation: GlyphOrientation::Horizontal,
             byte_range: a.byte_range,
             atom_range: i..i + 1,
             font: FontRef::unscaled(FontId(1)),
-            bidi_level: 0,
             flags,
             glyph_range: 0..1,
             natural_width: 1.,
@@ -435,14 +430,6 @@ pub fn orient(a: &mut ParagraphAst, mode: WritingMode, orientation: GlyphOrienta
         r.orientation = orientation;
         r.bidi_level = level;
     }
-    for atom in &mut a.atoms {
-        atom.orientation = orientation;
-        atom.bidi_level = level;
-    }
-    for cluster in &mut a.clusters {
-        cluster.orientation = orientation;
-        cluster.bidi_level = level;
-    }
 }
 
 pub fn annotation(base: TextRange, side: AnnotationSide) -> AnnotationSpan {
@@ -517,10 +504,7 @@ pub const ADV: f32 = 10.0;
 /// One Latin atom covering the single byte at `offset`.
 pub fn atom(offset: usize) -> GraphemeAtom {
     GraphemeAtom {
-        orientation: GlyphOrientation::Horizontal,
         byte_range: TextRange::new(offset, offset + 1),
-        script: ScriptTag::LATIN,
-        bidi_level: 0,
         linebreak_class: LineBreakClass::Al,
         flags: AtomFlags::EMPTY,
     }
@@ -532,11 +516,9 @@ pub fn atom(offset: usize) -> GraphemeAtom {
 pub fn cluster(base: usize, local: usize) -> ShapedCluster {
     let off = base + local;
     ShapedCluster {
-        orientation: GlyphOrientation::Horizontal,
         byte_range: TextRange::new(off, off + 1),
         atom_range: local..local + 1,
         font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
         flags: AtomFlags::EMPTY,
         glyph_range: 0..1,
         natural_width: ADV,

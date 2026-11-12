@@ -217,14 +217,7 @@ fn emphasis_mark_is_one_atom_even_when_it_is_two_chars() {
 }
 
 #[test]
-fn annotation_atom_script_must_match_its_run_and_be_resolved() {
-    let mut a = ast("ab");
-    a.annotations = vec![annotation(TextRange::new(0, 2), AnnotationSide::Over)];
-    a.annotations[0].atoms[0].script = ScriptTag::GREEK;
-    assert_eq!(
-        check(&a, "ab"),
-        Err(LayoutInputError::InvalidAnnotationSpan { annotation: 0 })
-    );
+fn annotation_run_script_must_be_resolved() {
     let mut a = ast("ab");
     a.annotations = vec![annotation(TextRange::new(0, 2), AnnotationSide::Over)];
     a.annotations[0].run.script = ScriptTag::COMMON;

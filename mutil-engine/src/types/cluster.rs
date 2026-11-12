@@ -1,6 +1,6 @@
 //! Physical shaping output: glyphs grouped into clusters (spec §2.3).
 
-use super::{AtomFlags, BidiLevel, FontRef, GlyphOrientation, TextRange};
+use super::{AtomFlags, FontRef, TextRange};
 use core::ops::Range;
 
 /// One glyph as produced by a shaping backend, before line layout.
@@ -84,8 +84,6 @@ pub struct RawShapedGlyph {
 /// safe. `true` means the corresponding HarfBuzz unsafe flag is absent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapedCluster {
-    /// Resolved glyph orientation.
-    pub orientation: GlyphOrientation,
     /// Source bytes covered by the cluster.
     pub byte_range: TextRange,
     /// Atoms covered: `K >= 1`, and a cluster never splits an atom. `K > 1`
@@ -94,8 +92,6 @@ pub struct ShapedCluster {
     pub atom_range: Range<usize>,
     /// Font used for this cluster, with the fallback scale.
     pub font: FontRef,
-    /// Bidi level; a cluster never straddles two levels (§3 Step 2.3).
-    pub bidi_level: BidiLevel,
     /// Per-flag aggregate of the covered atoms' flags, as computed by
     /// `AtomFlags::for_cluster`: open-punctuation from the first atom,
     /// `ALLOW_CJK_JUSTIFY_AFTER` and close-punctuation from the last, all other
@@ -136,7 +132,7 @@ impl ShapedCluster {
     /// This is also `true` for a tate-chu-yoko cluster
     /// (`GlyphOrientation::HorizontalInVertical`), which is one merged run of
     /// several atoms and not a ligature: a caller placing caret sub-slots must
-    /// check the cluster's `orientation` first.
+    /// check its run's `orientation` first.
     #[inline]
     #[must_use]
     pub fn is_ligature(&self) -> bool {
@@ -157,8 +153,8 @@ impl ShapedCluster {
 const _: () = {
     assert!(core::mem::size_of::<RawShapedGlyph>() == 20);
     assert!(core::mem::align_of::<RawShapedGlyph>() == 4);
-    // Half the size of the cluster that held its glyphs inline.
-    assert!(core::mem::size_of::<ShapedCluster>() == 72);
+    // The glyphs live in the paragraph buffer; run-wide properties on the run.
+    assert!(core::mem::size_of::<ShapedCluster>() == 64);
 };
 
 #[cfg(test)]
@@ -168,11 +164,9 @@ mod tests {
 
     fn cluster(atoms: Range<usize>, brk: bool, cat: bool) -> ShapedCluster {
         ShapedCluster {
-            orientation: GlyphOrientation::Horizontal,
             byte_range: TextRange::new(0, 2),
             atom_range: atoms,
             font: FontRef::unscaled(FontId(0)),
-            bidi_level: 0,
             flags: AtomFlags::EMPTY,
             glyph_range: 0..0,
             natural_width: 0.0,
