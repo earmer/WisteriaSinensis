@@ -168,10 +168,6 @@ fn line_invariant_error_messages() {
             "invalid paragraph: it has no line",
         ),
         (
-            LineInvariantError::NonFiniteOrNegativeExtent,
-            "visual_width or a hanging extent is negative or not finite",
-        ),
-        (
             LineInvariantError::NonFiniteLineMetrics,
             "baseline_y, ascent, descent or line_height is not finite",
         ),
@@ -215,7 +211,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::EmptyLineHasExtent,
-            "an empty line has a non-zero width or hanging extent",
+            "an empty line's slots hold a non-zero width",
         ),
         (
             LineInvariantError::LineHeightMismatch {
@@ -255,14 +251,6 @@ fn line_invariant_error_messages() {
         (
             LineInvariantError::BodyGlyphOutsideBlock { run: 1, glyph: 5 },
             "body glyph 5 of run 1 lies outside the content of every slot",
-        ),
-        (
-            LineInvariantError::HangingExtentMismatch {
-                side: HangSide::Left,
-                expected: 1.5,
-                actual: 2.5,
-            },
-            "left hanging extent is 2.5 but the glyphs occupy 1.5",
         ),
         (
             LineInvariantError::InvalidInlineBox { index: 4 },
@@ -390,8 +378,8 @@ fn storage_coverage_and_ordering_error_messages() {
             "glyph 5 of run 1 lies left of the glyph before it",
         ),
         (
-            LineInvariantError::SpanFragmentEdgeMismatch { index: 4 },
-            "span fragment 4 lies outside its span, or its first or last flag disagrees with where it starts or ends",
+            LineInvariantError::SpanFragmentOutsideSpan { index: 4 },
+            "span fragment 4 covers bytes outside its span",
         ),
         (
             LineInvariantError::HangingWithoutOverflow {
@@ -419,10 +407,6 @@ fn every_reason_completes_its_error_message() {
         (
             S::InvalidContent,
             "a content block is not finite, is negative or starts outside its constraint",
-        ),
-        (
-            S::WidthNotConserved,
-            "the slot widths do not sum to the line's visual width",
         ),
         (
             S::WidthNotContentSpan,

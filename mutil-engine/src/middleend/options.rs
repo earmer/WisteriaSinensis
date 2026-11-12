@@ -43,7 +43,7 @@ pub enum HangStartMode {
 ///
 /// The two edges are independent. They are **logical** (start and end of the
 /// line in the paragraph's base direction), whereas
-/// `PositionedLine::hanging_left` and `hanging_right` are **physical**: the
+/// `PositionedLine::hanging_left()` and `hanging_right()` are **physical**: the
 /// start edge is the left one for an LTR paragraph and the right one for an RTL
 /// paragraph, the end edge the opposite. [`HangMode::allows`] is that mapping
 /// (plus the first-line rule), and `PositionedLine::validate` enforces it.

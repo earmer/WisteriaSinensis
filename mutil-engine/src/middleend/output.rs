@@ -170,11 +170,11 @@ pub struct PositionedTab {
 /// §2.6), after bidi reordering.
 ///
 /// Bidi reordering can split one span into several visual groups on a line;
-/// each group is its own fragment. `is_first_fragment` marks the fragment
-/// holding the span's logical start, `is_last_fragment` the one holding its
-/// logical end (a span on one line, in one group, has both). The fragment
-/// carries the span's whole range, so both flags can be checked on the line
-/// alone: a painter that joins borders across fragments can trust them.
+/// each group is its own fragment. The fragment carries the span's whole
+/// range, so [`is_first_fragment`](Self::is_first_fragment) and
+/// [`is_last_fragment`](Self::is_last_fragment) follow from the fragment
+/// alone: a painter that joins borders across fragments reads them from the
+/// two ranges, which no stored flag can contradict (spec §1.5, A2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedSpanFragment {
     /// Identifier of the `InlineDecorationSpan`.
@@ -193,14 +193,24 @@ pub struct PositionedSpanFragment {
     pub ascent: f32,
     /// Extent below the baseline (non-negative).
     pub descent: f32,
-    /// `true` if and only if the fragment holds the logical start of the
-    /// span: `byte_range.start == span_range.start`.
-    pub is_first_fragment: bool,
-    /// `true` if and only if the fragment holds the logical end of the span:
-    /// `byte_range.end == span_range.end`.
-    pub is_last_fragment: bool,
     /// UAX #9 level of the text in this fragment.
     pub bidi_level: BidiLevel,
+}
+
+impl PositionedSpanFragment {
+    /// Whether the fragment holds the logical start of its span:
+    /// `byte_range.start == span_range.start`.
+    #[must_use]
+    pub const fn is_first_fragment(&self) -> bool {
+        self.byte_range.start == self.span_range.start
+    }
+
+    /// Whether the fragment holds the logical end of its span:
+    /// `byte_range.end == span_range.end`.
+    #[must_use]
+    pub const fn is_last_fragment(&self) -> bool {
+        self.byte_range.end == self.span_range.end
+    }
 }
 
 /// Which side of an ambiguous boundary a caret belongs to (spec §6.1).
@@ -364,12 +374,6 @@ pub struct PositionedLine {
     pub descent: f32,
     /// Line box height.
     pub line_height: f32,
-    /// Sum of the slots' content advances, excluding hanging punctuation and obstacles.
-    pub visual_width: f32,
-    /// Overflow beyond the left edge of the first occupied slot's content.
-    pub hanging_left: f32,
-    /// Overflow beyond the right edge of the last occupied slot's content.
-    pub hanging_right: f32,
     /// Whether justification adjusted this line.
     pub is_justified: bool,
     /// Glyph runs, screen left to right.

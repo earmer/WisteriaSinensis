@@ -329,9 +329,8 @@ pub fn single_slot(visual_width: f32, wrap_width: f32) -> smallvec::SmallVec<[Po
     smallvec![slot(0.0, visual_width, wrap_width)]
 }
 
-/// Sets the width of a single-slot line, keeping its slot in step.
+/// Sets the content width of a single-slot line.
 pub fn set_visual_width(line: &mut PositionedLine, width: f32) {
-    line.visual_width = width;
     line.slots[0].visual_width = width;
 }
 
@@ -348,9 +347,6 @@ pub fn line() -> PositionedLine {
         ascent: 8.,
         descent: 2.,
         line_height: 10.,
-        visual_width: 100.,
-        hanging_left: 0.,
-        hanging_right: 0.,
         is_justified: false,
         visual_runs: vec![],
         visual_boxes: vec![],
@@ -480,7 +476,6 @@ pub fn two_slots() -> (PositionedLine, LineContext) {
     let mut l = line();
     l.byte_range = TextRange::new(0, 2);
     l.visible_byte_end = 2;
-    l.visual_width = 200.0;
     l.slots = smallvec![slot(0.0, 100.0, 100.0), slot(150.0, 100.0, 100.0)];
     let mut right = glyph(150.0, 100.0, false);
     right.byte_range = Some(TextRange::new(1, 2));

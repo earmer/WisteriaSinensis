@@ -143,13 +143,7 @@ fn pen_glyph(range: (usize, usize), x: f32) -> PositionedGlyph {
     }
 }
 
-fn fragment(
-    range: (usize, usize),
-    x: f32,
-    width: f32,
-    first: bool,
-    last: bool,
-) -> PositionedSpanFragment {
+fn fragment(range: (usize, usize), x: f32, width: f32) -> PositionedSpanFragment {
     PositionedSpanFragment {
         span_id: SPAN_ID,
         span_range: CHIP,
@@ -158,8 +152,6 @@ fn fragment(
         width,
         ascent: 12.0,
         descent: 4.0,
-        is_first_fragment: first,
-        is_last_fragment: last,
         bidi_level: 0,
     }
 }
@@ -177,9 +169,6 @@ fn line(byte_range: (usize, usize), visible_end: usize, y: f32, width: f32) -> P
         ascent: 12.0,
         descent: 4.0,
         line_height: 16.0,
-        visual_width: width,
-        hanging_left: 0.0,
-        hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![],
         visual_boxes: vec![],
@@ -266,7 +255,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         byte_range: TextRange::new(0, 8),
         glyphs: glyphs0,
     }];
-    l0.span_fragments = vec![fragment((3, 8), 24.0, 56.0, true, false)];
+    l0.span_fragments = vec![fragment((3, 8), 24.0, 56.0)];
 
     // Line 1: cloned leading pad 0..3, "Lee" 3..33, trailing pad 33..36,
     //   space 36..40, "ok" 40..60.
@@ -285,7 +274,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         byte_range: TextRange::new(8, 14),
         glyphs: glyphs1,
     }];
-    l1.span_fragments = vec![fragment((8, 11), 0.0, 36.0, false, true)];
+    l1.span_fragments = vec![fragment((8, 11), 0.0, 36.0)];
 
     // Atomic editing: no caret stop strictly inside the chip, even at the wrap
     // (offset 8). Only the logical boundaries 3 and 11 survive.
@@ -330,8 +319,8 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         para.lines[0].span_fragments[0],
         para.lines[1].span_fragments[0],
     ];
-    assert!(f0.is_first_fragment && !f0.is_last_fragment);
-    assert!(!f1.is_first_fragment && f1.is_last_fragment);
+    assert!(f0.is_first_fragment() && !f0.is_last_fragment());
+    assert!(!f1.is_first_fragment() && f1.is_last_fragment());
     assert_eq!(f0.width, 5.0 * ADV + 2.0 * PAD);
     assert_eq!(f1.width, 3.0 * ADV + 2.0 * PAD);
 

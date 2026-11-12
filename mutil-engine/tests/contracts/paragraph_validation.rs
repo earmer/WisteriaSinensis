@@ -83,7 +83,6 @@ fn standard_slots_follow_the_recorded_indents() {
         let start = if i == 0 { 10. } else { 20. };
         l.slots = smallvec::smallvec![slot(start, 0., 100. - start)];
         l.visual_runs.clear();
-        l.visual_width = 0.;
         l.byte_range = TextRange::new(2 * i, 2 * i + 2);
     }
     // Without glyphs the lines only need consistent slots and coverage, so
@@ -181,8 +180,6 @@ fn span_fragment(span: (usize, usize), bytes: (usize, usize)) -> PositionedSpanF
         width: 100.,
         ascent: 8.,
         descent: 2.,
-        is_first_fragment: bytes.0 == span.0,
-        is_last_fragment: bytes.1 == span.1,
         bidi_level: 0,
     }
 }

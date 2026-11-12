@@ -187,9 +187,6 @@ fn blank_line() -> PositionedLine {
         ascent: 12.0,
         descent: 4.0,
         line_height: 16.0,
-        visual_width: 0.0,
-        hanging_left: 0.0,
-        hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![],
         caret_stops: vec![],
@@ -238,7 +235,6 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
         byte_range: TextRange::new(0, 3),
         visible_byte_end: 3,
         baseline_y: 12.0,
-        visual_width: 4.0 * ADV,
         slots: single_slot(4.0 * ADV, ctx.wrap_width),
         visual_runs: vec![run_of(TextRange::new(0, 3), l0_glyphs)],
         ..blank_line()
@@ -266,9 +262,7 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
         byte_range: TextRange::new(3, 18),
         visible_byte_end: 15,
         baseline_y: 32.0,
-        visual_width: body_width,
         slots: single_slot(body_width, ctx.wrap_width),
-        hanging_right: ADV,
         visual_runs: vec![run_of(TextRange::new(3, 15), l1_glyphs)],
         visual_boxes: vec![PositionedInlineBox {
             bidi_level: 0,
@@ -498,7 +492,7 @@ fn middle_end_assembles_three_valid_lines() {
         };
         assert_eq!(l.validate(&ctx), Ok(()), "line {i}");
     }
-    assert!(line1.hanging_right > 0.0 && line0.hanging_right == 0.0);
+    assert!(line1.hanging_right() > 0.0 && line0.hanging_right() == 0.0);
     assert_eq!((line1.visual_boxes.len(), line1.tabs.len()), (1, 1));
     // The tab follows the box exactly and ends where "go" begins.
     let (b, t) = (line1.visual_boxes[0], line1.tabs[0]);
@@ -571,9 +565,8 @@ fn assembled_output_owns_its_data() {
 fn hanging_comma_counted_in_visual_width_is_rejected() {
     let (_, ctx, para) = assembled();
     let mut bad = para.lines[1].clone();
-    let widened = bad.visual_width + ADV;
+    let widened = bad.visual_width() + ADV;
     set_visual_width(&mut bad, widened);
-    bad.hanging_right = 0.0;
     // The comma is the last glyph of the run: "atje" (4), "go" (2), ",".
     assert_eq!(
         bad.validate(&ctx),
@@ -685,9 +678,6 @@ fn small_line() -> PositionedLine {
         ascent: 12.0,
         descent: 4.0,
         line_height: 16.0,
-        visual_width: 40.0,
-        hanging_left: 0.0,
-        hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
             orientation: GlyphOrientation::Horizontal,
@@ -829,10 +819,9 @@ fn hang_mode_struct_gates_each_physical_edge() {
     });
     l.byte_range = TextRange::new(0, 5);
     l.visible_byte_end = 5;
-    l.hanging_right = 6.0;
     // The body fills its slot, so the comma would not have fitted: `Allow`
     // and `Force` both let it hang.
-    let body = l.visual_width;
+    let body = l.visual_width();
     l.slots[0].constraint.end = body;
     let with = |hang_mode, base_direction| LineContext {
         hang_mode,
@@ -963,7 +952,7 @@ fn l1_trailing_whitespace_sits_on_the_far_edge_of_the_base_direction() {
     }
     // It never counts as hanging punctuation, on either side.
     assert_eq!(
-        (left_of_body.hanging_left, right_of_body.hanging_right),
+        (left_of_body.hanging_left(), right_of_body.hanging_right()),
         (0.0, 0.0)
     );
 }
@@ -1066,7 +1055,6 @@ fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
             is_hanging: true,
         },
     );
-    l.hanging_left = 10.0;
     let ctx = |start, dir, index| LineContext {
         hang_mode: HangMode {
             start,

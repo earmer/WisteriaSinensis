@@ -162,9 +162,6 @@ fn test_pipeline_types_compile() {
         ascent: ast.strut_metrics.ascent,
         descent: ast.strut_metrics.descent,
         line_height: ast.strut_metrics.natural_line_height(),
-        visual_width: pen + ADV,
-        hanging_left: 0.0,
-        hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
             orientation: GlyphOrientation::Horizontal,

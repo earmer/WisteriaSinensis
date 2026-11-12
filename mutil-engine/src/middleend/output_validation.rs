@@ -43,8 +43,6 @@ pub enum LineInvariantError {
         /// What is wrong.
         reason: ParagraphErrorReason,
     },
-    /// `visual_width`, `hanging_left` or `hanging_right` is negative, NaN or infinite.
-    NonFiniteOrNegativeExtent,
     /// `baseline_y`, `ascent`, `descent` or `line_height` is NaN or infinite.
     NonFiniteLineMetrics,
     /// A line height or the resolved strut height is not positive.
@@ -71,7 +69,7 @@ pub enum LineInvariantError {
         /// The line's `line_height`.
         actual: f32,
     },
-    /// An empty line has a non-zero `visual_width` or hanging extent.
+    /// An empty line's slots hold a non-zero content width.
     EmptyLineHasExtent,
     /// Under `LineHeight::Fixed`, `line_height` differs from the strut's.
     LineHeightMismatch {
@@ -153,16 +151,6 @@ pub enum LineInvariantError {
         /// Index into that run's `glyphs`.
         glyph: usize,
     },
-    /// A hanging extent differs from what the hanging glyphs occupy: positive
-    /// without hanging glyphs, zero with them, or simply a different width.
-    HangingExtentMismatch {
-        /// Edge concerned.
-        side: HangSide,
-        /// Extent derived from the glyphs.
-        expected: f32,
-        /// Stored extent.
-        actual: f32,
-    },
     /// An inline box has a non-finite coordinate, a negative size, an invalid
     /// baseline alignment, an unrepresentable bidi level, or bytes outside the
     /// line.
@@ -196,10 +184,8 @@ pub enum LineInvariantError {
         /// Index into `span_fragments`.
         index: usize,
     },
-    /// A span fragment's `byte_range` lies outside its `span_range`, or
-    /// `is_first_fragment` / `is_last_fragment` disagrees with whether the
-    /// fragment starts / ends where the span does.
-    SpanFragmentEdgeMismatch {
+    /// A span fragment's `byte_range` lies outside its `span_range`.
+    SpanFragmentOutsideSpan {
         /// Index into `span_fragments`.
         index: usize,
     },
@@ -322,8 +308,6 @@ pub enum SlotErrorReason {
     /// A slot's `content_start` or `visual_width` is not finite, the width is
     /// negative, or the content starts outside the slot's constraint.
     InvalidContent,
-    /// The slots' `visual_width`s do not sum to the line's.
-    WidthNotConserved,
     /// A slot's content block is not the span of the content placed in it.
     WidthNotContentSpan,
     /// The line has content but no slot holds any of it.
@@ -514,6 +498,75 @@ impl PositionedLine {
         self.validate(ctx).is_ok()
     }
 
+    /// The body width: the sum of the slots' content advances, hanging
+    /// punctuation, preserved trailing whitespace and obstacles excluded.
+    #[must_use]
+    pub fn visual_width(&self) -> f32 {
+        self.slots.iter().map(|slot| slot.visual_width).sum()
+    }
+
+    /// Overflow of hanging punctuation beyond the left edge of the first
+    /// occupied slot's content.
+    #[must_use]
+    pub fn hanging_left(&self) -> f32 {
+        self.hanging_extents().0
+    }
+
+    /// Overflow of hanging punctuation beyond the right edge of the last
+    /// occupied slot's content.
+    #[must_use]
+    pub fn hanging_right(&self) -> f32 {
+        self.hanging_extents().1
+    }
+
+    /// `(left, right)` hanging overflow: the largest overflow of an
+    /// `is_hanging` glyph's pen interval beyond the body edges, from the left
+    /// edge of the first occupied slot's content to the right edge of the
+    /// last one's. Zero on a line with no occupied slot.
+    fn hanging_extents(&self) -> (f32, f32) {
+        let Some((first, last)) = self.occupied_slots() else {
+            return (0.0, 0.0);
+        };
+        let (left, right) = (
+            self.slots[first].content_start,
+            self.slots[last].content_end(),
+        );
+        self.visual_runs
+            .iter()
+            .flat_map(|r| &r.glyphs)
+            .filter(|g| g.is_hanging && g.advance != 0.0 && !self.is_trailing_whitespace(g))
+            .fold((0.0_f32, 0.0_f32), |(l, r), g| {
+                let (lo, hi) = pen_interval(g);
+                (l.max(left - lo), r.max(hi - right))
+            })
+    }
+
+    /// The first and last slot that hold content: a non-zero block, or a
+    /// visible body glyph, an inline box or a visible tab inside its block.
+    fn occupied_slots(&self) -> Option<(usize, usize)> {
+        let is_occupied = |slot: &PositionedSlot| {
+            slot.visual_width > 0.0
+                || self.visual_runs.iter().flat_map(|r| &r.glyphs).any(|g| {
+                    let (lo, hi) = pen_interval(g);
+                    !g.is_hanging
+                        && g.byte_range
+                            .is_some_and(|r| r.start < self.visible_byte_end)
+                        && slot_holds(slot, lo, hi)
+                })
+                || self
+                    .visual_boxes
+                    .iter()
+                    .any(|b| slot_holds(slot, b.x, b.x + b.width))
+                || self.tabs.iter().any(|t| {
+                    t.byte_range.start < self.visible_byte_end
+                        && slot_holds(slot, t.x, t.x + t.width)
+                })
+        };
+        let first = self.slots.iter().position(is_occupied)?;
+        let last = self.slots.iter().rposition(is_occupied)?;
+        Some((first, last))
+    }
+
     /// `true` for a glyph of the trailing whitespace: source text at or after
     /// `visible_byte_end`.
     fn is_trailing_whitespace(&self, glyph: &PositionedGlyph) -> bool {
@@ -541,10 +594,6 @@ impl PositionedLine {
     /// Pass 1: all numbers finite, no negative extent or size.
     fn check_finite(&self) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
-        let ok = |v: f32| v.is_finite() && v >= 0.0;
-        if !(ok(self.visual_width) && ok(self.hanging_left) && ok(self.hanging_right)) {
-            return Err(E::NonFiniteOrNegativeExtent);
-        }
         let metrics = [
             self.baseline_y,
             self.ascent,
@@ -715,7 +764,7 @@ impl PositionedLine {
                 actual: self.line_height,
             });
         }
-        if self.visual_width != 0.0 || self.hanging_left != 0.0 || self.hanging_right != 0.0 {
+        if self.slots.iter().any(|slot| slot.visual_width != 0.0) {
             return Err(E::EmptyLineHasExtent);
         }
         Ok(())
@@ -1020,10 +1069,6 @@ impl PositionedLine {
                 return invalid(R::InvalidContent);
             }
         }
-        let total: f32 = self.slots.iter().map(|slot| slot.visual_width).sum();
-        if !approx_eq(total, self.visual_width) {
-            return invalid(R::WidthNotConserved);
-        }
         Ok(())
     }
 
@@ -1036,35 +1081,13 @@ impl PositionedLine {
     ) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
         let slots = &self.slots;
-        let is_occupied = |slot: &PositionedSlot| {
-            slot.visual_width > 0.0
-                || self.visual_runs.iter().flat_map(|r| &r.glyphs).any(|g| {
-                    let (lo, hi) = pen_interval(g);
-                    !g.is_hanging
-                        && g.byte_range
-                            .is_some_and(|r| r.start < self.visible_byte_end)
-                        && slot_holds(slot, lo, hi)
-                })
-                || self
-                    .visual_boxes
-                    .iter()
-                    .any(|b| slot_holds(slot, b.x, b.x + b.width))
-                || self.tabs.iter().any(|t| {
-                    t.byte_range.start < self.visible_byte_end
-                        && slot_holds(slot, t.x, t.x + t.width)
-                })
-        };
-        let first_index = slots.iter().position(is_occupied);
-        let last_index = slots.iter().rposition(is_occupied);
-        let (Some(first_index), Some(last_index)) = (first_index, last_index) else {
+        let Some((first_index, last_index)) = self.occupied_slots() else {
             let has_nothing = self.visual_runs.iter().all(|r| r.glyphs.is_empty())
                 && self.visual_boxes.is_empty()
                 && self.tabs.is_empty()
                 && self.span_fragments.is_empty()
                 && self.atomic_fragments.is_empty()
-                && self.annotations.is_empty()
-                && self.hanging_left == 0.0
-                && self.hanging_right == 0.0;
+                && self.annotations.is_empty();
             return if has_nothing {
                 Ok(())
             } else {
@@ -1077,7 +1100,7 @@ impl PositionedLine {
         // The body: from the left edge of the first occupied slot's content to
         // the right edge of the last one's.
         let (left, right) = (first.content_start, last.content_end());
-        let eps = tolerance(self.visual_width, 0.0);
+        let eps = tolerance(self.visual_width(), 0.0);
         let inside = |lo: f32, hi: f32| slots.iter().any(|s| slot_holds(s, lo, hi));
         // Hanging marks and preserved whitespace lie outside the body, and
         // never in an internal obstacle or an unused slot.
@@ -1094,7 +1117,6 @@ impl PositionedLine {
                 }
         };
         let collapsible = ctx.whitespace == HangingWhitespaceMode::Collapsible;
-        let (mut hanging_left, mut hanging_right) = (0.0_f32, 0.0_f32);
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
                 let (lo, hi) = pen_interval(g);
@@ -1123,24 +1145,16 @@ impl PositionedLine {
                     if !is_outside_clear(lo, hi) || !(hangs_from_first || hangs_from_last) {
                         return Err(E::BodyGlyphOutsideBlock { run, glyph });
                     }
-                    hanging_left = hanging_left.max(over_left);
-                    hanging_right = hanging_right.max(over_right);
                 } else if !inside(lo, hi) {
                     return Err(E::BodyGlyphOutsideBlock { run, glyph });
                 }
             }
         }
-        for (side, expected, actual, slot) in [
-            (HangSide::Left, hanging_left, self.hanging_left, first),
-            (HangSide::Right, hanging_right, self.hanging_right, last),
+        let (hanging_left, hanging_right) = self.hanging_extents();
+        for (side, expected, slot) in [
+            (HangSide::Left, hanging_left, first),
+            (HangSide::Right, hanging_right, last),
         ] {
-            if !approx_eq(expected, actual) || (actual > 0.0 && expected == 0.0) {
-                return Err(E::HangingExtentMismatch {
-                    side,
-                    expected,
-                    actual,
-                });
-            }
             if expected == 0.0 {
                 continue;
             }
@@ -1212,7 +1226,7 @@ impl PositionedLine {
         glyphs: &SourcedGlyphs<'_>,
     ) -> Result<(), LineInvariantError> {
         use AnnotationErrorReason as R;
-        let eps = tolerance(self.visual_width, 0.0);
+        let eps = tolerance(self.visual_width(), 0.0);
         for (index, ann) in self.annotations.iter().enumerate() {
             let invalid = |reason| Err(LineInvariantError::InvalidAnnotation { index, reason });
             let (mut base_lo, mut base_hi) = (f32::INFINITY, f32::NEG_INFINITY);
@@ -1289,10 +1303,10 @@ impl PositionedLine {
                 // The whole line is wider than the container, or only this
                 // slot is wider than its own capacity.
                 let line_overflows =
-                    self.visual_width > ctx.wrap_width + tolerance(self.visual_width, 0.0);
+                    self.visual_width() > ctx.wrap_width + tolerance(self.visual_width(), 0.0);
                 return Err(if line_overflows {
                     E::LineWiderThanWrapWidth {
-                        visual_width: self.visual_width,
+                        visual_width: self.visual_width(),
                         wrap_width: ctx.wrap_width,
                     }
                 } else {
@@ -1401,7 +1415,7 @@ impl PositionedLine {
     ///   visual_width`). Unpadded entities cannot inflate `visual_width` this
     ///   way.
     fn is_single_entity_overflow(&self, origin: f32) -> bool {
-        let vw = self.visual_width;
+        let vw = self.visual_width();
         if !self.tabs.is_empty() {
             return false;
         }
@@ -1488,11 +1502,8 @@ impl PositionedLine {
             if !self.owns_bytes(f.byte_range) {
                 return Err(E::SpanFragmentOutsideLine { index });
             }
-            if !f.span_range.contains_range(f.byte_range)
-                || f.is_first_fragment != (f.byte_range.start == f.span_range.start)
-                || f.is_last_fragment != (f.byte_range.end == f.span_range.end)
-            {
-                return Err(E::SpanFragmentEdgeMismatch { index });
+            if !f.span_range.contains_range(f.byte_range) {
+                return Err(E::SpanFragmentOutsideSpan { index });
             }
         }
         for (run, r) in self.visual_runs.iter().enumerate() {
@@ -1524,7 +1535,7 @@ impl PositionedLine {
     /// The first span owning `range` (some fragment of it covers `range` in
     /// bytes) none of whose fragments contains `[lo, hi]` horizontally.
     fn uncovered_span(&self, range: TextRange, lo: f32, hi: f32) -> Option<u64> {
-        let vw = self.visual_width;
+        let vw = self.visual_width();
         self.span_fragments
             .iter()
             .filter(|f| f.byte_range.contains_range(range))
@@ -1696,14 +1707,14 @@ impl PositionedParagraph {
                 has_last: false,
             });
             if seen.span_range != fragment.span_range
-                || (seen.has_first && fragment.is_first_fragment)
-                || (seen.has_last && fragment.is_last_fragment)
+                || (seen.has_first && fragment.is_first_fragment())
+                || (seen.has_last && fragment.is_last_fragment())
             {
                 return invalid(line);
             }
             seen.line = line;
-            seen.has_first |= fragment.is_first_fragment;
-            seen.has_last |= fragment.is_last_fragment;
+            seen.has_first |= fragment.is_first_fragment();
+            seen.has_last |= fragment.is_last_fragment();
         }
         // Report the earliest offending line, whatever the map's order.
         match spans
@@ -1868,7 +1879,7 @@ mod tests {
         smallvec![slot(0.0, visual_width, wrap_width)]
     }
 
-    fn line(glyphs: Vec<PositionedGlyph>, width: f32, hang_l: f32, hang_r: f32) -> PositionedLine {
+    fn line(glyphs: Vec<PositionedGlyph>, width: f32) -> PositionedLine {
         let byte_end = glyphs
             .iter()
             .filter_map(|g| g.byte_range.map(|r| r.end))
@@ -1887,9 +1898,6 @@ mod tests {
             ascent: 12.0,
             descent: 4.0,
             line_height: 16.0,
-            visual_width: width,
-            hanging_left: hang_l,
-            hanging_right: hang_r,
             is_justified: false,
             visual_runs: vec![VisualGlyphRun {
                 orientation: GlyphOrientation::Horizontal,
@@ -1909,9 +1917,8 @@ mod tests {
         }
     }
 
-    /// Sets the line's width and keeps its one slot in step.
+    /// Sets the content width of the line's one slot.
     fn set_width(l: &mut PositionedLine, width: f32) {
-        l.visual_width = width;
         l.slots[0].visual_width = width;
     }
 
@@ -1921,7 +1928,7 @@ mod tests {
             visible_byte_end: 7,
             line_height: height,
             visual_runs: vec![],
-            ..line(vec![], 0.0, 0.0, 0.0)
+            ..line(vec![], 0.0)
         }
     }
 
@@ -1950,7 +1957,7 @@ mod tests {
                 actual: 15.0
             })
         );
-        let mut with_runs = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        let mut with_runs = line(vec![glyph(0.0, 5.0, false)], 5.0);
         with_runs.byte_range = TextRange::empty_at(0);
         with_runs.visible_byte_end = 0;
         assert_eq!(
@@ -1964,7 +1971,7 @@ mod tests {
             Err(LineInvariantError::EmptyLineHasBoxes)
         );
         let mut wide = empty_line(16.0);
-        wide.visual_width = 1.0;
+        wide.slots[0].visual_width = 1.0;
         assert_eq!(
             wide.validate(&ctx()),
             Err(LineInvariantError::EmptyLineHasExtent)
@@ -1973,7 +1980,7 @@ mod tests {
 
     #[test]
     fn line_height_follows_the_policy() {
-        let mut tall = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        let mut tall = line(vec![glyph(0.0, 5.0, false)], 5.0);
         tall.line_height = 20.0;
         // Normal: taller is fine (fallback glyphs), shorter is not.
         assert!(tall.is_valid(&ctx()));
@@ -1998,7 +2005,7 @@ mod tests {
                 actual: 20.0
             })
         );
-        assert!(line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0).is_valid(&fixed));
+        assert!(line(vec![glyph(0.0, 5.0, false)], 5.0).is_valid(&fixed));
     }
 
     #[test]
@@ -2011,20 +2018,13 @@ mod tests {
                 glyph(20.0, 5.0, true),
             ],
             20.0,
-            6.0,
-            5.0,
         );
         assert!(l.is_valid(&ctx()));
     }
 
     #[test]
     fn counting_hanging_punctuation_in_visual_width_is_rejected() {
-        let l = line(
-            vec![glyph(0.0, 20.0, false), glyph(20.0, 5.0, true)],
-            25.0,
-            0.0,
-            0.0,
-        );
+        let l = line(vec![glyph(0.0, 20.0, false), glyph(20.0, 5.0, true)], 25.0);
         assert_eq!(
             l.validate(&ctx()),
             Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 1 })
@@ -2032,44 +2032,16 @@ mod tests {
     }
 
     #[test]
-    fn hanging_extent_is_positive_iff_hanging_glyphs_exist() {
-        let none = line(vec![glyph(0.0, 20.0, false)], 20.0, 0.0, 5.0);
-        assert_eq!(
-            none.validate(&ctx()),
-            Err(LineInvariantError::HangingExtentMismatch {
-                side: HangSide::Right,
-                expected: 0.0,
-                actual: 5.0
-            })
-        );
-        let missing = line(
-            vec![glyph(0.0, 20.0, false), glyph(20.0, 5.0, true)],
-            20.0,
-            0.0,
-            0.0,
-        );
-        assert_eq!(
-            missing.validate(&ctx()),
-            Err(LineInvariantError::HangingExtentMismatch {
-                side: HangSide::Right,
-                expected: 5.0,
-                actual: 0.0
-            })
-        );
-        let wrong = line(
-            vec![glyph(-6.0, 6.0, true), glyph(0.0, 20.0, false)],
-            20.0,
-            3.0,
-            0.0,
-        );
-        assert_eq!(
-            wrong.validate(&ctx()),
-            Err(LineInvariantError::HangingExtentMismatch {
-                side: HangSide::Left,
-                expected: 6.0,
-                actual: 3.0
-            })
-        );
+    fn hanging_extents_are_the_overflow_of_the_hanging_glyphs() {
+        let none = line(vec![glyph(0.0, 20.0, false)], 20.0);
+        assert_eq!((none.hanging_left(), none.hanging_right()), (0.0, 0.0));
+        let right = line(vec![glyph(0.0, 20.0, false), glyph(20.0, 5.0, true)], 20.0);
+        assert_eq!((right.hanging_left(), right.hanging_right()), (0.0, 5.0));
+        assert!(right.is_valid(&ctx()));
+        // A mark straddling the edge hangs only by its overflow.
+        let left = line(vec![glyph(-6.0, 8.0, true), glyph(2.0, 18.0, false)], 20.0);
+        assert_eq!((left.hanging_left(), left.hanging_right()), (6.0, 0.0));
+        assert_eq!(left.visual_width(), 20.0);
     }
 
     fn trailing_space(x: f32, advance: f32) -> PositionedGlyph {
@@ -2085,22 +2057,11 @@ mod tests {
         let mut l = line(
             vec![glyph(0.0, 20.0, false), trailing_space(20.0, 5.0)],
             20.0,
-            0.0,
-            0.0,
         );
         l.visible_byte_end = 3;
         assert!(l.is_valid(&preserved()));
-        // It is not punctuation: hanging_right stays zero and a non-zero value is wrong.
-        let mut claimed = l.clone();
-        claimed.hanging_right = 5.0;
-        assert_eq!(
-            claimed.validate(&preserved()),
-            Err(LineInvariantError::HangingExtentMismatch {
-                side: HangSide::Right,
-                expected: 0.0,
-                actual: 5.0
-            })
-        );
+        // It is not punctuation: it never counts as hanging.
+        assert_eq!(l.hanging_right(), 0.0);
         // Collapsible: the same glyph must have collapsed to zero width.
         assert_eq!(
             l.validate(&ctx()),
@@ -2114,16 +2075,16 @@ mod tests {
     #[test]
     fn mixed_tolerance_absorbs_f32_noise_at_large_coordinates() {
         // At 1e6 an f32 ulp is 0.0625, far above the 1e-3 absolute floor.
-        let l = line(vec![glyph(0.0, 1_000_000.1, false)], 1_000_000.0, 0.0, 0.0);
+        let l = line(vec![glyph(0.0, 1_000_000.1, false)], 1_000_000.0);
         assert!(l.is_valid(&ctx()));
         // Real overflow is still caught (relative tolerance there is 10).
-        let l = line(vec![glyph(0.0, 1_000_100.0, false)], 1_000_000.0, 0.0, 0.0);
+        let l = line(vec![glyph(0.0, 1_000_100.0, false)], 1_000_000.0);
         assert_eq!(
             l.validate(&ctx()),
             Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
         );
         // Small coordinates keep the strict absolute floor.
-        let l = line(vec![glyph(0.0, 20.01, false)], 20.0, 0.0, 0.0);
+        let l = line(vec![glyph(0.0, 20.01, false)], 20.0);
         assert_eq!(
             l.validate(&ctx()),
             Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
@@ -2132,7 +2093,7 @@ mod tests {
 
     #[test]
     fn inline_boxes_assemble_and_are_checked() {
-        let mut l = line(vec![glyph(0.0, 5.0, false)], 30.0, 0.0, 0.0);
+        let mut l = line(vec![glyph(0.0, 5.0, false)], 30.0);
         l.visual_boxes = vec![inline_box(5.0, 12.0), inline_box(17.0, 13.0)];
         assert!(l.is_valid(&ctx()));
         assert_eq!(l.visual_boxes[1].box_id, 9);
@@ -2160,7 +2121,7 @@ mod tests {
 
     #[test]
     fn visible_end_must_lie_inside_the_line() {
-        let mut l = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        let mut l = line(vec![glyph(0.0, 5.0, false)], 5.0);
         l.visible_byte_end = 9;
         assert_eq!(
             l.validate(&ctx()),
@@ -2174,16 +2135,16 @@ mod tests {
             let mut g = glyph(0.0, 5.0, false);
             g.x = bad;
             assert_eq!(
-                line(vec![g], 5.0, 0.0, 0.0).validate(&ctx()),
+                line(vec![g], 5.0).validate(&ctx()),
                 Err(LineInvariantError::NonFiniteGlyph { run: 0, glyph: 0 })
             );
             let mut g = glyph(0.0, 5.0, false);
             g.advance = bad;
             assert_eq!(
-                line(vec![g], 5.0, 0.0, 0.0).validate(&ctx()),
+                line(vec![g], 5.0).validate(&ctx()),
                 Err(LineInvariantError::NonFiniteGlyph { run: 0, glyph: 0 })
             );
-            let mut l = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+            let mut l = line(vec![glyph(0.0, 5.0, false)], 5.0);
             l.line_height = bad;
             assert_eq!(
                 l.validate(&ctx()),
@@ -2197,13 +2158,13 @@ mod tests {
         // The mark's pen position is 0; its ink sits 3 units to the left.
         let mut mark = glyph(0.0, 0.0, false);
         mark.x_offset = -3.0;
-        let l = line(vec![mark, glyph(0.0, 20.0, false)], 20.0, 0.0, 0.0);
+        let l = line(vec![mark, glyph(0.0, 20.0, false)], 20.0);
         assert!(l.is_valid(&ctx()));
         // `x_offset` plays no part in containment, even when large.
         let mut far = glyph(5.0, 10.0, false);
         far.x_offset = -50.0;
         let body = || vec![glyph(0.0, 5.0, false), far, glyph(15.0, 5.0, false)];
-        assert!(line(body(), 20.0, 0.0, 0.0).is_valid(&ctx()));
+        assert!(line(body(), 20.0).is_valid(&ctx()));
         // A zero advance has no horizontal extent, so its pen position is
         // exempt from containment even outside the body (and it is not content
         // of the slot).
@@ -2211,7 +2172,7 @@ mod tests {
             // A run's glyphs are in screen order.
             let mut glyphs = vec![mark, glyph(0.0, 20.0, false)];
             glyphs.sort_by(|a, b| a.x.total_cmp(&b.x));
-            line(glyphs, 20.0, 0.0, 0.0)
+            line(glyphs, 20.0)
         };
         assert!(with_mark(glyph(-3.0, 0.0, false)).is_valid(&ctx()));
         assert!(with_mark(glyph(25.0, 0.0, false)).is_valid(&ctx()));
@@ -2223,15 +2184,13 @@ mod tests {
                 glyph(25.0, 0.0, true),
             ],
             20.0,
-            0.0,
-            5.0,
         );
         assert!(l.is_valid(&ctx()));
         // A non-finite ink offset is rejected in pass 1.
         let mut nan = glyph(0.0, 5.0, false);
         nan.x_offset = f32::NAN;
         assert_eq!(
-            line(vec![nan], 5.0, 0.0, 0.0).validate(&ctx()),
+            line(vec![nan], 5.0).validate(&ctx()),
             Err(LineInvariantError::NonFiniteGlyph { run: 0, glyph: 0 })
         );
     }
@@ -2245,8 +2204,6 @@ mod tests {
             width,
             ascent: 12.0,
             descent: 4.0,
-            is_first_fragment: true,
-            is_last_fragment: true,
             bidi_level: 0,
         }
     }
@@ -2257,7 +2214,7 @@ mod tests {
         second.byte_range = Some(TextRange::new(2, 4));
         let mut first = glyph(0.0, 10.0, false);
         first.byte_range = Some(TextRange::new(0, 2));
-        line(vec![first, second], 30.0, 0.0, 0.0)
+        line(vec![first, second], 30.0)
     }
 
     #[test]
@@ -2339,7 +2296,7 @@ mod tests {
 
     #[test]
     fn span_membership_covers_inline_boxes_and_exempts_hanging_and_trailing() {
-        let mut l = line(vec![glyph(0.0, 5.0, false)], 30.0, 0.0, 0.0);
+        let mut l = line(vec![glyph(0.0, 5.0, false)], 30.0);
         l.visual_runs[0].glyphs[0].byte_range = Some(TextRange::new(0, 1));
         l.visual_boxes = vec![inline_box(10.0, 12.0)]; // bytes 1..4
         l.span_fragments = vec![fragment(1, 0.0, 30.0, (0, 4))];
@@ -2353,12 +2310,7 @@ mod tests {
             })
         );
         // A hanging glyph lies outside the body and so outside the fragment.
-        let mut h = line(
-            vec![glyph(0.0, 20.0, false), glyph(20.0, 5.0, true)],
-            20.0,
-            0.0,
-            5.0,
-        );
+        let mut h = line(vec![glyph(0.0, 20.0, false), glyph(20.0, 5.0, true)], 20.0);
         h.visual_runs[0].glyphs[0].byte_range = Some(TextRange::new(0, 3));
         h.visual_runs[0].glyphs[1].byte_range = Some(TextRange::new(3, 4));
         h.span_fragments = vec![fragment(1, 0.0, 20.0, (0, 4))];
@@ -2369,28 +2321,25 @@ mod tests {
     fn a_lone_overflowing_object_is_valid_when_the_width_equals_the_box() {
         // `AllowOverflow`: the line's visual_width is set to the box width, so
         // containment [0, visual_width] holds for a box wider than wrap_width.
-        let mut l = line(vec![], 500.0, 0.0, 0.0);
+        let mut l = line(vec![], 500.0);
         l.visual_runs.clear();
         l.visual_boxes = vec![inline_box(0.0, 500.0)];
         assert!(l.is_valid(&ctx()));
     }
 
     #[test]
-    fn body_glyphs_must_stay_inside_the_block_and_extents_must_be_sane() {
-        let outside = line(vec![glyph(0.0, 30.0, false)], 20.0, 0.0, 0.0);
+    fn body_glyphs_must_stay_inside_the_block_and_widths_must_be_finite() {
+        let outside = line(vec![glyph(0.0, 30.0, false)], 20.0);
         assert_eq!(
             outside.validate(&ctx()),
             Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
         );
-        let negative = line(vec![glyph(0.0, 5.0, false)], 5.0, -1.0, 0.0);
-        assert_eq!(
-            negative.validate(&ctx()),
-            Err(LineInvariantError::NonFiniteOrNegativeExtent)
-        );
-        let nan = line(vec![glyph(0.0, 5.0, false)], f32::NAN, 0.0, 0.0);
+        let nan = line(vec![glyph(0.0, 5.0, false)], f32::NAN);
         assert_eq!(
             nan.validate(&ctx()),
-            Err(LineInvariantError::NonFiniteOrNegativeExtent)
+            Err(LineInvariantError::InvalidSlots {
+                reason: SlotErrorReason::InvalidContent
+            })
         );
     }
 
@@ -2452,7 +2401,7 @@ mod tests {
             byte_range: Some(TextRange::new(0, 4)),
             ..glyph(0.0, 5.0, false)
         };
-        let base = || line(vec![whole], 5.0, 0.0, 0.0);
+        let base = || line(vec![whole], 5.0);
         let invalid = Err(LineInvariantError::InvalidCaretStop { index: 1 });
         let mut l = base();
         l.caret_stops = vec![caret(0.0, 0), caret(5.0, 4)];
@@ -2499,7 +2448,7 @@ mod tests {
             ..caret(0.0, offset)
         };
         // A glyph at level 0 owns 0..1; nothing owns 2..4.
-        let mut l = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        let mut l = line(vec![glyph(0.0, 5.0, false)], 5.0);
         l.caret_stops = vec![leveled(1, 0)];
         assert_eq!(l.validate(&ctx()), Ok(()));
         l.caret_stops = vec![leveled(1, 1)];
@@ -2550,7 +2499,7 @@ mod tests {
 
     #[test]
     fn an_empty_line_stop_carries_the_paragraph_level() {
-        let mut l = line(vec![], 0.0, 0.0, 0.0);
+        let mut l = line(vec![], 0.0);
         l.visual_runs.clear();
         l.byte_range = TextRange::empty_at(0);
         l.visible_byte_end = 0;
@@ -2570,7 +2519,7 @@ mod tests {
 
     #[test]
     fn decorations_must_be_finite_nonnegative_and_inside_the_line() {
-        let base = || line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        let base = || line(vec![glyph(0.0, 5.0, false)], 5.0);
         let invalid = Err(LineInvariantError::InvalidDecoration { index: 0 });
         let mut l = base();
         l.decorations = vec![underline(0.0, 5.0)];
@@ -2596,18 +2545,18 @@ mod tests {
     #[test]
     fn overflowing_endpoints_are_rejected_before_comparison() {
         // Each coordinate is finite, but x + advance overflows to infinity.
-        let l = line(vec![glyph(3.0e38, 3.0e38, false)], 5.0, 0.0, 0.0);
+        let l = line(vec![glyph(3.0e38, 3.0e38, false)], 5.0);
         assert_eq!(
             l.validate(&ctx()),
             Err(LineInvariantError::NonFiniteGlyph { run: 0, glyph: 0 })
         );
-        let mut b = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        let mut b = line(vec![glyph(0.0, 5.0, false)], 5.0);
         b.visual_boxes.push(inline_box(3.0e38, 3.0e38));
         assert_eq!(
             b.validate(&ctx()),
             Err(LineInvariantError::InvalidInlineBox { index: 0 })
         );
-        let mut t = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        let mut t = line(vec![glyph(0.0, 5.0, false)], 5.0);
         t.tabs.push(PositionedTab {
             byte_range: TextRange::new(1, 2),
             x: 3.0e38,
@@ -2622,7 +2571,7 @@ mod tests {
     #[test]
     fn negative_advance_is_judged_by_its_normalised_extent() {
         // Occupies [20, 25] although `x + advance` is 20: outside a 20-wide body.
-        let l = line(vec![glyph(25.0, -5.0, false)], 20.0, 0.0, 0.0);
+        let l = line(vec![glyph(25.0, -5.0, false)], 20.0);
         assert_eq!(
             l.validate(&ctx()),
             Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
@@ -2633,18 +2582,13 @@ mod tests {
             glyph(10.0, -5.0, false),
             glyph(10.0, 10.0, false),
         ];
-        assert!(line(body, 20.0, 0.0, 0.0).is_valid(&ctx()));
+        assert!(line(body, 20.0).is_valid(&ctx()));
     }
 
     #[test]
     fn synthesized_hyphen_with_no_range_is_not_trailing_whitespace() {
         // "abc" + generated hyphen whose range is empty at visible_byte_end.
-        let mut l = line(
-            vec![glyph(0.0, 15.0, false), glyph(15.0, 5.0, false)],
-            20.0,
-            0.0,
-            0.0,
-        );
+        let mut l = line(vec![glyph(0.0, 15.0, false), glyph(15.0, 5.0, false)], 20.0);
         l.byte_range = TextRange::new(0, 4);
         l.visible_byte_end = 4;
         l.visual_runs[0].glyphs[0].byte_range = Some(TextRange::new(0, 4));
@@ -2666,8 +2610,6 @@ mod tests {
         let mut l = line(
             vec![glyph(0.0, 20.0, false), trailing_space(20.0, 0.0)],
             20.0,
-            0.0,
-            0.0,
         );
         l.visible_byte_end = 3;
         l.visual_runs[0].glyphs[1].is_hanging = true;
@@ -2683,8 +2625,6 @@ mod tests {
         let l = line(
             vec![glyph(-1.0e-4, 1.0e-4, true), glyph(0.0, 20.0, false)],
             20.0,
-            0.0,
-            0.0,
         );
         let expected = Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 0 });
         assert_eq!(l.validate(&no_hang()), expected);
@@ -2697,8 +2637,6 @@ mod tests {
         let mut l = line(
             vec![glyph(5.0, 20.0, false), trailing_space(0.0, 5.0)],
             20.0,
-            0.0,
-            0.0,
         );
         l.visible_byte_end = 3;
         l.visual_runs[0].glyphs[0].x = 0.0;
@@ -2760,8 +2698,6 @@ mod tests {
                     word_glyph(10.0, 20.0, (1, 2)),
                 ],
                 30.0,
-                0.0,
-                0.0,
             )
         };
         assert!(two().validate_at(30.0).is_ok());
@@ -2786,8 +2722,6 @@ mod tests {
                 word_glyph(25.0, 15.0, (0, 3)),
             ],
             40.0,
-            0.0,
-            0.0,
         );
         assert!(l.validate_at(30.0).is_ok());
         // Two different clusters are divisible, so they must wrap.
@@ -2797,8 +2731,6 @@ mod tests {
                 word_glyph(25.0, 15.0, (3, 6)),
             ],
             40.0,
-            0.0,
-            0.0,
         );
         assert_eq!(
             l.validate_at(30.0),
@@ -2809,7 +2741,7 @@ mod tests {
         );
         // A lone cluster whose extent is not the line width is not the overflow
         // state either (the line is wider than what it holds).
-        let l = line(vec![word_glyph(0.0, 25.0, (0, 3))], 40.0, 0.0, 0.0);
+        let l = line(vec![word_glyph(0.0, 25.0, (0, 3))], 40.0);
         assert_eq!(
             l.validate_at(30.0),
             Err(LineInvariantError::LineWiderThanWrapWidth {
@@ -2836,7 +2768,7 @@ mod tests {
         let allow = BoxOverflowPolicy::AllowOverflow;
         // Exemption A: no visual runs, no tabs, one AllowOverflow box at x = 0
         // that is as wide as the line.
-        let mut l = line(vec![], 50.0, 0.0, 0.0);
+        let mut l = line(vec![], 50.0);
         l.byte_range = TextRange::new(0, 1);
         l.visible_byte_end = 1;
         l.visual_runs.clear();
@@ -2858,8 +2790,7 @@ mod tests {
         }
         // Not when it shares the line with a glyph run, a tab or a second box.
         let mut with_run = l.clone();
-        with_run.visual_runs =
-            line(vec![word_glyph(0.0, 50.0, (0, 1))], 50.0, 0.0, 0.0).visual_runs;
+        with_run.visual_runs = line(vec![word_glyph(0.0, 50.0, (0, 1))], 50.0).visual_runs;
         with_run.visual_runs[0].byte_range = with_run.byte_range;
         assert_eq!(
             with_run.validate_at(30.0),
@@ -2916,12 +2847,7 @@ mod tests {
         let wide = |paddings: (f32, f32)| {
             // One 26-wide cluster between the paddings, in a chip over its bytes.
             let (left, right) = paddings;
-            let mut l = line(
-                vec![word_glyph(left, 26.0, (0, 3))],
-                left + 26.0 + right,
-                0.0,
-                0.0,
-            );
+            let mut l = line(vec![word_glyph(left, 26.0, (0, 3))], left + 26.0 + right);
             l.span_fragments = vec![fragment(1, 0.0, left + 26.0 + right, (0, 3))];
             // Byte 3 is the line's trailing whitespace.
             l.visible_byte_end = 3;
@@ -2933,8 +2859,7 @@ mod tests {
         assert!(wide((0.0, 3.0)).validate_at(30.0).is_ok());
         // Nested fragments of the same bytes: all must wrap the entity.
         let mut nested = wide((3.0, 3.0));
-        let mut inner = fragment(2, 3.0, 26.0, (0, 3));
-        inner.is_first_fragment = true;
+        let inner = fragment(2, 3.0, 26.0, (0, 3));
         nested.span_fragments.push(inner);
         assert!(nested.validate_at(30.0).is_ok());
         // Every padded fixture here is 3 + 26 + 3 = 32 wide.
@@ -2987,7 +2912,7 @@ mod tests {
             Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
         );
         // Unpadded, the width must still be exactly the entity's.
-        let mut bare = line(vec![word_glyph(0.0, 26.0, (0, 3))], 32.0, 0.0, 0.0);
+        let mut bare = line(vec![word_glyph(0.0, 26.0, (0, 3))], 32.0);
         too_wide(&bare);
         set_width(&mut bare, 26.0);
         assert!(bare.validate_at(30.0).is_ok());
@@ -3005,7 +2930,7 @@ mod tests {
             descent: 1.0,
             overflow_policy: BoxOverflowPolicy::AllowOverflow,
         };
-        let mut l = line(vec![], 32.0, 0.0, 0.0);
+        let mut l = line(vec![], 32.0);
         l.visual_runs.clear();
         l.byte_range = TextRange::new(0, 2);
         l.visible_byte_end = 1;
@@ -3039,8 +2964,6 @@ mod tests {
                 word_glyph(10.0, 20.0, (1, 2)),
             ],
             30.0,
-            0.0,
-            0.0,
         );
         let mut p = paragraph(&wrap(30.0), vec![two]);
         p.lines[0].slots[0].constraint.end = 30.0;

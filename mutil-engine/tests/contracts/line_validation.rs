@@ -38,19 +38,10 @@ fn partial_hanging_counts_only_overflow() {
     // The body glyph and the 4 units of the hanging mark inside the body span
     // the slot; the mark's last 6 units hang.
     l.visual_runs = vec![run(glyph(0., 96., false)), run(glyph(96., 10., true))];
-    l.hanging_right = 6.;
     let mut c = ctx();
     c.hang_mode.end = HangEndMode::Allow;
     assert_eq!(l.validate(&c), Ok(()));
-    l.hanging_right = 10.;
-    assert_eq!(
-        l.validate(&c),
-        Err(LineInvariantError::HangingExtentMismatch {
-            side: HangSide::Right,
-            expected: 6.0,
-            actual: 10.0
-        })
-    );
+    assert_eq!(l.hanging_right(), 6.0);
 }
 
 #[test]
@@ -135,7 +126,6 @@ fn false_hanging_flag_inside_body_is_rejected() {
 fn negative_advance_partial_hang_uses_normalized_envelope() {
     let mut l = line();
     l.visual_runs = vec![run(glyph(0., 96., false)), run(glyph(106., -10., true))];
-    l.hanging_right = 6.;
     let mut c = ctx();
     c.hang_mode.end = HangEndMode::Allow;
     assert_eq!(l.validate(&c), Ok(()));
@@ -145,7 +135,6 @@ fn negative_advance_partial_hang_uses_normalized_envelope() {
 fn left_partial_hanging_counts_only_overflow() {
     let mut l = line();
     l.visual_runs = vec![run(glyph(-6., 10., true)), run(glyph(4., 96., false))];
-    l.hanging_left = 6.;
     let mut c = ctx();
     c.hang_mode.start = HangStartMode::AllLines;
     assert_eq!(l.validate(&c), Ok(()));
@@ -166,18 +155,11 @@ fn hanging_requires_overflow_beyond_tolerance() {
     let mut l = line();
     l.visual_runs = vec![run(glyph(0., 100., false)), run(glyph(50., 0., true))];
     assert_eq!(l.validate(&c), Ok(()));
-    // But they cannot fake a declared hanging extent.
+    // Nor do they add a hanging extent.
     let mut l = line();
-    l.hanging_right = 5.;
     l.visual_runs = vec![run(glyph(0., 100., false)), run(glyph(99., 0., true))];
-    assert_eq!(
-        l.validate(&c),
-        Err(LineInvariantError::HangingExtentMismatch {
-            side: HangSide::Right,
-            expected: 0.0,
-            actual: 5.0
-        })
-    );
+    assert_eq!(l.validate(&c), Ok(()));
+    assert_eq!(l.hanging_right(), 0.0);
 }
 
 #[test]
@@ -193,20 +175,11 @@ fn multi_slot_containment_and_conserved_width() {
     let mut bad = valid.clone();
     // A slot's content may not run on into the obstacle after it.
     bad.slots[0].visual_width = 151.0;
-    bad.visual_width = 251.0;
     assert_eq!(
         bad.validate(&c),
         Err(LineInvariantError::LineWiderThanWrapWidth {
             visual_width: 251.0,
             wrap_width: 250.0
-        })
-    );
-    let mut bad = valid.clone();
-    bad.visual_width += 1.0;
-    assert_eq!(
-        bad.validate(&c),
-        Err(LineInvariantError::InvalidSlots {
-            reason: SlotErrorReason::WidthNotConserved /*auto*/
         })
     );
     let mut bad = valid.clone();
@@ -237,8 +210,6 @@ fn multi_slot_containment_and_conserved_width() {
         ascent: 8.0,
         descent: 2.0,
         bidi_level: 0,
-        is_first_fragment: true,
-        is_last_fragment: true,
     });
     assert_eq!(
         bad.validate(&c),
@@ -251,19 +222,16 @@ fn empty_slot_hanging_and_trailing_whitespace() {
     let (mut l, mut c) = two_slots();
     l.visual_runs[0].glyphs.remove(0);
     l.slots[0].visual_width = 0.0;
-    l.visual_width = 100.0;
     c.hang_mode.start = HangStartMode::AllLines;
     assert_eq!(l.validate(&c), Ok(()));
     let mut hanging = glyph(145.0, 5.0, true);
     hanging.byte_range = Some(TextRange::new(0, 1));
     l.visual_runs[0].glyphs.insert(0, hanging);
-    l.hanging_left = 5.0;
     assert_eq!(
         l.validate(&c),
         Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
     );
     l.visual_runs[0].glyphs.remove(0);
-    l.hanging_left = 0.0;
     let trailing = PositionedGlyph {
         byte_range: Some(TextRange::new(2, 3)),
         ..glyph(250.0, 5.0, false)
@@ -459,7 +427,6 @@ fn slot_line(
 ) -> (PositionedLine, LineContext) {
     let mut l = line();
     l.slots = smallvec::smallvec![slot(start, width, capacity)];
-    l.visual_width = width;
     l.visual_runs = vec![run(glyph(start, width, false))];
     let c = LineContext {
         wrap_width,
@@ -503,7 +470,6 @@ fn slot_overflow_names_the_slot_and_its_capacity() {
     let (mut l, c) = two_slots();
     l.visual_runs[0].glyphs[0].advance = 110.;
     l.slots[0].visual_width = 110.;
-    l.visual_width = 210.;
     assert_eq!(
         l.validate(&c),
         Err(LineInvariantError::SlotOverflow {
@@ -516,7 +482,6 @@ fn slot_overflow_names_the_slot_and_its_capacity() {
     let (mut l, c) = two_slots();
     l.visual_runs[0].glyphs[1].advance = 105.;
     l.slots[1].visual_width = 105.;
-    l.visual_width = 205.;
     assert_eq!(
         l.validate(&c),
         Err(LineInvariantError::SlotOverflow {
@@ -718,7 +683,6 @@ fn a_slot_is_as_wide_as_the_content_placed_in_it() {
     );
     // The slot may be narrower than its capacity when its content is.
     narrow.slots[1].visual_width = 60.;
-    narrow.visual_width = 160.;
     assert_eq!(narrow.validate(&c), Ok(()));
 }
 
@@ -728,7 +692,6 @@ fn aligned_line(x: f32, content_start: f32, visual_width: f32) -> PositionedLine
     let mut l = line();
     l.slots[0].content_start = content_start;
     l.slots[0].visual_width = visual_width;
-    l.visual_width = visual_width;
     l.visual_runs = vec![run(glyph(x, 60., false))];
     l
 }
@@ -903,7 +866,6 @@ fn end_hanging_line(body: f32) -> PositionedLine {
         byte_range: Some(TextRange::new(1, 2)),
         ..glyph(body, 5., true)
     };
-    l.hanging_right = 5.;
     l
 }
 
@@ -956,7 +918,7 @@ fn allow_end_hangs_a_mark_only_when_it_would_otherwise_wrap() {
     start.visual_runs[0].glyphs[1].x = 0.;
     start.visual_runs[0].glyphs.swap(0, 1);
     start.slots[0].content_start = 5.;
-    (start.hanging_left, start.hanging_right) = (5., 0.);
+    assert_eq!((start.hanging_left(), start.hanging_right()), (5., 0.));
     let first_line = LineContext {
         hang_mode: HangMode {
             start: HangStartMode::FirstLine,
@@ -976,8 +938,6 @@ fn span_fragment(span: (usize, usize), bytes: (usize, usize)) -> PositionedSpanF
         width: 100.,
         ascent: 8.,
         descent: 2.,
-        is_first_fragment: bytes.0 == span.0,
-        is_last_fragment: bytes.1 == span.1,
         bidi_level: 0,
     }
 }
@@ -989,7 +949,7 @@ fn span_fragment_flags_say_where_the_fragment_lies_in_its_span() {
         l.span_fragments = vec![fragment];
         l.validate(&ctx())
     };
-    let mismatch = Err(LineInvariantError::SpanFragmentEdgeMismatch { index: 0 });
+    let mismatch = Err(LineInvariantError::SpanFragmentOutsideSpan { index: 0 });
     // The whole span, its first part, a middle part and its last part.
     for span in [(0, 2), (0, 9), (0, 9), (0, 2)] {
         assert_eq!(with(span_fragment(span, (0, 2))), Ok(()), "{span:?}");
@@ -1004,21 +964,13 @@ fn span_fragment_flags_say_where_the_fragment_lies_in_its_span() {
         l.span_fragments = vec![span_fragment(span, (4, 6))];
         assert_eq!(l.validate(&ctx()), Ok(()), "{span:?}");
     }
-    // Each flag is true exactly when the fragment reaches that end.
-    for flip in [
-        |f: &mut PositionedSpanFragment| f.is_first_fragment = !f.is_first_fragment,
-        |f: &mut PositionedSpanFragment| f.is_last_fragment = !f.is_last_fragment,
-    ] {
-        for span in [(0, 2), (0, 9)] {
-            let mut fragment = span_fragment(span, (0, 2));
-            flip(&mut fragment);
-            assert_eq!(with(fragment), mismatch, "{span:?}");
-        }
-    }
+    // Each edge is the fragment's exactly when it reaches that end.
+    let fragment = span_fragment((0, 9), (0, 2));
+    assert!(fragment.is_first_fragment() && !fragment.is_last_fragment());
+    let fragment = span_fragment((0, 9), (4, 9));
+    assert!(!fragment.is_first_fragment() && fragment.is_last_fragment());
     // The fragment lies inside its span.
-    let mut outside = span_fragment((1, 2), (0, 2));
-    outside.is_first_fragment = false;
-    assert_eq!(with(outside), mismatch);
+    assert_eq!(with(span_fragment((1, 2), (0, 2))), mismatch);
 }
 
 fn atomic_fragment(full: (usize, usize), bytes: (usize, usize), x: f32) -> AtomicFragment {
