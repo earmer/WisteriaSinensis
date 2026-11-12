@@ -1,10 +1,10 @@
 //! Interactive types: caret, hit-test, movement and selection data (spec §6).
 //!
 //! Data only. The queries that produce and consume them (`hit_test`,
-//! `caret_geometry`, `move_cursor`, `selection_geometry`) arrive in later phases.
+//! `caret_geometry`, `move_cursor`, `selection_geometry`) are not implemented yet.
 
 use super::output::{AtomicFragment, CaretAffinity};
-use crate::types::{BidiLevel, ByteIndex, Rect};
+use crate::types::{BidiLevel, ByteIndex, Rect, WritingMode};
 
 /// A caret location: offset plus affinity (spec §6.1).
 ///
@@ -100,8 +100,8 @@ pub struct Selection {
 pub enum BoxHeightStyle {
     /// Union of selected font-instance ascent/descent, excluding gap and leading.
     ///
-    /// **Forward contract (Phase 1/2).** Selection geometry is not computed in
-    /// Phase 0; when it lands it must query `TextShaper::font_metrics` for every
+    /// **Forward contract.** Selection geometry is not computed yet; when it
+    /// is, it must query `TextShaper::font_metrics` for every
     /// selected instance and union their ascent/descent.
     #[default]
     Tight,
@@ -116,24 +116,25 @@ impl AtomicFragment {
     /// Even level: left half → start/Downstream, right half → end/Upstream.
     /// Odd level: halves swap. Midpoint itself counts as right half.
     pub fn hit_test(&self, x: f32) -> CursorPosition {
-        let midpoint = self.x_start + 0.5 * (self.x_end - self.x_start);
+        let midpoint = self.x + 0.5 * self.width;
         let is_in_left_half = x < midpoint;
-        let is_even_level = self.bidi_level & 1 == 0;
+        let is_even_level = !self.bidi_level.direction().is_rtl();
         // Even levels map the left half to the start; odd levels swap halves.
         let snaps_to_start = is_in_left_half == is_even_level;
         if snaps_to_start {
             CursorPosition {
-                byte_offset: self.full_byte_range.start,
+                byte_offset: self.full_byte_range.start(),
                 affinity: CaretAffinity::Downstream,
             }
         } else {
             CursorPosition {
-                byte_offset: self.full_byte_range.end,
+                byte_offset: self.full_byte_range.end(),
                 affinity: CaretAffinity::Upstream,
             }
         }
     }
 }
+
 /// Validates GDEF subdivisions or falls back to K equal atom slots.
 pub fn resolve_ligature_carets(width: f32, atom_count: usize, carets: &[f32]) -> Vec<f32> {
     // A non-finite or non-positive width cannot describe a ligature, so no
@@ -166,4 +167,37 @@ fn equal_caret_slots(width: f32, atom_count: usize) -> Vec<f32> {
     (1..atom_count)
         .map(|index| width * (index as f32 / atom_count as f32))
         .collect()
+}
+
+/// A physical direction resolved once at the interaction boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FlowMotion {
+    /// Previous visual inline stop.
+    InlinePrev,
+    /// Next visual inline stop.
+    InlineNext,
+    /// Previous block-axis line.
+    BlockPrev,
+    /// Next block-axis line.
+    BlockNext,
+}
+
+impl Motion {
+    /// Resolves the four physical arrows; logical and word commands return `None`.
+    #[must_use]
+    pub const fn flow_direction(self, mode: WritingMode) -> Option<FlowMotion> {
+        use FlowMotion::*;
+        use WritingMode::*;
+        match (mode, self) {
+            (HorizontalTb, Self::Left) | (VerticalRl | VerticalLr, Self::Up) => Some(InlinePrev),
+            (HorizontalTb, Self::Right) | (VerticalRl | VerticalLr, Self::Down) => Some(InlineNext),
+            (HorizontalTb, Self::Up) | (VerticalRl, Self::Right) | (VerticalLr, Self::Left) => {
+                Some(BlockPrev)
+            }
+            (HorizontalTb, Self::Down) | (VerticalRl, Self::Left) | (VerticalLr, Self::Right) => {
+                Some(BlockNext)
+            }
+            _ => None,
+        }
+    }
 }

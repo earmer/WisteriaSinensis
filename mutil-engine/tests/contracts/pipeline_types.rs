@@ -1,136 +1,102 @@
-//! Phase 0 validation: the types of all three tiers fit together.
+//! The types of all three tiers fit together.
 //!
 //! No typesetting happens here. Every cluster, width and position below is a
 //! hand-written fixture (fixed 10-unit advances) whose only purpose is to
 //! exercise ownership, visibility and trait closure from *outside* the crate.
 
+use crate::common::{
+    ADV, assert_send_sync_static, atom, push_text, rebuild_items, shaping_run, single_slot,
+};
 use mutil_engine::*;
-use smallvec::smallvec;
-use std::sync::Arc;
 
 const TEXT: &str = "Hello world";
-const ADVANCE: f32 = 10.0;
+
+fn cluster(base: usize, local: usize) -> ShapedCluster {
+    crate::common::cluster(base, local)
+}
 
 fn run() -> ShapingRun {
-    ShapingRun {
-        features: Default::default(),
-
-        byte_range: TextRange::new(0, TEXT.len()),
-        families: Arc::from([FontFamily::Generic(GenericFamily::SansSerif)]),
-        font_size: 16.0,
-        style: FontStyle::default(),
-        script: ScriptTag::LATIN,
-        locale: LocaleTag::new("en-GB"),
-        bidi_level: 0,
-        decoration: TextDecoration::default(),
-    }
+    shaping_run(TEXT, "en-GB")
 }
 
-/// One atom per ASCII letter, at its absolute byte offset.
-fn atom(offset: usize) -> GraphemeAtom {
-    GraphemeAtom {
-        byte_range: TextRange::new(offset, offset + 1),
-        script: ScriptTag::LATIN,
-        bidi_level: 0,
-        linebreak_class: LineBreakClass::Al,
-        flags: AtomFlags::EMPTY,
-    }
-}
-
-/// Fixture cluster for the atom at `local` index of a node starting at byte `base`.
-fn cluster(base: usize, local: usize) -> ShapedCluster {
-    let off = base + local;
-    ShapedCluster {
-        byte_range: TextRange::new(off, off + 1),
-        atom_range: local..local + 1, // relative to the node's own atoms
-        font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
-        flags: AtomFlags::EMPTY,
-        glyphs: smallvec![RawShapedGlyph {
-            glyph_id: TEXT.as_bytes()[off] as u32,
-            cluster: off as u32,
-            x_advance: ADVANCE,
-            x_offset: 0.0,
-            y_offset: 0.0,
-            is_synthesized: false,
-        }],
-        natural_width: ADVANCE,
-        uncompressed_width: ADVANCE,
-        safe_to_break_before: true,
-        safe_to_concat_before: true,
-    }
-}
-
-fn word(range: TextRange) -> WordNode {
+fn word(ast: &mut ParagraphAst, range: TextRange) -> WordNode {
     let atoms: Vec<_> = range.as_range().map(atom).collect();
     let clusters: Vec<_> = (0..atoms.len()).map(|i| cluster(range.start, i)).collect();
-    let natural_width = clusters.iter().map(|c| c.natural_width).sum();
-    WordNode::Box(BoxNode::Text {
-        run_index: 0,
-        byte_range: range,
-        atoms,
-        clusters,
-        natural_width,
-    })
+    push_text(ast, 0, atoms, clusters)
 }
-
-fn assert_send_sync_static<T: Send + Sync + 'static>() {}
 
 #[test]
 fn test_pipeline_types_compile() {
     // Frontend: a pseudo ParagraphAst of Box, Discretionary, Glue, Box.
-    let ast = ParagraphAst {
+    let mut ast = ParagraphAst {
+        annotations: Vec::new(),
+        bidi_spans: Vec::new(),
+        writing_mode: WritingMode::HorizontalTb,
         base_direction: BidiDirection::Ltr,
         strut_metrics: FontMetrics {
+            vertical_ascent: 5.0,
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
             ascent: 12.0,
             descent: 4.0,
             ..Default::default()
         },
         strut_font_size: 16.0,
         runs: vec![run()],
-        items: vec![
-            word(TextRange::new(0, 5)),
-            // A breakable space: the break opportunity follows the glue.
-            WordNode::Glue(GlueNode {
-                original_bidi_class: BidiClass::Ws,
-                bidi_level: 0,
-                is_collapsible: true,
-
-                byte_range: TextRange::new(5, 6),
-                kind: GlueKind::WordSpace,
-                tier: GlueTier::Tier0,
-                natural_width: 4.0,
-                max_stretch: 2.0,
-                max_shrink: 1.0,
-            }),
-            WordNode::Discretionary(DiscretionaryNode::direct(6)),
-            word(TextRange::new(6, 11)),
-        ],
+        atoms: vec![],
+        clusters: vec![],
+        glyphs: Vec::new(),
+        items: vec![],
         decoration_spans: vec![],
         atomic_spans: vec![],
     };
+    ast.items = vec![
+        word(&mut ast, TextRange::new(0, 5)),
+        // A breakable space: the break opportunity follows the glue.
+        WordNode::Glue(GlueNode {
+            original_bidi_class: BidiClass::Ws,
+            bidi_level: BidiLevel::LTR,
+            is_collapsible: true,
+
+            byte_range: TextRange::new(5, 6),
+            kind: GlueKind::WordSpace,
+            natural_width: 4.0,
+            max_stretch: 2.0,
+            max_shrink: 1.0,
+        }),
+        WordNode::Discretionary(DiscretionaryNode::direct(6)),
+        word(&mut ast, TextRange::new(6, 11)),
+    ];
 
     // Shaping bridge: the no-op backend, through a trait object.
     let shaper: &dyn TextShaper = &NoopShaper;
     let r = &ast.runs[0];
-    let (font_id, metrics) =
-        shaper.resolve_primary_font_metrics(&r.families, r.style, r.script, &r.locale, r.font_size);
+    let (font_id, metrics) = shaper.resolve_primary_font_metrics(
+        &r.families,
+        r.style,
+        r.script,
+        &r.locale,
+        r.font_size,
+        r.features.variations(),
+    );
     assert_eq!(font_id, FontId(0));
     assert_eq!(metrics, FontMetrics::default());
 
-    let mut out = Vec::new();
-    shaper.shape_run(TEXT, r, &[], &mut out);
-    let run_atoms: Vec<GraphemeAtom> = (0..TEXT.len()).map(atom).collect();
+    let (mut out, mut out_glyphs) = (Vec::new(), Vec::new());
+    shaper.shape_run(TEXT, r, &[], &mut out, &mut out_glyphs);
+    let run_atoms = ast.run_atoms(0);
+    assert_eq!(run_atoms.len(), 10); // "Hello" and "world"; the space is glue
     shaper.reshape_window(
         TEXT,
         r,
-        &run_atoms,
+        run_atoms,
         TextRange::new(0, 5),
         LeadingEdit::None,
         TrailingEdit::AppendHyphen { hyphen: '-' },
         &mut out,
+        &mut out_glyphs,
     );
-    assert!(out.is_empty());
+    assert!(out.is_empty() && out_glyphs.is_empty());
     assert!(
         shaper
             .ligature_carets(
@@ -148,10 +114,10 @@ fn test_pipeline_types_compile() {
     // Middle-end: assemble the fixture clusters into a PositionedParagraph.
     let mut line_glyphs = Vec::new();
     let mut pen = 0.0_f32; // fixture bookkeeping only, not a layout algorithm
-    for item in &ast.items {
-        if let WordNode::Box(BoxNode::Text { clusters, .. }) = item {
-            for c in clusters {
-                let g = c.glyphs[0];
+    for item in 0..ast.items.len() {
+        if let Some(view) = ast.text_box(item) {
+            for c in view.clusters {
+                let g = ast.cluster_glyphs(c)[0];
                 line_glyphs.push(PositionedGlyph {
                     glyph_id: g.glyph_id,
                     x: pen,
@@ -159,7 +125,6 @@ fn test_pipeline_types_compile() {
                     y_offset: g.y_offset,
                     advance: g.x_advance,
                     byte_range: Some(c.byte_range),
-                    is_synthesized: false,
                     is_hanging: false,
                 });
                 pen += c.natural_width;
@@ -172,19 +137,21 @@ fn test_pipeline_types_compile() {
         x: pen,
         x_offset: 0.0,
         y_offset: 0.0,
-        advance: ADVANCE,
+        advance: ADV,
         byte_range: None,
-        is_synthesized: true,
         is_hanging: false,
     });
     assert_eq!(line_glyphs.len(), 11);
     assert!(
         line_glyphs
             .last()
-            .is_some_and(|g| g.is_synthesized && g.byte_range.is_none())
+            .is_some_and(PositionedGlyph::is_synthesized)
     );
 
     let line = PositionedLine {
+        slots: single_slot(pen + ADV, f32::INFINITY),
+        annotations: Vec::new(),
+        is_ellipsized: false,
         atomic_fragments: vec![],
 
         tabs: vec![],
@@ -194,17 +161,15 @@ fn test_pipeline_types_compile() {
         baseline_y: ast.strut_metrics.ascent,
         ascent: ast.strut_metrics.ascent,
         descent: ast.strut_metrics.descent,
-        line_height: VerticalMetrics::from_font_metrics(&ast.strut_metrics).natural_line_height(),
-        visual_width: pen + ADVANCE,
-        hanging_left: 0.0,
-        hanging_right: 0.0,
+        line_height: ast.strut_metrics.natural_line_height(),
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
+            orientation: GlyphOrientation::Horizontal,
             font_size: 16.0,
             variations: Default::default(),
 
             font: FontRef::unscaled(FontId(1)),
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             byte_range: TextRange::new(0, TEXT.len()),
             glyphs: line_glyphs,
         }],
@@ -212,20 +177,26 @@ fn test_pipeline_types_compile() {
             x: 0.0,
             offset: 0,
             affinity: CaretAffinity::Downstream,
-            level: 0,
+            level: BidiLevel::LTR,
             line: 0,
         }],
         visual_boxes: vec![],
         decorations: vec![],
     };
 
-    let mut para = PositionedParagraph::empty(ast.base_direction);
-    assert!(para.lines.is_empty());
-    para.size = Size {
-        width: line.visual_width,
-        height: line.line_height,
+    let policy = LayoutPolicySnapshot::resolve(
+        &ast,
+        &LayoutConstraints::default(),
+        &LayoutOptions::default(),
+    )
+    .expect("the fixture's layout inputs are valid");
+    let para = PositionedParagraph {
+        policy,
+        base_direction: ast.base_direction,
+        truncated_range: None,
+        total_block_size: 0.0,
+        lines: vec![line],
     };
-    para.lines.push(line);
     assert_eq!(para.lines.len(), 1);
 
     // Interaction types.
@@ -236,7 +207,7 @@ fn test_pipeline_types_compile() {
     let sel = SelectionRect {
         rect: Rect::new(0.0, 0.0, 50.0, 16.0),
         line: 0,
-        level: 0,
+        level: BidiLevel::LTR,
         is_line_end_extension: false,
     };
     assert_eq!(cursor.affinity, CaretAffinity::Upstream);
@@ -249,30 +220,42 @@ fn test_pipeline_types_compile() {
 
 #[test]
 fn fixture_clusters_index_their_own_node_atoms() {
-    let w = word(TextRange::new(6, 11));
-    let WordNode::Box(BoxNode::Text {
-        atoms,
-        clusters,
-        natural_width,
-        ..
-    }) = &w
-    else {
-        unreachable!()
-    };
-    assert_eq!(*natural_width, 5.0 * ADVANCE);
-    for c in clusters {
-        let covered = &atoms[c.atom_range.clone()];
+    // Two words in one run: the second box's atoms start at run-local index 5.
+    let mut ast = crate::common::ast("");
+    rebuild_items(&mut ast, |ast| {
+        vec![
+            word(ast, TextRange::new(0, 5)),
+            word(ast, TextRange::new(6, 11)),
+        ]
+    });
+    let view = ast.text_box(1).unwrap();
+    assert_eq!(view.natural_width, 5.0 * ADV);
+    let run = &ast.runs[0];
+    let run_atoms = ast.run_atoms(0);
+    assert_eq!(run_atoms.len(), 10);
+    for c in view.clusters {
+        // Cluster ranges are run-local: they index the run's atom slice, and the
+        // paragraph-level index adds the run's start.
+        let covered = &run_atoms[c.atom_range.clone()];
         assert_eq!(covered.len(), 1);
         assert_eq!(covered[0].byte_range, c.byte_range);
+        assert_eq!(
+            ast.atoms[run.atom_range.start + c.atom_range.start],
+            covered[0]
+        );
         assert!(c.safety_flags_consistent());
     }
+    assert_eq!(view.clusters[0].atom_range, 5..6);
 }
 
 #[test]
 fn every_word_node_variant_is_constructible() {
+    let mut ast = crate::common::ast("");
     let nodes = [
-        word(TextRange::new(0, 5)),
+        word(&mut ast, TextRange::new(0, 5)),
         WordNode::Box(BoxNode::InlineObject {
+            bidi_level: BidiLevel::LTR,
+            baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(7, 8),
             box_id: 7,
             width: 12.0,
@@ -285,22 +268,21 @@ fn every_word_node_variant_is_constructible() {
             span_id: 3,
             edge: SpanEdge::Leading,
             width: 6.0,
-            bidi_level: 1,
+            bidi_level: BidiLevel::RTL,
         }),
         WordNode::Glue(GlueNode {
             original_bidi_class: BidiClass::Ws,
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             is_collapsible: true,
 
             byte_range: TextRange::empty_at(5),
             kind: GlueKind::CjkAutospace,
-            tier: GlueKind::CjkAutospace.default_tier(),
             natural_width: 4.0,
             max_stretch: 8.0,
             max_shrink: 2.0,
         }),
         WordNode::Discretionary(DiscretionaryNode::direct(5)),
-        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(6, 7), false)),
+        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(6, 7))),
         WordNode::Tab {
             byte_range: TextRange::new(5, 6),
         },
@@ -315,8 +297,7 @@ fn every_word_node_variant_is_constructible() {
             },
             WordNode::Glue(_) | WordNode::Discretionary(_) | WordNode::Tab { .. } => {}
         }
-        // Every node reports a span; only a discretionary is a break opportunity.
-        assert!(n.byte_span().is_some());
+        // Only a discretionary is a break opportunity.
         assert_eq!(
             n.is_break_opportunity(),
             matches!(n, WordNode::Discretionary(_))
@@ -325,16 +306,13 @@ fn every_word_node_variant_is_constructible() {
     assert_eq!(nodes.len(), 7);
     // A soft discretionary owns no bytes: its span is empty at the break. A
     // hard break owns its newline.
-    assert_eq!(nodes[4].byte_span(), Some(TextRange::empty_at(5)));
-    assert_eq!(nodes[5].byte_span(), Some(TextRange::new(6, 7)));
+    assert_eq!(nodes[4].byte_span(), TextRange::empty_at(5));
+    assert_eq!(nodes[5].byte_span(), TextRange::new(6, 7));
     // Break actions are exhaustive too.
     let actions = [
         BreakAction::Direct,
-        BreakAction::HardBreak {
-            is_paragraph_end: true,
-        },
+        BreakAction::HardBreak,
         BreakAction::Hyphenate(HyphenOpportunity {
-            byte_offset: 3,
             prefix_replacement: None,
             suffix_replacement: None,
             prefix_cut_bytes: 0,
@@ -342,13 +320,16 @@ fn every_word_node_variant_is_constructible() {
         }),
         BreakAction::CjkPunctAdjust,
         BreakAction::MathOperator {
-            repeat_glyph_id: Some(9),
+            repeat: Some(RepeatedOperator {
+                glyph_id: 9,
+                advance: 6.0,
+            }),
         },
     ];
     for a in &actions {
         match a {
             BreakAction::Direct
-            | BreakAction::HardBreak { .. }
+            | BreakAction::HardBreak
             | BreakAction::Hyphenate(_)
             | BreakAction::CjkPunctAdjust
             | BreakAction::MathOperator { .. } => {}
@@ -372,22 +353,18 @@ fn canonical_penalty_scale_is_ordered_and_tiers_are_ranked() {
         D::FORBIDDEN_BREAK_PENALTY,
     ];
     assert!(scale.windows(2).all(|w| w[0] < w[1]));
-    assert!(D::hard_break(TextRange::EMPTY, true).is_mandatory());
+    assert!(D::paragraph_end(0).is_mandatory());
     assert!(!D::direct(0).is_mandatory());
     assert!(GlueTier::Tier0 < GlueTier::Tier1 && GlueTier::Tier1 < GlueTier::Tier2);
-    assert_eq!(GlueKind::WordSpace.default_tier(), GlueTier::Tier0);
-    assert_eq!(GlueKind::CjkAutospace.default_tier(), GlueTier::Tier1);
-    assert_eq!(
-        GlueKind::CjkPunctCompression.default_tier(),
-        GlueTier::Tier0
-    );
+    assert_eq!(GlueKind::WordSpace.tier(), GlueTier::Tier0);
+    assert_eq!(GlueKind::CjkAutospace.tier(), GlueTier::Tier1);
+    assert_eq!(GlueKind::CjkPunctCompression.tier(), GlueTier::Tier0);
     assert_eq!(GlueTier::Tier2 as u8, 2);
 }
 
 #[test]
 fn hyphen_opportunity_carries_prefix_and_suffix_replacements() {
     let h = HyphenOpportunity {
-        byte_offset: 3,
         prefix_replacement: Some("a".into()),
         suffix_replacement: Some("tje".into()),
         prefix_cut_bytes: 1,
@@ -401,7 +378,9 @@ fn hyphen_opportunity_carries_prefix_and_suffix_replacements() {
 #[test]
 fn clusters_partition_atoms_and_split_clusters_are_detected() {
     // Fixture words satisfy both invariants.
-    assert!(word(TextRange::new(0, 5)).is_self_contained());
+    let mut ast = crate::common::ast("");
+    rebuild_items(&mut ast, |ast| vec![word(ast, TextRange::new(0, 5))]);
+    assert!(ast.is_self_contained(0));
 
     // A two-atom ligature cluster is fine while it stays inside one node...
     let lig = |range: std::ops::Range<usize>, bytes: TextRange| {
@@ -411,16 +390,20 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
         c
     };
     let atoms: Vec<_> = (0..3).map(atom).collect();
-    let text_box = |range: TextRange, atoms: Vec<GraphemeAtom>, clusters: Vec<ShapedCluster>| {
-        WordNode::Box(BoxNode::Text {
-            run_index: 0,
-            byte_range: range,
-            atoms,
-            clusters,
-            natural_width: 0.0,
-        })
+    // Whether one box with the given (possibly wrong) range, atoms and clusters
+    // is self-contained.
+    let contained = |range: TextRange, atoms: Vec<GraphemeAtom>, clusters: Vec<ShapedCluster>| {
+        let mut ast = crate::common::ast("");
+        rebuild_items(&mut ast, |ast| {
+            let mut node = push_text(ast, 0, atoms, clusters);
+            if let WordNode::Box(BoxNode::Text { byte_range, .. }) = &mut node {
+                *byte_range = range;
+            }
+            vec![node]
+        });
+        ast.is_self_contained(0)
     };
-    let ok = text_box(
+    let ok = contained(
         TextRange::new(0, 3),
         atoms.clone(),
         vec![
@@ -428,33 +411,33 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
             lig(2..3, TextRange::new(2, 3)),
         ],
     );
-    assert!(ok.is_self_contained());
+    assert!(ok);
 
     // ...but cutting that ligature between two nodes leaves node A's cluster
     // reaching past its atoms, which the check rejects (invariant 1).
-    let node_a = text_box(
+    let node_a = contained(
         TextRange::new(0, 1),
         atoms[..1].to_vec(),
         vec![lig(0..2, TextRange::new(0, 2))],
     );
-    assert!(!node_a.is_self_contained());
+    assert!(!node_a);
 
     // Gaps and byte-range mismatches (invariant 2) are rejected too.
-    let gap = text_box(
+    let gap = contained(
         TextRange::new(0, 3),
         atoms.clone(),
         vec![lig(1..3, TextRange::new(1, 3))],
     );
-    assert!(!gap.is_self_contained());
-    let bad_bytes = text_box(
+    assert!(!gap);
+    let bad_bytes = contained(
         TextRange::new(0, 1),
         atoms[..1].to_vec(),
         vec![lig(0..1, TextRange::new(0, 2))],
     );
-    assert!(!bad_bytes.is_self_contained());
+    assert!(!bad_bytes);
     // Atoms that run backwards or overlap are not a partition of the text either,
     // even when every cluster matches its own atoms.
-    let backwards = text_box(
+    let backwards = contained(
         TextRange::new(1, 1),
         vec![atom(1), atom(0)],
         vec![
@@ -462,8 +445,8 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
             lig(1..2, TextRange::new(0, 1)),
         ],
     );
-    assert!(!backwards.is_self_contained());
-    let overlap = text_box(
+    assert!(!backwards);
+    let overlap = contained(
         TextRange::new(0, 3),
         vec![
             GraphemeAtom {
@@ -480,20 +463,22 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
             lig(1..2, TextRange::new(1, 3)),
         ],
     );
-    assert!(!overlap.is_self_contained());
+    assert!(!overlap);
     // The box's own range must run from its first atom to its last.
-    let wrong_range = text_box(
+    let wrong_range = contained(
         TextRange::new(0, 2),
         atoms[..1].to_vec(),
         vec![lig(0..1, TextRange::new(0, 1))],
     );
-    assert!(!wrong_range.is_self_contained());
-    assert!(
-        WordNode::Tab {
-            byte_range: TextRange::new(0, 1)
-        }
-        .is_self_contained()
-    );
+    assert!(!wrong_range);
+    // Every other node is trivially self-contained.
+    let mut tab = crate::common::ast("");
+    rebuild_items(&mut tab, |_| {
+        vec![WordNode::Tab {
+            byte_range: TextRange::new(0, 1),
+        }]
+    });
+    assert!(tab.is_self_contained(0));
 }
 
 #[test]
@@ -553,17 +538,18 @@ fn hanging_punctuation_fits_negative_x_and_synthesized_flag_round_trips() {
     // A hanging opening bracket sits left of the line edge.
     let hanging = PositionedGlyph {
         glyph_id: 1,
-        x: -ADVANCE,
+        x: -ADV,
         x_offset: 0.0,
         y_offset: 0.0,
-        advance: ADVANCE,
+        advance: ADV,
         byte_range: Some(TextRange::new(0, 1)),
-        is_synthesized: false,
         is_hanging: true,
     };
     assert!(hanging.x < 0.0);
 
-    // The shaper-level flag exists to feed PositionedGlyph::is_synthesized.
+    // The shaper marks a glyph it inserts (the hyphen of a `TrailingEdit`),
+    // since a raw glyph has no source range of its own; once positioned, the
+    // glyph carries `byte_range: None` instead.
     let g = RawShapedGlyph {
         is_synthesized: true,
         ..Default::default()
@@ -574,9 +560,9 @@ fn hanging_punctuation_fits_negative_x_and_synthesized_flag_round_trips() {
 #[test]
 fn font_variation_is_nameable_and_canonical() {
     let mut f = FontFeatures::new();
-    f.push_variation(*b"wght", 650.0);
-    f.push_variation(*b"slnt", -0.0);
+    f.push_variation(FontVariation::new(*b"wght", 650.0).unwrap());
+    f.push_variation(FontVariation::new(*b"slnt", -0.0).unwrap());
     let v: &[FontVariation] = f.variations();
-    assert_eq!(v[0], FontVariation::new(*b"wght", 650.0));
+    assert_eq!(Some(v[0]), FontVariation::new(*b"wght", 650.0));
     assert_eq!(v[1].value().to_bits(), 0.0_f32.to_bits());
 }

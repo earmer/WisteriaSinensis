@@ -4,14 +4,15 @@
 use super::{LeadingEdit, TextShaper, TrailingEdit};
 use crate::frontend::ShapingRun;
 use crate::types::{
-    Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, GraphemeAtom,
-    LocaleTag, ScriptTag, ShapedCluster, TextRange,
+    Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
+    GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster, TextRange,
 };
 use smallvec::SmallVec;
 
 /// Returns empty data and all-zero metrics. Performs no shaping, measurement or
 /// font selection: every request reports "no glyphs, no ligature carets,
-/// `FontId(0)` with zero metrics".
+/// `FontId(0)` with zero metrics". As a test double it is exempt from the
+/// one-cluster contract for tate-chu-yoko runs: it returns no clusters at all.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopShaper;
 
@@ -19,6 +20,7 @@ impl TextShaper for NoopShaper {
     fn font_metrics(&self, _instance: FontInstanceRef<'_>) -> FontMetrics {
         FontMetrics::default()
     }
+
     fn resolve_primary_font_metrics(
         &self,
         _families: &[FontFamily],
@@ -26,6 +28,7 @@ impl TextShaper for NoopShaper {
         _script: ScriptTag,
         _locale: &LocaleTag,
         _font_size: f32,
+        _variations: &[FontVariation],
     ) -> (FontId, FontMetrics) {
         (FontId::default(), FontMetrics::default())
     }
@@ -36,6 +39,7 @@ impl TextShaper for NoopShaper {
         _run: &ShapingRun,
         _atoms: &[GraphemeAtom],
         _output_clusters: &mut Vec<ShapedCluster>,
+        _output_glyphs: &mut Vec<RawShapedGlyph>,
     ) {
     }
 
@@ -48,6 +52,7 @@ impl TextShaper for NoopShaper {
         _leading_edit: LeadingEdit,
         _trailing_edit: TrailingEdit,
         _output_clusters: &mut Vec<ShapedCluster>,
+        _output_glyphs: &mut Vec<RawShapedGlyph>,
     ) {
     }
 

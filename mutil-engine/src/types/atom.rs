@@ -1,6 +1,6 @@
 //! Logical atoms: the extended-grapheme-cluster unit (spec §2.2).
 
-use super::{BidiLevel, ScriptTag, TextRange};
+use super::{BidiLevel, GlyphOrientation, ScriptTag, TextRange};
 use core::fmt;
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub};
 
@@ -9,7 +9,7 @@ use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub};
 /// Names follow the UAX #14 two-letter codes in Pascal case. The list covers
 /// the classes defined through Unicode 15.1 (including `Ak`, `Ap`, `As`, `Vf`,
 /// `Vi`); Unicode 18 may add values, hence `#[non_exhaustive]`. The data
-/// version is pinned and reported by `conformance_report()` (§1.1, Phase 1).
+/// version is pinned and reported by `conformance_report()` (§1.1).
 /// One byte wide.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -143,16 +143,10 @@ impl AtomFlags {
     /// Closing punctuation.
     pub const IS_CLOSE_PUNCT: Self = Self(1 << 6);
     /// Cluster contains U+FE0E, U+FE0F or an IVS selector (U+E0100..U+E01EF);
-    /// set after segmentation (§3 Step 1.4).
+    /// set after segmentation (spec §3 Step 1, FE-7).
     pub const HAS_VARIATION_SELECTOR: Self = Self(1 << 7);
-    /// Resolved intra-word apostrophe (§3 Step 2.4).
+    /// Resolved intra-word apostrophe (spec §3 Step 2, FE-11).
     pub const IS_APOSTROPHE: Self = Self(1 << 8);
-    /// The atom lies inside an `AtomicEditSpan` (mention, chip, code span; spec
-    /// §2.2, §6): caret stops strictly inside the span are suppressed and
-    /// Backspace / Delete remove the whole span. Combined by bitwise OR across
-    /// the atoms of a cluster, so it is neither a first-only nor a last-only flag.
-    /// `check_layout_inputs` requires it on exactly the atoms inside an atomic span.
-    pub const IN_ATOMIC_EDIT_SPAN: Self = Self(1 << 9);
 
     /// No flags set.
     pub const EMPTY: Self = Self(0);
@@ -167,11 +161,10 @@ impl AtomFlags {
             | Self::IS_OPEN_PUNCT.0
             | Self::IS_CLOSE_PUNCT.0
             | Self::HAS_VARIATION_SELECTOR.0
-            | Self::IS_APOSTROPHE.0
-            | Self::IN_ATOMIC_EDIT_SPAN.0,
+            | Self::IS_APOSTROPHE.0,
     );
 
-    const NAMES: [(Self, &'static str); 10] = [
+    const NAMES: [(Self, &'static str); 9] = [
         (Self::IS_CJK_IDEOGRAPH, "IS_CJK_IDEOGRAPH"),
         (Self::ALLOW_CJK_JUSTIFY_AFTER, "ALLOW_CJK_JUSTIFY_AFTER"),
         (Self::NO_LETTER_SPACING, "NO_LETTER_SPACING"),
@@ -181,7 +174,6 @@ impl AtomFlags {
         (Self::IS_CLOSE_PUNCT, "IS_CLOSE_PUNCT"),
         (Self::HAS_VARIATION_SELECTOR, "HAS_VARIATION_SELECTOR"),
         (Self::IS_APOSTROPHE, "IS_APOSTROPHE"),
-        (Self::IN_ATOMIC_EDIT_SPAN, "IN_ATOMIC_EDIT_SPAN"),
     ];
 
     /// Flags a cluster takes only from its **first** atom.
@@ -279,12 +271,14 @@ impl BitOr for AtomFlags {
         Self(self.0 | rhs.0)
     }
 }
+
 impl BitOrAssign for AtomFlags {
     #[inline]
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
     }
 }
+
 impl BitAnd for AtomFlags {
     type Output = Self;
     #[inline]
@@ -292,12 +286,14 @@ impl BitAnd for AtomFlags {
         Self(self.0 & rhs.0)
     }
 }
+
 impl BitAndAssign for AtomFlags {
     #[inline]
     fn bitand_assign(&mut self, rhs: Self) {
         self.0 &= rhs.0;
     }
 }
+
 impl Sub for AtomFlags {
     type Output = Self;
     /// Set difference: flags in `self` that are not in `rhs`.
@@ -306,6 +302,7 @@ impl Sub for AtomFlags {
         Self(self.0 & !rhs.0)
     }
 }
+
 impl Not for AtomFlags {
     type Output = Self;
     /// Complement within the assigned bits.
@@ -339,11 +336,12 @@ impl fmt::Debug for AtomFlags {
 /// (spec §2.2). The logical unit for carets, script, bidi level and break
 /// classes.
 ///
-/// Layout (64-bit): `TextRange` 16 + `ScriptTag` 4 + `BidiLevel` 1 +
-/// `LineBreakClass` 1 + `AtomFlags` 2 = 24 bytes, alignment 8, no padding;
-/// asserted at compile time below.
+/// Layout on 64-bit targets is 32 bytes, aligned to 8, including orientation
+/// and padding; asserted at compile time below.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphemeAtom {
+    /// Resolved glyph orientation.
+    pub orientation: GlyphOrientation,
     /// Bytes of the cluster in the paragraph text.
     pub byte_range: TextRange,
     /// Resolved script. After frontend resolution never `Zyyy` or `Zinh` (§2.1).
@@ -361,7 +359,7 @@ pub struct GraphemeAtom {
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {
-    assert!(core::mem::size_of::<GraphemeAtom>() == 24);
+    assert!(core::mem::size_of::<GraphemeAtom>() == 32);
     assert!(core::mem::align_of::<GraphemeAtom>() == 8);
     assert!(core::mem::size_of::<AtomFlags>() == 2);
     assert!(core::mem::size_of::<LineBreakClass>() == 1);
@@ -397,9 +395,10 @@ mod tests {
 
     fn atom_with(flags: AtomFlags) -> GraphemeAtom {
         GraphemeAtom {
+            orientation: GlyphOrientation::Horizontal,
             byte_range: TextRange::new(0, 1),
             script: ScriptTag::LATIN,
-            bidi_level: 0,
+            bidi_level: crate::types::BidiLevel::LTR,
             linebreak_class: LineBreakClass::Al,
             flags,
         }
@@ -445,25 +444,6 @@ mod tests {
         // One atom: identity. No atoms: empty.
         assert_eq!(AtomFlags::for_cluster(&[atom_with(all)]), all);
         assert_eq!(AtomFlags::for_cluster(&[]), AtomFlags::EMPTY);
-    }
-
-    #[test]
-    fn atomic_edit_span_flag_is_ored_over_every_atom_of_a_cluster() {
-        // Present on a middle atom only: the cluster still carries it.
-        let lig = [
-            atom_with(AtomFlags::EMPTY),
-            atom_with(AtomFlags::IN_ATOMIC_EDIT_SPAN),
-            atom_with(AtomFlags::EMPTY),
-        ];
-        assert!(AtomFlags::for_cluster(&lig).contains(AtomFlags::IN_ATOMIC_EDIT_SPAN));
-        // It is neither a first-only nor a last-only flag.
-        assert!(!AtomFlags::FIRST_ATOM_ONLY.intersects(AtomFlags::IN_ATOMIC_EDIT_SPAN));
-        assert!(!AtomFlags::LAST_ATOM_ONLY.intersects(AtomFlags::IN_ATOMIC_EDIT_SPAN));
-        // Absent everywhere: absent.
-        assert!(
-            !AtomFlags::for_cluster(&[atom_with(AtomFlags::EMPTY)])
-                .contains(AtomFlags::IN_ATOMIC_EDIT_SPAN)
-        );
     }
 
     #[test]

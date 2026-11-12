@@ -9,8 +9,8 @@
 use crate::types::{ByteIndex, TextRange};
 
 /// Deepest proper nesting `check_layout_inputs` accepts for decoration spans
-/// (a span inside a span inside ...). **[Design decision]**: ruling 6 says
-/// "bounded" without a number; 8 is generous for rich text and cheap to check.
+/// (a span inside a span inside ...). **[Design decision]**
+/// (spec §2.5): 8 is generous for rich text and cheap to check.
 pub const MAX_DECORATION_NESTING_DEPTH: usize = 8;
 
 /// How a decoration is drawn when its span breaks across lines (CSS
@@ -28,6 +28,10 @@ pub enum BoxDecorationBreak {
 ///
 /// Paddings are the horizontal advance of border plus padding; the vertical
 /// extent of the box comes from the line.
+///
+/// A paragraph holds its spans in `ParagraphAst::decoration_spans`, ordered
+/// ascending by `byte_range.start` and, for equal starts, descending by
+/// `byte_range.end`, so an outer span precedes the spans it contains.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InlineDecorationSpan {
     /// Caller-assigned identifier, unique among decoration spans.
@@ -54,22 +58,25 @@ impl InlineDecorationSpan {
     }
 
     /// Whether the frontend must not insert `CjkAutospace` at `offset` because
-    /// a padded border already separates the neighbours (§3 Step 6.6): at
+    /// a padded border already separates the neighbours (spec SPN-4): at
     /// `byte_range.start` when `start_padding > 0`, at `byte_range.end` when
     /// `end_padding > 0`; both sides of the boundary, so the answer depends on
     /// the offset alone.
     #[must_use]
     pub fn forbids_cjk_autospace_at(&self, offset: ByteIndex) -> bool {
-        (self.start_padding > 0.0 && offset == self.byte_range.start)
-            || (self.end_padding > 0.0 && offset == self.byte_range.end)
+        (self.start_padding > 0.0 && offset == self.byte_range.start())
+            || (self.end_padding > 0.0 && offset == self.byte_range.end())
     }
 }
 
 /// A range the caret treats as a single unit (spec §2.2, §6): a mention, a
 /// page-reference chip, an inline code span.
 ///
-/// It may still wrap across lines when its `InlineDecorationSpan` allows it;
-/// atomicity concerns editing only.
+/// It may still wrap across lines (spec §6.1); atomicity concerns editing
+/// only.
+///
+/// A paragraph holds its spans in `ParagraphAst::atomic_spans`, ascending by
+/// `byte_range.start` and pairwise disjoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AtomicEditSpan {
     /// Caller-assigned identifier, unique among atomic spans.
@@ -84,8 +91,15 @@ impl AtomicEditSpan {
     /// boundaries are not interior.
     #[must_use]
     pub const fn is_interior(&self, offset: ByteIndex) -> bool {
-        self.byte_range.start < offset && offset < self.byte_range.end
+        self.byte_range.start() < offset && offset < self.byte_range.end()
     }
+}
+
+/// IME preedit styling over source bytes; never changes EGC segmentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompositionSpan {
+    /// UTF-8 code-point-aligned source range, which may lie inside an EGC.
+    pub byte_range: TextRange,
 }
 
 #[cfg(test)]
@@ -139,11 +153,4 @@ mod tests {
         assert!(!a.is_interior(9));
         assert!(!a.is_interior(2));
     }
-}
-
-/// IME preedit styling over source bytes; never changes EGC segmentation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CompositionSpan {
-    /// UTF-8 code-point-aligned source range, which may lie inside an EGC.
-    pub byte_range: TextRange,
 }

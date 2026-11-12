@@ -8,209 +8,350 @@
 //! a hand-written fixture (10-unit advances; the hyphenation example is a
 //! structural fixture, not real Dutch).
 
+use crate::common::{
+    ADV, assert_send_sync_static, atom, ctx, paragraph, push_text, rebuild_items, set_visual_width,
+    shaping_run, single_slot,
+};
 use mutil_engine::*;
-use smallvec::smallvec;
-use std::sync::Arc;
 
 // bytes: 0..7 "omaatje" | 7..8 " " | 8..11 U+FFFC | 11..12 "\t" | 12..14 "go"
 //        | 14..15 "," | 15..18 "U+2028"
 const TEXT: &str = "omaatje \u{FFFC}\tgo,\u{2028}";
-const ADV: f32 = 10.0;
 const BOX_W: f32 = 12.0;
 const TAB_W: f32 = 8.0;
 const SPACE_W: f32 = 4.0;
-
-fn atom(offset: usize) -> GraphemeAtom {
-    GraphemeAtom {
-        byte_range: TextRange::new(offset, offset + 1),
-        script: ScriptTag::LATIN,
-        bidi_level: 0,
-        linebreak_class: LineBreakClass::Al,
-        flags: AtomFlags::EMPTY,
-    }
-}
+const WRAP_WIDTH: f32 = 200.0;
 
 fn cluster(base: usize, local: usize) -> ShapedCluster {
-    let off = base + local;
-    ShapedCluster {
-        byte_range: TextRange::new(off, off + 1),
-        atom_range: local..local + 1,
-        font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
-        flags: AtomFlags::EMPTY,
-        glyphs: smallvec![RawShapedGlyph {
-            glyph_id: TEXT.as_bytes()[off] as u32,
-            cluster: off as u32,
-            x_advance: ADV,
-            ..Default::default()
-        }],
-        natural_width: ADV,
-        uncompressed_width: ADV,
-        safe_to_break_before: true,
-        safe_to_concat_before: true,
-    }
+    crate::common::cluster(base, local)
 }
 
-fn word(start: usize, end: usize) -> WordNode {
+fn run() -> ShapingRun {
+    shaping_run(TEXT, "nl-NL")
+}
+
+fn word(ast: &mut ParagraphAst, start: usize, end: usize) -> WordNode {
     let atoms: Vec<_> = (start..end).map(atom).collect();
     let clusters: Vec<_> = (0..atoms.len()).map(|i| cluster(start, i)).collect();
-    let natural_width = clusters.iter().map(|c| c.natural_width).sum();
-    WordNode::Box(BoxNode::Text {
-        run_index: 0,
-        byte_range: TextRange::new(start, end),
-        atoms,
-        clusters,
-        natural_width,
-    })
+    push_text(ast, 0, atoms, clusters)
 }
 
 fn glyph(c: &ShapedCluster, x: f32, hanging: bool) -> PositionedGlyph {
     PositionedGlyph {
-        glyph_id: c.glyphs[0].glyph_id,
+        glyph_id: 1,
         x,
         x_offset: 0.0,
         y_offset: 0.0,
         advance: c.natural_width,
         byte_range: Some(c.byte_range),
-        is_synthesized: false,
         is_hanging: hanging,
     }
 }
 
-fn clusters_of(node: &WordNode) -> &[ShapedCluster] {
-    match node {
-        WordNode::Box(BoxNode::Text { clusters, .. }) => clusters,
-        _ => &[],
-    }
+fn clusters_of(ast: &ParagraphAst, item: usize) -> &[ShapedCluster] {
+    ast.text_box(item).map_or(&[], |view| view.clusters)
 }
 
-fn assert_send_sync_static<T: Send + Sync + 'static>() {}
-
-fn run() -> ShapingRun {
-    ShapingRun {
-        features: Default::default(),
-
-        byte_range: TextRange::new(0, TEXT.len()),
-        families: Arc::from([FontFamily::Generic(GenericFamily::SansSerif)]),
-        font_size: 16.0,
-        style: FontStyle::default(),
-        script: ScriptTag::LATIN,
-        locale: LocaleTag::new("nl-NL"),
-        bidi_level: 0,
-        decoration: TextDecoration::default(),
-    }
+/// `true` when every item of `ast` is self-contained.
+fn all_self_contained(ast: &ParagraphAst) -> bool {
+    (0..ast.items.len()).all(|item| ast.is_self_contained(item))
 }
 
-#[test]
-fn zero_layout_full_pipeline_assembly() {
-    // ---- Frontend: every WordNode variant -------------------------------
-    // "omaatje" is split at the opportunity: Box("oma"), Discretionary, Box("atje").
-    let opportunity = HyphenOpportunity {
-        byte_offset: 3,
+// "omaatje" is split at the opportunity: Box("oma"), Discretionary, Box("atje").
+fn opportunity() -> HyphenOpportunity {
+    HyphenOpportunity {
         prefix_replacement: Some("a".into()),
         suffix_replacement: Some("tje".into()),
         prefix_cut_bytes: 1,
         suffix_cut_bytes: 2,
-    };
-    let ast = ParagraphAst {
+    }
+}
+
+/// One paragraph that uses every `WordNode` variant.
+fn paragraph_ast() -> ParagraphAst {
+    let mut ast = ParagraphAst {
+        annotations: Vec::new(),
+        bidi_spans: Vec::new(),
+        writing_mode: WritingMode::HorizontalTb,
         base_direction: BidiDirection::Ltr,
         // Raw primary-font metrics: the frontend never resolves a line height.
         strut_metrics: FontMetrics {
+            vertical_ascent: 5.0,
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
             ascent: 12.0,
             descent: 4.0,
             ..Default::default()
         },
         strut_font_size: 16.0,
         runs: vec![run()],
-        items: vec![
-            word(0, 3),
-            WordNode::Discretionary(DiscretionaryNode {
-                byte_range: TextRange::empty_at(3),
-                penalty: DiscretionaryNode::HYPHEN_PENALTY,
-                flagged: true,
-                pre_break_width: ADV,
-                post_break_width: 0.0,
-                no_break_width: 0.0,
-                action: BreakAction::Hyphenate(opportunity.clone()),
-                cloned_spans: Default::default(),
-            }),
-            word(3, 7),
-            // A breakable space: the opportunity follows the glue, so the space
-            // stays on the trailing edge of the line that breaks after it.
-            WordNode::Glue(GlueNode {
-                original_bidi_class: BidiClass::Ws,
-                bidi_level: 0,
-                is_collapsible: true,
-
-                byte_range: TextRange::new(7, 8),
-                kind: GlueKind::WordSpace,
-                tier: GlueTier::Tier0,
-                natural_width: SPACE_W,
-                max_stretch: 2.0,
-                max_shrink: 1.0,
-            }),
-            WordNode::Discretionary(DiscretionaryNode::direct(8)),
-            WordNode::Box(BoxNode::InlineObject {
-                byte_range: TextRange::new(8, 11),
-                box_id: 42,
-                width: BOX_W,
-                ascent: 10.0,
-                descent: 2.0,
-                overflow_policy: BoxOverflowPolicy::Clip,
-            }),
-            WordNode::Tab {
-                byte_range: TextRange::new(11, 12),
-            },
-            word(12, 14),
-            // "," is fused to "go" by the absence of a discretionary.
-            word(14, 15),
-            // The hard break owns U+2028: the next line starts at byte 18.
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(15, 18), false)),
-            // Every paragraph ends with the sentinel: it terminates the blank line
-            // after the trailing line separator, so N separators give N + 1 lines.
-            WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::empty_at(18), true)),
-        ],
+        atoms: vec![],
+        clusters: vec![],
+        glyphs: Vec::new(),
+        items: vec![],
         decoration_spans: vec![],
         atomic_spans: vec![],
     };
-    assert_eq!(ast.items.len(), 11);
-    assert!(ast.items.iter().all(WordNode::is_self_contained));
-    // Nodes tile the text exactly: no cluster was split or lost.
-    let covered: usize = ast
-        .items
+    ast.items = vec![
+        word(&mut ast, 0, 3),
+        WordNode::Discretionary(DiscretionaryNode {
+            byte_range: TextRange::empty_at(3),
+            penalty: DiscretionaryNode::HYPHEN_PENALTY,
+            flagged: true,
+            pre_break_width: ADV,
+            post_break_width: 0.0,
+            no_break_width: 0.0,
+            action: BreakAction::Hyphenate(opportunity()),
+            cloned_spans: Default::default(),
+        }),
+        word(&mut ast, 3, 7),
+        // A breakable space: the opportunity follows the glue, so the space
+        // stays on the trailing edge of the line that breaks after it.
+        WordNode::Glue(GlueNode {
+            original_bidi_class: BidiClass::Ws,
+            bidi_level: BidiLevel::LTR,
+            is_collapsible: true,
+
+            byte_range: TextRange::new(7, 8),
+            kind: GlueKind::WordSpace,
+            natural_width: SPACE_W,
+            max_stretch: 2.0,
+            max_shrink: 1.0,
+        }),
+        WordNode::Discretionary(DiscretionaryNode::direct(8)),
+        WordNode::Box(BoxNode::InlineObject {
+            bidi_level: BidiLevel::LTR,
+            baseline_align: BaselineAlignment::Auto,
+            byte_range: TextRange::new(8, 11),
+            box_id: 42,
+            width: BOX_W,
+            ascent: 10.0,
+            descent: 2.0,
+            overflow_policy: BoxOverflowPolicy::Clip,
+        }),
+        WordNode::Tab {
+            byte_range: TextRange::new(11, 12),
+        },
+        word(&mut ast, 12, 14),
+        // "," is fused to "go" by the absence of a discretionary.
+        word(&mut ast, 14, 15),
+        // The hard break owns U+2028: the next line starts at byte 18.
+        WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(15, 18))),
+        // Every paragraph ends with the sentinel: it terminates the blank line
+        // after the trailing line separator, so N separators give N + 1 lines.
+        WordNode::Discretionary(DiscretionaryNode::paragraph_end(18)),
+    ];
+    ast
+}
+
+fn layout_options() -> LayoutOptions {
+    LayoutOptions {
+        hang_mode: HangMode {
+            start: HangStartMode::None,
+            end: HangEndMode::Force,
+        },
+        ..Default::default()
+    }
+}
+
+fn layout_constraints() -> LayoutConstraints {
+    LayoutConstraints {
+        wrap_width: WRAP_WIDTH,
+        ..Default::default()
+    }
+}
+
+/// The strut is resolved here, in the middle-end, from the AST's raw metrics
+/// and the line-height policy.
+fn policy(ast: &ParagraphAst) -> LayoutPolicySnapshot {
+    LayoutPolicySnapshot::resolve(ast, &layout_constraints(), &layout_options())
+        .expect("the fixture's layout inputs are valid")
+}
+
+fn line_context(ast: &ParagraphAst) -> LineContext {
+    policy(ast).line_context(ast.base_direction, 0)
+}
+
+/// The fields every assembled line shares: strut-sized metrics and no output
+/// entities.
+fn blank_line() -> PositionedLine {
+    PositionedLine {
+        slots: single_slot(0.0, WRAP_WIDTH),
+        annotations: Vec::new(),
+        is_ellipsized: false,
+        atomic_fragments: vec![],
+        span_fragments: vec![],
+        byte_range: TextRange::EMPTY,
+        visible_byte_end: 0,
+        baseline_y: 0.0,
+        ascent: 12.0,
+        descent: 4.0,
+        line_height: 16.0,
+        is_justified: false,
+        visual_runs: vec![],
+        caret_stops: vec![],
+        visual_boxes: vec![],
+        tabs: vec![],
+        decorations: vec![],
+    }
+}
+
+fn run_of(byte_range: TextRange, glyphs: Vec<PositionedGlyph>) -> VisualGlyphRun {
+    VisualGlyphRun {
+        orientation: GlyphOrientation::Horizontal,
+        font_size: 16.0,
+        variations: Default::default(),
+        font: FontRef::unscaled(FontId(1)),
+        bidi_level: BidiLevel::LTR,
+        byte_range,
+        glyphs,
+    }
+}
+
+/// Three hand-positioned lines: "oma-", "atje ␠ [box] ⇥ go," and the blank line
+/// after the hard break.
+fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParagraph {
+    let oma = clusters_of(ast, 0);
+    let atje = clusters_of(ast, 2);
+    let word_b = clusters_of(ast, 7);
+    let comma = &clusters_of(ast, 8)[0];
+
+    // Line 0: "oma" + generated hyphen. Hyphen glyph is synthesized, no bytes.
+    let mut l0_glyphs: Vec<_> = oma
         .iter()
-        .flat_map(clusters_of)
+        .enumerate()
+        .map(|(i, c)| glyph(c, i as f32 * ADV, false))
+        .collect();
+    l0_glyphs.push(PositionedGlyph {
+        glyph_id: b'-' as u32,
+        x: 3.0 * ADV,
+        x_offset: 0.0,
+        y_offset: 0.0,
+        advance: ADV,
+        byte_range: None,
+        is_hanging: false,
+    });
+    let line0 = PositionedLine {
+        byte_range: TextRange::new(0, 3),
+        visible_byte_end: 3,
+        baseline_y: 12.0,
+        slots: single_slot(4.0 * ADV, ctx.wrap_width),
+        visual_runs: vec![run_of(TextRange::new(0, 3), l0_glyphs)],
+        ..blank_line()
+    };
+
+    // Line 1: "atje" ␠ [box] ⇥ "go" and a right-hanging ",". The space occupies
+    // width without any output entity (glue); the box and the tab are
+    // `PositionedInlineBox` and `PositionedTab`. `visual_width` stops before ",".
+    let mut pen = 0.0;
+    let mut l1_glyphs = Vec::new();
+    for c in atje.iter() {
+        l1_glyphs.push(glyph(c, pen, false));
+        pen += c.natural_width;
+    }
+    pen += SPACE_W;
+    let box_x = pen;
+    pen += BOX_W + TAB_W;
+    for c in word_b {
+        l1_glyphs.push(glyph(c, pen, false));
+        pen += c.natural_width;
+    }
+    let body_width = pen;
+    l1_glyphs.push(glyph(comma, body_width, true));
+    let line1 = PositionedLine {
+        byte_range: TextRange::new(3, 18),
+        visible_byte_end: 15,
+        baseline_y: 32.0,
+        slots: single_slot(body_width, ctx.wrap_width),
+        visual_runs: vec![run_of(TextRange::new(3, 15), l1_glyphs)],
+        visual_boxes: vec![PositionedInlineBox {
+            bidi_level: BidiLevel::LTR,
+            baseline_align: BaselineAlignment::Auto,
+            box_id: 42,
+            byte_range: TextRange::new(8, 11),
+            x: box_x,
+            y: 0.0,
+            width: BOX_W,
+            ascent: 10.0,
+            descent: 2.0,
+            overflow_policy: BoxOverflowPolicy::Clip,
+        }],
+        tabs: vec![PositionedTab {
+            byte_range: TextRange::new(11, 12),
+            x: box_x + BOX_W,
+            width: TAB_W,
+        }],
+        ..blank_line()
+    };
+
+    // Line 2: the empty line after the hard break (Stage 4.2).
+    let line2 = PositionedLine {
+        byte_range: TextRange::empty_at(18),
+        visible_byte_end: 18,
+        baseline_y: 48.0,
+        line_height: ctx.strut.line_height(),
+        caret_stops: vec![CaretStop {
+            x: 0.0,
+            offset: 18,
+            affinity: CaretAffinity::Downstream,
+            level: BidiLevel::LTR,
+            line: 2,
+        }],
+        ..blank_line()
+    };
+
+    // The block extent ends at the bottom of the last line: its baseline plus
+    // its descent.
+    let total_block_size = line2.baseline_y + line2.descent;
+    PositionedParagraph {
+        policy: policy(ast),
+        base_direction: ast.base_direction,
+        truncated_range: None,
+        total_block_size,
+        lines: vec![line0, line1, line2],
+    }
+}
+
+/// The paragraph, its line context and the assembled output.
+fn assembled() -> (ParagraphAst, LineContext, PositionedParagraph) {
+    let ast = paragraph_ast();
+    let ctx = line_context(&ast);
+    let para = assembled_paragraph(&ast, &ctx);
+    (ast, ctx, para)
+}
+
+#[test]
+fn frontend_ast_uses_every_word_node_variant_and_tiles_the_text() {
+    let ast = paragraph_ast();
+    assert_eq!(ast.items.len(), 11);
+    assert!(all_self_contained(&ast));
+    // Nodes tile the text exactly: no cluster was split or lost.
+    let covered: usize = (0..ast.items.len())
+        .flat_map(|item| clusters_of(&ast, item))
         .map(|c| c.byte_range.len())
         .sum();
     assert_eq!(covered, 7 + 2 + 1); // "omaatje" + "go" + ","
+}
 
-    // Layout policy and the validation context. The strut is resolved here, in
-    // the middle-end, from the AST's raw metrics and the line-height policy.
-    let options = LayoutOptions {
-        hang_mode: HangMode {
-            start: HangStartMode::None,
-            end: HangEndMode::Allow,
-        },
-        ..Default::default()
-    };
-    let ctx = LineContext::from_options(
-        &ast.strut_metrics,
-        ast.strut_font_size,
-        ast.base_direction,
-        &options,
-        200.0,
-    );
-    assert_eq!(ctx.strut.natural_line_height(), 16.0);
-    let constraints = LayoutConstraints {
-        wrap_width: 200.0,
-        tab_stops: TabStops { step: 8.0 },
-    };
+#[test]
+fn middle_end_resolves_the_strut_and_accepts_the_inputs() {
+    let ast = paragraph_ast();
+    let ctx = line_context(&ast);
+    assert_eq!(ctx.strut.line_height(), 16.0);
     assert_eq!(
-        check_layout_inputs(&ast, TEXT, &constraints, &options),
+        check_layout_inputs(&ast, TEXT, &layout_constraints(), &layout_options()),
+        Ok(())
+    );
+    assert_eq!(
+        LineContext::for_paragraph(&ast, &layout_constraints(), &layout_options(), 0),
         Ok(ctx)
     );
+}
 
-    // ---- Shaping bridge: both spelling edits through the trait ----------
+#[test]
+fn shaping_bridge_applies_both_spelling_edits() {
+    let ast = paragraph_ast();
+    let opportunity = opportunity();
     let shaper: &dyn TextShaper = &NoopShaper;
     let r = &ast.runs[0];
     // One atom per char: U+FFFC is a single 3-byte atom (8..11), so every
@@ -228,7 +369,7 @@ fn zero_layout_full_pipeline_assembly() {
             .iter()
             .any(|a| a.byte_range == TextRange::new(8, 11))
     );
-    let starts: Vec<_> = run_atoms.iter().map(|a| a.byte_range.start).collect();
+    let starts: Vec<_> = run_atoms.iter().map(|a| a.byte_range.start()).collect();
     for edge in [0, 3, 7] {
         assert!(
             starts.contains(&edge),
@@ -253,8 +394,9 @@ fn zero_layout_full_pipeline_assembly() {
             cut_bytes: 2
         }
     );
-    // Seeded: shapers append to the buffer and never clear it.
+    // Seeded: shapers append to the buffers and never clear them.
     let mut out = vec![cluster(0, 0)];
+    let mut out_glyphs = vec![RawShapedGlyph::default()];
     // Regular break: line 0 ends at the break, line 1 starts after it.
     shaper.reshape_window(
         TEXT,
@@ -264,6 +406,7 @@ fn zero_layout_full_pipeline_assembly() {
         LeadingEdit::None,
         trailing_edit.clone(),
         &mut out,
+        &mut out_glyphs,
     );
     shaper.reshape_window(
         TEXT,
@@ -273,6 +416,7 @@ fn zero_layout_full_pipeline_assembly() {
         leading_edit.clone(),
         TrailingEdit::None,
         &mut out,
+        &mut out_glyphs,
     );
     // Extreme middle fragment: both edges edited in one call.
     shaper.reshape_window(
@@ -283,183 +427,151 @@ fn zero_layout_full_pipeline_assembly() {
         leading_edit,
         trailing_edit,
         &mut out,
+        &mut out_glyphs,
     );
     assert_eq!(out, vec![cluster(0, 0)]);
+    assert_eq!(out_glyphs, vec![RawShapedGlyph::default()]);
+}
 
-    // ---- Middle-end: three lines ----------------------------------------
-    let oma = clusters_of(&ast.items[0]);
-    let atje = clusters_of(&ast.items[2]);
-    let word_b = clusters_of(&ast.items[7]);
-    let comma = &clusters_of(&ast.items[8])[0];
+#[test]
+fn untaken_hyphenation_seam_is_rejoined_only_when_unsafe_to_concat() {
+    let mut ast = paragraph_ast();
+    // items: [0] "oma", [1] Hyphenate, [2] "atje", [3] glue, [4] Direct, ...
+    assert!(
+        ast.rejoin_windows([1]).is_empty(),
+        "a safe seam keeps both boxes"
+    );
 
-    // Line 0: "oma" + generated hyphen. Hyphen glyph is synthesized, no bytes.
-    let mut l0_glyphs: Vec<_> = oma
-        .iter()
-        .enumerate()
-        .map(|(i, c)| glyph(c, i as f32 * ADV, false))
-        .collect();
-    l0_glyphs.push(PositionedGlyph {
-        glyph_id: b'-' as u32,
-        x: 3.0 * ADV,
-        x_offset: 0.0,
-        y_offset: 0.0,
-        advance: ADV,
-        byte_range: None,
-        is_synthesized: true,
-        is_hanging: false,
-    });
-    let line0 = PositionedLine {
-        atomic_fragments: vec![],
-
-        span_fragments: vec![],
-        byte_range: TextRange::new(0, 3),
-        visible_byte_end: 3,
-        baseline_y: 12.0,
-        ascent: 12.0,
-        descent: 4.0,
-        line_height: 16.0,
-        visual_width: 4.0 * ADV,
-        hanging_left: 0.0,
-        hanging_right: 0.0,
-        is_justified: false,
-        visual_runs: vec![VisualGlyphRun {
-            font_size: 16.0,
-            variations: Default::default(),
-
-            font: FontRef::unscaled(FontId(1)),
-            bidi_level: 0,
-            byte_range: TextRange::new(0, 3),
-            glyphs: l0_glyphs,
-        }],
-        caret_stops: vec![],
-        visual_boxes: vec![],
-        tabs: vec![],
-        decorations: vec![],
+    // The frontend split a multi-atom cluster here: the seam is unsafe.
+    let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &ast.items[2] else {
+        panic!("items[2] is a text box");
     };
+    let first_cluster = cluster_range.start;
+    ast.clusters[first_cluster].safe_to_concat_before = false;
+    assert_eq!(
+        ast.rejoin_windows([1])[..],
+        [ReshapeWindow {
+            run_index: 0,
+            atom_range: 0..7,
+            byte_range: TextRange::new(0, 7),
+        }]
+    );
 
-    // Line 1: "atje" ␠ [box] ⇥ "go" and a right-hanging ",". The space occupies
-    // width without any output entity (glue); the box and the tab are
-    // `PositionedInlineBox` and `PositionedTab`. `visual_width` stops before ",".
-    let mut pen = 0.0;
-    let mut l1_glyphs = Vec::new();
-    for c in atje.iter() {
-        l1_glyphs.push(glyph(c, pen, false));
-        pen += c.natural_width;
+    // Only a Hyphenate discretionary between two text boxes qualifies.
+    let others = [0, 2, 3, 4, ast.items.len() - 1, ast.items.len()];
+    assert!(ast.rejoin_windows(others).is_empty());
+}
+
+#[test]
+fn a_taken_hyphenation_break_reshapes_the_boxes_it_touches() {
+    let ast = paragraph_ast();
+    // The spelling change of "omaatje" cuts inside the two boxes at the seam.
+    assert_eq!(
+        ast.break_window(1),
+        Some(ReshapeWindow {
+            run_index: 0,
+            atom_range: 0..7,
+            byte_range: TextRange::new(0, 7),
+        })
+    );
+    for index in [0, 2, 3, 4, ast.items.len()] {
+        assert_eq!(ast.break_window(index), None, "item {index}");
     }
-    pen += SPACE_W;
-    let box_x = pen;
-    pen += BOX_W + TAB_W;
-    for c in word_b {
-        l1_glyphs.push(glyph(c, pen, false));
-        pen += c.natural_width;
-    }
-    let body_width = pen;
-    l1_glyphs.push(glyph(comma, body_width, true));
-    let line1 = PositionedLine {
-        atomic_fragments: vec![],
+}
 
-        span_fragments: vec![],
-        byte_range: TextRange::new(3, 18),
-        visible_byte_end: 15,
-        baseline_y: 32.0,
-        ascent: 12.0,
-        descent: 4.0,
-        line_height: 16.0,
-        visual_width: body_width,
-        hanging_left: 0.0,
-        hanging_right: ADV,
-        is_justified: false,
-        visual_runs: vec![VisualGlyphRun {
-            font_size: 16.0,
-            variations: Default::default(),
-
-            font: FontRef::unscaled(FontId(1)),
-            bidi_level: 0,
-            byte_range: TextRange::new(3, 15),
-            glyphs: l1_glyphs,
-        }],
-        caret_stops: vec![],
-        visual_boxes: vec![PositionedInlineBox {
-            box_id: 42,
-            byte_range: TextRange::new(8, 11),
-            x: box_x,
-            y: 0.0,
-            width: BOX_W,
-            ascent: 10.0,
-            descent: 2.0,
-            overflow_policy: BoxOverflowPolicy::Clip,
-        }],
-        tabs: vec![PositionedTab {
-            byte_range: TextRange::new(11, 12),
-            x: box_x + BOX_W,
-            width: TAB_W,
-        }],
-        decorations: vec![],
+#[test]
+fn middle_end_assembles_three_valid_lines() {
+    let (_, ctx, para) = assembled();
+    let [line0, line1, _] = &para.lines[..] else {
+        panic!("expected three lines, got {}", para.lines.len());
     };
-
-    // Line 2: the empty line after the hard break (Stage 4.2).
-    let line2 = PositionedLine {
-        atomic_fragments: vec![],
-
-        span_fragments: vec![],
-        byte_range: TextRange::empty_at(18),
-        visible_byte_end: 18,
-        baseline_y: 48.0,
-        ascent: 12.0,
-        descent: 4.0,
-        line_height: ctx.strut.natural_line_height(),
-        visual_width: 0.0,
-        hanging_left: 0.0,
-        hanging_right: 0.0,
-        is_justified: false,
-        visual_runs: vec![],
-        caret_stops: vec![CaretStop {
-            x: 0.0,
-            offset: 18,
-            affinity: CaretAffinity::Downstream,
-            level: 0,
-            line: 2,
-        }],
-        visual_boxes: vec![],
-        tabs: vec![],
-        decorations: vec![],
-    };
-
-    for (i, l) in [&line0, &line1, &line2].into_iter().enumerate() {
+    for (i, l) in para.lines.iter().enumerate() {
+        let ctx = LineContext {
+            line_index: i,
+            ..ctx
+        };
         assert_eq!(l.validate(&ctx), Ok(()), "line {i}");
     }
-    assert!(line1.hanging_right > 0.0 && line0.hanging_right == 0.0);
+    assert!(line1.hanging_right() > 0.0 && line0.hanging_right() == 0.0);
     assert_eq!((line1.visual_boxes.len(), line1.tabs.len()), (1, 1));
     // The tab follows the box exactly and ends where "go" begins.
     let (b, t) = (line1.visual_boxes[0], line1.tabs[0]);
     assert_eq!(b.x + b.width, t.x);
     assert_eq!(t.x + t.width, line1.visual_runs[0].glyphs[4].x);
+}
 
-    let mut para = PositionedParagraph::empty(ast.base_direction);
-    para.size = Size {
-        width: body_width,
-        height: 48.0,
-    };
-    para.lines = vec![line0, line1, line2];
+#[test]
+fn the_assembled_paragraph_validates_as_a_whole() {
+    let (_, _, para) = assembled();
+    // Lines at baselines 12, 32 and 48 with ascent 12 and descent 4 end at 52.
+    assert_eq!(para.total_block_size, 52.0);
+    // Each line is judged against the paragraph's own policy with its own
+    // index (line 1 hangs its comma at the end edge, which `layout_options`
+    // allows).
+    assert_eq!(para.validate_geometry(), Ok(()));
+    assert_eq!(para.validate(TEXT), Ok(()));
+    // A block extent shorter than the lines is wrong ...
+    let mut short = para.clone();
+    short.total_block_size = 51.0;
+    assert_eq!(
+        short.validate_geometry(),
+        Err((
+            2,
+            LineInvariantError::InvalidParagraph {
+                reason: ParagraphErrorReason::InvalidBlockSize /*auto*/
+            }
+        ))
+    );
+    // ... and so are lines that stop short of the text.
+    assert_eq!(
+        para.validate(&format!("{TEXT}x")),
+        Err((
+            2,
+            LineInvariantError::InvalidParagraph {
+                reason: ParagraphErrorReason::SourceNotCovered /*auto*/
+            }
+        ))
+    );
+    // The hanging comma is only legal on line 1 because the policy allows an
+    // end-edge hang; under a policy that forbids it line 1 fails.
+    let mut forbidding = para.clone();
+    forbidding.policy.hang_mode = HangMode::NONE;
+    assert_eq!(
+        forbidding.validate(TEXT),
+        Err((
+            1,
+            LineInvariantError::HangingNotAllowed {
+                side: HangSide::Right
+            }
+        ))
+    );
+}
 
-    // ---- Ownership: the output stands alone ------------------------------
+#[test]
+fn assembled_output_owns_its_data() {
     assert_send_sync_static::<ParagraphAst>();
     assert_send_sync_static::<PositionedParagraph>();
     assert_send_sync_static::<LeadingEdit>();
     assert_send_sync_static::<TrailingEdit>();
+    let (ast, _, para) = assembled();
     let ast_copy = ast.clone();
     drop(ast); // the layout holds no borrow of the AST
-    assert!(ast_copy.items.iter().all(WordNode::is_self_contained));
+    assert!(all_self_contained(&ast_copy));
     assert_eq!(para.lines.len(), 3);
     assert_eq!(para.clone(), para);
-    // Tampering is caught: counting the hanging comma in visual_width.
+}
+
+#[test]
+fn hanging_comma_counted_in_visual_width_is_rejected() {
+    let (_, ctx, para) = assembled();
     let mut bad = para.lines[1].clone();
-    bad.visual_width += ADV;
-    bad.hanging_right = 0.0;
-    assert!(matches!(
+    let widened = bad.visual_width() + ADV;
+    set_visual_width(&mut bad, widened);
+    // The comma is the last glyph of the run: "atje" (4), "go" (2), ",".
+    assert_eq!(
         bad.validate(&ctx),
-        Err(LineInvariantError::HangingGlyphInsideBlock { .. })
-    ));
+        Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 6 })
+    );
 }
 
 #[test]
@@ -468,32 +580,31 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
     // holds for every node and the cluster byte ranges tile the text without
     // overlap.
     let text_len = 200usize;
-    let items: Vec<_> = (0..text_len)
-        .map(|i| {
-            let atoms = vec![atom(i)];
-            WordNode::Box(BoxNode::Text {
-                run_index: 0,
-                byte_range: atoms[0].byte_range,
-                clusters: vec![ShapedCluster {
+    let text = "a".repeat(text_len);
+    let mut ast = crate::common::ast(&text);
+    rebuild_items(&mut ast, |ast| {
+        (0..text_len)
+            .map(|i| {
+                let atoms = vec![atom(i)];
+                let cluster = ShapedCluster {
+                    orientation: GlyphOrientation::Horizontal,
                     byte_range: atoms[0].byte_range,
                     atom_range: 0..1,
                     font: FontRef::unscaled(FontId(1)),
-                    bidi_level: 0,
+                    bidi_level: BidiLevel::LTR,
                     flags: AtomFlags::EMPTY,
-                    glyphs: smallvec![],
+                    glyph_range: 0..0,
                     natural_width: 0.0,
-                    uncompressed_width: 0.0,
                     safe_to_break_before: true,
                     safe_to_concat_before: true,
-                }],
-                atoms,
-                natural_width: 0.0,
+                };
+                push_text(ast, 0, atoms, vec![cluster])
             })
-        })
-        .collect();
-    assert!(items.iter().all(WordNode::is_self_contained));
+            .collect()
+    });
+    assert!(all_self_contained(&ast));
     let mut next = 0;
-    for c in items.iter().flat_map(clusters_of) {
+    for c in (0..ast.items.len()).flat_map(|item| clusters_of(&ast, item)) {
         assert_eq!(c.byte_range.start, next);
         next = c.byte_range.end;
     }
@@ -503,18 +614,15 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
 #[test]
 fn ligature_cluster_takes_justify_after_from_its_last_atom_only() {
     let atom_with = |off: usize, flags: AtomFlags| GraphemeAtom { flags, ..atom(off) };
-    let node = |atoms: Vec<GraphemeAtom>, flags: AtomFlags| {
+    // Whether one box over `atoms` with a single cluster of `flags` is self-contained.
+    let contained = |atoms: Vec<GraphemeAtom>, flags: AtomFlags| {
         let mut c = cluster(0, 0);
         c.atom_range = 0..atoms.len();
         c.byte_range = TextRange::new(0, atoms.len());
         c.flags = flags;
-        WordNode::Box(BoxNode::Text {
-            run_index: 0,
-            byte_range: TextRange::new(0, atoms.len()),
-            atoms,
-            clusters: vec![c],
-            natural_width: 0.0,
-        })
+        let mut ast = crate::common::ast("");
+        rebuild_items(&mut ast, |ast| vec![push_text(ast, 0, atoms, vec![c])]);
+        ast.is_self_contained(0)
     };
     let allow = AtomFlags::ALLOW_CJK_JUSTIFY_AFTER;
 
@@ -522,17 +630,17 @@ fn ligature_cluster_takes_justify_after_from_its_last_atom_only() {
     let atoms = vec![atom_with(0, AtomFlags::EMPTY), atom_with(1, allow)];
     let aggregated = AtomFlags::for_cluster(&atoms);
     assert!(aggregated.contains(allow));
-    assert!(node(atoms.clone(), aggregated).is_self_contained());
+    assert!(contained(atoms.clone(), aggregated));
     // A naive OR is the same here, but the cluster flags must equal the aggregate.
-    assert!(!node(atoms, AtomFlags::EMPTY).is_self_contained());
+    assert!(!contained(atoms, AtomFlags::EMPTY));
 
     // Only the first atom has it: the opportunity lies *inside* the ligature,
     // so the cluster must not have it, and a naive OR is rejected.
     let atoms = vec![atom_with(0, allow), atom_with(1, AtomFlags::EMPTY)];
     let aggregated = AtomFlags::for_cluster(&atoms);
     assert!(!aggregated.contains(allow));
-    assert!(node(atoms.clone(), aggregated).is_self_contained());
-    assert!(!node(atoms.clone(), allow).is_self_contained());
+    assert!(contained(atoms.clone(), aggregated));
+    assert!(!contained(atoms.clone(), allow));
 
     // Open punctuation from the first atom, close punctuation from the last.
     let atoms = vec![
@@ -541,10 +649,10 @@ fn ligature_cluster_takes_justify_after_from_its_last_atom_only() {
     ];
     let f = AtomFlags::for_cluster(&atoms);
     assert!(f.contains(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT));
-    assert!(node(atoms, f).is_self_contained());
+    assert!(contained(atoms, f));
 }
 
-// ---- Counter-examples on the assembled line --------------------------------
+// Counter-examples on the assembled line.
 
 /// A one-line fixture whose body is `[0, 40]`: glyph, inline box, tab, glyph.
 fn small_line() -> PositionedLine {
@@ -555,10 +663,12 @@ fn small_line() -> PositionedLine {
         y_offset: 0.0,
         advance: 10.0,
         byte_range: Some(TextRange::new(bytes.0, bytes.1)),
-        is_synthesized: false,
         is_hanging: false,
     };
     PositionedLine {
+        slots: single_slot(40.0, f32::INFINITY),
+        annotations: Vec::new(),
+        is_ellipsized: false,
         atomic_fragments: vec![],
 
         span_fragments: vec![],
@@ -568,20 +678,20 @@ fn small_line() -> PositionedLine {
         ascent: 12.0,
         descent: 4.0,
         line_height: 16.0,
-        visual_width: 40.0,
-        hanging_left: 0.0,
-        hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![VisualGlyphRun {
+            orientation: GlyphOrientation::Horizontal,
             font_size: 16.0,
             variations: Default::default(),
 
             font: FontRef::unscaled(FontId(1)),
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             byte_range: TextRange::new(0, 4),
             glyphs: vec![g(0.0, (0, 1)), g(30.0, (3, 4))],
         }],
         visual_boxes: vec![PositionedInlineBox {
+            bidi_level: BidiLevel::LTR,
+            baseline_align: BaselineAlignment::Auto,
             box_id: 7,
             byte_range: TextRange::new(1, 2),
             x: 10.0,
@@ -603,12 +713,13 @@ fn small_line() -> PositionedLine {
 
 fn small_ctx() -> LineContext {
     LineContext {
-        strut: VerticalMetrics {
+        strut: StrutMetrics {
             ascent: 12.0,
             descent: 4.0,
             line_gap: 0.0,
         },
-        ..Default::default()
+        wrap_width: f32::INFINITY,
+        ..ctx()
     }
 }
 
@@ -683,7 +794,7 @@ fn empty_line_rejects_tabs() {
     l.visible_byte_end = 0;
     l.visual_runs.clear();
     l.visual_boxes.clear();
-    l.visual_width = 0.0;
+    set_visual_width(&mut l, 0.0);
     l.line_height = 16.0;
     assert_eq!(
         l.validate(&small_ctx()),
@@ -704,15 +815,18 @@ fn hang_mode_struct_gates_each_physical_edge() {
         y_offset: 0.0,
         advance: 10.0,
         byte_range: Some(TextRange::new(4, 5)),
-        is_synthesized: false,
         is_hanging: true,
     });
     l.byte_range = TextRange::new(0, 5);
     l.visible_byte_end = 5;
-    l.hanging_right = 6.0;
+    // The body fills its slot, so the comma would not have fitted: `Allow`
+    // and `Force` both let it hang.
+    let body = l.visual_width();
+    l.slots[0].constraint = InlineSlotConstraint::new(l.slots[0].constraint.start(), body).unwrap();
     let with = |hang_mode, base_direction| LineContext {
         hang_mode,
         base_direction,
+        wrap_width: body,
         ..small_ctx()
     };
     let end = |end| HangMode {
@@ -764,7 +878,8 @@ fn trailing_space_line(x: f32) -> PositionedLine {
     l.visual_boxes.clear();
     l.byte_range = TextRange::new(0, 3);
     l.visible_byte_end = 2;
-    l.visual_width = 20.0;
+    set_visual_width(&mut l, 20.0);
+    l.visual_runs[0].byte_range = l.byte_range;
     l.visual_runs[0].glyphs = vec![
         PositionedGlyph {
             glyph_id: 1,
@@ -773,7 +888,6 @@ fn trailing_space_line(x: f32) -> PositionedLine {
             y_offset: 0.0,
             advance: 20.0,
             byte_range: Some(TextRange::new(0, 2)),
-            is_synthesized: false,
             is_hanging: false,
         },
         PositionedGlyph {
@@ -783,11 +897,19 @@ fn trailing_space_line(x: f32) -> PositionedLine {
             y_offset: 0.0,
             advance: 5.0,
             byte_range: Some(TextRange::new(2, 3)),
-            is_synthesized: false,
             is_hanging: false,
         },
     ];
+    // A run's glyphs are in screen order.
+    l.visual_runs[0].glyphs.sort_by(|a, b| a.x.total_cmp(&b.x));
     l
+}
+
+/// Index of the trailing space in the run's glyphs, which are in screen
+/// order.
+fn space_index(l: &PositionedLine) -> usize {
+    let glyphs = &l.visual_runs[0].glyphs;
+    glyphs.iter().position(|g| g.glyph_id == 3).unwrap()
 }
 
 #[test]
@@ -803,22 +925,34 @@ fn l1_trailing_whitespace_sits_on_the_far_edge_of_the_base_direction() {
     assert_eq!(right_of_body.validate(&ctx(BidiDirection::Ltr)), Ok(()));
     assert_eq!(
         left_of_body.validate(&ctx(BidiDirection::Ltr)),
-        Err(LineInvariantError::TrailingWhitespaceOnWrongSide { run: 0, glyph: 1 })
+        Err(LineInvariantError::TrailingWhitespaceOnWrongSide {
+            run: 0,
+            glyph: space_index(&left_of_body)
+        })
     );
     // RTL paragraph: mirrored.
     assert_eq!(left_of_body.validate(&ctx(BidiDirection::Rtl)), Ok(()));
     assert_eq!(
         right_of_body.validate(&ctx(BidiDirection::Rtl)),
-        Err(LineInvariantError::TrailingWhitespaceOnWrongSide { run: 0, glyph: 1 })
+        Err(LineInvariantError::TrailingWhitespaceOnWrongSide {
+            run: 0,
+            glyph: space_index(&right_of_body)
+        })
     );
     // Whitespace in the middle of the body is wrong in both directions.
     let inside = trailing_space_line(10.0);
     for d in [BidiDirection::Ltr, BidiDirection::Rtl] {
-        assert!(inside.validate(&ctx(d)).is_err());
+        assert_eq!(
+            inside.validate(&ctx(d)),
+            Err(LineInvariantError::TrailingWhitespaceOnWrongSide {
+                run: 0,
+                glyph: space_index(&inside)
+            })
+        );
     }
     // It never counts as hanging punctuation, on either side.
     assert_eq!(
-        (left_of_body.hanging_left, right_of_body.hanging_right),
+        (left_of_body.hanging_left(), right_of_body.hanging_right()),
         (0.0, 0.0)
     );
 }
@@ -830,7 +964,8 @@ fn trailing_tab_follows_the_same_l1_rule() {
     l.visual_runs[0].glyphs.truncate(1);
     l.byte_range = TextRange::new(0, 3);
     l.visible_byte_end = 2;
-    l.visual_width = 10.0;
+    set_visual_width(&mut l, 10.0);
+    l.visual_runs[0].byte_range = l.byte_range;
     l.tabs = vec![PositionedTab {
         byte_range: TextRange::new(2, 3),
         x: 10.0,
@@ -859,6 +994,8 @@ fn trailing_tab_follows_the_same_l1_rule() {
 #[test]
 fn context_follows_the_layout_options() {
     let options = LayoutOptions {
+        clamp: None,
+        justify: false,
         strategy: LineBreakStrategy::Publication,
         hang_mode: HangMode {
             start: HangStartMode::FirstLine,
@@ -866,25 +1003,35 @@ fn context_follows_the_layout_options() {
         },
         line_height: LineHeight::Fixed(1.5),
         whitespace: HangingWhitespaceMode::Preserved,
-        copy_soft_hyphen: SoftHyphenPolicy::Strip,
+        soft_hyphen: SoftHyphenPolicy::Strip,
     };
-    let raw = FontMetrics {
+    let mut ast = crate::common::ast("a");
+    ast.base_direction = BidiDirection::Rtl;
+    ast.strut_font_size = 10.0;
+    ast.strut_metrics = FontMetrics {
+        vertical_ascent: 5.0,
+        vertical_descent: 5.0,
+        vertical_line_gap: 0.0,
         ascent: 12.0,
         descent: 4.0,
         ..Default::default()
     };
-    let c = LineContext::from_options(&raw, 10.0, BidiDirection::Rtl, &options, 123.0);
+    let constraints = LayoutConstraints {
+        wrap_width: 123.0,
+        ..Default::default()
+    };
+    let c = LineContext::for_paragraph(&ast, &constraints, &options, 3).unwrap();
+    assert_eq!(c.wrap_width, 123.0);
     assert_eq!(c.hang_mode, options.hang_mode);
     assert_eq!(c.line_height, LineHeight::Fixed(1.5));
     assert_eq!(c.whitespace, HangingWhitespaceMode::Preserved);
     assert_eq!(c.base_direction, BidiDirection::Rtl);
     // Fixed(1.5) at size 10 resolves to a 15-unit strut with 12/4 raw: leading -1.
-    assert_eq!(c.strut.natural_line_height(), 15.0);
-    assert_eq!(c.line_index, 0);
-    assert_eq!(c.for_line(3).line_index, 3);
+    assert_eq!(c.strut.line_height(), 15.0);
+    assert_eq!(c.line_index, 3);
     // FrontendOptions is the frontend's counterpart, with its own defaults.
     let f = FrontendOptions {
-        default_locale: LocaleTag::new("ja-JP"),
+        default_locale: "ja-JP".parse().unwrap(),
         ..Default::default()
     };
     assert_eq!(f.default_locale.as_str(), "ja-JP");
@@ -905,21 +1052,17 @@ fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
             y_offset: 0.0,
             advance: 10.0,
             byte_range: Some(TextRange::new(4, 5)),
-            is_synthesized: false,
             is_hanging: true,
         },
     );
-    l.hanging_left = 10.0;
-    let ctx = |start, dir, index| {
-        LineContext {
-            hang_mode: HangMode {
-                start,
-                end: HangEndMode::None,
-            },
-            base_direction: dir,
-            ..small_ctx()
-        }
-        .for_line(index)
+    let ctx = |start, dir, index| LineContext {
+        hang_mode: HangMode {
+            start,
+            end: HangEndMode::None,
+        },
+        base_direction: dir,
+        line_index: index,
+        ..small_ctx()
     };
     use HangStartMode::{AllLines, FirstLine, None as NoStart};
     assert_eq!(l.validate(&ctx(FirstLine, BidiDirection::Ltr, 0)), Ok(()));
@@ -933,14 +1076,10 @@ fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
     assert_eq!(l.validate(&ctx(AllLines, BidiDirection::Rtl, 0)), denied);
 
     // The paragraph-level check supplies the index per line.
-    let para = PositionedParagraph {
-        base_direction: BidiDirection::Ltr,
-        size: Size::default(),
-        lines: vec![l.clone(), l],
-    };
     let c = ctx(FirstLine, BidiDirection::Ltr, 0);
+    let para = paragraph(&c, vec![l.clone(), l]);
     assert_eq!(
-        para.validate(&c),
+        para.validate_geometry(),
         Err((
             1,
             LineInvariantError::HangingNotAllowed {
@@ -952,7 +1091,7 @@ fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
 
 #[test]
 fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
-    let stop = |x: f32, offset: usize, level: u8, affinity| CaretStop {
+    let stop = |x: f32, offset: usize, level: BidiLevel, affinity| CaretStop {
         x,
         offset,
         affinity,
@@ -967,12 +1106,12 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
     mixed.byte_range = TextRange::new(0, 6);
     mixed.visible_byte_end = 6;
     mixed.caret_stops = vec![
-        stop(0.0, 0, 0, Downstream),
-        stop(10.0, 1, 0, Downstream),
-        stop(20.0, 2, 0, Downstream),
-        stop(20.0, 6, 1, Upstream), // two stops share x = 20
-        stop(30.0, 4, 1, Downstream),
-        stop(40.0, 2, 1, Upstream),
+        stop(0.0, 0, BidiLevel::LTR, Downstream),
+        stop(10.0, 1, BidiLevel::LTR, Downstream),
+        stop(20.0, 2, BidiLevel::LTR, Downstream),
+        stop(20.0, 6, BidiLevel::RTL, Upstream), // two stops share x = 20
+        stop(30.0, 4, BidiLevel::RTL, Downstream),
+        stop(40.0, 2, BidiLevel::RTL, Upstream),
     ];
     let right = mixed.extreme_caret_stop(HangSide::Right).unwrap();
     assert_eq!((right.x, right.offset), (40.0, 2));
@@ -983,20 +1122,20 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
     // Pure LTR line: the right extreme is (visible_byte_end, Upstream).
     let mut ltr = small_line();
     ltr.caret_stops = vec![
-        stop(0.0, 0, 0, Downstream),
-        stop(20.0, 2, 0, Downstream),
-        stop(40.0, 4, 0, Upstream),
+        stop(0.0, 0, BidiLevel::LTR, Downstream),
+        stop(20.0, 2, BidiLevel::LTR, Downstream),
+        stop(40.0, 4, BidiLevel::LTR, Upstream),
     ];
     let end = ltr.extreme_caret_stop(HangSide::Right).unwrap();
     assert_eq!((end.offset, end.affinity), (ltr.visible_byte_end, Upstream));
 
     // Pure RTL line in an RTL paragraph: logical end is the *left* extreme.
     let mut rtl = small_line();
-    rtl.visual_runs[0].bidi_level = 1;
+    rtl.visual_runs[0].bidi_level = BidiLevel::RTL;
     rtl.caret_stops = vec![
-        stop(0.0, 4, 1, Upstream),
-        stop(20.0, 2, 1, Downstream),
-        stop(40.0, 0, 1, Downstream),
+        stop(0.0, 4, BidiLevel::RTL, Upstream),
+        stop(20.0, 2, BidiLevel::RTL, Downstream),
+        stop(40.0, 0, BidiLevel::RTL, Downstream),
     ];
     let end = rtl.extreme_caret_stop(HangSide::Left).unwrap();
     assert_eq!((end.offset, end.affinity), (rtl.visible_byte_end, Upstream));
@@ -1004,7 +1143,10 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
     assert_eq!(start.offset, 0);
 
     // Tie-break by visual order: equal x picks the last stop on the right.
-    let tie = [stop(5.0, 1, 0, Downstream), stop(5.0, 9, 1, Upstream)];
+    let tie = [
+        stop(5.0, 1, BidiLevel::LTR, Downstream),
+        stop(5.0, 9, BidiLevel::RTL, Upstream),
+    ];
     let mut t = small_line();
     t.caret_stops = tie.to_vec();
     assert_eq!(t.extreme_caret_stop(HangSide::Right).unwrap().offset, 9);
@@ -1015,29 +1157,39 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
 #[test]
 fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
     let ast = ParagraphAst {
+        annotations: Vec::new(),
+        bidi_spans: Vec::new(),
+        writing_mode: WritingMode::HorizontalTb,
         base_direction: BidiDirection::Rtl,
         strut_metrics: FontMetrics {
+            vertical_ascent: 5.0,
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
             ascent: 8.0,
             descent: 2.0,
             ..Default::default()
         },
         strut_font_size: 10.0,
         runs: vec![],
+        atoms: vec![],
+        clusters: vec![],
+        glyphs: Vec::new(),
         // An empty paragraph is just the sentinel.
-        items: vec![WordNode::Discretionary(DiscretionaryNode::hard_break(
-            TextRange::empty_at(0),
-            true,
-        ))],
+        items: vec![WordNode::Discretionary(DiscretionaryNode::paragraph_end(0))],
         decoration_spans: vec![],
         atomic_spans: vec![],
     };
     let constraints = LayoutConstraints {
+        first_line_indent: 0.0,
+        geometry_provider: None,
+        hanging_indent: 0.0,
         wrap_width: 120.0,
-        tab_stops: TabStops { step: 16.0 },
+        tab_stops: TabStops::new(16.0).unwrap(),
     };
     let options = LayoutOptions::default();
     let shaper: &dyn TextShaper = &NoopShaper;
-    let p = layout_paragraph(&ast, "", shaper, &constraints, &options);
-    assert_eq!(p, Ok(PositionedParagraph::empty(BidiDirection::Rtl)));
+    let p = layout_paragraph(&ast, "", shaper, &constraints, &options).unwrap();
+    assert_eq!(p.base_direction, BidiDirection::Rtl);
+    assert!(p.lines.is_empty());
     assert!(check_layout_inputs(&ast, "", &constraints, &options).is_ok());
 }

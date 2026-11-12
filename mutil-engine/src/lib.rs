@@ -1,12 +1,13 @@
 //! `mutil-engine`: a headless, synchronous, GUI-free multilingual typesetting and
 //! interactive layout engine.
 //!
-//! **Phase 0** (this state of the crate) contains the strongly typed data model
-//! of the specification (§2), the `TextShaper` contract (§4) and a `NoopShaper`
-//! that proves the types close over the whole pipeline. It implements **no**
-//! segmentation, shaping, line breaking or justification.
+//! The crate currently contains the strongly typed data model of the
+//! specification (§2), the `TextShaper` contract (§4), input and output
+//! validators, and a `NoopShaper` that proves the types close over the whole
+//! pipeline. Segmentation, shaping, line breaking and justification are not
+//! implemented yet.
 //!
-//! Layers (dependencies point left):
+//! Layers (dependencies point left or up):
 //!
 //! ```text
 //! types  <-  frontend  <-  shaping
@@ -15,6 +16,12 @@
 //! ```
 //!
 //! Everything public is re-exported at the crate root.
+//!
+//! The normative contract is `SPECIFICATION.md` at the repository root;
+//! `§` references in this crate's documentation are to its sections, and
+//! `RESEARCH.md` holds the evidence behind them under the same numbers.
+//! `scripts/check_spec.py` checks in CI that every type, field, variant and
+//! member the specification names exists here under that name.
 
 pub mod frontend;
 pub mod middleend;
@@ -38,6 +45,7 @@ pub struct ConformanceReport {
     /// Word segmentation Unicode data version.
     pub word: Option<&'static str>,
 }
+
 /// Reports installed components rather than claiming target-version conformance.
 pub fn conformance_report() -> ConformanceReport {
     ConformanceReport {

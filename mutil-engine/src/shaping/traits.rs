@@ -2,8 +2,8 @@
 
 use crate::frontend::{HyphenOpportunity, ShapingRun};
 use crate::types::{
-    Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, GraphemeAtom,
-    LocaleTag, ScriptTag, ShapedCluster, TextRange,
+    Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
+    GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster, TextRange,
 };
 use smallvec::SmallVec;
 
@@ -99,13 +99,24 @@ impl TrailingEdit {
 /// backend can serve several layout threads; implementations needing interior
 /// mutability (caches) must synchronise it themselves.
 ///
-/// Output vectors are **appended to, never cleared**: callers own the buffer
-/// and may reuse its capacity.
+/// ## Output buffers
+///
+/// `shape_run` and `reshape_window` write to two caller-owned vectors,
+/// `output_clusters` and `output_glyphs`. Both are **appended to, never
+/// cleared**, so a caller can reuse their capacity or shape a whole paragraph
+/// into its `ParagraphAst::clusters` and `ParagraphAst::glyphs` run by run.
+/// Every appended cluster names its glyphs by a `glyph_range` of
+/// `output_glyphs` in **absolute** positions of that vector (not relative to
+/// the call's first glyph). In cluster order the appended ranges are
+/// contiguous: the first starts at the vector's length before the call and
+/// the last ends at its length after it.
 pub trait TextShaper: Send + Sync {
     /// Metrics of the actual font instance, without line-height policy.
     fn font_metrics(&self, instance: FontInstanceRef<'_>) -> FontMetrics;
     /// Resolves the primary font for a style and returns its identifier and
-    /// complete metrics (§4.5). Used for the paragraph strut.
+    /// complete metrics (§4.5) **for the requested variation instance**: a
+    /// variable font's metrics depend on its axes, so `variations` are applied
+    /// exactly as `font_metrics` would apply them. Used for the paragraph strut.
     fn resolve_primary_font_metrics(
         &self,
         families: &[FontFamily],
@@ -113,10 +124,23 @@ pub trait TextShaper: Send + Sync {
         script: ScriptTag,
         locale: &LocaleTag,
         font_size: f32,
+        variations: &[FontVariation],
     ) -> (FontId, FontMetrics);
 
     /// Shapes one complete run. Output is in **logical** order (§4.2 req. 2);
-    /// `atoms` is the run's atom slice, and `ShapedCluster::atom_range` indexes it.
+    /// `atoms` is the run's atom slice, `&ast.atoms[run.atom_range]`, and
+    /// `ShapedCluster::atom_range` indexes it; `ShapedCluster::glyph_range`
+    /// indexes `output_glyphs` (see "Output buffers"). Implementations read the run's
+    /// settings from `run` but ignore `run.atom_range` and `run.cluster_range`,
+    /// which locate the slices in the AST and are not meaningful to a shaper.
+    ///
+    /// **Tate-chu-yoko.** For a run whose `orientation` is
+    /// [`GlyphOrientation::HorizontalInVertical`](crate::types::GlyphOrientation::HorizontalInVertical), the backend returns exactly
+    /// one cluster covering all of the run's atoms (`atom_range ==
+    /// 0..atoms.len()`), with every glyph in logical order, `natural_width`
+    /// the run's total advance in the vertical line's inline direction, and
+    /// both `safe_to_*_before` flags as for the start of the run. The backend
+    /// merges per-character shaping clusters itself.
     ///
     /// `text` is the **whole paragraph text**, with `run.byte_range` selecting
     /// the run, so that cluster byte offsets are absolute paragraph indices and
@@ -129,23 +153,21 @@ pub trait TextShaper: Send + Sync {
     /// backend kern or squeeze across the seam. Full-width punctuation
     /// squeezing across fonts is therefore a middle-end metrics-stage fallback
     /// (spec §4.2, §5).
-    #[allow(clippy::too_many_arguments)] // signature fixed by spec §4.1
     fn shape_run(
         &self,
         text: &str,
         run: &ShapingRun,
         atoms: &[GraphemeAtom],
         output_clusters: &mut Vec<ShapedCluster>,
+        output_glyphs: &mut Vec<RawShapedGlyph>,
     );
 
     /// Re-shapes a window around a break, hyphenation point or word split
     /// (§5 Stage 1.4).
     ///
-    /// **Deviation from the §4.1 signature** (two parameters added, both
-    /// needed for a sound splice):
-    /// * `atoms`: the *same* run-local atom slice that was given to
-    ///   `shape_run` for this run;
-    /// * All features, variations, size and families come from `run`.
+    /// `atoms` is the *same* run atom slice, `&ast.atoms[run.atom_range]`, that
+    /// was given to `shape_run` for this run (O(1) to obtain, no copy). All
+    /// features, variations, size and families come from `run`.
     ///
     /// Contract:
     /// * `window` is in paragraph text coordinates, lies within
@@ -154,8 +176,12 @@ pub trait TextShaper: Send + Sync {
     ///   re-based to the window), i.e. in the same coordinate space as the
     ///   clusters `shape_run` produced for the run. The caller splices by
     ///   replacing the clusters whose `atom_range` lies inside the window.
+    ///   Output `glyph_range`s index `output_glyphs` (see "Output buffers").
     /// * The output clusters partition exactly the atoms inside the window, in
     ///   logical order, and never split an atom.
+    /// * For a run whose `orientation` is
+    ///   [`GlyphOrientation::HorizontalInVertical`](crate::types::GlyphOrientation::HorizontalInVertical) the output is exactly one
+    ///   cluster covering the whole window, shaped as `shape_run` specifies.
     /// * A window that carries a hyphen (`AppendHyphen`, `ReplacePrefix`)
     ///   must contain at least one atom, since the hyphen's glyphs attach to
     ///   the window's last cluster.
@@ -172,8 +198,7 @@ pub trait TextShaper: Send + Sync {
     ///   With `cut_bytes == 0` and a non-empty replacement no cluster covers
     ///   removed bytes: the glyphs belong to the window's last cluster for
     ///   `ReplacePrefix` and to its first cluster for `ReplaceSuffix`.
-    ///   **[Design decision]**; to be refined with the HarfRust backend in
-    ///   Phase 1.
+    ///   **[Design decision]**; to be refined with the HarfRust backend.
     #[allow(clippy::too_many_arguments)] // signature derived from spec §4.1
     fn reshape_window(
         &self,
@@ -184,6 +209,7 @@ pub trait TextShaper: Send + Sync {
         leading_edit: LeadingEdit,
         trailing_edit: TrailingEdit,
         output_clusters: &mut Vec<ShapedCluster>,
+        output_glyphs: &mut Vec<RawShapedGlyph>,
     );
 
     /// GDEF ligature caret positions: `n - 1` for `n` components, empty if the
@@ -253,7 +279,6 @@ mod tests {
         suffix_cut: u32,
     ) -> HyphenOpportunity {
         HyphenOpportunity {
-            byte_offset: 3,
             prefix_replacement: prefix.map(Into::into),
             suffix_replacement: suffix.map(Into::into),
             prefix_cut_bytes: prefix_cut,

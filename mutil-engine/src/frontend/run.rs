@@ -1,6 +1,11 @@
 //! Shaping runs: the unit handed to a shaping backend (spec §2.5, §3 Step 5).
 
-use crate::types::{BidiLevel, Direction, FamilyStack, FontStyle, LocaleTag, ScriptTag, TextRange};
+use core::ops::Range;
+
+use crate::types::{
+    BaselineAlignment, BidiLevel, Direction, FamilyStack, FontFeatures, FontStyle,
+    GlyphOrientation, LocaleTag, ScriptTag, TextRange,
+};
 
 /// Text decoration requested for a run. Colour is deliberately absent: it is
 /// applied at paint time over a single shaping context (§3 Step 5).
@@ -16,8 +21,16 @@ pub struct TextDecoration {
 /// decoration (spec §2.5). Atoms never straddle runs (§3 Step 5).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShapingRun {
+    /// Alignment relative to the paragraph main baseline.
+    pub baseline_align: BaselineAlignment,
+    /// Finite extra spacing between eligible atoms.
+    pub letter_spacing: f32,
+    /// Finite extra advance for word spaces.
+    pub word_spacing: f32,
+    /// Resolved glyph orientation.
+    pub orientation: GlyphOrientation,
     /// Complete shaping settings; the run is their single source of truth.
-    pub features: crate::types::FontFeatures,
+    pub features: FontFeatures,
     /// Bytes of the paragraph covered by the run.
     pub byte_range: TextRange,
     /// Ordered family stack; shared between runs by reference count.
@@ -34,6 +47,15 @@ pub struct ShapingRun {
     pub bidi_level: BidiLevel,
     /// Requested decoration.
     pub decoration: TextDecoration,
+    /// This run's atoms: `ast.atoms[atom_range]` for a body run (the slice
+    /// handed to `TextShaper::shape_run` and `reshape_window`), or
+    /// `ann.atoms[atom_range]` for an annotation run, where it is always
+    /// `0..ann.atoms.len()`. Shapers ignore it. Paragraph-level index space.
+    pub atom_range: Range<usize>,
+    /// This run's clusters: `ast.clusters[cluster_range]` for a body run, or
+    /// `ann.clusters[cluster_range]` (always `0..ann.clusters.len()`) for an
+    /// annotation run. Shapers ignore it. Paragraph-level index space.
+    pub cluster_range: Range<usize>,
 }
 
 impl ShapingRun {

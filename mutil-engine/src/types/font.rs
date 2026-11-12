@@ -70,15 +70,35 @@ pub enum FontFamily {
 /// pointer identity or a precomputed hash (spec §4.2 req. 5 keys on the stack).
 pub type FamilyStack = Arc<[FontFamily]>;
 
-/// CSS-scale font weight (1 to 1000; 400 normal, 700 bold).
+/// CSS-scale font weight: 1 to 1000, 400 normal, 700 bold.
+///
+/// Parsed, not validated (spec §1.5, A3): the field is private and
+/// [`new`](Self::new) refuses a value outside the scale, so a weight that
+/// exists is in range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FontWeight(pub u16);
+pub struct FontWeight(u16);
 
 impl FontWeight {
     /// 400.
     pub const NORMAL: Self = Self(400);
     /// 700.
     pub const BOLD: Self = Self(700);
+
+    /// The weight `value`, or `None` outside `1..=1000`.
+    #[must_use]
+    pub const fn new(value: u16) -> Option<Self> {
+        if 1 <= value && value <= 1000 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    /// The weight on the CSS scale.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
 }
 
 impl Default for FontWeight {
@@ -121,24 +141,22 @@ pub struct FontFeature {
 /// One variable-font axis setting, for example `("wght", 650.0)` (spec §4.2
 /// req. 5: the cache key includes "variation settings").
 ///
-/// Fields are private so that `Eq` and `Hash` are sound for `f32`: the
-/// constructor maps `-0.0` and NaN to `0.0` in every build profile, and hashing uses the bit pattern.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Parsed, not validated (spec §1.5, A3): [`new`](Self::new) refuses a
+/// coordinate that is not finite and maps `-0.0` to `0.0`, so equality and
+/// hashing by bit pattern are sound and agree with numeric equality.
+#[derive(Clone, Copy, Debug)]
 pub struct FontVariation {
     tag: [u8; 4],
     value: f32,
 }
 
 impl FontVariation {
-    /// Builds a setting, canonicalising `-0.0` and NaN to `0.0`.
+    /// The setting of axis `tag` to `value`, with `-0.0` canonicalised to
+    /// `0.0`; `None` unless `value` is finite.
     #[must_use]
-    pub fn new(tag: [u8; 4], value: f32) -> Self {
-        let value = if value.is_nan() || value == 0.0 {
-            0.0
-        } else {
-            value
-        };
-        Self { tag, value }
+    pub fn new(tag: [u8; 4], value: f32) -> Option<Self> {
+        let value = if value == 0.0 { 0.0 } else { value };
+        value.is_finite().then_some(Self { tag, value })
     }
 
     /// Four-byte axis tag.
@@ -151,6 +169,12 @@ impl FontVariation {
     #[must_use]
     pub const fn value(&self) -> f32 {
         self.value
+    }
+}
+
+impl PartialEq for FontVariation {
+    fn eq(&self, other: &Self) -> bool {
+        self.tag == other.tag && self.value.to_bits() == other.value.to_bits()
     }
 }
 
@@ -192,8 +216,8 @@ impl FontFeatures {
     }
 
     /// Appends a variation-axis setting.
-    pub fn push_variation(&mut self, tag: [u8; 4], value: f32) {
-        self.variations.push(FontVariation::new(tag, value));
+    pub fn push_variation(&mut self, variation: FontVariation) {
+        self.variations.push(variation);
     }
 
     /// The feature settings as a slice.
@@ -220,15 +244,40 @@ impl FontFeatures {
     }
 }
 
+/// Borrowed, complete physical font instance used by measurement queries.
+#[derive(Clone, Copy, Debug)]
+pub struct FontInstanceRef<'a> {
+    /// Face and fallback scale; FontId identifies a face, not variations.
+    pub font: FontRef,
+    /// Requested size in layout units.
+    pub font_size: f32,
+    /// Variable font coordinates.
+    pub variations: &'a [FontVariation],
+}
+
 /// Complete primary-font metrics (spec §2.5).
 ///
 /// The field set is a **[Design decision]** (the draft never defined it).
 /// `resolve_primary_font_metrics` must return every field (§4.5); fonts lacking
 /// a table value fall back to the backend's best estimate. All values are in
-/// layout units at the requested size; positions follow the OpenType sign
-/// convention chosen by the backend and normalised by the middle-end later.
+/// layout units at the requested size. Baseline offsets are positive toward
+/// line-over; the backend normalizes table signs and supplies missing metrics.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FontMetrics {
+    /// Vertical line-over half extent.
+    pub vertical_ascent: f32,
+    /// Vertical line-under half extent.
+    pub vertical_descent: f32,
+    /// Vertical inter-line gap.
+    pub vertical_line_gap: f32,
+    /// Baseline offset toward line-over, in scaled layout units.
+    pub ideographic_baseline_offset: f32,
+    /// Baseline offset toward line-over, in scaled layout units.
+    pub central_baseline_offset: f32,
+    /// Baseline offset toward line-over, in scaled layout units.
+    pub hanging_baseline_offset: f32,
+    /// Baseline offset toward line-over, in scaled layout units.
+    pub mathematical_baseline_offset: f32,
     /// Distance from baseline to the top of the line box.
     pub ascent: f32,
     /// Distance from baseline to the bottom of the line box (positive downwards).
@@ -249,39 +298,62 @@ pub struct FontMetrics {
     pub use_typo_metrics: bool,
 }
 
-/// Strut metrics for a paragraph (spec §2.5, §5 Stage 4): what an empty or
-/// fixed-height line is measured with.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct VerticalMetrics {
-    /// Baseline to line-box top.
-    pub ascent: f32,
-    /// Baseline to line-box bottom.
-    pub descent: f32,
-    /// Extra inter-line gap.
-    pub line_gap: f32,
-}
-
-impl VerticalMetrics {
-    /// Takes the vertical subset of a font's metrics. No policy is applied here:
-    /// `USE_TYPO_METRICS` selection is the backend's job (§4.5).
-    #[must_use]
-    pub const fn from_font_metrics(m: &FontMetrics) -> Self {
-        Self {
-            ascent: m.ascent,
-            descent: m.descent,
-            line_gap: m.line_gap,
-        }
-    }
-
-    /// `ascent + descent + line_gap`, the CSS `line-height: normal` height.
+impl FontMetrics {
+    /// The font's own horizontal line height: `ascent + descent + line_gap`.
     #[must_use]
     pub fn natural_line_height(&self) -> f32 {
         self.ascent + self.descent + self.line_gap
+    }
+
+    /// Checks raw font metrics: every field finite, the depths non-negative
+    /// (ascent, descent, line gap and their vertical counterparts, underline
+    /// thickness, x-height, cap height), both line heights finite and both
+    /// `ascent + descent` sums positive. A resolved strut has other rules; see
+    /// `StrutMetrics`.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        let nonnegative = [
+            self.ascent,
+            self.descent,
+            self.line_gap,
+            self.vertical_ascent,
+            self.vertical_descent,
+            self.vertical_line_gap,
+            self.underline_thickness,
+            self.x_height,
+            self.cap_height,
+        ];
+        nonnegative.iter().all(|v| v.is_finite() && *v >= 0.0)
+            && [
+                self.underline_position,
+                self.strikeout_position,
+                self.ideographic_baseline_offset,
+                self.central_baseline_offset,
+                self.hanging_baseline_offset,
+                self.mathematical_baseline_offset,
+                self.natural_line_height(),
+                self.vertical_ascent + self.vertical_descent + self.vertical_line_gap,
+            ]
+            .iter()
+            .all(|v| v.is_finite())
+            && self.ascent + self.descent > 0.0
+            && self.vertical_ascent + self.vertical_descent > 0.0
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn font_weight_is_parsed_onto_the_css_scale() {
+        assert_eq!(FontWeight::new(400), Some(FontWeight::NORMAL));
+        assert_eq!(FontWeight::new(1).map(FontWeight::get), Some(1));
+        assert_eq!(FontWeight::new(1000).map(FontWeight::get), Some(1000));
+        assert_eq!(FontWeight::new(0), None);
+        assert_eq!(FontWeight::new(1001), None);
+        assert_eq!(FontWeight::default(), FontWeight::NORMAL);
+    }
+
     use super::*;
 
     #[test]
@@ -299,9 +371,9 @@ mod tests {
         f.push(*b"kern", 1);
         f.push(*b"chws", 1);
         f.push(*b"kern", 0); // later wins
-        f.push_variation(*b"wght", 400.0);
-        f.push_variation(*b"wdth", 100.0);
-        f.push_variation(*b"wght", 650.0);
+        f.push_variation(FontVariation::new(*b"wght", 400.0).unwrap());
+        f.push_variation(FontVariation::new(*b"wdth", 100.0).unwrap());
+        f.push_variation(FontVariation::new(*b"wght", 650.0).unwrap());
         f.normalize();
         assert_eq!(
             f.as_slice(),
@@ -322,47 +394,28 @@ mod tests {
     }
 
     #[test]
-    fn variation_nan_is_normalised_to_zero() {
-        let v = FontVariation::new(*b"wght", f32::NAN);
-        assert_eq!(v.value().to_bits(), 0.0_f32.to_bits());
-        assert_eq!(v, FontVariation::new(*b"wght", 0.0));
+    fn a_variation_is_finite_by_construction() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(FontVariation::new(*b"wght", bad), None);
+        }
+        assert_eq!(
+            FontVariation::new(*b"wght", 650.0).map(|v| v.value()),
+            Some(650.0)
+        );
     }
 
     #[test]
     fn variation_negative_zero_hashes_like_zero() {
         use std::hash::{BuildHasher, RandomState};
         let s = RandomState::new();
-        let a = FontVariation::new(*b"slnt", -0.0);
-        let b = FontVariation::new(*b"slnt", 0.0);
+        let a = FontVariation::new(*b"slnt", -0.0).unwrap();
+        let b = FontVariation::new(*b"slnt", 0.0).unwrap();
         assert_eq!(a, b);
         assert_eq!(s.hash_one(a), s.hash_one(b));
-    }
-
-    #[test]
-    fn vertical_metrics_follow_font_metrics() {
-        let fm = FontMetrics {
-            ascent: 8.0,
-            descent: 2.0,
-            line_gap: 1.0,
-            ..Default::default()
-        };
-        let v = VerticalMetrics::from_font_metrics(&fm);
-        assert_eq!(v.natural_line_height(), 11.0);
     }
 
     #[test]
     fn unscaled_font_ref_has_unit_scale() {
         assert_eq!(FontRef::unscaled(FontId(3)).scale, 1.0);
     }
-}
-
-/// Borrowed, complete physical font instance used by measurement queries.
-#[derive(Clone, Copy, Debug)]
-pub struct FontInstanceRef<'a> {
-    /// Face and fallback scale; FontId identifies a face, not variations.
-    pub font: FontRef,
-    /// Requested size in layout units.
-    pub font_size: f32,
-    /// Variable font coordinates.
-    pub variations: &'a [FontVariation],
 }

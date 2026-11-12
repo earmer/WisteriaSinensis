@@ -1,4 +1,5 @@
-//! Public API contract probes. Shell behavior is intentionally still red.
+//! Public API contract probes: paragraph splitting, carets, tabs, badness and
+//! conformance reporting.
 use mutil_engine::*;
 
 #[test]
@@ -62,16 +63,26 @@ fn atomic_fragment_snaps_to_full_span_not_wrapped_fragment() {
         atomic_id: 7,
         full_byte_range: TextRange::new(0, 20),
         fragment_byte_range: TextRange::new(10, 15),
-        x_start: 0.,
-        x_end: 10.,
-        bidi_level: 0,
+        x: 0.,
+        width: 10.,
+        bidi_level: BidiLevel::LTR,
     };
     assert_eq!(f.hit_test(1.).byte_offset, 0);
     assert_eq!(f.hit_test(5.).byte_offset, 20);
     assert_eq!(f.hit_test(9.).affinity, CaretAffinity::Upstream);
-    f.bidi_level = 1;
+    f.bidi_level = BidiLevel::RTL;
     assert_eq!(f.hit_test(1.).byte_offset, 20);
     assert_eq!(f.hit_test(5.).byte_offset, 0);
+    // Even levels above 0 behave like level 0.
+    f.bidi_level = BidiLevel::new(2).unwrap();
+    assert_eq!(f.hit_test(1.).byte_offset, 0);
+    assert_eq!(f.hit_test(5.).byte_offset, 20);
+    // The midpoint is that of the fragment itself, wherever it sits on the line.
+    f.bidi_level = BidiLevel::LTR;
+    f.x = 100.;
+    f.width = 6.;
+    assert_eq!(f.hit_test(102.).byte_offset, 0);
+    assert_eq!(f.hit_test(103.).byte_offset, 20);
 }
 #[test]
 fn absent_gdef_carets_fall_back_to_atom_widths() {
@@ -129,8 +140,8 @@ fn information_separators_split_paragraphs() {
 }
 #[test]
 fn tab_precision_exhaustion_returns_none() {
-    assert_eq!(TabStops { step: 8. }.next_stop(1e10), None);
-    assert_eq!(TabStops { step: 8. }.next_stop(f32::MAX), None);
+    assert_eq!(TabStops::DEFAULT.next_stop(1e10), None);
+    assert_eq!(TabStops::DEFAULT.next_stop(f32::MAX), None);
 }
 #[test]
 fn locale_heuristics_require_opt_in() {
@@ -149,7 +160,7 @@ fn report_does_not_claim_uninstalled_unicode_components() {
 }
 #[test]
 fn font_instance_queries_accept_variations_without_changing_face_identity() {
-    let variations = [FontVariation::new(*b"wght", 650.)];
+    let variations = [FontVariation::new(*b"wght", 650.).unwrap()];
     let instance = FontInstanceRef {
         font: FontRef::unscaled(FontId(7)),
         font_size: 18.,
@@ -182,7 +193,7 @@ fn tier_two_without_primary_capacity_starts_at_zero() {
 
 #[test]
 fn standard_tab_stops_remain_strictly_forward() {
-    let stops = TabStops { step: 8. };
+    let stops = TabStops::DEFAULT;
     assert_eq!(stops.next_stop(0.), Some(8.));
     assert_eq!(stops.next_stop(8.), Some(16.));
     for x in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {

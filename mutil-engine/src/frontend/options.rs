@@ -1,6 +1,6 @@
 //! Frontend options (spec §3).
 
-use crate::types::LocaleTag;
+use crate::types::{LocaleTag, TextOrientation, WritingMode};
 
 /// How quotation marks and paired punctuation resolve their script
 /// (spec §3 Step 3).
@@ -9,11 +9,11 @@ use crate::types::LocaleTag;
 /// `QuotePolicy::CjkAware` and describes the first as "the default algorithm".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum QuotePolicy {
-    /// §3.1 default: `Script_Extensions` set intersection with a bounded stack;
+    /// Spec §3 Step 3, FE-13 default: `Script_Extensions` set intersection with a bounded stack;
     /// paired punctuation takes the enclosing text's script `[U4][S1]`.
     #[default]
     Standard,
-    /// §3.2 opt-in: pairs adjacent to CJK text take a CJK script so the quotation
+    /// Spec §3 Step 3, FE-14 opt-in: pairs adjacent to CJK text take a CJK script so the quotation
     /// glyphs come from a CJK font. Deterministic for a given text, but **not
     /// stable under edits** (an unclosed opener re-resolves once its closer is
     /// typed).
@@ -39,10 +39,14 @@ pub enum AutospaceProfile {
 /// metrics and never applies `LineHeight` (that is the middle-end's job).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FrontendOptions {
+    /// Paragraph writing mode.
+    pub writing_mode: WritingMode,
+    /// Vertical orientation policy.
+    pub text_orientation: TextOrientation,
     /// Whether untagged text can trigger experimental locale inference.
     pub locale_policy: LocalePolicy,
     /// Profile for `GlueKind::CjkAutospace` sizes.
-    pub autospace: AutospaceProfile,
+    pub autospace_profile: AutospaceProfile,
     /// How quotation marks resolve their script.
     pub quote_policy: QuotePolicy,
     /// Locale for runs that carry none (spec §1.2 fallback rules).
@@ -57,8 +61,8 @@ pub enum LocalePolicy {
     ExplicitOnly,
     /// Experimental script-based inference.
     ///
-    /// **Forward contract (Phase 1/2).** No locale-resolution pass exists in
-    /// Phase 0, so selecting this policy currently has no effect; it is
+    /// **Forward contract.** No locale-resolution pass exists yet, so
+    /// selecting this policy currently has no effect; it is
     /// reserved for the script-based rules in spec §3 Step 4.
     ExperimentalHeuristics,
 }

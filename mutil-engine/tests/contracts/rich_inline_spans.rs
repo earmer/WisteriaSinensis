@@ -1,79 +1,49 @@
-//! Rich inline spans end to end (spec §2.2, §2.4, §2.6, §6; Revision 2.1).
+//! Rich inline spans end to end (spec §2.2, §2.4, §2.6, §6).
 //!
 //! A Notion-style mention chip that wraps across two lines with cloned padding
 //! and is atomic for editing, and a flattened inline formula. Every width and
 //! position is a hand-written fixture; no layout algorithm runs.
 
+use crate::common::{ADV, push_text, shaping_run, single_slot};
 use mutil_engine::*;
-use smallvec::smallvec;
 
 // bytes: 0..2 "go" | 2..3 " " | 3..11 "@Ann-Lee" | 11..12 " " | 12..14 "ok"
 const TEXT: &str = "go @Ann-Lee ok";
-const ADV: f32 = 10.0;
 const PAD: f32 = 3.0;
 const SPACE_W: f32 = 4.0;
-const CHIP: TextRange = TextRange { start: 3, end: 11 };
+const CHIP: TextRange = TextRange::new(3, 11);
 const SPAN_ID: u64 = 77;
 
 fn atom(offset: usize) -> GraphemeAtom {
-    let in_chip = CHIP.contains(offset);
-    GraphemeAtom {
-        byte_range: TextRange::new(offset, offset + 1),
-        script: ScriptTag::LATIN,
-        bidi_level: 0,
-        linebreak_class: LineBreakClass::Al,
-        flags: if in_chip {
-            AtomFlags::IN_ATOMIC_EDIT_SPAN
-        } else {
-            AtomFlags::EMPTY
-        },
-    }
+    crate::common::atom(offset)
 }
 
+/// The cluster's flags are the aggregate of its atoms (spec §2.2).
 fn cluster(base: usize, local: usize) -> ShapedCluster {
-    let off = base + local;
-    let atoms = [atom(off)];
     ShapedCluster {
-        byte_range: TextRange::new(off, off + 1),
-        atom_range: local..local + 1,
-        font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
-        // The cluster's flags are the aggregate of its atoms (spec §2.2).
-        flags: AtomFlags::for_cluster(&atoms),
-        glyphs: smallvec![RawShapedGlyph {
-            glyph_id: TEXT.as_bytes()[off] as u32,
-            cluster: off as u32,
-            x_advance: ADV,
-            ..Default::default()
-        }],
-        natural_width: ADV,
-        uncompressed_width: ADV,
-        safe_to_break_before: true,
-        safe_to_concat_before: true,
+        flags: AtomFlags::for_cluster(&[atom(base + local)]),
+        ..crate::common::cluster(base, local)
     }
 }
 
-fn text(start: usize, end: usize) -> WordNode {
+fn run() -> ShapingRun {
+    shaping_run(TEXT, "en-GB")
+}
+
+fn text(ast: &mut ParagraphAst, start: usize, end: usize) -> WordNode {
     let atoms: Vec<_> = (start..end).map(atom).collect();
     let clusters: Vec<_> = (0..atoms.len()).map(|i| cluster(start, i)).collect();
-    WordNode::Box(BoxNode::Text {
-        run_index: 0,
-        byte_range: TextRange::new(start, end),
-        atoms,
-        clusters,
-        natural_width: (end - start) as f32 * ADV,
-    })
+    push_text(ast, 0, atoms, clusters)
 }
 
 fn space(at: usize) -> WordNode {
     WordNode::Glue(GlueNode {
         original_bidi_class: BidiClass::Ws,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         is_collapsible: true,
 
         byte_range: TextRange::new(at, at + 1),
         kind: GlueKind::WordSpace,
-        tier: GlueTier::Tier0,
         natural_width: SPACE_W,
         max_stretch: 2.0,
         max_shrink: 1.0,
@@ -86,35 +56,17 @@ fn boundary(edge: SpanEdge, at: usize) -> WordNode {
         span_id: SPAN_ID,
         edge,
         width: PAD,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
     })
 }
 
 fn sentinel(len: usize) -> WordNode {
-    WordNode::Discretionary(DiscretionaryNode::hard_break(
-        TextRange::empty_at(len),
-        true,
-    ))
-}
-
-fn run() -> ShapingRun {
-    ShapingRun {
-        features: Default::default(),
-
-        byte_range: TextRange::new(0, TEXT.len()),
-        families: std::sync::Arc::from([FontFamily::Generic(GenericFamily::SansSerif)]),
-        font_size: 16.0,
-        style: FontStyle::default(),
-        script: ScriptTag::LATIN,
-        locale: LocaleTag::new("en-GB"),
-        bidi_level: 0,
-        decoration: TextDecoration::default(),
-    }
+    WordNode::Discretionary(DiscretionaryNode::paragraph_end(len))
 }
 
 fn chip_ast() -> ParagraphAst {
     // Inside a `Clone` span every interior break carries +300, the padding on
-    // both sides, and lists the span in `cloned_spans` (ruling 5): cloning is
+    // both sides, and lists the span in `cloned_spans` (spec §2.4): cloning is
     // orthogonal to the action, which stays `Direct` here.
     let interior_break = DiscretionaryNode {
         byte_range: TextRange::empty_at(8),
@@ -126,31 +78,25 @@ fn chip_ast() -> ParagraphAst {
         action: BreakAction::Direct,
         cloned_spans: smallvec::smallvec![SPAN_ID],
     };
-    ParagraphAst {
+    let mut ast = ParagraphAst {
+        annotations: Vec::new(),
+        bidi_spans: Vec::new(),
+        writing_mode: WritingMode::HorizontalTb,
         base_direction: BidiDirection::Ltr,
         strut_metrics: FontMetrics {
+            vertical_ascent: 5.0,
+            vertical_descent: 5.0,
+            vertical_line_gap: 0.0,
             ascent: 12.0,
             descent: 4.0,
             ..Default::default()
         },
         strut_font_size: 16.0,
         runs: vec![run()],
-        items: vec![
-            text(0, 2),
-            // A breakable space is [Glue, Discretionary] (ruling 1): the space
-            // stays on the trailing edge of the line that breaks after it.
-            space(2),
-            WordNode::Discretionary(DiscretionaryNode::direct(3)),
-            boundary(SpanEdge::Leading, 3),
-            text(3, 8), // "@Ann-"
-            WordNode::Discretionary(interior_break),
-            text(8, 11), // "Lee"
-            boundary(SpanEdge::Trailing, 11),
-            space(11),
-            WordNode::Discretionary(DiscretionaryNode::direct(12)),
-            text(12, 14),
-            sentinel(TEXT.len()),
-        ],
+        atoms: vec![],
+        clusters: vec![],
+        glyphs: Vec::new(),
+        items: vec![],
         decoration_spans: vec![InlineDecorationSpan {
             span_id: SPAN_ID,
             byte_range: CHIP,
@@ -162,7 +108,24 @@ fn chip_ast() -> ParagraphAst {
             span_id: SPAN_ID,
             byte_range: CHIP,
         }],
-    }
+    };
+    ast.items = vec![
+        text(&mut ast, 0, 2),
+        // A breakable space is [Glue, Discretionary] (spec §2.4): the space
+        // stays on the trailing edge of the line that breaks after it.
+        space(2),
+        WordNode::Discretionary(DiscretionaryNode::direct(3)),
+        boundary(SpanEdge::Leading, 3),
+        text(&mut ast, 3, 8), // "@Ann-"
+        WordNode::Discretionary(interior_break),
+        text(&mut ast, 8, 11), // "Lee"
+        boundary(SpanEdge::Trailing, 11),
+        space(11),
+        WordNode::Discretionary(DiscretionaryNode::direct(12)),
+        text(&mut ast, 12, 14),
+        sentinel(TEXT.len()),
+    ];
+    ast
 }
 
 fn pen_glyph(range: (usize, usize), x: f32) -> PositionedGlyph {
@@ -173,33 +136,28 @@ fn pen_glyph(range: (usize, usize), x: f32) -> PositionedGlyph {
         y_offset: 0.0,
         advance: ADV,
         byte_range: Some(TextRange::new(range.0, range.1)),
-        is_synthesized: false,
         is_hanging: false,
     }
 }
 
-fn fragment(
-    range: (usize, usize),
-    x: f32,
-    width: f32,
-    first: bool,
-    last: bool,
-) -> PositionedSpanFragment {
+fn fragment(range: (usize, usize), x: f32, width: f32) -> PositionedSpanFragment {
     PositionedSpanFragment {
         span_id: SPAN_ID,
+        span_range: CHIP,
         byte_range: TextRange::new(range.0, range.1),
         x,
         width,
         ascent: 12.0,
         descent: 4.0,
-        is_first_fragment: first,
-        is_last_fragment: last,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
     }
 }
 
 fn line(byte_range: (usize, usize), visible_end: usize, y: f32, width: f32) -> PositionedLine {
     PositionedLine {
+        slots: single_slot(width, 100.0),
+        annotations: Vec::new(),
+        is_ellipsized: false,
         atomic_fragments: vec![],
 
         byte_range: TextRange::new(byte_range.0, byte_range.1),
@@ -208,9 +166,6 @@ fn line(byte_range: (usize, usize), visible_end: usize, y: f32, width: f32) -> P
         ascent: 12.0,
         descent: 4.0,
         line_height: 16.0,
-        visual_width: width,
-        hanging_left: 0.0,
-        hanging_right: 0.0,
         is_justified: false,
         visual_runs: vec![],
         visual_boxes: vec![],
@@ -226,7 +181,7 @@ fn stop(x: f32, offset: usize, affinity: CaretAffinity, line: usize) -> CaretSto
         x,
         offset,
         affinity,
-        level: 0,
+        level: BidiLevel::LTR,
         line,
     }
 }
@@ -235,36 +190,33 @@ fn stop(x: f32, offset: usize, affinity: CaretAffinity, line: usize) -> CaretSto
 fn chip_inputs_are_accepted_and_atoms_carry_the_atomic_flag() {
     let ast = chip_ast();
     let constraints = LayoutConstraints {
+        first_line_indent: 0.0,
+        geometry_provider: None,
+        hanging_indent: 0.0,
         wrap_width: 100.0,
-        tab_stops: TabStops { step: 8.0 },
+        tab_stops: TabStops::DEFAULT,
     };
     assert!(check_layout_inputs(&ast, TEXT, &constraints, &LayoutOptions::default()).is_ok());
-    assert!(ast.items.iter().all(WordNode::is_self_contained));
-    // Atoms inside the chip carry the flag, and so do their clusters.
-    let WordNode::Box(BoxNode::Text {
-        atoms, clusters, ..
-    }) = &ast.items[4]
-    else {
-        unreachable!()
-    };
+    assert!((0..ast.items.len()).all(|item| ast.is_self_contained(item)));
+    // The chip's atoms are found by lookup, not by a flag on the atoms.
+    let chip = ast.text_box(4).unwrap();
+    assert!(chip.atoms.iter().all(|a| {
+        ast.atomic_span_containing(a.byte_range.start())
+            .map(|s| s.span_id)
+            == Some(SPAN_ID)
+    }));
     assert!(
-        atoms
+        ast.text_box(0)
+            .unwrap()
+            .atoms
             .iter()
-            .all(|a| a.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN))
+            .all(|a| ast.atomic_span_containing(a.byte_range.start()).is_none())
     );
-    assert!(
-        clusters
-            .iter()
-            .all(|c| c.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN))
-    );
-    let WordNode::Box(BoxNode::Text { clusters, .. }) = &ast.items[0] else {
-        unreachable!()
-    };
-    assert!(
-        clusters
-            .iter()
-            .all(|c| !c.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN))
-    );
+    // Both ends: the start byte is inside, the end byte is not.
+    assert!(ast.atomic_span_containing(CHIP.start()).is_some());
+    assert!(ast.atomic_span_containing(CHIP.end() - 1).is_some());
+    assert!(ast.atomic_span_containing(CHIP.end()).is_none());
+    assert!(ast.atomic_span_containing(CHIP.start() - 1).is_none());
     // The only break opportunities are discretionaries; glue never breaks.
     let breaks: Vec<_> = ast
         .items
@@ -276,7 +228,7 @@ fn chip_inputs_are_accepted_and_atoms_carry_the_atomic_flag() {
     assert_eq!(breaks, vec![2, 5, 9, 11]); // the last is the sentinel
     // Padding is cloned only on the break that is inside the chip.
     assert!(!ast.decoration_spans[0].forbids_cjk_autospace_at(5));
-    assert!(ast.decoration_spans[0].forbids_cjk_autospace_at(CHIP.start));
+    assert!(ast.decoration_spans[0].forbids_cjk_autospace_at(CHIP.start()));
 }
 
 #[test]
@@ -291,15 +243,16 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         .collect();
     glyphs0.extend((3..8).map(|i| pen_glyph((i, i + 1), 27.0 + (i - 3) as f32 * ADV)));
     l0.visual_runs = vec![VisualGlyphRun {
+        orientation: GlyphOrientation::Horizontal,
         font_size: 16.0,
         variations: Default::default(),
 
         font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         byte_range: TextRange::new(0, 8),
         glyphs: glyphs0,
     }];
-    l0.span_fragments = vec![fragment((3, 8), 24.0, 56.0, true, false)];
+    l0.span_fragments = vec![fragment((3, 8), 24.0, 56.0)];
 
     // Line 1: cloned leading pad 0..3, "Lee" 3..33, trailing pad 33..36,
     //   space 36..40, "ok" 40..60.
@@ -309,15 +262,16 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         .collect();
     glyphs1.extend((12..14).map(|i| pen_glyph((i, i + 1), 40.0 + (i - 12) as f32 * ADV)));
     l1.visual_runs = vec![VisualGlyphRun {
+        orientation: GlyphOrientation::Horizontal,
         font_size: 16.0,
         variations: Default::default(),
 
         font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         byte_range: TextRange::new(8, 14),
         glyphs: glyphs1,
     }];
-    l1.span_fragments = vec![fragment((8, 11), 0.0, 36.0, false, true)];
+    l1.span_fragments = vec![fragment((8, 11), 0.0, 36.0)];
 
     // Atomic editing: no caret stop strictly inside the chip, even at the wrap
     // (offset 8). Only the logical boundaries 3 and 11 survive.
@@ -342,20 +296,19 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         );
     }
 
-    let ctx = LineContext::from_options(
-        &ast.strut_metrics,
-        ast.strut_font_size,
-        ast.base_direction,
-        &LayoutOptions::default(),
-        100.0,
-    );
-    let mut para = PositionedParagraph::empty(ast.base_direction);
-    para.size = Size {
-        width: 80.0,
-        height: 32.0,
+    let para = PositionedParagraph {
+        policy: LayoutPolicySnapshot::resolve(
+            &ast,
+            &crate::common::constraints(),
+            &LayoutOptions::default(),
+        )
+        .expect("the fixture's layout inputs are valid"),
+        base_direction: ast.base_direction,
+        truncated_range: None,
+        total_block_size: 32.0,
+        lines: vec![l0, l1],
     };
-    para.lines = vec![l0, l1];
-    assert_eq!(para.validate(&ctx), Ok(()));
+    assert_eq!(para.validate_geometry(), Ok(()));
 
     // Slice vs Clone is visible in the fragments: both pads exist on both lines
     // under Clone, so the first fragment is wider than its text by two pads.
@@ -363,8 +316,8 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         para.lines[0].span_fragments[0],
         para.lines[1].span_fragments[0],
     ];
-    assert!(f0.is_first_fragment && !f0.is_last_fragment);
-    assert!(!f1.is_first_fragment && f1.is_last_fragment);
+    assert!(f0.is_first_fragment() && !f0.is_last_fragment());
+    assert!(!f1.is_first_fragment() && f1.is_last_fragment());
     assert_eq!(f0.width, 5.0 * ADV + 2.0 * PAD);
     assert_eq!(f1.width, 3.0 * ADV + 2.0 * PAD);
 
@@ -372,7 +325,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
     let mut narrow = para.clone();
     narrow.lines[1].span_fragments[0].width = 20.0;
     assert_eq!(
-        narrow.validate(&ctx),
+        narrow.validate_geometry(),
         Err((
             1,
             LineInvariantError::GlyphOutsideSpanFragment {
@@ -390,6 +343,8 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     // everything inside braces, fractions or radicals would stay one object.
     let obj = |id: u64, at: usize| {
         WordNode::Box(BoxNode::InlineObject {
+            bidi_level: BidiLevel::LTR,
+            baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(at, at + 1),
             box_id: id,
             width: 8.0,
@@ -406,9 +361,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
             pre_break_width: 0.0,
             post_break_width: 0.0,
             no_break_width: 0.0,
-            action: BreakAction::MathOperator {
-                repeat_glyph_id: None,
-            },
+            action: BreakAction::MathOperator { repeat: None },
             cloned_spans: Default::default(),
         })
     };
@@ -419,6 +372,9 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     };
     let ast = ParagraphAst {
         runs: vec![formula_run],
+        atoms: vec![],
+        clusters: vec![],
+        glyphs: Vec::new(),
         decoration_spans: vec![],
         atomic_spans: vec![],
         items: vec![
@@ -433,18 +389,13 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
         ],
         ..chip_ast()
     };
-    let constraints = LayoutConstraints {
-        wrap_width: 100.0,
-        tab_stops: TabStops { step: 8.0 },
-    };
     assert_eq!(
-        check_layout_inputs(&ast, "a+b=c", &constraints, &LayoutOptions::default()),
-        Ok(LineContext::from_options(
-            &ast.strut_metrics,
-            ast.strut_font_size,
-            ast.base_direction,
-            &LayoutOptions::default(),
-            100.0
-        ))
+        check_layout_inputs(
+            &ast,
+            "a+b=c",
+            &crate::common::constraints(),
+            &LayoutOptions::default()
+        ),
+        Ok(())
     );
 }
