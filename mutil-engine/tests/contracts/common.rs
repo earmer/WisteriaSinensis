@@ -96,12 +96,8 @@ pub fn retile_glyphs(ast: &mut ParagraphAst) {
 
 /// A text box over the one-byte atoms `s..e` of run 0, one unit-wide cluster
 /// per atom, appended to `ast`'s storage.
-pub fn boxed(ast: &mut ParagraphAst, s: usize, e: usize, atomic: bool) -> WordNode {
-    let flags = if atomic {
-        AtomFlags::IN_ATOMIC_EDIT_SPAN
-    } else {
-        AtomFlags::EMPTY
-    };
+pub fn boxed(ast: &mut ParagraphAst, s: usize, e: usize) -> WordNode {
+    let flags = AtomFlags::EMPTY;
     let atoms: Vec<_> = (s..e)
         .map(|i| GraphemeAtom {
             orientation: GlyphOrientation::Horizontal,
@@ -143,7 +139,7 @@ pub fn hyphen_chain_ast(
     let t = format!("x{}", "a".repeat(n));
     let mut a = ast(&t);
     rebuild_items(&mut a, |a| {
-        let mut items = vec![boxed(a, 0, 1, false)];
+        let mut items = vec![boxed(a, 0, 1)];
         items.push(WordNode::Discretionary(DiscretionaryNode::direct(1)));
         for k in 0..n {
             if k > 0 {
@@ -164,7 +160,7 @@ pub fn hyphen_chain_ast(
                     cloned_spans: Default::default(),
                 }));
             }
-            items.push(boxed(a, k + 1, k + 2, false));
+            items.push(boxed(a, k + 1, k + 2));
         }
         items.push(end(t.len()));
         items
@@ -297,7 +293,7 @@ pub fn ast(t: &str) -> ParagraphAst {
         decoration_spans: vec![],
         atomic_spans: vec![],
     };
-    let text = boxed(&mut a, 0, t.len(), false);
+    let text = boxed(&mut a, 0, t.len());
     a.items = vec![text, end(t.len())];
     a
 }

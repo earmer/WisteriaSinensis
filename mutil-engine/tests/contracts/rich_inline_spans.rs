@@ -14,17 +14,8 @@ const SPACE_W: f32 = 4.0;
 const CHIP: TextRange = TextRange { start: 3, end: 11 };
 const SPAN_ID: u64 = 77;
 
-/// Atoms inside the chip carry the atomic-edit flag.
 fn atom(offset: usize) -> GraphemeAtom {
-    let flags = if CHIP.contains(offset) {
-        AtomFlags::IN_ATOMIC_EDIT_SPAN
-    } else {
-        AtomFlags::EMPTY
-    };
-    GraphemeAtom {
-        flags,
-        ..crate::common::atom(offset)
-    }
+    crate::common::atom(offset)
 }
 
 /// The cluster's flags are the aggregate of its atoms (spec §2.2).
@@ -221,25 +212,25 @@ fn chip_inputs_are_accepted_and_atoms_carry_the_atomic_flag() {
     };
     assert!(check_layout_inputs(&ast, TEXT, &constraints, &LayoutOptions::default()).is_ok());
     assert!((0..ast.items.len()).all(|item| ast.is_self_contained(item)));
-    // Atoms inside the chip carry the flag, and so do their clusters.
+    // The chip's atoms are found by lookup, not by a flag on the atoms.
     let chip = ast.text_box(4).unwrap();
-    assert!(
-        chip.atoms
-            .iter()
-            .all(|a| a.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN))
-    );
-    assert!(
-        chip.clusters
-            .iter()
-            .all(|c| c.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN))
-    );
+    assert!(chip.atoms.iter().all(|a| {
+        ast.atomic_span_containing(a.byte_range.start)
+            .map(|s| s.span_id)
+            == Some(SPAN_ID)
+    }));
     assert!(
         ast.text_box(0)
             .unwrap()
-            .clusters
+            .atoms
             .iter()
-            .all(|c| !c.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN))
+            .all(|a| ast.atomic_span_containing(a.byte_range.start).is_none())
     );
+    // Both ends: the start byte is inside, the end byte is not.
+    assert!(ast.atomic_span_containing(CHIP.start).is_some());
+    assert!(ast.atomic_span_containing(CHIP.end - 1).is_some());
+    assert!(ast.atomic_span_containing(CHIP.end).is_none());
+    assert!(ast.atomic_span_containing(CHIP.start - 1).is_none());
     // The only break opportunities are discretionaries; glue never breaks.
     let breaks: Vec<_> = ast
         .items

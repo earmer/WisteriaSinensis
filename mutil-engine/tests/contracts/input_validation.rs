@@ -188,9 +188,9 @@ fn explicit_spacing_and_discretionary_equations() {
         disc.no_break_width = spacing;
         rebuild_items(&mut a, |b| {
             vec![
-                boxed(b, 0, 1, false),
+                boxed(b, 0, 1),
                 WordNode::Discretionary(disc),
-                boxed(b, 1, 2, false),
+                boxed(b, 1, 2),
                 end(2),
             ]
         });
@@ -301,9 +301,9 @@ fn a_tab_owns_source_bytes() {
         let mut a = ast("a\tb");
         rebuild_items(&mut a, |b| {
             vec![
-                boxed(b, 0, 1, false),
+                boxed(b, 0, 1),
                 WordNode::Tab { byte_range: tab },
-                boxed(b, 2, 3, false),
+                boxed(b, 2, 3),
                 end(3),
             ]
         });
@@ -327,7 +327,7 @@ fn an_inline_object_is_at_a_representable_level() {
         let mut a = ast("ab\u{fffc}");
         rebuild_items(&mut a, |b| {
             vec![
-                boxed(b, 0, 2, false),
+                boxed(b, 0, 2),
                 WordNode::Box(BoxNode::InlineObject {
                     bidi_level,
                     baseline_align: BaselineAlignment::Auto,
@@ -368,9 +368,7 @@ fn a_zero_width_tab_stop_geometry_is_not_constrained() {
 fn every_text_box_and_inline_object_owns_source_bytes() {
     // A text box without atoms.
     let mut a = ast("abc");
-    rebuild_items(&mut a, |b| {
-        vec![boxed(b, 0, 0, false), boxed(b, 0, 3, false), end(3)]
-    });
+    rebuild_items(&mut a, |b| vec![boxed(b, 0, 0), boxed(b, 0, 3), end(3)]);
     assert_eq!(
         check(&a, "abc"),
         Err(LayoutInputError::ItemNotSelfContained { item: 0 })
@@ -390,14 +388,10 @@ fn every_text_box_and_inline_object_owns_source_bytes() {
         })
     };
     let mut a = ast("ab\u{fffc}");
-    rebuild_items(&mut a, |b| {
-        vec![boxed(b, 0, 2, false), object(2, 5), end(5)]
-    });
+    rebuild_items(&mut a, |b| vec![boxed(b, 0, 2), object(2, 5), end(5)]);
     assert_eq!(check(&a, "ab\u{fffc}"), Ok(()));
     let mut a = ast("ab");
-    rebuild_items(&mut a, |b| {
-        vec![boxed(b, 0, 2, false), object(2, 2), end(2)]
-    });
+    rebuild_items(&mut a, |b| vec![boxed(b, 0, 2), object(2, 2), end(2)]);
     assert_eq!(
         check(&a, "ab"),
         Err(LayoutInputError::InvalidInlineBox { item: 1 })

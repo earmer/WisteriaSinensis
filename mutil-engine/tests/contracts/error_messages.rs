@@ -124,10 +124,6 @@ fn layout_input_error_messages() {
             "decoration span 3 lacks a leading or trailing boundary",
         ),
         (
-            LayoutInputError::AtomicFlagMismatch { item: 2 },
-            "item 2 has an atom whose atomic-span flag is wrong",
-        ),
-        (
             LayoutInputError::InvalidTab { item: 2 },
             "tab 2 owns no source bytes",
         ),

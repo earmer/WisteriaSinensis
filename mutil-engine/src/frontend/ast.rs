@@ -606,7 +606,8 @@ pub struct ParagraphAst {
     pub decoration_spans: Vec<InlineDecorationSpan>,
     /// Spans the caret and deletion treat as one unit (mentions, chips).
     /// Orthogonal to `decoration_spans`: a span may be either, both or neither.
-    /// The atoms inside carry `AtomFlags::IN_ATOMIC_EDIT_SPAN`, and no others do.
+    /// Membership is looked up, never stored on atoms
+    /// ([`atomic_span_containing`](Self::atomic_span_containing)).
     ///
     /// **Order:** ascending by `byte_range.start` and pairwise disjoint
     /// (`prev.end <= next.start`). `check_layout_inputs` rejects any other
@@ -615,6 +616,21 @@ pub struct ParagraphAst {
 }
 
 impl ParagraphAst {
+    /// The atomic span that owns `byte` (`start <= byte < end`), if any. The
+    /// spans ascend and are disjoint, so this is a binary search; an in-order
+    /// sweep over the atoms gets the same answer in amortised O(1) by keeping
+    /// a cursor into `atomic_spans`.
+    #[must_use]
+    pub fn atomic_span_containing(&self, byte: ByteIndex) -> Option<&AtomicEditSpan> {
+        let after = self
+            .atomic_spans
+            .partition_point(|span| span.byte_range.start <= byte);
+        after
+            .checked_sub(1)
+            .map(|i| &self.atomic_spans[i])
+            .filter(|span| byte < span.byte_range.end)
+    }
+
     /// The atoms of body run `run`: `atoms[runs[run].atom_range]`, which is
     /// exactly the slice `TextShaper::shape_run` and `reshape_window` take.
     /// Empty for an out-of-range run or range (validation reports the error).

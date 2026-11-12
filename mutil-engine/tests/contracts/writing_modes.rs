@@ -67,9 +67,9 @@ fn orientation_and_tcy_matrix() {
     assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
     rebuild_items(&mut a, |b| {
         vec![
-            boxed(b, 0, 1, false),
+            boxed(b, 0, 1),
             WordNode::Discretionary(DiscretionaryNode::direct(1)),
-            boxed(b, 1, 2, false),
+            boxed(b, 1, 2),
             end(2),
         ]
     });
@@ -266,7 +266,7 @@ fn tcy_run_split_across_two_boxes_is_rejected() {
     let mut a = ast("25");
     rebuild_items(&mut a, |b| {
         vec![
-            boxed(b, 0, 1, false),
+            boxed(b, 0, 1),
             WordNode::Box(BoxNode::SpanBoundary {
                 byte_range: TextRange::empty_at(1),
                 span_id: 0,
@@ -274,7 +274,7 @@ fn tcy_run_split_across_two_boxes_is_rejected() {
                 width: 0.,
                 bidi_level: 0,
             }),
-            boxed(b, 1, 2, false),
+            boxed(b, 1, 2),
             end(2),
         ]
     });

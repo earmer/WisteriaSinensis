@@ -228,13 +228,6 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A text box holds an atom whose `AtomFlags::IN_ATOMIC_EDIT_SPAN` disagrees
-    /// with `atomic_spans`: the flag is missing on an atom inside an atomic span,
-    /// or set on one outside every atomic span.
-    AtomicFlagMismatch {
-        /// Index into `ParagraphAst::items`.
-        item: usize,
-    },
     /// An atomic span is empty, does not fit the text, repeats a `span_id`,
     /// is out of order (`atomic_spans` must ascend by start), overlaps or nests
     /// with another atomic span, or has an edge that is not
@@ -658,10 +651,6 @@ fn annotation_payload_is_valid(ann: &AnnotationSpan, mode: WritingMode) -> bool 
         && check_text_payload(text, run, &payload, &ann.glyphs, 0, 0).is_ok()
         && check_text_presentation(run, &ann.atoms, &ann.clusters, mode).is_ok()
         && (run.orientation != GlyphOrientation::HorizontalInVertical || ann.clusters.len() == 1)
-        && !ann
-            .atoms
-            .iter()
-            .any(|a| a.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN))
 }
 
 /// `true` when every measurement a cluster hands downstream is finite and the
@@ -1097,8 +1086,6 @@ struct ItemChecks<'a> {
     runs_in_byte_order: Vec<bool>,
     /// Index of the last discretionary, where the sentinel belongs.
     last_break: Option<usize>,
-    /// Cursor into `ast.atomic_spans` for the in-order sweep over the atoms.
-    atomic_span_at: usize,
 }
 
 impl<'a> ItemChecks<'a> {
@@ -1112,7 +1099,6 @@ impl<'a> ItemChecks<'a> {
                 .map(|run| in_byte_order(ast.run_atoms(run).iter().map(|a| a.byte_range)))
                 .collect(),
             last_break: ast.items.iter().rposition(WordNode::is_break_opportunity),
-            atomic_span_at: 0,
         }
     }
 
@@ -1160,8 +1146,7 @@ impl<'a> ItemChecks<'a> {
         }
     }
 
-    /// A text box: its payload against its run, and `IN_ATOMIC_EDIT_SPAN` on
-    /// exactly the atoms inside an atomic span.
+    /// A text box: its payload against its run.
     fn check_text_box(&mut self, item: usize) -> Result<(), LayoutInputError> {
         use LayoutInputError as E;
         let ast = self.ast;
@@ -1172,24 +1157,7 @@ impl<'a> ItemChecks<'a> {
             return Err(E::RunIndexOutOfRange { item });
         };
         let base = view.atom_start.saturating_sub(run.atom_range.start);
-        check_text_payload(self.text, run, &view, &ast.glyphs, base, item)?;
-        for atom in view.atoms {
-            while ast
-                .atomic_spans
-                .get(self.atomic_span_at)
-                .is_some_and(|span| span.byte_range.end <= atom.byte_range.start)
-            {
-                self.atomic_span_at += 1;
-            }
-            let is_inside = ast
-                .atomic_spans
-                .get(self.atomic_span_at)
-                .is_some_and(|span| span.byte_range.contains_range(atom.byte_range));
-            if is_inside != atom.flags.contains(AtomFlags::IN_ATOMIC_EDIT_SPAN) {
-                return Err(E::AtomicFlagMismatch { item });
-            }
-        }
-        Ok(())
+        check_text_payload(self.text, run, &view, &ast.glyphs, base, item)
     }
 
     /// A span boundary: an empty range at its span's start (`Leading`) or end
@@ -2338,37 +2306,6 @@ mod tests {
     }
 
     #[test]
-    fn the_atomic_flag_mirrors_the_atomic_spans() {
-        let o = LayoutOptions::default();
-        let build = |flag_inside: bool, flag_outside: bool| {
-            let mut a = with_items(vec![text_box(vec![
-                atom(0, 1),
-                atom(1, 2),
-                atom(2, 3),
-                atom(3, 4),
-            ])]);
-            a.atomic_spans = vec![AtomicEditSpan {
-                span_id: 1,
-                byte_range: TextRange::new(1, 3),
-            }];
-            for (i, at) in a.atoms.iter_mut().enumerate() {
-                let inside = (1..3).contains(&i);
-                if (inside && flag_inside) || (!inside && flag_outside) {
-                    at.flags = AtomFlags::IN_ATOMIC_EDIT_SPAN;
-                }
-            }
-            reaggregate_cluster_flags(&mut a);
-            a
-        };
-        let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
-        assert!(check(build(true, false)).is_ok());
-        let bad = Err(LayoutInputError::AtomicFlagMismatch { item: 0 });
-        assert_eq!(check(build(false, false)), bad); // flag missing inside
-        assert_eq!(check(build(true, true)), bad); // flag stray outside
-        assert_eq!(check(build(false, true)), bad);
-    }
-
-    #[test]
     fn every_atom_must_fit_and_be_in_order() {
         let o = LayoutOptions::default();
         // Overall span fits "abcd" but the middle atom does not end inside it.
@@ -2625,33 +2562,6 @@ mod tests {
         let mut a = adjust(-1.0, 0.0);
         a.items.remove(2);
         assert!(check(tiled(a)).is_ok());
-    }
-
-    /// Recomputes every cluster's flags from its atoms.
-    fn reaggregate_cluster_flags(a: &mut ParagraphAst) {
-        for run in &a.runs {
-            let atoms = &a.atoms[run.atom_range.clone()];
-            for c in &mut a.clusters[run.cluster_range.clone()] {
-                c.flags = AtomFlags::for_cluster(&atoms[c.atom_range.clone()]);
-            }
-        }
-    }
-
-    /// Sets `IN_ATOMIC_EDIT_SPAN` on exactly the atoms inside an atomic span, as
-    /// the frontend does, and re-aggregates the cluster flags to match.
-    fn flag_atomic(a: &mut ParagraphAst) {
-        let spans = a.atomic_spans.clone();
-        for at in &mut a.atoms {
-            let inside = spans
-                .iter()
-                .any(|s| s.byte_range.contains_range(at.byte_range));
-            at.flags = if inside {
-                AtomFlags::IN_ATOMIC_EDIT_SPAN
-            } else {
-                AtomFlags::EMPTY
-            };
-        }
-        reaggregate_cluster_flags(a);
     }
 
     fn bnd(id: u64, edge: SpanEdge, at: usize) -> WordNode {
@@ -3384,7 +3294,6 @@ mod tests {
             );
             a.decoration_spans = deco;
             a.atomic_spans = atomic;
-            flag_atomic(&mut a);
             check_layout_inputs(&closed(a), "abcd", &constraints(), &o)
         };
         let atomic = |id, r: TextRange| AtomicEditSpan {
@@ -3482,10 +3391,7 @@ mod tests {
             }];
             a
         };
-        let check = |mut a: ParagraphAst| {
-            flag_atomic(&mut a);
-            check_layout_inputs(&a, "aéb", &constraints(), &o)
-        };
+        let check = |a: ParagraphAst| check_layout_inputs(&a, "aéb", &constraints(), &o);
         assert!(check(build(1, 4)).is_ok());
         // Offset 2 is inside the atom 1..4 (a char boundary of "é" is 1 and 3,
         // so use 3: still strictly inside the atom).
@@ -3534,10 +3440,7 @@ mod tests {
             }];
             a
         };
-        let check = |mut a: ParagraphAst| {
-            flag_atomic(&mut a);
-            check_layout_inputs(&a, "ab  cd", &constraints(), &o)
-        };
+        let check = |a: ParagraphAst| check_layout_inputs(&a, "ab  cd", &constraints(), &o);
         let bad = Err(LayoutInputError::InvalidAtomicSpan { span: 0 });
         // Both edges at atom edges, with or without glue between them.
         assert!(check(build("glue", (2, 4), (0, 2))).is_ok());
@@ -3555,7 +3458,6 @@ mod tests {
             span_id: 1,
             byte_range: TextRange::new(1, 3),
         }];
-        flag_atomic(&mut a);
         assert_eq!(check_layout_inputs(&a, "abcd", &constraints(), &o), bad);
         // An inline object's edges count.
         let mut a = with_items(vec![
@@ -3575,7 +3477,6 @@ mod tests {
             span_id: 1,
             byte_range: TextRange::new(1, 3),
         }];
-        flag_atomic(&mut a);
         assert!(check_layout_inputs(&tiled(a), "abcd", &constraints(), &o).is_ok());
     }
 

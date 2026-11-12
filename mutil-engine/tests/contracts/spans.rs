@@ -30,7 +30,7 @@ fn spanned(n: usize) -> (String, ParagraphAst) {
                 bidi_level: 0,
             }));
             if edge == SpanEdge::Leading {
-                let text = boxed(&mut a, i, i + 1, true);
+                let text = boxed(&mut a, i, i + 1);
                 a.items.push(text);
             }
         }
@@ -131,7 +131,7 @@ fn decorated(ranges: &[(usize, usize)]) -> ParagraphAst {
             }));
         }
         if offset < 4 {
-            let text = boxed(&mut a, offset, offset + 1, false);
+            let text = boxed(&mut a, offset, offset + 1);
             a.items.push(text);
         }
     }
@@ -280,7 +280,7 @@ fn an_isolate_may_cover_only_a_hard_break() {
     let mut a = ast(text);
     rebuild_items(&mut a, |b| {
         vec![
-            boxed(b, 0, 1, false),
+            boxed(b, 0, 1),
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4), false)),
             WordNode::Box(BoxNode::InlineObject {
                 bidi_level: 0,

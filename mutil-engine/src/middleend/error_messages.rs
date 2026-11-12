@@ -69,7 +69,6 @@ error_messages! {
         SpanEnclosure { span, item } => "item {item} is misplaced relative to the boundaries of decoration span {span}",
         MissingParagraphEnd => "the items do not end with the paragraph-end sentinel",
         MissingSpanBoundary { span } => "decoration span {span} lacks a leading or trailing boundary",
-        AtomicFlagMismatch { item } => "item {item} has an atom whose atomic-span flag is wrong",
         InvalidTab { item } => "tab {item} owns no source bytes",
         InvalidAtomicSpan { span } => "atomic span {span} is invalid, duplicated, out of order or overlapping",
     }

@@ -25,9 +25,9 @@ fn annotation_input_boundaries_and_local_partition() {
     a.annotations[0] = annotation(TextRange::new(0, 2), AnnotationSide::Over);
     rebuild_items(&mut a, |b| {
         vec![
-            boxed(b, 0, 1, false),
+            boxed(b, 0, 1),
             WordNode::Discretionary(DiscretionaryNode::direct(1)),
-            boxed(b, 1, 2, false),
+            boxed(b, 1, 2),
             end(2),
         ]
     });
@@ -47,7 +47,7 @@ fn annotation_input_boundaries_and_local_partition() {
     a.annotations[0] = annotation(TextRange::new(0, 2), AnnotationSide::Over);
     rebuild_items(&mut a, |b| {
         vec![
-            boxed(b, 0, 1, false),
+            boxed(b, 0, 1),
             WordNode::Tab {
                 byte_range: TextRange::new(1, 2),
             },
@@ -167,7 +167,7 @@ fn ruby_rejects_glue_and_cluster_internal_edges() {
     let mut a = ast("a b");
     rebuild_items(&mut a, |b| {
         vec![
-            boxed(b, 0, 1, false),
+            boxed(b, 0, 1),
             WordNode::Glue(GlueNode {
                 original_bidi_class: BidiClass::Ws,
                 bidi_level: 0,
@@ -178,7 +178,7 @@ fn ruby_rejects_glue_and_cluster_internal_edges() {
                 max_stretch: 0.0,
                 max_shrink: 0.0,
             }),
-            boxed(b, 2, 3, false),
+            boxed(b, 2, 3),
             end(3),
         ]
     });

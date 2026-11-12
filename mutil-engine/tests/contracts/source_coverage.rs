@@ -22,7 +22,7 @@ fn sentinel_cannot_replace_source() {
 #[test]
 fn source_cannot_have_gaps() {
     let mut a = ast("abc");
-    rebuild_items(&mut a, |b| vec![boxed(b, 0, 2, false), end(3)]);
+    rebuild_items(&mut a, |b| vec![boxed(b, 0, 2), end(3)]);
     assert_eq!(
         check(&a, "abc"),
         Err(LayoutInputError::UncoveredSource { byte: 2 }),
@@ -33,9 +33,7 @@ fn source_cannot_have_gaps() {
 #[test]
 fn source_cannot_overlap() {
     let mut a = ast("abc");
-    rebuild_items(&mut a, |b| {
-        vec![boxed(b, 0, 2, false), boxed(b, 1, 3, false), end(3)]
-    });
+    rebuild_items(&mut a, |b| vec![boxed(b, 0, 2), boxed(b, 1, 3), end(3)]);
     assert_eq!(
         check(&a, "abc"),
         Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
@@ -87,9 +85,9 @@ fn line_separator_remains_allowed() {
     let mut a = ast(t);
     rebuild_items(&mut a, |b| {
         vec![
-            boxed(b, 0, 1, false),
+            boxed(b, 0, 1),
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4), false)),
-            boxed(b, 4, 5, false),
+            boxed(b, 4, 5),
             end(5),
         ]
     });
@@ -141,9 +139,9 @@ fn zero_width_node_may_sit_on_a_content_boundary() {
     let mut a = ast("abc");
     rebuild_items(&mut a, |b| {
         vec![
-            boxed(b, 0, 1, false),
+            boxed(b, 0, 1),
             WordNode::Discretionary(DiscretionaryNode::direct(1)),
-            boxed(b, 1, 3, false),
+            boxed(b, 1, 3),
             end(3),
         ]
     });
@@ -190,9 +188,7 @@ fn every_paragraph_separator_is_rejected_in_paragraph_text() {
 #[test]
 fn source_coverage_cannot_skip_an_internal_byte() {
     let mut a = ast("abc");
-    rebuild_items(&mut a, |b| {
-        vec![boxed(b, 0, 1, false), boxed(b, 2, 3, false), end(3)]
-    });
+    rebuild_items(&mut a, |b| vec![boxed(b, 0, 1), boxed(b, 2, 3), end(3)]);
     assert_eq!(
         check(&a, "abc"),
         Err(LayoutInputError::UncoveredSource { byte: 1 })
