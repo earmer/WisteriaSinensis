@@ -16,6 +16,12 @@
 //! ```
 //!
 //! Everything public is re-exported at the crate root.
+//!
+//! The normative contract is `SPECIFICATION.md` at the repository root;
+//! `§` references in this crate's documentation are to its sections, and
+//! `RESEARCH.md` holds the evidence behind them under the same numbers.
+//! `scripts/check_spec.py` checks in CI that every type, field, variant and
+//! member the specification names exists here under that name.
 
 pub mod frontend;
 pub mod middleend;

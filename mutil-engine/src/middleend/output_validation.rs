@@ -177,7 +177,7 @@ pub enum LineInvariantError {
         /// Index into `span_fragments`.
         index: usize,
     },
-    /// A span fragment's `byte_range` is inverted or outside the line's.
+    /// A span fragment's `byte_range` lies outside the line's.
     SpanFragmentOutsideLine {
         /// Index into `span_fragments`.
         index: usize,
@@ -2602,7 +2602,7 @@ mod tests {
 
     #[test]
     fn a_hanging_glyph_with_negligible_overflow_is_rejected() {
-        // Extent 1e-4 sits inside the tolerance, so `hanging_left` is 0.0.
+        // Extent 1e-4 sits inside the tolerance: the glyph does not hang.
         let l = line(
             vec![glyph(-1.0e-4, 1.0e-4, true), glyph(0.0, 20.0, false)],
             20.0,

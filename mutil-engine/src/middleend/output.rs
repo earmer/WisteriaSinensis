@@ -447,7 +447,7 @@ pub struct LayoutPolicySnapshot {
 }
 
 /// Where a paragraph's slots came from, recorded so that validation can
-/// rebuild the standard column (spec §5.1).
+/// rebuild the standard column (spec §5, GEO-2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SlotSource {
     /// No geometry provider: every line has exactly the one slot

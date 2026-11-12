@@ -40,6 +40,18 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  spec:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Specification names match the crate
+        run: python3 scripts/check_spec.py
+
   msrv:
     runs-on: ubuntu-latest
     steps:

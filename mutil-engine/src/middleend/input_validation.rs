@@ -23,7 +23,9 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LayoutInputError {
-    /// Glyph orientation disagrees with mode, run or level parity.
+    /// A run's orientation does not suit the writing mode or its level parity,
+    /// or a tate-chu-yoko run is not one cluster in one text box spanning the
+    /// whole run.
     OrientationMismatch,
     /// Invalid raw horizontal/vertical metrics or baseline offsets.
     InvalidFontMetrics,
@@ -192,8 +194,9 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::decoration_spans`.
         span: usize,
     },
-    /// `ParagraphAst::items` does not end with the paragraph-end sentinel
-    /// `HardBreak { is_paragraph_end: true }` (an empty paragraph included).
+    /// `ParagraphAst::items` does not end with the paragraph-end sentinel, the
+    /// `HardBreak` owning the empty range at the end of the text (an empty
+    /// paragraph included).
     MissingParagraphEnd,
     /// A decoration span lacks its `Leading` boundary at `byte_range.start` or
     /// its `Trailing` boundary at `byte_range.end` in `items` (both are

@@ -143,9 +143,9 @@ impl AtomFlags {
     /// Closing punctuation.
     pub const IS_CLOSE_PUNCT: Self = Self(1 << 6);
     /// Cluster contains U+FE0E, U+FE0F or an IVS selector (U+E0100..U+E01EF);
-    /// set after segmentation (§3 Step 1.4).
+    /// set after segmentation (spec §3 Step 1, FE-7).
     pub const HAS_VARIATION_SELECTOR: Self = Self(1 << 7);
-    /// Resolved intra-word apostrophe (§3 Step 2.4).
+    /// Resolved intra-word apostrophe (spec §3 Step 2, FE-11).
     pub const IS_APOSTROPHE: Self = Self(1 << 8);
 
     /// No flags set.

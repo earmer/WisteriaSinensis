@@ -58,7 +58,7 @@ impl InlineDecorationSpan {
     }
 
     /// Whether the frontend must not insert `CjkAutospace` at `offset` because
-    /// a padded border already separates the neighbours (§3 Step 6.6): at
+    /// a padded border already separates the neighbours (spec SPN-4): at
     /// `byte_range.start` when `start_padding > 0`, at `byte_range.end` when
     /// `end_padding > 0`; both sides of the boundary, so the answer depends on
     /// the offset alone.
