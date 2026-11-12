@@ -1,6 +1,6 @@
 //! Physical shaping output: glyphs grouped into clusters (spec §2.3).
 
-use super::{AtomFlags, FontRef, GraphemeAtom, TextRange};
+use super::{FontRef, GraphemeAtom, TextRange};
 use core::ops::Range;
 
 /// One glyph as produced by a shaping backend, before line layout.
@@ -74,7 +74,9 @@ pub struct RawShapedGlyph {
 ///    `atom_range`s are contiguous and non-empty, and start at the box's
 ///    first atom and end after its last. A cluster stores no byte range: its
 ///    bytes are its atoms' ([`ShapedCluster::byte_range`]).
-/// 3. **Flags aggregate per flag.** `flags == AtomFlags::for_cluster(atoms[atom_range])`.
+/// 3. **Flags are derived.** A cluster stores no flags: they are the
+///    per-flag aggregate of its atoms (`AtomFlags::for_cluster`,
+///    `TextBoxView::cluster_flags`).
 ///
 /// ## Break-safety polarity (HarfBuzz `[B1]`)
 ///
@@ -90,11 +92,6 @@ pub struct ShapedCluster {
     pub atom_range: Range<usize>,
     /// Font used for this cluster, with the fallback scale.
     pub font: FontRef,
-    /// Per-flag aggregate of the covered atoms' flags, as computed by
-    /// `AtomFlags::for_cluster`: open-punctuation from the first atom,
-    /// `ALLOW_CJK_JUSTIFY_AFTER` and close-punctuation from the last, all other
-    /// flags ORed.
-    pub flags: AtomFlags,
     /// The cluster's glyphs, as a range of the glyph buffer it is stored
     /// beside (see "Index spaces" above). Glyphs are in **logical** order,
     /// including the order within the cluster; backends that return visual
@@ -177,7 +174,6 @@ mod tests {
         ShapedCluster {
             atom_range: atoms,
             font: FontRef::unscaled(FontId(0)),
-            flags: AtomFlags::EMPTY,
             glyph_range: 0..0,
             natural_width: 0.0,
             safe_to_break_before: brk,

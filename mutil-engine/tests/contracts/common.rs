@@ -103,7 +103,6 @@ pub fn boxed(ast: &mut ParagraphAst, s: usize, e: usize) -> WordNode {
         .map(|(i, _)| ShapedCluster {
             atom_range: i..i + 1,
             font: FontRef::unscaled(FontId(1)),
-            flags,
             glyph_range: 0..1,
             natural_width: 1.,
             safe_to_break_before: true,
@@ -528,7 +527,6 @@ pub fn cluster(local: usize) -> ShapedCluster {
     ShapedCluster {
         atom_range: local..local + 1,
         font: FontRef::unscaled(FontId(1)),
-        flags: AtomFlags::EMPTY,
         glyph_range: 0..1,
         natural_width: ADV,
         safe_to_break_before: true,

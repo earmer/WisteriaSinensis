@@ -1607,7 +1607,6 @@ mod tests {
             .map(|(i, _)| ShapedCluster {
                 atom_range: i..i + 1,
                 font: crate::types::FontRef::unscaled(crate::types::FontId(0)),
-                flags: AtomFlags::EMPTY,
                 glyph_range: 0..0,
                 natural_width: 0.0,
                 safe_to_break_before: true,

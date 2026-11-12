@@ -592,7 +592,6 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
                 let cluster = ShapedCluster {
                     atom_range: 0..1,
                     font: FontRef::unscaled(FontId(1)),
-                    flags: AtomFlags::EMPTY,
                     glyph_range: 0..0,
                     natural_width: 0.0,
                     safe_to_break_before: true,
@@ -614,41 +613,36 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
 #[test]
 fn ligature_cluster_takes_justify_after_from_its_last_atom_only() {
     let atom_with = |off: usize, flags: AtomFlags| GraphemeAtom { flags, ..atom(off) };
-    // Whether one box over `atoms` with a single cluster of `flags` is self-contained.
-    let contained = |atoms: Vec<GraphemeAtom>, flags: AtomFlags| {
+    // The flags of the one cluster of a box over `atoms`, derived from them.
+    let flags_of = |atoms: Vec<GraphemeAtom>| {
         let mut c = cluster(0);
         c.atom_range = 0..atoms.len();
-        c.flags = flags;
         let mut ast = crate::common::ast("");
         rebuild_items(&mut ast, |ast| vec![push_text(ast, 0, atoms, vec![c])]);
-        ast.is_self_contained(0)
+        assert!(ast.is_self_contained(0));
+        let view = ast.text_box(0).unwrap();
+        view.cluster_flags(&view.clusters[0]).unwrap()
     };
     let allow = AtomFlags::ALLOW_CJK_JUSTIFY_AFTER;
 
     // Only the last atom has the opportunity: the cluster has it.
     let atoms = vec![atom_with(0, AtomFlags::EMPTY), atom_with(1, allow)];
-    let aggregated = AtomFlags::for_cluster(&atoms);
-    assert!(aggregated.contains(allow));
-    assert!(contained(atoms.clone(), aggregated));
-    // A naive OR is the same here, but the cluster flags must equal the aggregate.
-    assert!(!contained(atoms, AtomFlags::EMPTY));
-
+    assert!(flags_of(atoms).contains(allow));
     // Only the first atom has it: the opportunity lies *inside* the ligature,
-    // so the cluster must not have it, and a naive OR is rejected.
+    // so the cluster does not have it (a naive OR would).
     let atoms = vec![atom_with(0, allow), atom_with(1, AtomFlags::EMPTY)];
-    let aggregated = AtomFlags::for_cluster(&atoms);
-    assert!(!aggregated.contains(allow));
-    assert!(contained(atoms.clone(), aggregated));
-    assert!(!contained(atoms.clone(), allow));
-
+    assert!(!flags_of(atoms).contains(allow));
     // Open punctuation from the first atom, close punctuation from the last.
     let atoms = vec![
         atom_with(0, AtomFlags::IS_OPEN_PUNCT),
         atom_with(1, AtomFlags::IS_CLOSE_PUNCT),
     ];
-    let f = AtomFlags::for_cluster(&atoms);
-    assert!(f.contains(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT));
-    assert!(contained(atoms, f));
+    assert!(flags_of(atoms).contains(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT));
+    let atoms = vec![
+        atom_with(0, AtomFlags::IS_CLOSE_PUNCT),
+        atom_with(1, AtomFlags::IS_OPEN_PUNCT),
+    ];
+    assert!(!flags_of(atoms).intersects(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT));
 }
 
 // Counter-examples on the assembled line.

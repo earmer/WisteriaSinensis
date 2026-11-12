@@ -485,11 +485,6 @@ fn clusters_partition_atoms(
         if r.start != next || r.end <= r.start || r.end > base + atoms.len() {
             return false;
         }
-        let local = r.start - base..r.end - base;
-        // Invariant 3: the cluster's flags are the per-flag aggregate of its atoms.
-        if c.flags != AtomFlags::for_cluster(&atoms[local]) {
-            return false;
-        }
         next = r.end;
     }
     next == base + atoms.len()
@@ -528,6 +523,18 @@ impl TextBoxView<'_> {
         let start = cluster.atom_range.start.checked_sub(self.atom_base)?;
         let end = cluster.atom_range.end.checked_sub(self.atom_base)?;
         atoms_byte_range(self.atoms.get(start..end)?)
+    }
+
+    /// The flags of `cluster`, one of this box's clusters: the per-flag
+    /// aggregate of its atoms' ([`AtomFlags::for_cluster`]: open punctuation
+    /// from the first atom, `ALLOW_CJK_JUSTIFY_AFTER` and close punctuation
+    /// from the last, every other flag ORed). `None` when the cluster's
+    /// run-local `atom_range` does not index this box's atoms.
+    #[must_use]
+    pub fn cluster_flags(&self, cluster: &ShapedCluster) -> Option<AtomFlags> {
+        let start = cluster.atom_range.start.checked_sub(self.atom_base)?;
+        let end = cluster.atom_range.end.checked_sub(self.atom_base)?;
+        Some(AtomFlags::for_cluster(self.atoms.get(start..end)?))
     }
 }
 
@@ -709,9 +716,8 @@ impl ParagraphAst {
 
     /// Checks the invariants documented on [`ShapedCluster`] for the text box at
     /// `items[item]`: it resolves, its clusters lie inside its run's, its
-    /// atoms are non-empty and contiguous, its clusters partition them in
-    /// order, and each cluster's flags aggregate its atoms'. Every other node
-    /// is trivially self-contained; an `item` past the end, or a text box that
+    /// atoms are non-empty and contiguous, and its clusters partition them in
+    /// order. Every other node is trivially self-contained; an `item` past the end, or a text box that
     /// does not resolve or leaves its run's clusters, is not.
     #[must_use]
     pub fn is_self_contained(&self, item: usize) -> bool {
