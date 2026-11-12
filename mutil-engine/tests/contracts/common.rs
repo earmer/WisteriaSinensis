@@ -386,6 +386,10 @@ pub fn ctx() -> LineContext {
 /// The policy `ctx` describes, without a clamp.
 pub fn policy(ctx: &LineContext) -> LayoutPolicySnapshot {
     LayoutPolicySnapshot {
+        slot_source: mutil_engine::SlotSource::Standard {
+            first_line_indent: 0.0,
+            hanging_indent: 0.0,
+        },
         writing_mode: ctx.writing_mode,
         strut: ctx.strut,
         line_height: ctx.line_height,

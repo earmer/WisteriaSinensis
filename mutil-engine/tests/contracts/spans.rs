@@ -283,6 +283,7 @@ fn an_isolate_may_cover_only_a_hard_break() {
             boxed(b, 0, 1, false),
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4), false)),
             WordNode::Box(BoxNode::InlineObject {
+                bidi_level: 0,
                 baseline_align: BaselineAlignment::Auto,
                 byte_range: TextRange::new(4, 5),
                 box_id: 1,

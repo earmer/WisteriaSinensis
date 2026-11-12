@@ -212,6 +212,7 @@ fn multi_slot_containment_and_conserved_width() {
     let mut bad = valid.clone();
     bad.visual_runs.clear();
     bad.visual_boxes.push(PositionedInlineBox {
+        bidi_level: 0,
         baseline_align: BaselineAlignment::Auto,
         box_id: 1,
         byte_range: TextRange::new(0, 1),
@@ -289,6 +290,7 @@ fn one_glyph_line() -> PositionedLine {
 #[test]
 fn inline_box_alignment_and_bytes_are_checked_per_box() {
     let object = PositionedInlineBox {
+        bidi_level: 0,
         baseline_align: BaselineAlignment::Auto,
         box_id: 1,
         byte_range: TextRange::new(0, 1),
@@ -351,6 +353,7 @@ fn visual_runs_hold_glyphs_and_stay_inside_the_line() {
 #[test]
 fn tabs_own_non_empty_bytes_inside_the_line() {
     let tab = PositionedTab {
+        bidi_level: 0,
         byte_range: TextRange::new(0, 1),
         x: 10.,
         width: 8.,
@@ -390,6 +393,7 @@ fn ellipsis_only_line_rejects_every_body_entity() {
     );
     let mut tabbed = l;
     tabbed.tabs = vec![PositionedTab {
+        bidi_level: 0,
         byte_range: TextRange::empty_at(0),
         x: 0.,
         width: 0.,
@@ -405,6 +409,7 @@ fn a_slot_holding_only_a_tab_is_occupied() {
     let mut l = line();
     set_visual_width(&mut l, 0.);
     l.tabs = vec![PositionedTab {
+        bidi_level: 0,
         byte_range: TextRange::new(0, 1),
         x: 0.,
         width: 0.,
@@ -554,6 +559,7 @@ fn line_wider_than_wrap_width_reports_the_container_not_the_slot() {
 #[test]
 fn rigid_boxes_are_compared_with_the_wrap_width_not_the_slot_capacity() {
     let object = |x: f32, width: f32| PositionedInlineBox {
+        bidi_level: 0,
         baseline_align: BaselineAlignment::Auto,
         box_id: 1,
         byte_range: TextRange::new(0, 1),
@@ -656,6 +662,7 @@ fn the_visible_end_sits_on_a_cluster_boundary() {
     first.byte_range = Some(TextRange::new(0, 2));
     l.visual_runs = vec![run(first)];
     l.visual_boxes = vec![PositionedInlineBox {
+        bidi_level: 0,
         baseline_align: BaselineAlignment::Auto,
         box_id: 1,
         byte_range: TextRange::new(2, 4),
@@ -667,6 +674,7 @@ fn the_visible_end_sits_on_a_cluster_boundary() {
         overflow_policy: BoxOverflowPolicy::Clip,
     }];
     l.tabs = vec![PositionedTab {
+        bidi_level: 0,
         byte_range: TextRange::new(4, 5),
         x: 50.,
         width: 50.,
@@ -862,11 +870,11 @@ fn a_caret_stop_carries_the_level_of_a_run_owning_its_offset() {
     // A level no run has is wrong even at the boundary.
     assert_eq!(with(vec![caret(50., 1, 2)]), invalid(0));
 
-    // Inline boxes carry no level, so a stop touching one is only
-    // range-checked; so is the stop of an empty line.
+    // An inline box lends its own level to the stops touching it.
     let mut boxed = l.clone();
     boxed.visual_runs.pop();
     boxed.visual_boxes = vec![PositionedInlineBox {
+        bidi_level: 1,
         baseline_align: BaselineAlignment::Auto,
         box_id: 1,
         byte_range: TextRange::new(1, 2),
@@ -879,12 +887,17 @@ fn a_caret_stop_carries_the_level_of_a_run_owning_its_offset() {
     }];
     boxed.caret_stops = vec![caret(50., 1, 1), caret(100., 2, 1)];
     assert_eq!(boxed.validate(&ctx()), Ok(()));
+    boxed.caret_stops = vec![caret(100., 2, 0)];
+    assert_eq!(boxed.validate(&ctx()), invalid(0));
+    // The stop of an empty line carries the paragraph level.
     let mut empty = line();
     empty.byte_range = TextRange::empty_at(0);
     empty.visible_byte_end = 0;
     set_visual_width(&mut empty, 0.);
-    empty.caret_stops = vec![caret(0., 0, 1)];
+    empty.caret_stops = vec![caret(0., 0, 0)];
     assert_eq!(empty.validate(&ctx()), Ok(()));
+    empty.caret_stops = vec![caret(0., 0, 1)];
+    assert_eq!(empty.validate(&ctx()), invalid(0));
 }
 
 /// A line whose body is `body` wide in a 100-unit slot, with a 5-unit mark

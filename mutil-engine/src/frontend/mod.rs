@@ -61,15 +61,19 @@ pub fn is_line_or_paragraph_separator(c: char) -> bool {
 }
 
 /// `true` for a character a [`GlueKind::WordSpace`] may own: the Unicode space
-/// separators (`General_Category=Zs`), from U+0020 to the ideographic space
-/// U+3000. Tabs, line and paragraph separators are not word spaces; they have
-/// nodes of their own.
+/// separators (`General_Category=Zs`) except the ideographic space U+3000.
+/// Tabs, line and paragraph separators are not word spaces; they have nodes of
+/// their own.
+///
+/// U+3000 is a fixed full-width character in CJK typography (JLReq class
+/// cl-14), neither stretched by justification nor collapsed, so the frontend
+/// shapes it as ordinary text in a [`BoxNode::Text`]
+/// followed by a break opportunity (UAX #14 class BA, break after).
 #[must_use]
 pub fn is_word_space(c: char) -> bool {
     matches!(
         c,
-        ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+        ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}'
     )
 }
 

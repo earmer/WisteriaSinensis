@@ -259,6 +259,7 @@ fn every_word_node_variant_is_constructible() {
     let nodes = [
         word(&mut ast, TextRange::new(0, 5)),
         WordNode::Box(BoxNode::InlineObject {
+            bidi_level: 0,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(7, 8),
             box_id: 7,
@@ -288,6 +289,7 @@ fn every_word_node_variant_is_constructible() {
         WordNode::Discretionary(DiscretionaryNode::direct(5)),
         WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(6, 7), false)),
         WordNode::Tab {
+            bidi_level: 0,
             byte_range: TextRange::new(5, 6),
         },
     ];
@@ -481,6 +483,7 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
     let mut tab = crate::common::ast("");
     rebuild_items(&mut tab, |_| {
         vec![WordNode::Tab {
+            bidi_level: 0,
             byte_range: TextRange::new(0, 1),
         }]
     });

@@ -196,6 +196,9 @@ pub enum BoxNode {
         descent: f32,
         /// Behaviour when wider than the line.
         overflow_policy: BoxOverflowPolicy,
+        /// Resolved UAX #9 level of the object's source (U+FFFC is a neutral,
+        /// so the level comes from its context). At most `BIDI_MAX_DEPTH + 1`.
+        bidi_level: BidiLevel,
     },
     /// The padding-plus-border advance at one end of an inline decoration span.
     SpanBoundary {
@@ -424,6 +427,10 @@ pub enum WordNode {
     Tab {
         /// Source bytes.
         byte_range: TextRange,
+        /// Resolved UAX #9 level. A tab is a segment separator, which rule L1
+        /// resets to the paragraph level, so this is always
+        /// `ParagraphAst::base_direction.base_level()`.
+        bidi_level: BidiLevel,
     },
 }
 
@@ -440,7 +447,7 @@ impl WordNode {
             | Self::Box(BoxNode::SpanBoundary { byte_range, .. })
             | Self::Glue(GlueNode { byte_range, .. })
             | Self::Discretionary(DiscretionaryNode { byte_range, .. })
-            | Self::Tab { byte_range } => *byte_range,
+            | Self::Tab { byte_range, .. } => *byte_range,
         }
     }
 

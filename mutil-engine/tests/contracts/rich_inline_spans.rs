@@ -367,6 +367,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     // everything inside braces, fractions or radicals would stay one object.
     let obj = |id: u64, at: usize| {
         WordNode::Box(BoxNode::InlineObject {
+            bidi_level: 0,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(at, at + 1),
             box_id: id,

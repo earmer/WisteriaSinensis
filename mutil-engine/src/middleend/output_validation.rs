@@ -164,7 +164,8 @@ pub enum LineInvariantError {
         actual: f32,
     },
     /// An inline box has a non-finite coordinate, a negative size, an invalid
-    /// baseline alignment, or bytes outside the line.
+    /// baseline alignment, an unrepresentable bidi level, or bytes outside the
+    /// line.
     InvalidInlineBox {
         /// Index into `visual_boxes`.
         index: usize,
@@ -242,8 +243,9 @@ pub enum LineInvariantError {
         /// The constraint's width.
         capacity: f32,
     },
-    /// A tab has a non-finite coordinate, a negative width, or empty bytes or
-    /// bytes outside the line.
+    /// A tab has a non-finite coordinate, a negative width, a bidi level other
+    /// than the paragraph level (UAX #9 L1), or empty bytes or bytes outside the
+    /// line.
     InvalidTab {
         /// Index into `tabs`.
         index: usize,
@@ -382,6 +384,9 @@ pub enum ParagraphErrorReason {
     LineBoxesOverlap,
     /// A line's `ascent + descent` exceeds its `line_height`.
     LineBoxExceedsLineHeight,
+    /// Under [`SlotSource::Standard`](super::SlotSource::Standard), a line's
+    /// slots are not exactly the one standard slot `[indent, wrap_width]`.
+    NotStandardSlots,
     /// The lines' byte ranges do not tile the rendered text from offset 0 on
     /// character boundaries.
     SourceNotCovered,
@@ -809,6 +814,7 @@ impl PositionedLine {
         }
         for (index, b) in self.visual_boxes.iter().enumerate() {
             if !b.baseline_align.is_valid()
+                || b.bidi_level > BIDI_MAX_DEPTH + 1
                 || b.byte_range.is_empty()
                 || !self.owns_bytes(b.byte_range)
             {
@@ -816,7 +822,10 @@ impl PositionedLine {
             }
         }
         for (index, t) in self.tabs.iter().enumerate() {
-            if t.byte_range.is_empty() || !self.owns_bytes(t.byte_range) {
+            if t.byte_range.is_empty()
+                || t.bidi_level != ctx.base_direction.base_level()
+                || !self.owns_bytes(t.byte_range)
+            {
                 return Err(E::InvalidTab { index });
             }
         }
@@ -853,25 +862,28 @@ impl PositionedLine {
     }
 
     /// Caret stops are in visual order, lie on this line, and carry the bidi
-    /// level of the text they belong to.
+    /// level of the content they belong to.
     ///
-    /// The level of a stop at `offset` is the level of a visual run with a
-    /// glyph whose bytes contain or touch `offset`; at a run boundary either
-    /// adjacent run qualifies. Inline boxes and tabs carry no level in the
-    /// output, so a stop that touches one of them (or touches nothing at all)
-    /// is only range-checked.
+    /// A stop's owners are the glyphs, inline boxes and tabs whose bytes
+    /// contain or touch its `offset`; at a boundary either neighbour qualifies,
+    /// and the stop's level must be the level of one of them. A stop with no
+    /// owner is legal only on a line with no glyphs, boxes or tabs (an empty
+    /// line), and there it carries the paragraph level.
     fn check_caret_stops(
         &self,
         ctx: &LineContext,
         glyphs: &SourcedGlyphs<'_>,
     ) -> Result<(), LineInvariantError> {
-        let unleveled = RangeIndex::new(
+        let objects = RangeIndex::new(
             self.visual_boxes
                 .iter()
-                .map(|b| (b.byte_range, ()))
-                .chain(self.tabs.iter().map(|t| (t.byte_range, ())))
+                .map(|b| (b.byte_range, b.bidi_level))
+                .chain(self.tabs.iter().map(|t| (t.byte_range, t.bidi_level)))
                 .collect(),
         );
+        let line_is_empty = self.visual_boxes.is_empty()
+            && self.tabs.is_empty()
+            && self.visual_runs.iter().all(|r| r.glyphs.is_empty());
         for (index, stop) in self.caret_stops.iter().enumerate() {
             let in_order = index == 0 || {
                 let previous = self.caret_stops[index - 1].x;
@@ -881,10 +893,13 @@ impl PositionedLine {
                 let mut owners = glyphs
                     .touching(stop.offset)
                     .map(|(_, (level, _))| *level)
+                    .chain(objects.touching(stop.offset).map(|(_, level)| *level))
                     .peekable();
-                owners.peek().is_none()
-                    || owners.any(|level| level == stop.level)
-                    || unleveled.touching(stop.offset).next().is_some()
+                if owners.peek().is_none() {
+                    line_is_empty && stop.level == ctx.base_direction.base_level()
+                } else {
+                    owners.any(|level| level == stop.level)
+                }
             };
             if !in_order
                 || !(self.byte_range.start..=self.byte_range.end).contains(&stop.offset)
@@ -1526,8 +1541,10 @@ impl PositionedParagraph {
     /// Validates the geometry of the paragraph against its own recorded
     /// policy: the policy is one layout could have resolved; there is at least
     /// one line; every line is valid under its own `line_index` (so
-    /// `HangStartMode::FirstLine` applies to line 0 only); and the line boxes
-    /// follow one another inside `total_block_size`.
+    /// `HangStartMode::FirstLine` applies to line 0 only); under
+    /// [`SlotSource::Standard`](super::SlotSource::Standard) every line has
+    /// exactly its standard slot; and the line boxes follow one another inside
+    /// `total_block_size`.
     ///
     /// Serves geometry-only fixtures; it does not certify source coverage.
     ///
@@ -1549,6 +1566,11 @@ impl PositionedParagraph {
         for (i, line) in self.lines.iter().enumerate() {
             let ctx = self.policy.line_context(self.base_direction, i);
             line.validate(&ctx).map_err(|e| (i, e))?;
+            if let Some(standard) = self.policy.slot_source.standard_slot(i, ctx.wrap_width) {
+                if !matches!(line.slots.as_slice(), [slot] if slot.constraint == standard) {
+                    return invalid(i, R::NotStandardSlots);
+                }
+            }
             let (top, bottom) =
                 self.policy
                     .writing_mode
@@ -1803,6 +1825,10 @@ mod tests {
     /// The policy of [`ctx`], for paragraph fixtures.
     fn policy(ctx: &LineContext) -> LayoutPolicySnapshot {
         LayoutPolicySnapshot {
+            slot_source: crate::middleend::SlotSource::Standard {
+                first_line_indent: 0.0,
+                hanging_indent: 0.0,
+            },
             writing_mode: ctx.writing_mode,
             strut: ctx.strut,
             line_height: ctx.line_height,
@@ -1901,6 +1927,7 @@ mod tests {
 
     fn inline_box(x: f32, width: f32) -> PositionedInlineBox {
         PositionedInlineBox {
+            bidi_level: 0,
             baseline_align: BaselineAlignment::Auto,
             box_id: 9,
             byte_range: TextRange::new(1, 4),
@@ -2420,7 +2447,12 @@ mod tests {
 
     #[test]
     fn caret_stops_must_be_finite_ordered_and_inside_the_line() {
-        let base = || line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        // One glyph rendering the whole line, bytes 0..4.
+        let whole = PositionedGlyph {
+            byte_range: Some(TextRange::new(0, 4)),
+            ..glyph(0.0, 5.0, false)
+        };
+        let base = || line(vec![whole], 5.0, 0.0, 0.0);
         let invalid = Err(LineInvariantError::InvalidCaretStop { index: 1 });
         let mut l = base();
         l.caret_stops = vec![caret(0.0, 0), caret(5.0, 4)];
@@ -2457,6 +2489,84 @@ mod tests {
             },
         ];
         assert_eq!(l.validate(&ctx()), invalid);
+    }
+
+    #[test]
+    fn caret_stop_levels_follow_their_owners() {
+        let invalid = |index| Err(LineInvariantError::InvalidCaretStop { index });
+        let leveled = |offset, level| CaretStop {
+            level,
+            ..caret(0.0, offset)
+        };
+        // A glyph at level 0 owns 0..1; nothing owns 2..4.
+        let mut l = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
+        l.caret_stops = vec![leveled(1, 0)];
+        assert_eq!(l.validate(&ctx()), Ok(()));
+        l.caret_stops = vec![leveled(1, 1)];
+        assert_eq!(l.validate(&ctx()), invalid(0));
+        // A stop no glyph, box or tab touches, on a line with content.
+        l.caret_stops = vec![leveled(3, 0)];
+        assert_eq!(l.validate(&ctx()), invalid(0));
+
+        // An inline object and a tab own their bytes and lend their levels.
+        let object = PositionedInlineBox {
+            baseline_align: BaselineAlignment::Alphabetic,
+            box_id: 1,
+            byte_range: TextRange::new(1, 2),
+            x: 5.0,
+            y: 0.0,
+            width: 0.0,
+            ascent: 0.0,
+            descent: 0.0,
+            overflow_policy: BoxOverflowPolicy::AllowOverflow,
+            bidi_level: 2,
+        };
+        let tab = PositionedTab {
+            byte_range: TextRange::new(2, 4),
+            x: 5.0,
+            width: 0.0,
+            bidi_level: 0,
+        };
+        l.visual_boxes = vec![object];
+        l.tabs = vec![tab];
+        assert_eq!(l.validate(&ctx()), Ok(()));
+        l.caret_stops = vec![leveled(3, 1)];
+        assert_eq!(l.validate(&ctx()), invalid(0));
+        // Between the glyph and the object either level qualifies.
+        l.caret_stops = vec![leveled(1, 2)];
+        assert_eq!(l.validate(&ctx()), Ok(()));
+        l.caret_stops = vec![leveled(1, 1)];
+        assert_eq!(l.validate(&ctx()), invalid(0));
+        // A tab is at the paragraph level (UAX #9 L1).
+        l.tabs = vec![PositionedTab {
+            bidi_level: 2,
+            ..tab
+        }];
+        l.caret_stops = vec![];
+        assert_eq!(
+            l.validate(&ctx()),
+            Err(LineInvariantError::InvalidTab { index: 0 })
+        );
+    }
+
+    #[test]
+    fn an_empty_line_stop_carries_the_paragraph_level() {
+        let mut l = line(vec![], 0.0, 0.0, 0.0);
+        l.visual_runs.clear();
+        l.byte_range = TextRange::empty_at(0);
+        l.visible_byte_end = 0;
+        l.caret_stops = vec![caret(0.0, 0)];
+        assert_eq!(l.validate(&ctx()), Ok(()));
+        let rtl = LineContext {
+            base_direction: BidiDirection::Rtl,
+            ..ctx()
+        };
+        assert_eq!(
+            l.validate(&rtl),
+            Err(LineInvariantError::InvalidCaretStop { index: 0 })
+        );
+        l.caret_stops[0].level = 1;
+        assert_eq!(l.validate(&rtl), Ok(()));
     }
 
     #[test]
@@ -2500,6 +2610,7 @@ mod tests {
         );
         let mut t = line(vec![glyph(0.0, 5.0, false)], 5.0, 0.0, 0.0);
         t.tabs.push(PositionedTab {
+            bidi_level: 0,
             byte_range: TextRange::new(1, 2),
             x: 3.0e38,
             width: 3.0e38,
@@ -2715,6 +2826,7 @@ mod tests {
     #[test]
     fn a_single_wide_inline_box_may_overflow() {
         let object = |x: f32, width: f32, policy| PositionedInlineBox {
+            bidi_level: 0,
             baseline_align: BaselineAlignment::Auto,
             box_id: 1,
             byte_range: TextRange::new(0, 1),
@@ -2762,6 +2874,7 @@ mod tests {
         );
         let mut with_tab = l.clone();
         with_tab.tabs = vec![PositionedTab {
+            bidi_level: 0,
             byte_range: TextRange::new(0, 1),
             x: 50.0,
             width: 0.0,
@@ -2886,6 +2999,7 @@ mod tests {
 
         // Exemption A, padded: one AllowOverflow box in a chip over its bytes.
         let object = |x: f32, width: f32| PositionedInlineBox {
+            bidi_level: 0,
             baseline_align: BaselineAlignment::Auto,
             box_id: 1,
             byte_range: TextRange::new(0, 1),

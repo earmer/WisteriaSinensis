@@ -81,7 +81,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidInlineBox { item: 2 },
-            "inline object 2 has a non-finite or negative size, an invalid baseline alignment, or no source bytes",
+            "inline object 2 has a non-finite or negative size, an invalid baseline alignment or bidi level, or no source bytes",
         ),
         (
             LayoutInputError::InvalidGlue { item: 2 },
@@ -129,7 +129,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidTab { item: 2 },
-            "tab 2 owns no source bytes",
+            "tab 2 owns no source bytes or is not at the paragraph bidi level",
         ),
         (
             LayoutInputError::InvalidAtomicSpan { span: 3 },
@@ -270,7 +270,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidInlineBox { index: 4 },
-            "inline box 4 has a non-finite coordinate, a negative size, an invalid baseline alignment, or bytes that are empty or outside the line",
+            "inline box 4 has a non-finite coordinate, a negative size, an invalid baseline alignment or bidi level, or bytes that are empty or outside the line",
         ),
         (
             LineInvariantError::InlineBoxOutsideBlock { index: 4 },
@@ -336,7 +336,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidTab { index: 4 },
-            "tab 4 has a non-finite coordinate, a negative width, or empty or out-of-line bytes",
+            "tab 4 has a non-finite coordinate, a negative width, a level other than the paragraph level, or empty or out-of-line bytes",
         ),
         (
             LineInvariantError::TabOutsideBlock { index: 4 },
@@ -506,6 +506,10 @@ fn every_reason_completes_its_error_message() {
         (
             P::LineBoxExceedsLineHeight,
             "a line's ascent plus descent exceeds its line height",
+        ),
+        (
+            P::NotStandardSlots,
+            "a line's slots are not the standard column [indent, wrap width]",
         ),
         (
             P::SourceNotCovered,

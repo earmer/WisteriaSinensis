@@ -33,7 +33,7 @@ pub use output::{
     AtomicFragment, CaretAffinity, CaretStop, DecorationKind, DecorationLine, HangSide,
     LayoutPolicySnapshot, LineContext, PositionedAnnotationRun, PositionedGlyph,
     PositionedInlineBox, PositionedLine, PositionedParagraph, PositionedSlot,
-    PositionedSpanFragment, PositionedTab, VisualGlyphRun,
+    PositionedSpanFragment, PositionedTab, SlotSource, VisualGlyphRun,
 };
 pub use output_validation::{
     AnnotationErrorReason, LineInvariantError, ParagraphErrorReason, SlotErrorReason,

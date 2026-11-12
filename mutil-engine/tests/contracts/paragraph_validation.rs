@@ -71,6 +71,76 @@ fn a_paragraph_is_validated_against_the_policy_it_records() {
 }
 
 #[test]
+fn standard_slots_follow_the_recorded_indents() {
+    let indents = |first_line_indent, hanging_indent| SlotSource::Standard {
+        first_line_indent,
+        hanging_indent,
+    };
+    let mut p = three_lines();
+    // Line 0 starts at the first-line indent, later lines at the hanging one.
+    p.policy.slot_source = indents(10., 20.);
+    for (i, l) in p.lines.iter_mut().enumerate() {
+        let start = if i == 0 { 10. } else { 20. };
+        l.slots = smallvec::smallvec![slot(start, 0., 100. - start)];
+        l.visual_runs.clear();
+        l.visual_width = 0.;
+        l.byte_range = TextRange::new(2 * i, 2 * i + 2);
+    }
+    // Without glyphs the lines only need consistent slots and coverage, so
+    // the check under test is the only one that can fail.
+    let slots_only = p.validate_geometry();
+    assert_eq!(slots_only, Ok(()));
+    // Swapped indents put line 0 at the hanging indent.
+    p.policy.slot_source = indents(20., 10.);
+    assert_eq!(
+        p.validate_geometry(),
+        invalid(0, ParagraphErrorReason::NotStandardSlots)
+    );
+    // A second slot is never standard; a provider may answer with any slots.
+    p.policy.slot_source = indents(10., 20.);
+    p.lines[1].slots = smallvec::smallvec![slot(20., 0., 30.), slot(60., 0., 40.)];
+    assert_eq!(
+        p.validate_geometry(),
+        invalid(1, ParagraphErrorReason::NotStandardSlots)
+    );
+    p.policy.slot_source = SlotSource::Provider;
+    assert_eq!(p.validate_geometry(), Ok(()));
+    // An indent outside `[0, wrap_width)` is a policy layout never records.
+    p.policy.slot_source = indents(100., 0.);
+    assert_eq!(
+        p.validate_geometry(),
+        invalid(0, ParagraphErrorReason::InvalidPolicy)
+    );
+}
+
+#[test]
+fn the_policy_records_where_the_slots_came_from() {
+    let a = ast("a");
+    let constraints = LayoutConstraints {
+        first_line_indent: 5.,
+        hanging_indent: 7.,
+        ..constraints()
+    };
+    let policy =
+        LayoutPolicySnapshot::resolve(&a, &constraints, &LayoutOptions::default()).unwrap();
+    assert_eq!(
+        policy.slot_source,
+        SlotSource::Standard {
+            first_line_indent: 5.,
+            hanging_indent: 7.
+        }
+    );
+    assert_eq!(
+        policy.slot_source.standard_slot(1, policy.wrap_width),
+        Some(InlineSlotConstraint {
+            start: 7.,
+            end: 100.
+        })
+    );
+    assert_eq!(SlotSource::Provider.standard_slot(0, 100.), None);
+}
+
+#[test]
 fn block_geometry_reasons_are_distinct() {
     let p = three_lines();
     let mut overlapping = p.clone();

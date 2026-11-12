@@ -127,13 +127,15 @@ pub enum LayoutInputError {
         item: usize,
     },
     /// An inline object has a non-finite or negative width, ascent or descent,
-    /// an invalid baseline alignment, or owns no source bytes.
+    /// an invalid baseline alignment or an unrepresentable bidi level, or owns
+    /// no source bytes.
     InvalidInlineBox {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A tab owns no source bytes (its `byte_range` is empty). A tab's geometric
-    /// width is resolved during layout and is not constrained here.
+    /// A tab owns no source bytes (its `byte_range` is empty), or its bidi level
+    /// is not the paragraph level (UAX #9 L1). A tab's geometric width is
+    /// resolved during layout and is not constrained here.
     InvalidTab {
         /// Index into `ParagraphAst::items`.
         item: usize,
@@ -1125,11 +1127,13 @@ impl<'a> ItemChecks<'a> {
                 width,
                 ascent,
                 descent,
+                bidi_level,
                 ..
             }) => {
                 // An object owns the bytes carets and selections address it by.
                 if byte_range.is_empty()
                     || !baseline_align.is_valid()
+                    || !is_bidi_level(*bidi_level)
                     || ![*width, *ascent, *descent]
                         .into_iter()
                         .all(is_finite_nonnegative)
@@ -1147,9 +1151,13 @@ impl<'a> ItemChecks<'a> {
             }) => self.check_span_boundary(item, *byte_range, *span_id, *edge, *width, *bidi_level),
             WordNode::Glue(glue) => self.check_glue(item, glue),
             WordNode::Discretionary(d) => self.check_discretionary(item, d),
-            WordNode::Tab { byte_range } => {
+            WordNode::Tab {
+                byte_range,
+                bidi_level,
+            } => {
                 // A tab is source text; its geometric width is resolved later.
-                if byte_range.is_empty() {
+                // UAX #9 L1 resets a segment separator to the paragraph level.
+                if byte_range.is_empty() || *bidi_level != self.ast.base_direction.base_level() {
                     return Err(LayoutInputError::InvalidTab { item });
                 }
                 Ok(())
@@ -1868,6 +1876,7 @@ mod tests {
             (1.0, 1.0, f32::INFINITY),
         ] {
             let a = with_items(vec![WordNode::Box(BoxNode::InlineObject {
+                bidi_level: 0,
                 baseline_align: crate::types::BaselineAlignment::Auto,
                 byte_range: TextRange::new(0, 1),
                 box_id: 1,
@@ -2885,10 +2894,13 @@ mod tests {
             check_layout_inputs(&a, text, &constraints(), &o)
         };
         let bad = Err(LayoutInputError::InvalidGlue { item: 1 });
-        // One space, a run of spaces, and the ideographic space.
+        // One space, a run of spaces, and the other space separators.
         assert_eq!(check("a ", space((1, 2), true)), Ok(()));
         assert_eq!(check("a  ", space((1, 3), true)), Ok(()));
-        assert_eq!(check("a\u{3000}", space((1, 4), true)), Ok(()));
+        assert_eq!(check("a\u{2003}", space((1, 4), true)), Ok(()));
+        // The ideographic space is text, not glue.
+        assert_eq!(check("a\u{3000}", space((1, 4), true)), bad);
+        assert_eq!(check("a\u{3000}", space((1, 4), false)), bad);
         // Letters are not a space, wholly or in part.
         assert_eq!(check("ab", space((1, 2), true)), bad);
         assert_eq!(check("a b", space((1, 3), true)), bad);
@@ -3508,6 +3520,7 @@ mod tests {
                 max_shrink: 0.0,
             }),
             _ => WordNode::Tab {
+                bidi_level: 0,
                 byte_range: TextRange::new(range.0, range.1),
             },
         };
@@ -3554,6 +3567,7 @@ mod tests {
         let mut a = with_items(vec![
             text_box(vec![atom(0, 1)]),
             WordNode::Box(BoxNode::InlineObject {
+                bidi_level: 0,
                 baseline_align: crate::types::BaselineAlignment::Auto,
                 byte_range: TextRange::new(1, 3),
                 box_id: 1,

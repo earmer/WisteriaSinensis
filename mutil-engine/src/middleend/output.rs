@@ -132,6 +132,8 @@ pub struct PositionedInlineBox {
     /// tell a legitimate `AllowOverflow` from a `Clip` or `ScaleToFit` box that
     /// was not made to fit.
     pub overflow_policy: BoxOverflowPolicy,
+    /// The object's resolved bidi level (`BoxNode::InlineObject::bidi_level`).
+    pub bidi_level: BidiLevel,
 }
 
 /// A tab placed on a line (spec §2.4 `Tab`, §2.6).
@@ -149,6 +151,8 @@ pub struct PositionedTab {
     pub x: f32,
     /// Width (non-negative).
     pub width: f32,
+    /// The paragraph level, to which UAX #9 L1 resets every tab.
+    pub bidi_level: BidiLevel,
 }
 
 /// The visual box of one line fragment of an inline decoration span (spec
@@ -421,8 +425,52 @@ pub struct LayoutPolicySnapshot {
     /// wider than this is valid only in the single-entity overflow state (see
     /// [`PositionedLine::validate`]).
     pub wrap_width: f32,
+    /// Where the lines' slots came from.
+    pub slot_source: SlotSource,
     /// The truncation policy, if any (`LayoutOptions::clamp`).
     pub clamp: Option<LineClampPolicy>,
+}
+
+/// Where a paragraph's slots came from, recorded so that validation can
+/// rebuild the standard column (spec §5.1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SlotSource {
+    /// No geometry provider: every line has exactly the one slot
+    /// `[indent, wrap_width]`, with `first_line_indent` on line 0 and
+    /// `hanging_indent` after it. Both indents lie in `[0, wrap_width)`.
+    Standard {
+        /// `LayoutConstraints::first_line_indent`.
+        first_line_indent: f32,
+        /// `LayoutConstraints::hanging_indent`.
+        hanging_indent: f32,
+    },
+    /// A `LineGeometryProvider` answered for every line. Its answers are not
+    /// recomputable after layout, so only their shape is validated; the
+    /// constraints' indents do not apply.
+    Provider,
+}
+
+impl SlotSource {
+    /// The one slot line `line_index` must have under
+    /// [`Standard`](Self::Standard) in a container `wrap_width` wide; `None`
+    /// for [`Provider`](Self::Provider).
+    #[must_use]
+    pub fn standard_slot(self, line_index: usize, wrap_width: f32) -> Option<InlineSlotConstraint> {
+        match self {
+            Self::Standard {
+                first_line_indent,
+                hanging_indent,
+            } => Some(InlineSlotConstraint {
+                start: if line_index == 0 {
+                    first_line_indent
+                } else {
+                    hanging_indent
+                },
+                end: wrap_width,
+            }),
+            Self::Provider => None,
+        }
+    }
 }
 
 impl LayoutPolicySnapshot {
@@ -472,18 +520,36 @@ impl LayoutPolicySnapshot {
             whitespace: options.whitespace,
             hang_mode: options.hang_mode,
             wrap_width: constraints.wrap_width,
+            slot_source: if constraints.geometry_provider.is_some() {
+                SlotSource::Provider
+            } else {
+                SlotSource::Standard {
+                    first_line_indent: constraints.first_line_indent,
+                    hanging_indent: constraints.hanging_indent,
+                }
+            },
             clamp: options.clamp.clone(),
         })
     }
 
     /// `true` when the snapshot could have come from
-    /// [`resolve`](Self::resolve): a valid strut, line height and clamp, and a
-    /// positive wrap width.
+    /// [`resolve`](Self::resolve): a valid strut, line height and clamp, a
+    /// positive wrap width, and standard indents inside `[0, wrap_width)`.
     #[must_use]
     pub fn is_valid(&self) -> bool {
+        let indents_are_valid = match self.slot_source {
+            SlotSource::Standard {
+                first_line_indent,
+                hanging_indent,
+            } => [first_line_indent, hanging_indent]
+                .iter()
+                .all(|&indent| indent >= 0.0 && indent < self.wrap_width),
+            SlotSource::Provider => true,
+        };
         self.strut.is_valid()
             && self.line_height.is_valid()
             && self.wrap_width > 0.0
+            && indents_are_valid
             && self.clamp.as_ref().is_none_or(LineClampPolicy::is_valid)
     }
 

@@ -46,6 +46,7 @@ fn reject_separator_in_source(sep: &str) {
     let t = format!("a{sep}b");
     let mut a = ast(&t);
     a.items[0] = WordNode::Box(BoxNode::InlineObject {
+        bidi_level: 0,
         baseline_align: BaselineAlignment::Auto,
         byte_range: TextRange::new(0, t.len()),
         box_id: 1,

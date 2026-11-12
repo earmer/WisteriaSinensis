@@ -49,6 +49,7 @@ fn annotation_input_boundaries_and_local_partition() {
         vec![
             boxed(b, 0, 1, false),
             WordNode::Tab {
+                bidi_level: 0,
                 byte_range: TextRange::new(1, 2),
             },
             end(2),
