@@ -587,9 +587,11 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
             .map(|i| {
                 let atoms = vec![atom(i)];
                 let cluster = ShapedCluster {
+                    orientation: GlyphOrientation::Horizontal,
                     byte_range: atoms[0].byte_range,
                     atom_range: 0..1,
                     font: FontRef::unscaled(FontId(1)),
+                    bidi_level: BidiLevel::LTR,
                     flags: AtomFlags::EMPTY,
                     glyph_range: 0..0,
                     natural_width: 0.0,

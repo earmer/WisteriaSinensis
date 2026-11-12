@@ -99,6 +99,11 @@ pub enum LayoutInputError {
         /// The first byte of `text` that no item owns.
         byte: usize,
     },
+    /// An atom of a text box has a script different from its run's.
+    ScriptMismatch {
+        /// Index into `ParagraphAst::items`.
+        item: usize,
+    },
     /// A text box (or one of its atoms) is not contained in the byte range of
     /// the shaping run it names.
     ItemOutsideRun {
@@ -401,13 +406,27 @@ fn check_run_presentation(run: &ShapingRun, mode: WritingMode) -> Result<(), Lay
     Ok(())
 }
 
-/// The atoms of one text payload present the way their run says: no atom
-/// that forbids letter spacing sits in a letter-spaced run. (Orientation,
-/// level and script belong to the run alone.)
+/// The atoms and clusters of one text payload present the way their run says:
+/// they share its orientation, which suits the writing mode and their level,
+/// and no atom that forbids letter spacing sits in a letter-spaced run.
 fn check_text_presentation(
     run: &ShapingRun,
     atoms: &[GraphemeAtom],
+    clusters: &[ShapedCluster],
+    mode: WritingMode,
 ) -> Result<(), LayoutInputError> {
+    let orientation_is_valid = |orientation: GlyphOrientation, level| {
+        orientation == run.orientation && orientation.is_valid(mode, level)
+    };
+    if !atoms
+        .iter()
+        .all(|a| orientation_is_valid(a.orientation, a.bidi_level))
+        || !clusters
+            .iter()
+            .all(|c| orientation_is_valid(c.orientation, c.bidi_level))
+    {
+        return Err(LayoutInputError::OrientationMismatch);
+    }
     if run.letter_spacing != 0.0
         && atoms
             .iter()
@@ -448,7 +467,7 @@ fn check_presentation(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
         {
             return Err(E::OrientationMismatch);
         }
-        check_text_presentation(run, view.atoms)?;
+        check_text_presentation(run, view.atoms, view.clusters, ast.writing_mode)?;
     }
     Ok(())
 }
@@ -613,7 +632,7 @@ fn annotation_payload_is_valid(ann: &AnnotationSpan, mode: WritingMode) -> bool 
         && check_run_presentation(run, mode).is_ok()
         && check_run(run, text, 0).is_ok()
         && check_text_payload(text, run, &payload, &ann.glyphs, 0, 0).is_ok()
-        && check_text_presentation(run, &ann.atoms).is_ok()
+        && check_text_presentation(run, &ann.atoms, &ann.clusters, mode).is_ok()
         && (run.orientation != GlyphOrientation::HorizontalInVertical || ann.clusters.len() == 1)
 }
 
@@ -661,7 +680,10 @@ fn check_text_payload(
     }
     // Atoms tile the payload's bytes, so the payload is inside the run's bytes
     // exactly when its range is.
-    if !run.byte_range.contains_range(byte_range) {
+    if !run.byte_range.contains_range(byte_range)
+        || atoms.iter().any(|a| a.bidi_level != run.bidi_level)
+        || clusters.iter().any(|c| c.bidi_level != run.bidi_level)
+    {
         return Err(E::ItemOutsideRun { item });
     }
     let total: f64 = clusters.iter().map(|c| f64::from(c.natural_width)).sum();
@@ -673,6 +695,9 @@ fn check_text_payload(
         || !approx_eq_f64(f64::from(natural_width), total)
     {
         return Err(E::InvalidTextWidth { item });
+    }
+    if atoms.iter().any(|a| a.script != run.script) {
+        return Err(E::ScriptMismatch { item });
     }
     Ok(())
 }
@@ -792,16 +817,16 @@ impl SpanIndex {
                 }
                 next += 1;
             }
-            // Every atom of a text box is at its run's level.
-            let boxed = ast
-                .text_box(item)
-                .and_then(|view| Some((view.atoms, ast.runs.get(view.run_index)?.bidi_level)));
-            if let Some((atoms, level)) = boxed {
+            if let Some(view) = ast.text_box(item) {
                 for &i in &active {
                     let span = ast.decoration_spans[i].byte_range;
-                    if atoms.iter().any(|a| span.contains_range(a.byte_range)) {
-                        levels[i].0.get_or_insert(level);
-                        levels[i].1 = Some(level);
+                    for atom in view
+                        .atoms
+                        .iter()
+                        .filter(|a| span.contains_range(a.byte_range))
+                    {
+                        levels[i].0.get_or_insert(atom.bidi_level);
+                        levels[i].1 = Some(atom.bidi_level);
                     }
                 }
             }
@@ -1532,7 +1557,10 @@ mod tests {
 
     fn atom(start: usize, end: usize) -> GraphemeAtom {
         GraphemeAtom {
+            orientation: crate::types::GlyphOrientation::Horizontal,
             byte_range: TextRange::new(start, end),
+            script: ScriptTag::LATIN,
+            bidi_level: crate::types::BidiLevel::LTR,
             linebreak_class: LineBreakClass::Al,
             flags: AtomFlags::EMPTY,
         }
@@ -1562,9 +1590,11 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, a)| ShapedCluster {
+                orientation: crate::types::GlyphOrientation::Horizontal,
                 byte_range: a.byte_range,
                 atom_range: i..i + 1,
                 font: crate::types::FontRef::unscaled(crate::types::FontId(0)),
+                bidi_level: crate::types::BidiLevel::LTR,
                 flags: AtomFlags::EMPTY,
                 glyph_range: 0..0,
                 natural_width: 0.0,
@@ -2751,8 +2781,8 @@ mod tests {
     fn span_boundary_bidi_level_follows_the_atom_inside_the_span() {
         use crate::frontend::BoxDecorationBreak::Slice;
         let o = LayoutOptions::default();
-        // The atom 1..2 is the only one of a level-1 run.
-        let inner = atom(1, 2);
+        let mut inner = atom(1, 2);
+        inner.bidi_level = crate::types::BidiLevel::RTL;
         // Edge `edge` carries `level`; the other edge carries its correct level.
         let build = |edge: SpanEdge, level: BidiLevel| {
             let boundary = |e: SpanEdge, correct: BidiLevel, at: usize| {
@@ -2785,6 +2815,7 @@ mod tests {
                     *run_index = run;
                 }
             }
+            a.clusters[1].bidi_level = crate::types::BidiLevel::RTL;
             settle(&mut a);
             a.decoration_spans = vec![chip(5, Slice)];
             a

@@ -82,6 +82,8 @@ fn orientation_and_tcy_matrix() {
     assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
     a.items.remove(1);
     assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
+    a.atoms[0].orientation = GlyphOrientation::VerticalSideways;
+    assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
 }
 
 #[test]

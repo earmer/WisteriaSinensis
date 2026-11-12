@@ -3,18 +3,44 @@
 use crate::common::*;
 use mutil_engine::*;
 
-/// Atoms and clusters have no level of their own: the run's level is theirs,
-/// so changing it changes the whole payload, and a level above
-/// `BidiLevel::MAX` cannot be built.
-#[test]
-fn the_run_level_is_the_level_of_its_atoms() {
+fn reject_level_mismatch(target: usize) {
     let mut a = ast("abc");
     assert!(check(&a, "abc").is_ok());
-    a.runs[0].bidi_level = BidiLevel::RTL;
-    assert!(check(&a, "abc").is_ok());
-    a.runs[0].bidi_level = BidiLevel::MAX;
-    assert!(check(&a, "abc").is_ok());
+    if target == 0 {
+        a.runs[0].bidi_level = BidiLevel::RTL;
+    }
+    if target == 1 {
+        a.atoms[0].bidi_level = BidiLevel::RTL;
+    }
+    if target == 2 {
+        a.clusters[0].bidi_level = BidiLevel::RTL;
+    }
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::ItemOutsideRun { item: 0 })
+    );
+}
+
+/// A level above `BidiLevel::MAX` cannot be built.
+#[test]
+fn bidi_levels_are_bounded() {
     assert_eq!(BidiLevel::new(BIDI_MAX_DEPTH + 2), None);
+    assert!(BidiLevel::new(BIDI_MAX_DEPTH + 1).is_some());
+}
+
+#[test]
+fn reject_run_level_mismatch() {
+    reject_level_mismatch(0);
+}
+
+#[test]
+fn reject_atom_level_mismatch() {
+    reject_level_mismatch(1);
+}
+
+#[test]
+fn reject_cluster_level_mismatch() {
+    reject_level_mismatch(2);
 }
 
 #[test]
@@ -232,6 +258,16 @@ fn unresolved_run_script_is_an_invalid_shaping_run() {
             Err(LayoutInputError::InvalidShapingRun { run: 0 })
         );
     }
+}
+
+#[test]
+fn atom_script_must_match_its_run() {
+    let mut a = ast("abc");
+    a.atoms[1].script = ScriptTag::GREEK;
+    assert_eq!(
+        check(&a, "abc"),
+        Err(LayoutInputError::ScriptMismatch { item: 0 })
+    );
 }
 
 #[test]
