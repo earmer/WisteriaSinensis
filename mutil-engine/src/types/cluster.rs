@@ -115,14 +115,16 @@ impl ShapedCluster {
     /// The source bytes of the cluster: from its first atom's start to its
     /// last atom's end, where `run_atoms` is the slice its run-local
     /// `atom_range` indexes (the run's atoms, or an annotation's). `None` when
-    /// the range does not resolve or is empty.
+    /// the range does not resolve, is empty, or covers atoms that run
+    /// backwards.
     #[must_use]
     pub fn byte_range(&self, run_atoms: &[GraphemeAtom]) -> Option<TextRange> {
         let atoms = run_atoms.get(self.atom_range.clone())?;
-        Some(TextRange {
-            start: atoms.first()?.byte_range.start,
-            end: atoms.last()?.byte_range.end,
-        })
+        // Atoms out of byte order give no range.
+        TextRange::try_new(
+            atoms.first()?.byte_range.start(),
+            atoms.last()?.byte_range.end(),
+        )
     }
 
     /// Number of atoms covered (`K`). Assumes a validated cluster

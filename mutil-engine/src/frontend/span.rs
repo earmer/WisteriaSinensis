@@ -64,8 +64,8 @@ impl InlineDecorationSpan {
     /// the offset alone.
     #[must_use]
     pub fn forbids_cjk_autospace_at(&self, offset: ByteIndex) -> bool {
-        (self.start_padding > 0.0 && offset == self.byte_range.start)
-            || (self.end_padding > 0.0 && offset == self.byte_range.end)
+        (self.start_padding > 0.0 && offset == self.byte_range.start())
+            || (self.end_padding > 0.0 && offset == self.byte_range.end())
     }
 }
 
@@ -91,7 +91,7 @@ impl AtomicEditSpan {
     /// boundaries are not interior.
     #[must_use]
     pub const fn is_interior(&self, offset: ByteIndex) -> bool {
-        self.byte_range.start < offset && offset < self.byte_range.end
+        self.byte_range.start() < offset && offset < self.byte_range.end()
     }
 }
 

@@ -159,8 +159,9 @@ fn block_geometry_reasons_are_distinct() {
         invalid(2, ParagraphErrorReason::InvalidBlockSize)
     );
     let mut skipping = p;
-    skipping.lines[1].byte_range.start = 3;
-    skipping.lines[1].visual_runs[0].byte_range.start = 3;
+    skipping.lines[1].byte_range = TextRange::new(3, skipping.lines[1].byte_range.end());
+    skipping.lines[1].visual_runs[0].byte_range =
+        TextRange::new(3, skipping.lines[1].visual_runs[0].byte_range.end());
     skipping.lines[1].visual_runs[0].glyphs[0].byte_range = Some(TextRange::new(3, 4));
     assert_eq!(
         skipping.validate(TEXT),

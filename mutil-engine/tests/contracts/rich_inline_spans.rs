@@ -11,7 +11,7 @@ use mutil_engine::*;
 const TEXT: &str = "go @Ann-Lee ok";
 const PAD: f32 = 3.0;
 const SPACE_W: f32 = 4.0;
-const CHIP: TextRange = TextRange { start: 3, end: 11 };
+const CHIP: TextRange = TextRange::new(3, 11);
 const SPAN_ID: u64 = 77;
 
 fn atom(offset: usize) -> GraphemeAtom {
@@ -196,7 +196,7 @@ fn chip_inputs_are_accepted_and_atoms_carry_the_atomic_flag() {
     // The chip's atoms are found by lookup, not by a flag on the atoms.
     let chip = ast.text_box(4).unwrap();
     assert!(chip.atoms.iter().all(|a| {
-        ast.atomic_span_containing(a.byte_range.start)
+        ast.atomic_span_containing(a.byte_range.start())
             .map(|s| s.span_id)
             == Some(SPAN_ID)
     }));
@@ -205,13 +205,13 @@ fn chip_inputs_are_accepted_and_atoms_carry_the_atomic_flag() {
             .unwrap()
             .atoms
             .iter()
-            .all(|a| ast.atomic_span_containing(a.byte_range.start).is_none())
+            .all(|a| ast.atomic_span_containing(a.byte_range.start()).is_none())
     );
     // Both ends: the start byte is inside, the end byte is not.
-    assert!(ast.atomic_span_containing(CHIP.start).is_some());
-    assert!(ast.atomic_span_containing(CHIP.end - 1).is_some());
-    assert!(ast.atomic_span_containing(CHIP.end).is_none());
-    assert!(ast.atomic_span_containing(CHIP.start - 1).is_none());
+    assert!(ast.atomic_span_containing(CHIP.start()).is_some());
+    assert!(ast.atomic_span_containing(CHIP.end() - 1).is_some());
+    assert!(ast.atomic_span_containing(CHIP.end()).is_none());
+    assert!(ast.atomic_span_containing(CHIP.start() - 1).is_none());
     // The only break opportunities are discretionaries; glue never breaks.
     let breaks: Vec<_> = ast
         .items
@@ -223,7 +223,7 @@ fn chip_inputs_are_accepted_and_atoms_carry_the_atomic_flag() {
     assert_eq!(breaks, vec![2, 5, 9, 11]); // the last is the sentinel
     // Padding is cloned only on the break that is inside the chip.
     assert!(!ast.decoration_spans[0].forbids_cjk_autospace_at(5));
-    assert!(ast.decoration_spans[0].forbids_cjk_autospace_at(CHIP.start));
+    assert!(ast.decoration_spans[0].forbids_cjk_autospace_at(CHIP.start()));
 }
 
 #[test]

@@ -372,7 +372,7 @@ fn shaping_bridge_applies_both_spelling_edits() {
             .iter()
             .any(|a| a.byte_range == TextRange::new(8, 11))
     );
-    let starts: Vec<_> = run_atoms.iter().map(|a| a.byte_range.start).collect();
+    let starts: Vec<_> = run_atoms.iter().map(|a| a.byte_range.start()).collect();
     for edge in [0, 3, 7] {
         assert!(
             starts.contains(&edge),
@@ -604,8 +604,8 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
     assert!(all_self_contained(&ast));
     let mut next = 0;
     for (_, bytes) in (0..ast.items.len()).flat_map(|item| clusters_of(&ast, item)) {
-        assert_eq!(bytes.start, next);
-        next = bytes.end;
+        assert_eq!(bytes.start(), next);
+        next = bytes.end();
     }
     assert_eq!(next, text_len);
 }

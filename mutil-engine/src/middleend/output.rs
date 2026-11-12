@@ -202,14 +202,14 @@ impl PositionedSpanFragment {
     /// `byte_range.start == span_range.start`.
     #[must_use]
     pub const fn is_first_fragment(&self) -> bool {
-        self.byte_range.start == self.span_range.start
+        self.byte_range.start() == self.span_range.start()
     }
 
     /// Whether the fragment holds the logical end of its span:
     /// `byte_range.end == span_range.end`.
     #[must_use]
     pub const fn is_last_fragment(&self) -> bool {
-        self.byte_range.end == self.span_range.end
+        self.byte_range.end() == self.span_range.end()
     }
 }
 

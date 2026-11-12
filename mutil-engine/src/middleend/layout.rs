@@ -114,7 +114,7 @@ fn tallest_first_line(
         .unwrap_or(ast.items.len());
     let content_end = ast
         .item_range(first_break)
-        .map_or(usize::MAX, |range| range.start);
+        .map_or(usize::MAX, |range| range.start());
     let mut content_height = strut_height;
     for (item, node) in ast.items[..first_break].iter().enumerate() {
         if let WordNode::Box(BoxNode::InlineObject {
@@ -149,7 +149,7 @@ fn tallest_first_line(
         for annotation in ast
             .annotations
             .iter()
-            .filter(|annotation| annotation.base_byte_range.start < content_end)
+            .filter(|annotation| annotation.base_byte_range.start() < content_end)
         {
             match annotation.side {
                 AnnotationSide::Over => over = over.max(annotation.block_extent),

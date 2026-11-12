@@ -296,13 +296,8 @@ fn body_runs_progress_through_the_text_without_overlap() {
         check(&a, TEXT),
         Err(LayoutInputError::InvalidShapingRun { run: 1 })
     );
-    // An inverted range is not a range of the text at all.
-    let mut a = two_runs();
-    a.runs[1].byte_range = TextRange { start: 4, end: 2 };
-    assert_eq!(
-        check(&a, TEXT),
-        Err(LayoutInputError::RunOutsideText { run: 1 })
-    );
+    // An inverted range cannot be built at all.
+    assert_eq!(TextRange::try_new(4, 2), None);
     // An empty run is allowed anywhere between its neighbours.
     let mut a = two_runs();
     let empty = ShapingRun {

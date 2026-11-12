@@ -106,12 +106,17 @@ fn decorated(ranges: &[(usize, usize)]) -> ParagraphAst {
     // Nodes stay in canonical geometric order even when the span array is
     // permuted: a failure must come from the array's ordering contract.
     let mut ordered: Vec<_> = a.decoration_spans.clone();
-    ordered.sort_by_key(|sp| (sp.byte_range.start, std::cmp::Reverse(sp.byte_range.end)));
+    ordered.sort_by_key(|sp| {
+        (
+            sp.byte_range.start(),
+            std::cmp::Reverse(sp.byte_range.end()),
+        )
+    });
     for offset in 0..=4 {
         for sp in ordered
             .iter()
             .rev()
-            .filter(|sp| sp.byte_range.end == offset)
+            .filter(|sp| sp.byte_range.end() == offset)
         {
             a.items.push(WordNode::Box(BoxNode::SpanBoundary {
                 byte_range: TextRange::empty_at(offset),
@@ -121,7 +126,7 @@ fn decorated(ranges: &[(usize, usize)]) -> ParagraphAst {
                 bidi_level: BidiLevel::LTR,
             }));
         }
-        for sp in ordered.iter().filter(|sp| sp.byte_range.start == offset) {
+        for sp in ordered.iter().filter(|sp| sp.byte_range.start() == offset) {
             a.items.push(WordNode::Box(BoxNode::SpanBoundary {
                 byte_range: TextRange::empty_at(offset),
                 span_id: sp.span_id,
@@ -262,7 +267,7 @@ fn bidi_spans_order_ids_boundaries_and_depth() {
     let mut a = ast("ab");
     edit_text_box(&mut a, 0, |atoms, clusters| {
         atoms.truncate(1);
-        atoms[0].byte_range.end = 2;
+        atoms[0].byte_range = TextRange::new(atoms[0].byte_range.start(), 2);
         clusters.truncate(1);
         clusters[0].natural_width = 2.0;
     });

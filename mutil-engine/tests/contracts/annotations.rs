@@ -78,7 +78,8 @@ fn annotation_output_and_synthesized_ownership() {
         })
     );
     let mut bad = l.clone();
-    bad.annotations[0].base_byte_range.end = 2;
+    bad.annotations[0].base_byte_range =
+        TextRange::new(bad.annotations[0].base_byte_range.start(), 2);
     assert_eq!(
         bad.validate(&c),
         Err(LineInvariantError::InvalidAnnotation {

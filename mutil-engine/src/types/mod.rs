@@ -22,5 +22,5 @@ pub use font::{
 };
 pub use geometry::{Point, Rect, Size};
 pub use tag::{InvalidLocaleTag, InvalidScriptTag, LocaleTag, ScriptTag};
-pub use text::{ByteIndex, TextRange};
+pub use text::{ByteIndex, InvertedRange, TextRange};
 pub use writing::{BaselineAlignment, GlyphOrientation, TextOrientation, WritingMode};

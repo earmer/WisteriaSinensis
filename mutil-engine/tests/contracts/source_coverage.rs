@@ -219,7 +219,7 @@ fn glue_only_source_must_cover_every_byte() {
         Err(LayoutInputError::UncoveredSource { byte: 1 })
     );
     if let WordNode::Glue(g) = &mut a.items[0] {
-        g.byte_range.end = 3;
+        g.byte_range = TextRange::new(g.byte_range.start(), 3);
     }
     assert!(check(&a, "   ").is_ok());
 }

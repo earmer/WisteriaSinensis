@@ -235,10 +235,10 @@ pub enum LayoutInputError {
 /// `true` when `range` is well formed, inside `text` and on character
 /// boundaries.
 fn fits(text: &str, range: TextRange) -> bool {
-    range.start <= range.end
-        && range.end <= text.len()
-        && text.is_char_boundary(range.start)
-        && text.is_char_boundary(range.end)
+    range.start() <= range.end()
+        && range.end() <= text.len()
+        && text.is_char_boundary(range.start())
+        && text.is_char_boundary(range.end())
 }
 
 fn is_finite_nonnegative(value: f32) -> bool {
@@ -256,32 +256,32 @@ fn in_byte_order(mut ranges: impl Iterator<Item = TextRange>) -> bool {
         return true;
     };
     ranges.all(|r| {
-        let ok = prev.start <= prev.end && prev.end <= r.start;
+        let ok = prev.start() <= prev.end() && prev.end() <= r.start();
         prev = r;
         ok
-    }) && prev.start <= prev.end
+    }) && prev.start() <= prev.end()
 }
 
 /// Whether `ranges` (byte-ordered) has a range starting or ending at `offset`.
 fn is_range_edge(ranges: &[TextRange], offset: usize) -> bool {
-    let at = ranges.partition_point(|r| r.end < offset);
+    let at = ranges.partition_point(|r| r.end() < offset);
     ranges
         .get(at)
-        .is_some_and(|r| r.start == offset || r.end == offset)
+        .is_some_and(|r| r.start() == offset || r.end() == offset)
 }
 
 /// The bytes of `items[item]`. Called only after [`check_storage`], which
-/// proves every text box resolves, so the fallback is never taken.
+/// proves every item resolves, so the fallback is never taken.
 fn item_bytes(ast: &ParagraphAst, item: usize) -> TextRange {
     ast.item_range(item).unwrap_or(TextRange::EMPTY)
 }
 
 /// Whether `atoms` (byte-ordered) has an atom starting or ending at `offset`.
 fn is_atom_boundary(atoms: &[GraphemeAtom], offset: usize) -> bool {
-    let at = atoms.partition_point(|a| a.byte_range.end < offset);
+    let at = atoms.partition_point(|a| a.byte_range.end() < offset);
     atoms
         .get(at)
-        .is_some_and(|a| a.byte_range.start == offset || a.byte_range.end == offset)
+        .is_some_and(|a| a.byte_range.start() == offset || a.byte_range.end() == offset)
 }
 
 /// Checks that the `glyph_range`s of `clusters` tile a glyph buffer of
@@ -315,8 +315,9 @@ fn check_glyph_ranges(clusters: &[ShapedCluster], glyph_count: usize) -> Result<
 ///   `atom_range`s are non-empty and tile the run's atom slice in order;
 /// * the clusters' `glyph_range`s tile `ast.glyphs`, in cluster order;
 /// * in item order, the text boxes of one run take consecutive, non-empty
-///   cluster ranges inside the run's own and together cover it exactly, so
-///   every text box resolves ([`ParagraphAst::text_box`]).
+///   cluster ranges inside the run's own and together cover it exactly;
+/// * every text box resolves ([`ParagraphAst::text_box`]): its atoms are in
+///   byte order, so it has a range.
 fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     use LayoutInputError as E;
     let (mut atom_at, mut cluster_at) = (0, 0);
@@ -380,6 +381,11 @@ fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
         if cluster_end != r.cluster_range.end {
             return Err(E::InvalidRunStorage { run });
         }
+    }
+    // Every text box resolves (its atoms in byte order give it a range), so
+    // the later checks may read every item's bytes.
+    if let Some(item) = (0..ast.items.len()).find(|&item| ast.item_range(item).is_none()) {
+        return Err(E::ItemNotSelfContained { item });
     }
     Ok(())
 }
@@ -503,19 +509,19 @@ impl ContentEdges {
                     };
                     for atom in view.atoms {
                         let range = atom.byte_range;
-                        edges.node_edges.extend([range.start, range.end]);
-                        edges.atom_starts.insert(range.start, stretch);
-                        edges.atom_ends.insert(range.end, stretch);
+                        edges.node_edges.extend([range.start(), range.end()]);
+                        edges.atom_starts.insert(range.start(), stretch);
+                        edges.atom_ends.insert(range.end(), stretch);
                     }
                     let run_atoms = ast.run_atoms(view.run_index);
                     for range in view.clusters.iter().filter_map(|c| c.byte_range(run_atoms)) {
-                        edges.cluster_edges.extend([range.start, range.end]);
+                        edges.cluster_edges.extend([range.start(), range.end()]);
                     }
                 }
                 WordNode::Box(BoxNode::SpanBoundary { .. }) => {}
                 _ => {
                     let range = item_bytes(ast, item);
-                    edges.node_edges.extend([range.start, range.end]);
+                    edges.node_edges.extend([range.start(), range.end()]);
                     stretch += 1;
                 }
             }
@@ -527,12 +533,12 @@ impl ContentEdges {
     /// and cluster end of the same text stretch, so that it covers whole
     /// clusters and nothing but text.
     fn is_text_only(&self, range: TextRange) -> bool {
-        self.cluster_edges.contains(&range.start)
-            && self.cluster_edges.contains(&range.end)
+        self.cluster_edges.contains(&range.start())
+            && self.cluster_edges.contains(&range.end())
             && self
                 .atom_starts
-                .get(&range.start)
-                .zip(self.atom_ends.get(&range.end))
+                .get(&range.start())
+                .zip(self.atom_ends.get(&range.end()))
                 .is_some_and(|(start, end)| start == end)
     }
 }
@@ -550,18 +556,18 @@ fn check_bidi_spans(
     let mut previous: Option<TextRange> = None;
     for (span, s) in ast.bidi_spans.iter().enumerate() {
         let r = s.byte_range;
-        let is_ordered =
-            previous.is_none_or(|p| r.start > p.start || (r.start == p.start && r.end < p.end));
-        while open.last().is_some_and(|outer| outer.end <= r.start) {
+        let is_ordered = previous
+            .is_none_or(|p| r.start() > p.start() || (r.start() == p.start() && r.end() < p.end()));
+        while open.last().is_some_and(|outer| outer.end() <= r.start()) {
             open.pop();
         }
         if !(ids.insert(s.span_id)
             && !r.is_empty()
             && fits(text, r)
-            && edges.node_edges.contains(&r.start)
-            && edges.node_edges.contains(&r.end)
+            && edges.node_edges.contains(&r.start())
+            && edges.node_edges.contains(&r.end())
             && is_ordered
-            && open.last().is_none_or(|outer| r.end <= outer.end)
+            && open.last().is_none_or(|outer| r.end() <= outer.end())
             && open.len() < MAX_BIDI_SPAN_DEPTH)
         {
             return Err(LayoutInputError::InvalidBidiSpan { span });
@@ -589,7 +595,7 @@ fn check_annotations(
         let side = usize::from(ann.side == AnnotationSide::Under);
         let base_is_valid = !base.is_empty()
             && fits(text, base)
-            && base.start >= reach[side]
+            && base.start() >= reach[side]
             && edges.is_text_only(base);
         if !(ids.insert(ann.annotation_id)
             && base_is_valid
@@ -598,7 +604,7 @@ fn check_annotations(
         {
             return Err(LayoutInputError::InvalidAnnotationSpan { annotation });
         }
-        reach[side] = base.end;
+        reach[side] = base.end();
     }
     Ok(())
 }
@@ -730,11 +736,11 @@ fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
         let r = s.byte_range;
         if span > 0 {
             let prev = ast.decoration_spans[span - 1].byte_range;
-            if r.start < prev.start || (r.start == prev.start && r.end > prev.end) {
+            if r.start() < prev.start() || (r.start() == prev.start() && r.end() > prev.end()) {
                 return Err(E::InvalidDecorationSpan { span });
             }
         }
-        while stack.last().is_some_and(|top| top.end <= r.start) {
+        while stack.last().is_some_and(|top| top.end() <= r.start()) {
             stack.pop();
         }
         if !ids.insert(s.span_id)
@@ -759,15 +765,15 @@ fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
     let mut content_at = 0;
     ids.clear();
     for (span, s) in ast.atomic_spans.iter().enumerate() {
-        while content_at < content.len() && content[content_at].end <= s.byte_range.start {
+        while content_at < content.len() && content[content_at].end() <= s.byte_range.start() {
             content_at += 1;
         }
         if !ids.insert(s.span_id)
             || s.byte_range.is_empty()
             || !fits(text, s.byte_range)
-            || (span > 0 && ast.atomic_spans[span - 1].byte_range.end > s.byte_range.start)
-            || !is_edge(s.byte_range.start)
-            || !is_edge(s.byte_range.end)
+            || (span > 0 && ast.atomic_spans[span - 1].byte_range.end() > s.byte_range.start())
+            || !is_edge(s.byte_range.start())
+            || !is_edge(s.byte_range.end())
             || !content
                 .get(content_at)
                 .is_some_and(|r| !r.is_empty() && s.byte_range.contains_range(*r))
@@ -802,11 +808,11 @@ impl SpanIndex {
         let (mut next, mut active) = (0, Vec::<usize>::new());
         for item in 0..ast.items.len() {
             let r = item_bytes(ast, item);
-            active.retain(|&i| ast.decoration_spans[i].byte_range.end >= r.start);
+            active.retain(|&i| ast.decoration_spans[i].byte_range.end() >= r.start());
             while next < ast.decoration_spans.len()
-                && ast.decoration_spans[next].byte_range.start <= r.end
+                && ast.decoration_spans[next].byte_range.start() <= r.end()
             {
-                if ast.decoration_spans[next].byte_range.end >= r.start {
+                if ast.decoration_spans[next].byte_range.end() >= r.start() {
                     active.push(next);
                 }
                 next += 1;
@@ -849,7 +855,7 @@ impl SpanIndex {
 /// the line that ends there): `[Glue(CjkAutospace), Discretionary]`.
 fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     for item in 1..ast.items.len() {
-        if item_bytes(ast, item - 1).end > item_bytes(ast, item).start {
+        if item_bytes(ast, item - 1).end() > item_bytes(ast, item).start() {
             return Err(LayoutInputError::ItemsOutOfOrder { item });
         }
     }
@@ -858,13 +864,13 @@ fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     let mut break_opportunity_offset: Option<usize> = None;
     for (item, node) in ast.items.iter().enumerate() {
         let range = item_bytes(ast, item);
-        if !range.is_empty() || break_opportunity_offset != Some(range.start) {
+        if !range.is_empty() || break_opportunity_offset != Some(range.start()) {
             break_opportunity_offset = None;
         }
         if node.is_break_opportunity() && range.is_empty() {
-            break_opportunity_offset = Some(range.start);
+            break_opportunity_offset = Some(range.start());
         } else if matches!(node, WordNode::Glue(glue) if glue.kind == GlueKind::CjkAutospace)
-            && break_opportunity_offset == Some(range.start)
+            && break_opportunity_offset == Some(range.start())
         {
             return Err(LayoutInputError::ItemsOutOfOrder { item });
         }
@@ -939,27 +945,27 @@ fn span_enclosure_is_allowed(
     let is_cjk_autospace =
         matches!(node, WordNode::Glue(glue) if glue.kind == GlueKind::CjkAutospace);
     let sits_on_span_edge =
-        item_range.start == span_range.start || item_range.start == span_range.end;
+        item_range.start() == span_range.start() || item_range.start() == span_range.end();
 
     if is_zero_width
         && (node.is_break_opportunity() || is_cjk_autospace)
-        && item_range.start == span_range.start
+        && item_range.start() == span_range.start()
     {
         return item < leading_item;
     }
     if is_zero_width
         && (node.is_break_opportunity() || is_cjk_autospace)
-        && item_range.start == span_range.end
+        && item_range.start() == span_range.end()
     {
         return item > trailing_item;
     }
     if is_zero_width && sits_on_span_edge {
         return true;
     }
-    if item_range.start >= span_range.start && item_range.end <= span_range.end {
+    if item_range.start() >= span_range.start() && item_range.end() <= span_range.end() {
         return is_strictly_between_boundaries;
     }
-    if item_range.end <= span_range.start || item_range.start >= span_range.end {
+    if item_range.end() <= span_range.start() || item_range.start() >= span_range.end() {
         return !is_strictly_between_boundaries;
     }
     false
@@ -1022,8 +1028,9 @@ fn hyphen_chains(ast: &ParagraphAst) -> Vec<(usize, usize)> {
     let len = ast.items.len();
     let mut chains: Vec<(usize, usize)> = (0..len)
         .map(|item| {
-            ast.text_box(item)
-                .map_or((0, 0), |view| (view.byte_range.start, view.byte_range.end))
+            ast.text_box(item).map_or((0, 0), |view| {
+                (view.byte_range.start(), view.byte_range.end())
+            })
         })
         .collect();
     for item in 2..len {
@@ -1156,10 +1163,10 @@ impl<'a> ItemChecks<'a> {
         let span = &self.ast.decoration_spans[span_index];
         let (first_level, last_level) = self.spans.levels[span_index];
         let (anchor, padding, level) = match edge {
-            SpanEdge::Leading => (span.byte_range.start, span.start_padding, first_level),
-            SpanEdge::Trailing => (span.byte_range.end, span.end_padding, last_level),
+            SpanEdge::Leading => (span.byte_range.start(), span.start_padding, first_level),
+            SpanEdge::Trailing => (span.byte_range.end(), span.end_padding, last_level),
         };
-        if byte_range.start != anchor
+        if byte_range.start() != anchor
             || !approx_eq(width, padding)
             || level.is_some_and(|level| level != bidi_level)
         {
@@ -1243,8 +1250,8 @@ impl<'a> ItemChecks<'a> {
         let offset = d.byte_offset();
         let is_cut = |span: &InlineDecorationSpan| {
             span.break_mode == BoxDecorationBreak::Clone
-                && span.byte_range.start < offset
-                && offset < span.byte_range.end
+                && span.byte_range.start() < offset
+                && offset < span.byte_range.end()
         };
         let spans = &self.ast.decoration_spans;
         if self
@@ -1328,7 +1335,7 @@ impl<'a> ItemChecks<'a> {
         let Some((before, _)) = self.ast.hyphen_seam(item) else {
             return false;
         };
-        let offset = before.byte_range.end;
+        let offset = before.byte_range.end();
         let (Some(prefix_start), Some(suffix_end)) = (
             offset.checked_sub(opportunity.prefix_cut_bytes as usize),
             offset.checked_add(opportunity.suffix_cut_bytes as usize),
@@ -1351,10 +1358,10 @@ fn check_coverage(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError
     let mut covered = 0;
     for item in 0..ast.items.len() {
         let range = item_bytes(ast, item);
-        if range.start != covered {
+        if range.start() != covered {
             break;
         }
-        covered = range.end;
+        covered = range.end();
     }
     if covered == text.len() {
         Ok(())
@@ -1410,10 +1417,10 @@ pub(super) fn validate_layout_inputs(
     let mut previous_end = 0;
     for (index, run) in ast.runs.iter().enumerate() {
         check_run(run, text, index)?;
-        if run.byte_range.start < previous_end {
+        if run.byte_range.start() < previous_end {
             return Err(E::InvalidShapingRun { run: index });
         }
-        previous_end = run.byte_range.end;
+        previous_end = run.byte_range.end();
     }
     check_spans(ast, text)?;
     // Reject out-of-text and out-of-order items before indexing spans against
@@ -1747,12 +1754,12 @@ mod tests {
             .map(|item| a.item_range(item).expect("a resolvable fixture item"))
             .collect();
         for (node, r) in std::mem::take(&mut a.items).into_iter().zip(ranges) {
-            if r.start > covered {
+            if r.start() > covered {
                 items.push(text_box(
-                    (covered..r.start).map(|i| atom(i, i + 1)).collect(),
+                    (covered..r.start()).map(|i| atom(i, i + 1)).collect(),
                 ));
             }
-            covered = covered.max(r.end);
+            covered = covered.max(r.end());
             items.push(node);
         }
         a.items = items;
@@ -1774,19 +1781,23 @@ mod tests {
                     let (n, r) = (&a.items[item], a.item_range(item).unwrap_or_default());
                     let seam = n.is_break_opportunity()
                         || matches!(n, WordNode::Glue(g) if g.kind == GlueKind::CjkAutospace);
-                    r.start >= sp.byte_range.start
-                        && !(seam && r.is_empty() && r.start == sp.byte_range.start)
+                    r.start() >= sp.byte_range.start()
+                        && !(seam && r.is_empty() && r.start() == sp.byte_range.start())
                 })
                 .unwrap_or(a.items.len() - 1);
-            a.items
-                .insert(at, bnd(sp.span_id, SpanEdge::Leading, sp.byte_range.start));
+            a.items.insert(
+                at,
+                bnd(sp.span_id, SpanEdge::Leading, sp.byte_range.start()),
+            );
         }
         for sp in &spans {
             let at = (0..a.items.len())
-                .position(|item| a.item_range(item).unwrap_or_default().start >= sp.byte_range.end)
+                .position(|item| {
+                    a.item_range(item).unwrap_or_default().start() >= sp.byte_range.end()
+                })
                 .unwrap_or(a.items.len() - 1);
             a.items
-                .insert(at, bnd(sp.span_id, SpanEdge::Trailing, sp.byte_range.end));
+                .insert(at, bnd(sp.span_id, SpanEdge::Trailing, sp.byte_range.end()));
         }
         a
     }
@@ -1907,7 +1918,7 @@ mod tests {
     fn hyphenated(at: usize, opportunity: HyphenOpportunity) -> ParagraphAst {
         let atoms = vec![atom(0, 1), atom(1, 2), atom(2, 4)];
         let (head, tail): (Vec<_>, Vec<_>) =
-            atoms.into_iter().partition(|a| a.byte_range.end <= at);
+            atoms.into_iter().partition(|a| a.byte_range.end() <= at);
         let d = DiscretionaryNode {
             byte_range: TextRange::empty_at(at),
             penalty: DiscretionaryNode::HYPHEN_PENALTY,
@@ -2273,11 +2284,12 @@ mod tests {
             check_layout_inputs(&a, "abcd", &constraints(), &o),
             Err(LayoutInputError::ItemOutsideText { item: 0 })
         );
-        // First atom starts after the last one ends: no panic, an error.
+        // First atom starts after the last one ends: the box has no range, so
+        // it does not resolve. No panic, an error.
         let a = with_items(vec![text_box(vec![atom(3, 4), atom(0, 1)])]);
         assert_eq!(
             check_layout_inputs(&a, "abcd", &constraints(), &o),
-            Err(LayoutInputError::ItemOutsideText { item: 0 })
+            Err(LayoutInputError::ItemNotSelfContained { item: 0 })
         );
         // A text box naming a run that does not exist.
         let mut a = with_items(vec![text_box(vec![atom(0, 1)])]);

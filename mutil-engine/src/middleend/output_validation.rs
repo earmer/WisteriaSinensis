@@ -415,11 +415,11 @@ struct RangeIndex<T> {
 
 impl<T> RangeIndex<T> {
     fn new(mut entries: Vec<(TextRange, T)>) -> Self {
-        entries.sort_by_key(|(range, _)| range.start);
+        entries.sort_by_key(|(range, _)| range.start());
         let reach = entries
             .iter()
             .scan(0, |reach, (range, _)| {
-                *reach = (*reach).max(range.end);
+                *reach = (*reach).max(range.end());
                 Some(*reach)
             })
             .collect();
@@ -431,22 +431,22 @@ impl<T> RangeIndex<T> {
         let from = self.reach.partition_point(|&reach| reach < min_end);
         let to = self
             .entries
-            .partition_point(|(range, _)| range.start <= max_start);
+            .partition_point(|(range, _)| range.start() <= max_start);
         self.entries.get(from..to).unwrap_or_default()
     }
 
     /// The entries sharing at least one byte with the non-empty `range`.
     fn overlapping(&self, range: TextRange) -> impl Iterator<Item = &(TextRange, T)> {
-        self.candidates(range.start + 1, range.end - 1)
+        self.candidates(range.start() + 1, range.end() - 1)
             .iter()
-            .filter(move |(r, _)| r.start < range.end && r.end > range.start)
+            .filter(move |(r, _)| r.start() < range.end() && r.end() > range.start())
     }
 
     /// The entries that contain `offset` or start or end at it.
     fn touching(&self, offset: usize) -> impl Iterator<Item = &(TextRange, T)> {
         self.candidates(offset, offset)
             .iter()
-            .filter(move |(r, _)| r.start <= offset && offset <= r.end)
+            .filter(move |(r, _)| r.start() <= offset && offset <= r.end())
     }
 }
 
@@ -549,7 +549,7 @@ impl PositionedLine {
                     let (lo, hi) = pen_interval(g);
                     !g.is_hanging
                         && g.byte_range
-                            .is_some_and(|r| r.start < self.visible_byte_end)
+                            .is_some_and(|r| r.start() < self.visible_byte_end)
                         && slot_holds(slot, lo, hi)
                 })
                 || self
@@ -557,7 +557,7 @@ impl PositionedLine {
                     .iter()
                     .any(|b| slot_holds(slot, b.x, b.x + b.width))
                 || self.tabs.iter().any(|t| {
-                    t.byte_range.start < self.visible_byte_end
+                    t.byte_range.start() < self.visible_byte_end
                         && slot_holds(slot, t.x, t.x + t.width)
                 })
         };
@@ -572,12 +572,12 @@ impl PositionedLine {
         !glyph.is_synthesized()
             && glyph
                 .byte_range
-                .is_some_and(|range| range.start >= self.visible_byte_end)
+                .is_some_and(|range| range.start() >= self.visible_byte_end)
     }
 
     /// `true` when `range` is well formed and inside this line's bytes.
     fn owns_bytes(&self, range: TextRange) -> bool {
-        range.start <= range.end && self.byte_range.contains_range(range)
+        range.start() <= range.end() && self.byte_range.contains_range(range)
     }
 
     fn sourced_glyphs(&self) -> SourcedGlyphs<'_> {
@@ -674,7 +674,7 @@ impl PositionedLine {
     fn check_envelope(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
         let range = self.byte_range;
-        if !(range.start <= self.visible_byte_end && self.visible_byte_end <= range.end) {
+        if !(range.start() <= self.visible_byte_end && self.visible_byte_end <= range.end()) {
             return Err(E::VisibleEndOutsideRange);
         }
         self.check_atomic_fragment_ranges()?;
@@ -802,21 +802,21 @@ impl PositionedLine {
         order.sort_by_key(|&i| {
             (
                 fragments[i].atomic_id,
-                fragments[i].fragment_byte_range.start,
+                fragments[i].fragment_byte_range.start(),
             )
         });
         let same_span = |a: &usize, b: &usize| fragments[*a].atomic_id == fragments[*b].atomic_id;
         for span in order.chunk_by(same_span) {
             let full = fragments[span[0]].full_byte_range;
-            let mut covered = full.start.max(self.byte_range.start);
+            let mut covered = full.start().max(self.byte_range.start());
             for &index in span {
                 let f: &AtomicFragment = &fragments[index];
-                if f.full_byte_range != full || f.fragment_byte_range.start != covered {
+                if f.full_byte_range != full || f.fragment_byte_range.start() != covered {
                     return invalid(index);
                 }
-                covered = f.fragment_byte_range.end;
+                covered = f.fragment_byte_range.end();
             }
-            if covered != full.end.min(self.byte_range.end) {
+            if covered != full.end().min(self.byte_range.end()) {
                 return invalid(span[span.len() - 1]);
             }
         }
@@ -830,7 +830,7 @@ impl PositionedLine {
         use LineInvariantError as E;
         let valid_glyph = |g: &PositionedGlyph| {
             g.byte_range
-                .is_none_or(|r| r.start < r.end && self.byte_range.contains_range(r))
+                .is_none_or(|r| r.start() < r.end() && self.byte_range.contains_range(r))
         };
         for (run, r) in self.visual_runs.iter().enumerate() {
             if !r.orientation.is_valid(ctx.writing_mode, r.bidi_level) {
@@ -883,9 +883,9 @@ impl PositionedLine {
     /// an offset inside a cluster could split one.
     fn check_visible_end_boundary(&self) -> Result<(), LineInvariantError> {
         let end = self.visible_byte_end;
-        let on_edge = |r: TextRange| r.start == end || r.end == end;
-        let ok = end == self.byte_range.start
-            || end == self.byte_range.end
+        let on_edge = |r: TextRange| r.start() == end || r.end() == end;
+        let ok = end == self.byte_range.start()
+            || end == self.byte_range.end()
             || self
                 .visual_runs
                 .iter()
@@ -947,7 +947,7 @@ impl PositionedLine {
                 }
             };
             if !in_order
-                || !(self.byte_range.start..=self.byte_range.end).contains(&stop.offset)
+                || !(self.byte_range.start()..=self.byte_range.end()).contains(&stop.offset)
                 || stop.line != ctx.line_index
                 || !level_is_owned()
             {
@@ -978,8 +978,8 @@ impl PositionedLine {
             } else if !ann.orientation.is_valid(ctx.writing_mode, BidiLevel::LTR) {
                 R::OrientationMismatch
             } else if ann.base_byte_range.is_empty()
-                || ann.base_byte_range.start < self.byte_range.start
-                || ann.base_byte_range.end > self.visible_byte_end
+                || ann.base_byte_range.start() < self.byte_range.start()
+                || ann.base_byte_range.end() > self.visible_byte_end
             {
                 R::BaseOutsideLine
             } else if ann.glyphs.is_empty() {
@@ -1016,17 +1016,17 @@ impl PositionedLine {
             let mut on_side: Vec<usize> = (0..self.annotations.len())
                 .filter(|&i| self.annotations[i].side == side)
                 .collect();
-            on_side.sort_by_key(|&i| self.annotations[i].base_byte_range.start);
+            on_side.sort_by_key(|&i| self.annotations[i].base_byte_range.start());
             let mut reach = 0;
             for &index in &on_side {
                 let base = self.annotations[index].base_byte_range;
-                if base.start < reach {
+                if base.start() < reach {
                     return Err(LineInvariantError::InvalidAnnotation {
                         index,
                         reason: R::OverlapsOnSide,
                     });
                 }
-                reach = base.end;
+                reach = base.end();
             }
         }
         Ok(())
@@ -1179,7 +1179,7 @@ impl PositionedLine {
             }
         }
         for (index, t) in self.tabs.iter().enumerate() {
-            if t.byte_range.start >= self.visible_byte_end {
+            if t.byte_range.start() >= self.visible_byte_end {
                 if collapsible && t.width != 0.0 {
                     return Err(E::TrailingTabNotCollapsed { index });
                 }
@@ -1363,7 +1363,7 @@ impl PositionedLine {
         for t in self
             .tabs
             .iter()
-            .filter(|t| t.byte_range.start < self.visible_byte_end)
+            .filter(|t| t.byte_range.start() < self.visible_byte_end)
         {
             place(t.x, t.x + t.width);
         }
@@ -1431,7 +1431,8 @@ impl PositionedLine {
                         .filter(|g| {
                             !g.is_hanging
                                 && (!g.is_synthesized() || self.is_ellipsized)
-                                && g.byte_range.is_none_or(|b| b.start < self.visible_byte_end)
+                                && g.byte_range
+                                    .is_none_or(|b| b.start() < self.visible_byte_end)
                         })
                 };
                 let mut ranges = glyphs()
@@ -1475,8 +1476,8 @@ impl PositionedLine {
             .fold(f32::NEG_INFINITY, f32::max);
         self.span_fragments
             .iter()
-            .all(|f| f.byte_range.start == range.start && f.byte_range.end >= range.end)
-            && range.end >= self.visible_byte_end
+            .all(|f| f.byte_range.start() == range.start() && f.byte_range.end() >= range.end())
+            && range.end() >= self.visible_byte_end
             && start >= origin - tolerance(width, vw)
             && end <= origin + vw + tolerance(width, vw)
             && (left - origin).abs() <= tolerance(width, vw)
@@ -1626,10 +1627,10 @@ impl PositionedParagraph {
         let mut rendered_end = 0;
         let mut annotation_ids = HashSet::new();
         for (i, line) in self.lines.iter().enumerate() {
-            if line.byte_range.start != rendered_end
-                || line.byte_range.end > text.len()
-                || !text.is_char_boundary(line.byte_range.start)
-                || !text.is_char_boundary(line.byte_range.end)
+            if line.byte_range.start() != rendered_end
+                || line.byte_range.end() > text.len()
+                || !text.is_char_boundary(line.byte_range.start())
+                || !text.is_char_boundary(line.byte_range.end())
             {
                 return invalid(i, R::SourceNotCovered);
             }
@@ -1643,7 +1644,7 @@ impl PositionedParagraph {
             {
                 return invalid(i, R::DuplicateAnnotation);
             }
-            rendered_end = line.byte_range.end;
+            rendered_end = line.byte_range.end();
         }
         match self.truncated_range {
             None if rendered_end != text.len() => return invalid(last, R::SourceNotCovered),
@@ -1651,9 +1652,9 @@ impl PositionedParagraph {
             None => {}
             Some(tail) => {
                 let is_consistent = self.policy.clamp.is_some()
-                    && tail.start == rendered_end
-                    && tail.end == text.len()
-                    && tail.start < tail.end
+                    && tail.start() == rendered_end
+                    && tail.end() == text.len()
+                    && tail.start() < tail.end()
                     && self.lines[last].is_ellipsized;
                 if !is_consistent {
                     return invalid(last, R::InvalidTruncation);
@@ -1714,7 +1715,7 @@ impl PositionedParagraph {
         match spans
             .values()
             .filter(|seen| {
-                let ends_in_tail = seen.span_range.end > rendered_end;
+                let ends_in_tail = seen.span_range.end() > rendered_end;
                 !seen.has_first || (!seen.has_last && !ends_in_tail)
             })
             .map(|seen| seen.line)
@@ -1771,9 +1772,9 @@ impl PositionedParagraph {
                 seen.bytes
                     != seen
                         .full
-                        .end
+                        .end()
                         .min(rendered_end)
-                        .saturating_sub(seen.full.start)
+                        .saturating_sub(seen.full.start())
             })
             .map(|seen| seen.line)
             .min()
@@ -1873,7 +1874,7 @@ mod tests {
     fn line(glyphs: Vec<PositionedGlyph>, width: f32) -> PositionedLine {
         let byte_end = glyphs
             .iter()
-            .filter_map(|g| g.byte_range.map(|r| r.end))
+            .filter_map(|g| g.byte_range.map(|r| r.end()))
             .max()
             .unwrap_or(4)
             .max(4);
@@ -2999,13 +3000,6 @@ mod tests {
         later.span_fragments[0].span_range = TextRange::new(0, 4);
         assert_eq!(
             later.validate(&ctx()),
-            Err(LineInvariantError::SpanFragmentOutsideLine { index: 0 })
-        );
-        let mut inverted = fragment(1, 0.0, 30.0, (0, 4));
-        inverted.byte_range = TextRange { start: 3, end: 1 };
-        l.span_fragments = vec![inverted];
-        assert_eq!(
-            l.validate(&ctx()),
             Err(LineInvariantError::SpanFragmentOutsideLine { index: 0 })
         );
     }

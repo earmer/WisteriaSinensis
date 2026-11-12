@@ -123,12 +123,12 @@ impl AtomicFragment {
         let snaps_to_start = is_in_left_half == is_even_level;
         if snaps_to_start {
             CursorPosition {
-                byte_offset: self.full_byte_range.start,
+                byte_offset: self.full_byte_range.start(),
                 affinity: CaretAffinity::Downstream,
             }
         } else {
             CursorPosition {
-                byte_offset: self.full_byte_range.end,
+                byte_offset: self.full_byte_range.end(),
                 affinity: CaretAffinity::Upstream,
             }
         }

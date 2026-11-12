@@ -395,7 +395,7 @@ impl DiscretionaryNode {
     /// line `k + 1` begins (`byte_range.start`).
     #[must_use]
     pub const fn byte_offset(&self) -> ByteIndex {
-        self.byte_range.start
+        self.byte_range.start()
     }
 
     /// `true` when the break is mandatory (`penalty <= MANDATORY_BREAK_PENALTY`).
@@ -459,19 +459,22 @@ pub(crate) fn text_is_self_contained(
     !atoms.is_empty()
         && atoms
             .windows(2)
-            .all(|w| w[0].byte_range.end == w[1].byte_range.start)
-        && atoms.iter().all(|a| a.byte_range.start < a.byte_range.end)
+            .all(|w| w[0].byte_range.end() == w[1].byte_range.start())
+        && atoms
+            .iter()
+            .all(|a| a.byte_range.start() < a.byte_range.end())
         && clusters_partition_atoms(atoms, clusters, base)
 }
 
-/// The source bytes of a non-empty, byte-ordered atom slice: the first atom's
-/// start to the last atom's end. `None` for an empty slice.
+/// The source bytes of a non-empty atom slice: the first atom's start to the
+/// last atom's end. `None` for an empty slice, or when the last atom ends
+/// before the first starts.
 pub(crate) fn atoms_byte_range(atoms: &[GraphemeAtom]) -> Option<TextRange> {
-    // A literal: validation, not construction, rejects an inverted span.
-    Some(TextRange {
-        start: atoms.first()?.byte_range.start,
-        end: atoms.last()?.byte_range.end,
-    })
+    // Atoms out of byte order give no range.
+    TextRange::try_new(
+        atoms.first()?.byte_range.start(),
+        atoms.last()?.byte_range.end(),
+    )
 }
 
 fn clusters_partition_atoms(
@@ -627,11 +630,11 @@ impl ParagraphAst {
     pub fn atomic_span_containing(&self, byte: ByteIndex) -> Option<&AtomicEditSpan> {
         let after = self
             .atomic_spans
-            .partition_point(|span| span.byte_range.start <= byte);
+            .partition_point(|span| span.byte_range.start() <= byte);
         after
             .checked_sub(1)
             .map(|i| &self.atomic_spans[i])
-            .filter(|span| byte < span.byte_range.end)
+            .filter(|span| byte < span.byte_range.end())
     }
 
     /// The atoms of body run `run`: `atoms[runs[run].atom_range]`, which is
@@ -759,9 +762,9 @@ impl ParagraphAst {
         let before = self.text_box(index.checked_sub(1)?)?;
         let after = self.text_box(index + 1)?;
         (before.run_index == after.run_index
-            && before.byte_range.end == byte_range.start
-            && byte_range.end == after.byte_range.start)
-            .then_some((before, after))
+            && before.byte_range.end() == byte_range.start()
+            && byte_range.end() == after.byte_range.start())
+        .then_some((before, after))
     }
 
     /// The window to re-shape when the `Hyphenate` discretionary at
@@ -792,18 +795,18 @@ impl ParagraphAst {
         // The first and the last original byte the break's edits touch. An
         // edit without a cut still touches the neighbouring box: the hyphen
         // attaches to the last cluster before the break.
-        let offset = byte_range.start;
+        let offset = byte_range.start();
         let first = offset.checked_sub((opportunity.prefix_cut_bytes as usize).max(1))?;
         let last = offset.checked_add((opportunity.suffix_cut_bytes as usize).max(1))? - 1;
 
         let (mut start, mut start_item) = (before, index - 1);
-        while first < start.byte_range.start {
+        while first < start.byte_range.start() {
             let seam = start_item.checked_sub(1)?;
             (start, _) = self.hyphen_seam(seam)?;
             start_item = seam - 1;
         }
         let (mut end, mut end_item) = (after, index + 1);
-        while last >= end.byte_range.end {
+        while last >= end.byte_range.end() {
             let seam = end_item + 1;
             (_, end) = self.hyphen_seam(seam)?;
             end_item = seam + 1;
@@ -811,7 +814,7 @@ impl ParagraphAst {
         Some(ReshapeWindow {
             run_index: before.run_index,
             atom_range: start.atom_start..end.atom_start + end.atoms.len(),
-            byte_range: TextRange::new(start.byte_range.start, end.byte_range.end),
+            byte_range: TextRange::new(start.byte_range.start(), end.byte_range.end()),
         })
     }
 
@@ -844,12 +847,12 @@ impl ParagraphAst {
             .into_iter()
             .filter_map(|index| self.rejoin_window(index))
             .collect();
-        windows.sort_by_key(|window| window.byte_range.start);
+        windows.sort_by_key(|window| window.byte_range.start());
         let mut merged: SmallVec<[ReshapeWindow; 4]> = SmallVec::new();
         for window in windows {
             match merged.last_mut() {
-                Some(last) if window.byte_range.start < last.byte_range.end => {
-                    last.byte_range.end = last.byte_range.end.max(window.byte_range.end);
+                Some(last) if window.byte_range.start() < last.byte_range.end() => {
+                    last.byte_range = last.byte_range.cover(window.byte_range);
                     last.atom_range.end = last.atom_range.end.max(window.atom_range.end);
                 }
                 _ => merged.push(window),
@@ -870,7 +873,7 @@ impl ParagraphAst {
         seam_is_unsafe.then(|| ReshapeWindow {
             run_index: before.run_index,
             atom_range: before.atom_start..after.atom_start + after.atoms.len(),
-            byte_range: TextRange::new(before.byte_range.start, after.byte_range.end),
+            byte_range: TextRange::new(before.byte_range.start(), after.byte_range.end()),
         })
     }
 }

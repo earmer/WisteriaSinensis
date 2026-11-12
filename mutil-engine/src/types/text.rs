@@ -10,29 +10,46 @@ use core::ops::Range;
 /// implemented yet.
 pub type ByteIndex = usize;
 
-/// Half-open byte range `[start, end)`, aligned to code point boundaries (spec §2.1).
+/// Half-open byte range `[start, end)` (spec §2.1).
 ///
-/// The fields are public because the range is a plain value type; the
-/// invariant `start <= end` is checked by [`TextRange::new`] in debug builds.
+/// Parsed, not validated (spec §1.5, A3): the fields are private, and every
+/// constructor keeps `start <= end`, so a range that exists is ordered.
+/// [`new`](Self::new) asserts it, for ranges the caller computes;
+/// [`try_new`](Self::try_new) returns `None` instead, for offsets read from
+/// outside. Whether a range fits a text and falls on its code point
+/// boundaries depends on the text, and is checked where the text is known.
 /// Layout: two `usize`s, 16 bytes on 64-bit targets, no padding.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TextRange {
-    /// Inclusive start offset.
-    pub start: ByteIndex,
-    /// Exclusive end offset.
-    pub end: ByteIndex,
+    start: ByteIndex,
+    end: ByteIndex,
 }
 
 impl TextRange {
     /// The empty range at offset 0.
     pub const EMPTY: Self = Self { start: 0, end: 0 };
 
-    /// Builds a range. Debug builds assert `start <= end`.
+    /// The range `[start, end)`.
+    ///
+    /// # Panics
+    /// If `start > end`; use [`try_new`](Self::try_new) for offsets that may
+    /// be inverted.
     #[inline]
     #[must_use]
     pub const fn new(start: ByteIndex, end: ByteIndex) -> Self {
-        debug_assert!(start <= end, "TextRange requires start <= end");
+        assert!(start <= end, "TextRange requires start <= end");
         Self { start, end }
+    }
+
+    /// The range `[start, end)`, or `None` when `start > end`.
+    #[inline]
+    #[must_use]
+    pub const fn try_new(start: ByteIndex, end: ByteIndex) -> Option<Self> {
+        if start <= end {
+            Some(Self { start, end })
+        } else {
+            None
+        }
     }
 
     /// An empty range anchored at `offset`.
@@ -48,18 +65,49 @@ impl TextRange {
         }
     }
 
-    /// Length in bytes (0 if the range is inverted, which `new` rejects).
+    /// Inclusive start offset.
+    #[inline]
+    #[must_use]
+    pub const fn start(&self) -> ByteIndex {
+        self.start
+    }
+
+    /// Exclusive end offset.
+    #[inline]
+    #[must_use]
+    pub const fn end(&self) -> ByteIndex {
+        self.end
+    }
+
+    /// The smallest range covering both `self` and `other`.
+    #[inline]
+    #[must_use]
+    pub const fn cover(&self, other: TextRange) -> Self {
+        let start = if self.start < other.start {
+            self.start
+        } else {
+            other.start
+        };
+        let end = if self.end > other.end {
+            self.end
+        } else {
+            other.end
+        };
+        Self { start, end }
+    }
+
+    /// Length in bytes.
     #[inline]
     #[must_use]
     pub const fn len(&self) -> usize {
-        self.end.saturating_sub(self.start)
+        self.end - self.start
     }
 
     /// `true` when the range covers no bytes.
     #[inline]
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.start >= self.end
+        self.start == self.end
     }
 
     /// `true` when `offset` lies in `[start, end)`.
@@ -69,17 +117,12 @@ impl TextRange {
         self.start <= offset && offset < self.end
     }
 
-    /// `true` when `other` lies entirely within `self`. Both ranges must be
-    /// well formed: an inverted `self` or `other` (`start > end`) is contained
-    /// in nothing and contains nothing, so the relation is reflexive on valid
-    /// ranges and transitive.
+    /// `true` when `other` lies entirely within `self`: a reflexive and
+    /// transitive relation.
     #[inline]
     #[must_use]
     pub const fn contains_range(&self, other: TextRange) -> bool {
-        self.start <= self.end
-            && other.start <= other.end
-            && self.start <= other.start
-            && other.end <= self.end
+        self.start <= other.start && other.end <= self.end
     }
 
     /// Converts to a standard [`Range`].
@@ -98,10 +141,24 @@ impl TextRange {
     }
 }
 
-impl From<Range<usize>> for TextRange {
+/// The error of converting an inverted [`Range`] into a [`TextRange`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvertedRange;
+
+impl core::fmt::Display for InvertedRange {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("a text range must not end before it starts")
+    }
+}
+
+impl core::error::Error for InvertedRange {}
+
+impl TryFrom<Range<usize>> for TextRange {
+    type Error = InvertedRange;
+
     #[inline]
-    fn from(r: Range<usize>) -> Self {
-        Self::new(r.start, r.end)
+    fn try_from(r: Range<usize>) -> Result<Self, InvertedRange> {
+        Self::try_new(r.start, r.end).ok_or(InvertedRange)
     }
 }
 
@@ -139,15 +196,13 @@ mod tests {
         }
         assert!(outer.contains_range(middle) && middle.contains_range(inner));
         assert!(outer.contains_range(inner));
-        // An inverted range is neither a container nor contained, even when its
-        // endpoints happen to lie inside (or around) the other range.
-        let inverted = TextRange { start: 5, end: 3 };
-        assert!(!inverted.contains_range(inverted));
-        assert!(!outer.contains_range(inverted));
-        assert!(!inverted.contains_range(TextRange::new(4, 4)));
-        let wide_inverted = TextRange { start: 8, end: 1 };
-        assert!(!wide_inverted.contains_range(inner));
-        assert!(!outer.contains_range(wide_inverted));
+        // An inverted range cannot be built.
+        assert_eq!(TextRange::try_new(5, 3), None);
+        assert_eq!(TextRange::try_new(3, 5), Some(TextRange::new(3, 5)));
+        assert_eq!(
+            TextRange::new(2, 4).cover(TextRange::new(1, 3)),
+            TextRange::new(1, 4)
+        );
     }
 
     #[test]
@@ -161,8 +216,11 @@ mod tests {
 
     #[test]
     fn range_round_trip() {
-        let r: TextRange = (3..9).into();
+        let r = TextRange::try_from(3..9).unwrap();
         let back: Range<usize> = r.into();
         assert_eq!(back, 3..9);
+        #[allow(clippy::reversed_empty_ranges)]
+        let inverted = 9..3;
+        assert_eq!(TextRange::try_from(inverted), Err(InvertedRange));
     }
 }

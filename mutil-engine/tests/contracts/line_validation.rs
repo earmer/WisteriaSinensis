@@ -236,7 +236,7 @@ fn empty_slot_hanging_and_trailing_whitespace() {
         byte_range: Some(TextRange::new(2, 3)),
         ..glyph(250.0, 5.0, false)
     };
-    l.byte_range.end = 3;
+    l.byte_range = TextRange::new(l.byte_range.start(), 3);
     l.visual_runs[0].glyphs.push(trailing);
     c.whitespace = HangingWhitespaceMode::Preserved;
     assert_eq!(l.validate(&c), Ok(()));
