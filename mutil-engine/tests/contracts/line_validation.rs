@@ -68,7 +68,7 @@ fn malformed_atomic_fragments_are_rejected() {
         fragment_byte_range: TextRange::new(0, 1),
         x: 0.,
         width: 10.,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
     }];
     assert_eq!(l.validate(&ctx()), Ok(()));
     l.atomic_fragments[0].width = f32::NAN;
@@ -185,7 +185,7 @@ fn multi_slot_containment_and_conserved_width() {
     let mut bad = valid.clone();
     bad.visual_runs.clear();
     bad.visual_boxes.push(PositionedInlineBox {
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         baseline_align: BaselineAlignment::Auto,
         box_id: 1,
         byte_range: TextRange::new(0, 1),
@@ -209,7 +209,7 @@ fn multi_slot_containment_and_conserved_width() {
         width: 70.0,
         ascent: 8.0,
         descent: 2.0,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
     });
     assert_eq!(
         bad.validate(&c),
@@ -258,7 +258,7 @@ fn one_glyph_line() -> PositionedLine {
 #[test]
 fn inline_box_alignment_and_bytes_are_checked_per_box() {
     let object = PositionedInlineBox {
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         baseline_align: BaselineAlignment::Auto,
         box_id: 1,
         byte_range: TextRange::new(0, 1),
@@ -518,7 +518,7 @@ fn line_wider_than_wrap_width_reports_the_container_not_the_slot() {
 #[test]
 fn rigid_boxes_are_compared_with_the_wrap_width_not_the_slot_capacity() {
     let object = |x: f32, width: f32| PositionedInlineBox {
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         baseline_align: BaselineAlignment::Auto,
         box_id: 1,
         byte_range: TextRange::new(0, 1),
@@ -621,7 +621,7 @@ fn the_visible_end_sits_on_a_cluster_boundary() {
     first.byte_range = Some(TextRange::new(0, 2));
     l.visual_runs = vec![run(first)];
     l.visual_boxes = vec![PositionedInlineBox {
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         baseline_align: BaselineAlignment::Auto,
         box_id: 1,
         byte_range: TextRange::new(2, 4),
@@ -783,7 +783,7 @@ fn the_glyphs_of_a_run_are_in_screen_order() {
     );
 }
 
-fn caret(x: f32, offset: usize, level: u8) -> CaretStop {
+fn caret(x: f32, offset: usize, level: BidiLevel) -> CaretStop {
     CaretStop {
         x,
         offset,
@@ -798,7 +798,7 @@ fn a_caret_stop_carries_the_level_of_a_run_owning_its_offset() {
     // "a" at level 0 in `[0, 50]`, "b" at level 1 in `[50, 100]`.
     let mut l = two_glyph_line();
     let mut rtl = l.visual_runs[0].clone();
-    rtl.bidi_level = 1;
+    rtl.bidi_level = BidiLevel::RTL;
     rtl.byte_range = TextRange::new(1, 2);
     rtl.glyphs.remove(0);
     l.visual_runs[0].glyphs.pop();
@@ -814,24 +814,33 @@ fn a_caret_stop_carries_the_level_of_a_run_owning_its_offset() {
     // at one x.
     assert_eq!(
         with(vec![
-            caret(0., 0, 0),
-            caret(50., 1, 0),
-            caret(50., 1, 1),
-            caret(50., 2, 1)
+            caret(0., 0, BidiLevel::LTR),
+            caret(50., 1, BidiLevel::LTR),
+            caret(50., 1, BidiLevel::RTL),
+            caret(50., 2, BidiLevel::RTL)
         ]),
         Ok(())
     );
     // Offset 0 belongs to the level-0 run only, offset 2 to the level-1 run.
-    assert_eq!(with(vec![caret(0., 0, 1)]), invalid(0));
-    assert_eq!(with(vec![caret(0., 0, 0), caret(50., 2, 0)]), invalid(1));
+    assert_eq!(with(vec![caret(0., 0, BidiLevel::RTL)]), invalid(0));
+    assert_eq!(
+        with(vec![
+            caret(0., 0, BidiLevel::LTR),
+            caret(50., 2, BidiLevel::LTR)
+        ]),
+        invalid(1)
+    );
     // A level no run has is wrong even at the boundary.
-    assert_eq!(with(vec![caret(50., 1, 2)]), invalid(0));
+    assert_eq!(
+        with(vec![caret(50., 1, BidiLevel::new(2).unwrap())]),
+        invalid(0)
+    );
 
     // An inline box lends its own level to the stops touching it.
     let mut boxed = l.clone();
     boxed.visual_runs.pop();
     boxed.visual_boxes = vec![PositionedInlineBox {
-        bidi_level: 1,
+        bidi_level: BidiLevel::RTL,
         baseline_align: BaselineAlignment::Auto,
         box_id: 1,
         byte_range: TextRange::new(1, 2),
@@ -842,18 +851,21 @@ fn a_caret_stop_carries_the_level_of_a_run_owning_its_offset() {
         descent: 1.,
         overflow_policy: BoxOverflowPolicy::Clip,
     }];
-    boxed.caret_stops = vec![caret(50., 1, 1), caret(100., 2, 1)];
+    boxed.caret_stops = vec![
+        caret(50., 1, BidiLevel::RTL),
+        caret(100., 2, BidiLevel::RTL),
+    ];
     assert_eq!(boxed.validate(&ctx()), Ok(()));
-    boxed.caret_stops = vec![caret(100., 2, 0)];
+    boxed.caret_stops = vec![caret(100., 2, BidiLevel::LTR)];
     assert_eq!(boxed.validate(&ctx()), invalid(0));
     // The stop of an empty line carries the paragraph level.
     let mut empty = line();
     empty.byte_range = TextRange::empty_at(0);
     empty.visible_byte_end = 0;
     set_visual_width(&mut empty, 0.);
-    empty.caret_stops = vec![caret(0., 0, 0)];
+    empty.caret_stops = vec![caret(0., 0, BidiLevel::LTR)];
     assert_eq!(empty.validate(&ctx()), Ok(()));
-    empty.caret_stops = vec![caret(0., 0, 1)];
+    empty.caret_stops = vec![caret(0., 0, BidiLevel::RTL)];
     assert_eq!(empty.validate(&ctx()), invalid(0));
 }
 
@@ -940,7 +952,7 @@ fn span_fragment(span: (usize, usize), bytes: (usize, usize)) -> PositionedSpanF
         width: 100.,
         ascent: 8.,
         descent: 2.,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
     }
 }
 
@@ -982,7 +994,7 @@ fn atomic_fragment(full: (usize, usize), bytes: (usize, usize), x: f32) -> Atomi
         fragment_byte_range: TextRange::new(bytes.0, bytes.1),
         x,
         width: 50.,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
     }
 }
 

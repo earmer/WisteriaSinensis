@@ -4,19 +4,17 @@ use crate::common::*;
 use mutil_engine::*;
 
 /// Atoms and clusters have no level of their own: the run's level is theirs,
-/// so changing it changes the whole payload, and only an unrepresentable
-/// level is an error.
+/// so changing it changes the whole payload, and a level above
+/// `BidiLevel::MAX` cannot be built.
 #[test]
 fn the_run_level_is_the_level_of_its_atoms() {
     let mut a = ast("abc");
     assert!(check(&a, "abc").is_ok());
-    a.runs[0].bidi_level = 1;
+    a.runs[0].bidi_level = BidiLevel::RTL;
     assert!(check(&a, "abc").is_ok());
-    a.runs[0].bidi_level = BIDI_MAX_DEPTH + 2;
-    assert_eq!(
-        check(&a, "abc"),
-        Err(LayoutInputError::InvalidShapingRun { run: 0 })
-    );
+    a.runs[0].bidi_level = BidiLevel::MAX;
+    assert!(check(&a, "abc").is_ok());
+    assert_eq!(BidiLevel::new(BIDI_MAX_DEPTH + 2), None);
 }
 
 #[test]
@@ -94,7 +92,7 @@ fn nbsp_glue_must_not_be_collapsible() {
         vec![
             WordNode::Glue(GlueNode {
                 original_bidi_class: BidiClass::Cs,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 is_collapsible: true,
                 byte_range: TextRange::new(0, 2),
                 kind: GlueKind::WordSpace,
@@ -132,12 +130,6 @@ fn non_finite_variation_and_impossible_bidi_level_are_rejected() {
         .features
         .variations
         .push(FontVariation::new(*b"wght", f32::INFINITY));
-    assert_eq!(
-        check(&a, "abc"),
-        Err(LayoutInputError::InvalidShapingRun { run: 0 })
-    );
-    let mut a = ast("abc");
-    a.runs[0].bidi_level = BIDI_MAX_DEPTH + 2;
     assert_eq!(
         check(&a, "abc"),
         Err(LayoutInputError::InvalidShapingRun { run: 0 })
@@ -294,7 +286,7 @@ fn a_tab_owns_source_bytes() {
 
 #[test]
 fn an_inline_object_is_at_a_representable_level() {
-    // An object's level comes from its context: any representable level.
+    // An object's level comes from its context: any level.
     let with_object = |bidi_level| {
         let mut a = ast("ab\u{fffc}");
         rebuild_items(&mut a, |b| {
@@ -315,11 +307,8 @@ fn an_inline_object_is_at_a_representable_level() {
         });
         check(&a, "ab\u{fffc}")
     };
-    assert_eq!(with_object(BIDI_MAX_DEPTH + 1), Ok(()));
-    assert_eq!(
-        with_object(BIDI_MAX_DEPTH + 2),
-        Err(LayoutInputError::InvalidInlineBox { item: 1 })
-    );
+    assert_eq!(with_object(BidiLevel::MAX), Ok(()));
+    assert_eq!(with_object(BidiLevel::RTL), Ok(()));
 }
 
 #[test]
@@ -349,7 +338,7 @@ fn every_text_box_and_inline_object_owns_source_bytes() {
     // An inline object without bytes: nothing for a caret to address.
     let object = |start, end| {
         WordNode::Box(BoxNode::InlineObject {
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(start, end),
             box_id: 1,

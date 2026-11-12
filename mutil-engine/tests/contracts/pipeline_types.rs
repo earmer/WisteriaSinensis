@@ -51,7 +51,7 @@ fn test_pipeline_types_compile() {
         // A breakable space: the break opportunity follows the glue.
         WordNode::Glue(GlueNode {
             original_bidi_class: BidiClass::Ws,
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             is_collapsible: true,
 
             byte_range: TextRange::new(5, 6),
@@ -165,7 +165,7 @@ fn test_pipeline_types_compile() {
             variations: Default::default(),
 
             font: FontRef::unscaled(FontId(1)),
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             byte_range: TextRange::new(0, TEXT.len()),
             glyphs: line_glyphs,
         }],
@@ -173,7 +173,7 @@ fn test_pipeline_types_compile() {
             x: 0.0,
             offset: 0,
             affinity: CaretAffinity::Downstream,
-            level: 0,
+            level: BidiLevel::LTR,
             line: 0,
         }],
         visual_boxes: vec![],
@@ -203,7 +203,7 @@ fn test_pipeline_types_compile() {
     let sel = SelectionRect {
         rect: Rect::new(0.0, 0.0, 50.0, 16.0),
         line: 0,
-        level: 0,
+        level: BidiLevel::LTR,
         is_line_end_extension: false,
     };
     assert_eq!(cursor.affinity, CaretAffinity::Upstream);
@@ -250,7 +250,7 @@ fn every_word_node_variant_is_constructible() {
     let nodes = [
         word(&mut ast, TextRange::new(0, 5)),
         WordNode::Box(BoxNode::InlineObject {
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(7, 8),
             box_id: 7,
@@ -264,11 +264,11 @@ fn every_word_node_variant_is_constructible() {
             span_id: 3,
             edge: SpanEdge::Leading,
             width: 6.0,
-            bidi_level: 1,
+            bidi_level: BidiLevel::RTL,
         }),
         WordNode::Glue(GlueNode {
             original_bidi_class: BidiClass::Ws,
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             is_collapsible: true,
 
             byte_range: TextRange::empty_at(5),

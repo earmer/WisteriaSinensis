@@ -31,7 +31,7 @@ fn text(ast: &mut ParagraphAst, start: usize, end: usize) -> WordNode {
 fn space(at: usize) -> WordNode {
     WordNode::Glue(GlueNode {
         original_bidi_class: BidiClass::Ws,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         is_collapsible: true,
 
         byte_range: TextRange::new(at, at + 1),
@@ -48,7 +48,7 @@ fn boundary(edge: SpanEdge, at: usize) -> WordNode {
         span_id: SPAN_ID,
         edge,
         width: PAD,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
     })
 }
 
@@ -144,7 +144,7 @@ fn fragment(range: (usize, usize), x: f32, width: f32) -> PositionedSpanFragment
         width,
         ascent: 12.0,
         descent: 4.0,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
     }
 }
 
@@ -176,7 +176,7 @@ fn stop(x: f32, offset: usize, affinity: CaretAffinity, line: usize) -> CaretSto
         x,
         offset,
         affinity,
-        level: 0,
+        level: BidiLevel::LTR,
         line,
     }
 }
@@ -243,7 +243,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         variations: Default::default(),
 
         font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         byte_range: TextRange::new(0, 8),
         glyphs: glyphs0,
     }];
@@ -262,7 +262,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         variations: Default::default(),
 
         font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         byte_range: TextRange::new(8, 14),
         glyphs: glyphs1,
     }];
@@ -338,7 +338,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     // everything inside braces, fractions or radicals would stay one object.
     let obj = |id: u64, at: usize| {
         WordNode::Box(BoxNode::InlineObject {
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(at, at + 1),
             box_id: id,

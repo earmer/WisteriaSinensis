@@ -132,7 +132,7 @@ fn font_metrics_all_fields_and_overflow() {
         &mut a,
         WritingMode::VerticalLr,
         GlyphOrientation::VerticalUpright,
-        0,
+        BidiLevel::LTR,
     );
     assert_eq!(check(&a, "a"), Ok(()));
     let strut = LayoutPolicySnapshot::resolve(&a, &constraints(), &LayoutOptions::default())

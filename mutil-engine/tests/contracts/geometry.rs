@@ -166,7 +166,7 @@ fn provider_monotonicity_clearance_and_snapshots() {
     };
     let mut a = ast("a");
     a.items[0] = WordNode::Box(BoxNode::InlineObject {
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         baseline_align: BaselineAlignment::Auto,
         byte_range: TextRange::new(0, 1),
         box_id: 1,
@@ -229,7 +229,7 @@ fn probe_ignores_tall_input_after_first_break() {
             boxed(b, 0, 1),
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4), false)),
             WordNode::Box(BoxNode::InlineObject {
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 baseline_align: BaselineAlignment::Auto,
                 byte_range: TextRange::new(4, 5),
                 box_id: 1,

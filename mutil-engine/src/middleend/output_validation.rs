@@ -8,7 +8,7 @@ use super::{
     PositionedGlyph, PositionedLine, PositionedParagraph, PositionedSlot,
 };
 use crate::frontend::{AnnotationSide, BoxOverflowPolicy};
-use crate::types::{BIDI_MAX_DEPTH, BidiDirection, BidiLevel, TextRange};
+use crate::types::{BidiDirection, BidiLevel, TextRange};
 use std::collections::{HashMap, HashSet};
 
 /// A violated [`PositionedLine`] invariant.
@@ -113,7 +113,7 @@ pub enum LineInvariantError {
         /// Index into that run's `glyphs` of the glyph that steps back.
         glyph: usize,
     },
-    /// An atomic fragment's geometry or bidi level is invalid; its bytes are
+    /// An atomic fragment's geometry is invalid; its bytes are
     /// empty, outside the line or outside its span; or the fragments of its
     /// span on this line disagree about the span's range, overlap, or do not
     /// cover the part of the span on the line.
@@ -152,8 +152,7 @@ pub enum LineInvariantError {
         glyph: usize,
     },
     /// An inline box has a non-finite coordinate, a negative size, an invalid
-    /// baseline alignment, an unrepresentable bidi level, or bytes outside the
-    /// line.
+    /// baseline alignment, or bytes outside the line.
     InvalidInlineBox {
         /// Index into `visual_boxes`.
         index: usize,
@@ -260,8 +259,8 @@ pub enum LineInvariantError {
     },
     /// A caret stop has a non-finite `x`, is out of visual order, lies outside
     /// the line's bytes or belongs to another line, or has a bidi level that
-    /// is unrepresentable or is not that of a run owning the text at its
-    /// offset.
+    /// no glyph, box or tab owning its offset has (on an empty line: other
+    /// than the paragraph level).
     InvalidCaretStop {
         /// Index into `caret_stops`.
         index: usize,
@@ -645,14 +644,13 @@ impl PositionedLine {
             let finite = [f.x, f.width, f.ascent, f.descent, f.x + f.width]
                 .iter()
                 .all(|v| v.is_finite());
-            let level_ok = f.bidi_level <= BIDI_MAX_DEPTH + 1;
-            if !(finite && level_ok && f.width >= 0.0 && f.ascent >= 0.0 && f.descent >= 0.0) {
+            if !(finite && f.width >= 0.0 && f.ascent >= 0.0 && f.descent >= 0.0) {
                 return Err(E::InvalidSpanFragment { index });
             }
         }
         for (index, f) in self.atomic_fragments.iter().enumerate() {
             let finite = f.x.is_finite() && f.width.is_finite() && (f.x + f.width).is_finite();
-            if !(finite && f.width >= 0.0 && f.bidi_level <= BIDI_MAX_DEPTH + 1) {
+            if !(finite && f.width >= 0.0) {
                 return Err(E::InvalidAtomicFragment { index });
             }
         }
@@ -835,9 +833,7 @@ impl PositionedLine {
                 .is_none_or(|r| r.start < r.end && self.byte_range.contains_range(r))
         };
         for (run, r) in self.visual_runs.iter().enumerate() {
-            if r.bidi_level > BIDI_MAX_DEPTH + 1
-                || !r.orientation.is_valid(ctx.writing_mode, r.bidi_level)
-            {
+            if !r.orientation.is_valid(ctx.writing_mode, r.bidi_level) {
                 return Err(E::OrientationMismatch);
             }
             if let Some(glyph) = r.glyphs.iter().position(|g| !valid_glyph(g)) {
@@ -861,7 +857,6 @@ impl PositionedLine {
         }
         for (index, b) in self.visual_boxes.iter().enumerate() {
             if !b.baseline_align.is_valid()
-                || b.bidi_level > BIDI_MAX_DEPTH + 1
                 || b.byte_range.is_empty()
                 || !self.owns_bytes(b.byte_range)
             {
@@ -954,7 +949,6 @@ impl PositionedLine {
             if !in_order
                 || !(self.byte_range.start..=self.byte_range.end).contains(&stop.offset)
                 || stop.line != ctx.line_index
-                || stop.level > BIDI_MAX_DEPTH + 1
                 || !level_is_owned()
             {
                 return Err(LineInvariantError::InvalidCaretStop { index });
@@ -981,7 +975,7 @@ impl PositionedLine {
                 && ann.variations.iter().all(|v| v.value().is_finite()))
             {
                 R::InvalidMetrics
-            } else if !ann.orientation.is_valid(ctx.writing_mode, 0) {
+            } else if !ann.orientation.is_valid(ctx.writing_mode, BidiLevel::LTR) {
                 R::OrientationMismatch
             } else if ann.base_byte_range.is_empty()
                 || ann.base_byte_range.start < self.byte_range.start
@@ -1902,7 +1896,7 @@ mod tests {
                 variations: Default::default(),
 
                 font: FontRef::unscaled(FontId(0)),
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 byte_range: TextRange::new(0, byte_end),
                 glyphs,
             }],
@@ -1931,7 +1925,7 @@ mod tests {
 
     fn inline_box(x: f32, width: f32) -> PositionedInlineBox {
         PositionedInlineBox {
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             box_id: 9,
             byte_range: TextRange::new(1, 4),
@@ -2201,7 +2195,7 @@ mod tests {
             width,
             ascent: 12.0,
             descent: 4.0,
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
         }
     }
 
@@ -2375,7 +2369,7 @@ mod tests {
             x,
             offset,
             affinity: crate::middleend::CaretAffinity::Downstream,
-            level: 0,
+            level: BidiLevel::LTR,
             line: 0,
         }
     }
@@ -2427,14 +2421,6 @@ mod tests {
             }),
             Err(LineInvariantError::InvalidCaretStop { index: 0 })
         );
-        l.caret_stops = vec![
-            caret(0.0, 0),
-            CaretStop {
-                level: BIDI_MAX_DEPTH + 2,
-                ..caret(5.0, 4)
-            },
-        ];
-        assert_eq!(l.validate(&ctx()), invalid);
     }
 
     #[test]
@@ -2446,12 +2432,12 @@ mod tests {
         };
         // A glyph at level 0 owns 0..1; nothing owns 2..4.
         let mut l = line(vec![glyph(0.0, 5.0, false)], 5.0);
-        l.caret_stops = vec![leveled(1, 0)];
+        l.caret_stops = vec![leveled(1, BidiLevel::LTR)];
         assert_eq!(l.validate(&ctx()), Ok(()));
-        l.caret_stops = vec![leveled(1, 1)];
+        l.caret_stops = vec![leveled(1, BidiLevel::RTL)];
         assert_eq!(l.validate(&ctx()), invalid(0));
         // A stop no glyph, box or tab touches, on a line with content.
-        l.caret_stops = vec![leveled(3, 0)];
+        l.caret_stops = vec![leveled(3, BidiLevel::LTR)];
         assert_eq!(l.validate(&ctx()), invalid(0));
 
         // An inline object and a tab own their bytes and lend their levels.
@@ -2465,7 +2451,7 @@ mod tests {
             ascent: 0.0,
             descent: 0.0,
             overflow_policy: BoxOverflowPolicy::AllowOverflow,
-            bidi_level: 2,
+            bidi_level: BidiLevel::new(2).unwrap(),
         };
         let tab = PositionedTab {
             byte_range: TextRange::new(2, 4),
@@ -2475,12 +2461,12 @@ mod tests {
         l.visual_boxes = vec![object];
         l.tabs = vec![tab];
         assert_eq!(l.validate(&ctx()), Ok(()));
-        l.caret_stops = vec![leveled(3, 1)];
+        l.caret_stops = vec![leveled(3, BidiLevel::RTL)];
         assert_eq!(l.validate(&ctx()), invalid(0));
         // Between the glyph and the object either level qualifies.
-        l.caret_stops = vec![leveled(1, 2)];
+        l.caret_stops = vec![leveled(1, BidiLevel::new(2).unwrap())];
         assert_eq!(l.validate(&ctx()), Ok(()));
-        l.caret_stops = vec![leveled(1, 1)];
+        l.caret_stops = vec![leveled(1, BidiLevel::RTL)];
         assert_eq!(l.validate(&ctx()), invalid(0));
         // A tab lends the paragraph level (UAX #9 L1): level 1 in an RTL
         // paragraph, where the glyph and the object keep their own levels.
@@ -2488,9 +2474,9 @@ mod tests {
             base_direction: BidiDirection::Rtl,
             ..ctx()
         };
-        l.caret_stops = vec![leveled(3, 1)];
+        l.caret_stops = vec![leveled(3, BidiLevel::RTL)];
         assert_eq!(l.validate(&rtl), Ok(()));
-        l.caret_stops = vec![leveled(3, 0)];
+        l.caret_stops = vec![leveled(3, BidiLevel::LTR)];
         assert_eq!(l.validate(&rtl), invalid(0));
     }
 
@@ -2510,7 +2496,7 @@ mod tests {
             l.validate(&rtl),
             Err(LineInvariantError::InvalidCaretStop { index: 0 })
         );
-        l.caret_stops[0].level = 1;
+        l.caret_stops[0].level = BidiLevel::RTL;
         assert_eq!(l.validate(&rtl), Ok(()));
     }
 
@@ -2752,7 +2738,7 @@ mod tests {
     #[test]
     fn a_single_wide_inline_box_may_overflow() {
         let object = |x: f32, width: f32, policy| PositionedInlineBox {
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             box_id: 1,
             byte_range: TextRange::new(0, 1),
@@ -2917,7 +2903,7 @@ mod tests {
 
         // Exemption A, padded: one AllowOverflow box in a chip over its bytes.
         let object = |x: f32, width: f32| PositionedInlineBox {
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             box_id: 1,
             byte_range: TextRange::new(0, 1),
@@ -2983,17 +2969,12 @@ mod tests {
     }
 
     #[test]
-    fn fragment_bidi_level_is_range_checked() {
+    fn a_fragment_may_carry_the_highest_level() {
         let mut l = spanned_line();
         let mut f = fragment(1, 0.0, 30.0, (0, 4));
-        f.bidi_level = BIDI_MAX_DEPTH + 1;
+        f.bidi_level = BidiLevel::MAX;
         l.span_fragments = vec![f];
         assert!(l.validate(&ctx()).is_ok());
-        l.span_fragments[0].bidi_level = BIDI_MAX_DEPTH + 2;
-        assert_eq!(
-            l.validate(&ctx()),
-            Err(LineInvariantError::InvalidSpanFragment { index: 0 })
-        );
     }
 
     #[test]

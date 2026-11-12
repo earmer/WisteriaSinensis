@@ -49,7 +49,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidShapingRun { run: 1 },
-            "run 1 has an unresolved script, an invalid font size, bidi level or variation, or bytes that start before the previous run ends",
+            "run 1 has an unresolved script, an invalid font size or variation, or bytes that start before the previous run ends",
         ),
         (
             LayoutInputError::InvalidRunStorage { run: 1 },
@@ -77,11 +77,11 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidInlineBox { item: 2 },
-            "inline object 2 has a non-finite or negative size, an invalid baseline alignment or bidi level, or no source bytes",
+            "inline object 2 has a non-finite or negative size, an invalid baseline alignment, or no source bytes",
         ),
         (
             LayoutInputError::InvalidGlue { item: 2 },
-            "glue 2 has an invalid size or bidi level, a compression pool that is not shrink only, or source bytes that do not match its kind",
+            "glue 2 has an invalid size, a compression pool that is not shrink only, or source bytes that do not match its kind",
         ),
         (
             LayoutInputError::InvalidDiscretionary { item: 2 },
@@ -250,7 +250,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidInlineBox { index: 4 },
-            "inline box 4 has a non-finite coordinate, a negative size, an invalid baseline alignment or bidi level, or bytes that are empty or outside the line",
+            "inline box 4 has a non-finite coordinate, a negative size, an invalid baseline alignment, or bytes that are empty or outside the line",
         ),
         (
             LineInvariantError::InlineBoxOutsideBlock { index: 4 },
@@ -270,7 +270,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidSpanFragment { index: 4 },
-            "span fragment 4 has a non-finite coordinate, a negative size or an unrepresentable bidi level",
+            "span fragment 4 has a non-finite coordinate or a negative size",
         ),
         (
             LineInvariantError::SpanFragmentOutsideBlock { index: 4 },
@@ -336,7 +336,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidCaretStop { index: 4 },
-            "caret stop 4 is non-finite, out of visual order, outside the line, or at a bidi level that no run owning its offset has",
+            "caret stop 4 is non-finite, out of visual order, outside the line, or at a bidi level that nothing owning its offset has",
         ),
         (
             LineInvariantError::InvalidDecoration { index: 4 },

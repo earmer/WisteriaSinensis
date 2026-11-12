@@ -286,7 +286,7 @@ pub fn ast(t: &str) -> ParagraphAst {
             style: Default::default(),
             script: ScriptTag::LATIN,
             locale: LocaleTag::und(),
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             decoration: Default::default(),
             atom_range: 0..0,
             cluster_range: 0..0,
@@ -425,13 +425,18 @@ pub fn run(g: PositionedGlyph) -> VisualGlyphRun {
         variations: Default::default(),
 
         font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         byte_range: g.byte_range.unwrap(),
         glyphs: vec![g],
     }
 }
 
-pub fn orient(a: &mut ParagraphAst, mode: WritingMode, orientation: GlyphOrientation, level: u8) {
+pub fn orient(
+    a: &mut ParagraphAst,
+    mode: WritingMode,
+    orientation: GlyphOrientation,
+    level: BidiLevel,
+) {
     a.writing_mode = mode;
     for r in &mut a.runs {
         r.orientation = orientation;
@@ -545,7 +550,7 @@ pub fn shaping_run(text: &str, locale: &str) -> ShapingRun {
         style: FontStyle::default(),
         script: ScriptTag::LATIN,
         locale: locale.parse().expect("a well-formed locale"),
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         decoration: TextDecoration::default(),
         atom_range: 0..0,
         cluster_range: 0..0,

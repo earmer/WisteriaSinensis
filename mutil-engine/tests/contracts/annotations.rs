@@ -170,7 +170,7 @@ fn ruby_rejects_glue_and_cluster_internal_edges() {
             boxed(b, 0, 1),
             WordNode::Glue(GlueNode {
                 original_bidi_class: BidiClass::Ws,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 is_collapsible: true,
                 byte_range: TextRange::new(1, 2),
                 kind: GlueKind::WordSpace,

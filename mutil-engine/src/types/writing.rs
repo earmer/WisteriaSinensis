@@ -1,5 +1,5 @@
 //! Writing modes and resolved glyph geometry in canonical flow space.
-use super::{Point, Rect};
+use super::{BidiLevel, Point, Rect};
 
 /// Orthogonal mapping from inline/block coordinates to paragraph-local pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -130,11 +130,11 @@ pub enum GlyphOrientation {
 
 impl GlyphOrientation {
     /// Checks writing-mode compatibility and the required level parity.
-    pub const fn is_valid(self, mode: WritingMode, level: u8) -> bool {
+    pub const fn is_valid(self, mode: WritingMode, level: BidiLevel) -> bool {
         let compatible = mode.is_vertical() != matches!(self, Self::Horizontal);
         compatible
             && (!matches!(self, Self::VerticalUpright | Self::HorizontalInVertical)
-                || level % 2 == 0)
+                || !level.direction().is_rtl())
     }
 }
 

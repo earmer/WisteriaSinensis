@@ -50,7 +50,7 @@ fn orientation_and_tcy_matrix() {
         ),
     ] {
         let mut a = ast("a");
-        orient(&mut a, mode, orientation, level);
+        orient(&mut a, mode, orientation, BidiLevel::new(level).unwrap());
         assert_eq!(
             check(&a, "a").is_ok(),
             valid,
@@ -62,7 +62,7 @@ fn orientation_and_tcy_matrix() {
         &mut a,
         WritingMode::VerticalRl,
         GlyphOrientation::HorizontalInVertical,
-        0,
+        BidiLevel::LTR,
     );
     assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
     rebuild_items(&mut a, |b| {
@@ -77,7 +77,7 @@ fn orientation_and_tcy_matrix() {
         &mut a,
         WritingMode::VerticalRl,
         GlyphOrientation::HorizontalInVertical,
-        0,
+        BidiLevel::LTR,
     );
     assert_eq!(check(&a, "ab"), Err(LayoutInputError::OrientationMismatch));
     a.items.remove(1);
@@ -241,7 +241,7 @@ fn tcy_ast() -> ParagraphAst {
         &mut a,
         WritingMode::VerticalRl,
         GlyphOrientation::HorizontalInVertical,
-        0,
+        BidiLevel::LTR,
     );
     edit_text_box(&mut a, 0, |_, clusters| {
         let mut merged = clusters[0].clone();
@@ -269,7 +269,7 @@ fn tcy_run_split_across_two_boxes_is_rejected() {
                 span_id: 0,
                 edge: SpanEdge::Trailing,
                 width: 0.,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
             }),
             boxed(b, 1, 2),
             end(2),
@@ -279,7 +279,7 @@ fn tcy_run_split_across_two_boxes_is_rejected() {
         &mut a,
         WritingMode::VerticalRl,
         GlyphOrientation::HorizontalInVertical,
-        0,
+        BidiLevel::LTR,
     );
     assert_eq!(check(&a, "25"), Err(LayoutInputError::OrientationMismatch));
 }

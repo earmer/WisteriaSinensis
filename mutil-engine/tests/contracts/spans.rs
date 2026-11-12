@@ -27,7 +27,7 @@ fn spanned(n: usize) -> (String, ParagraphAst) {
                 span_id: i as u64,
                 edge,
                 width: 0.,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
             }));
             if edge == SpanEdge::Leading {
                 let text = boxed(&mut a, i, i + 1);
@@ -118,7 +118,7 @@ fn decorated(ranges: &[(usize, usize)]) -> ParagraphAst {
                 span_id: sp.span_id,
                 edge: SpanEdge::Trailing,
                 width: 0.,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
             }));
         }
         for sp in ordered.iter().filter(|sp| sp.byte_range.start == offset) {
@@ -127,7 +127,7 @@ fn decorated(ranges: &[(usize, usize)]) -> ParagraphAst {
                 span_id: sp.span_id,
                 edge: SpanEdge::Leading,
                 width: 0.,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
             }));
         }
         if offset < 4 {
@@ -282,7 +282,7 @@ fn an_isolate_may_cover_only_a_hard_break() {
             boxed(b, 0, 1),
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4), false)),
             WordNode::Box(BoxNode::InlineObject {
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 baseline_align: BaselineAlignment::Auto,
                 byte_range: TextRange::new(4, 5),
                 box_id: 1,

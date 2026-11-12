@@ -112,7 +112,7 @@ fn paragraph_ast() -> ParagraphAst {
         // stays on the trailing edge of the line that breaks after it.
         WordNode::Glue(GlueNode {
             original_bidi_class: BidiClass::Ws,
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             is_collapsible: true,
 
             byte_range: TextRange::new(7, 8),
@@ -123,7 +123,7 @@ fn paragraph_ast() -> ParagraphAst {
         }),
         WordNode::Discretionary(DiscretionaryNode::direct(8)),
         WordNode::Box(BoxNode::InlineObject {
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(8, 11),
             box_id: 42,
@@ -205,7 +205,7 @@ fn run_of(byte_range: TextRange, glyphs: Vec<PositionedGlyph>) -> VisualGlyphRun
         font_size: 16.0,
         variations: Default::default(),
         font: FontRef::unscaled(FontId(1)),
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
         byte_range,
         glyphs,
     }
@@ -268,7 +268,7 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
         slots: single_slot(body_width, ctx.wrap_width),
         visual_runs: vec![run_of(TextRange::new(3, 15), l1_glyphs)],
         visual_boxes: vec![PositionedInlineBox {
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             box_id: 42,
             byte_range: TextRange::new(8, 11),
@@ -297,7 +297,7 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
             x: 0.0,
             offset: 18,
             affinity: CaretAffinity::Downstream,
-            level: 0,
+            level: BidiLevel::LTR,
             line: 2,
         }],
         ..blank_line()
@@ -678,12 +678,12 @@ fn small_line() -> PositionedLine {
             variations: Default::default(),
 
             font: FontRef::unscaled(FontId(1)),
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             byte_range: TextRange::new(0, 4),
             glyphs: vec![g(0.0, (0, 1)), g(30.0, (3, 4))],
         }],
         visual_boxes: vec![PositionedInlineBox {
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             box_id: 7,
             byte_range: TextRange::new(1, 2),
@@ -1084,7 +1084,7 @@ fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
 
 #[test]
 fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
-    let stop = |x: f32, offset: usize, level: u8, affinity| CaretStop {
+    let stop = |x: f32, offset: usize, level: BidiLevel, affinity| CaretStop {
         x,
         offset,
         affinity,
@@ -1099,12 +1099,12 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
     mixed.byte_range = TextRange::new(0, 6);
     mixed.visible_byte_end = 6;
     mixed.caret_stops = vec![
-        stop(0.0, 0, 0, Downstream),
-        stop(10.0, 1, 0, Downstream),
-        stop(20.0, 2, 0, Downstream),
-        stop(20.0, 6, 1, Upstream), // two stops share x = 20
-        stop(30.0, 4, 1, Downstream),
-        stop(40.0, 2, 1, Upstream),
+        stop(0.0, 0, BidiLevel::LTR, Downstream),
+        stop(10.0, 1, BidiLevel::LTR, Downstream),
+        stop(20.0, 2, BidiLevel::LTR, Downstream),
+        stop(20.0, 6, BidiLevel::RTL, Upstream), // two stops share x = 20
+        stop(30.0, 4, BidiLevel::RTL, Downstream),
+        stop(40.0, 2, BidiLevel::RTL, Upstream),
     ];
     let right = mixed.extreme_caret_stop(HangSide::Right).unwrap();
     assert_eq!((right.x, right.offset), (40.0, 2));
@@ -1115,20 +1115,20 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
     // Pure LTR line: the right extreme is (visible_byte_end, Upstream).
     let mut ltr = small_line();
     ltr.caret_stops = vec![
-        stop(0.0, 0, 0, Downstream),
-        stop(20.0, 2, 0, Downstream),
-        stop(40.0, 4, 0, Upstream),
+        stop(0.0, 0, BidiLevel::LTR, Downstream),
+        stop(20.0, 2, BidiLevel::LTR, Downstream),
+        stop(40.0, 4, BidiLevel::LTR, Upstream),
     ];
     let end = ltr.extreme_caret_stop(HangSide::Right).unwrap();
     assert_eq!((end.offset, end.affinity), (ltr.visible_byte_end, Upstream));
 
     // Pure RTL line in an RTL paragraph: logical end is the *left* extreme.
     let mut rtl = small_line();
-    rtl.visual_runs[0].bidi_level = 1;
+    rtl.visual_runs[0].bidi_level = BidiLevel::RTL;
     rtl.caret_stops = vec![
-        stop(0.0, 4, 1, Upstream),
-        stop(20.0, 2, 1, Downstream),
-        stop(40.0, 0, 1, Downstream),
+        stop(0.0, 4, BidiLevel::RTL, Upstream),
+        stop(20.0, 2, BidiLevel::RTL, Downstream),
+        stop(40.0, 0, BidiLevel::RTL, Downstream),
     ];
     let end = rtl.extreme_caret_stop(HangSide::Left).unwrap();
     assert_eq!((end.offset, end.affinity), (rtl.visible_byte_end, Upstream));
@@ -1136,7 +1136,10 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
     assert_eq!(start.offset, 0);
 
     // Tie-break by visual order: equal x picks the last stop on the right.
-    let tie = [stop(5.0, 1, 0, Downstream), stop(5.0, 9, 1, Upstream)];
+    let tie = [
+        stop(5.0, 1, BidiLevel::LTR, Downstream),
+        stop(5.0, 9, BidiLevel::RTL, Upstream),
+    ];
     let mut t = small_line();
     t.caret_stops = tie.to_vec();
     assert_eq!(t.extreme_caret_stop(HangSide::Right).unwrap().offset, 9);

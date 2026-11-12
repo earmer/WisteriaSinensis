@@ -118,7 +118,7 @@ impl AtomicFragment {
     pub fn hit_test(&self, x: f32) -> CursorPosition {
         let midpoint = self.x + 0.5 * self.width;
         let is_in_left_half = x < midpoint;
-        let is_even_level = self.bidi_level & 1 == 0;
+        let is_even_level = !self.bidi_level.direction().is_rtl();
         // Even levels map the left half to the start; odd levels swap halves.
         let snaps_to_start = is_in_left_half == is_even_level;
         if snaps_to_start {

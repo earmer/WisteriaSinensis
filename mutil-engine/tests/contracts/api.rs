@@ -65,20 +65,20 @@ fn atomic_fragment_snaps_to_full_span_not_wrapped_fragment() {
         fragment_byte_range: TextRange::new(10, 15),
         x: 0.,
         width: 10.,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
     };
     assert_eq!(f.hit_test(1.).byte_offset, 0);
     assert_eq!(f.hit_test(5.).byte_offset, 20);
     assert_eq!(f.hit_test(9.).affinity, CaretAffinity::Upstream);
-    f.bidi_level = 1;
+    f.bidi_level = BidiLevel::RTL;
     assert_eq!(f.hit_test(1.).byte_offset, 20);
     assert_eq!(f.hit_test(5.).byte_offset, 0);
     // Even levels above 0 behave like level 0.
-    f.bidi_level = 2;
+    f.bidi_level = BidiLevel::new(2).unwrap();
     assert_eq!(f.hit_test(1.).byte_offset, 0);
     assert_eq!(f.hit_test(5.).byte_offset, 20);
     // The midpoint is that of the fragment itself, wherever it sits on the line.
-    f.bidi_level = 0;
+    f.bidi_level = BidiLevel::LTR;
     f.x = 100.;
     f.width = 6.;
     assert_eq!(f.hit_test(102.).byte_offset, 0);

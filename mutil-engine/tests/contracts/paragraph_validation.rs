@@ -177,7 +177,7 @@ fn span_fragment(span: (usize, usize), bytes: (usize, usize)) -> PositionedSpanF
         width: 100.,
         ascent: 8.,
         descent: 2.,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
     }
 }
 
@@ -225,7 +225,7 @@ fn atomic_fragment(full: (usize, usize), bytes: (usize, usize)) -> AtomicFragmen
         fragment_byte_range: TextRange::new(bytes.0, bytes.1),
         x: 0.,
         width: 100.,
-        bidi_level: 0,
+        bidi_level: BidiLevel::LTR,
     }
 }
 

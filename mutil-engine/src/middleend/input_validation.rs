@@ -14,8 +14,8 @@ use crate::frontend::{
     is_paragraph_separator, is_word_space, text_is_self_contained,
 };
 use crate::types::{
-    AtomFlags, BIDI_MAX_DEPTH, BidiLevel, GlyphOrientation, GraphemeAtom, RawShapedGlyph,
-    ShapedCluster, TextRange, WritingMode,
+    AtomFlags, BidiLevel, GlyphOrientation, GraphemeAtom, RawShapedGlyph, ShapedCluster, TextRange,
+    WritingMode,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -59,8 +59,7 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::runs`.
         run: usize,
     },
-    /// A run's `bidi_level` exceeds the UAX #9 maximum, its font size is not
-    /// positive and finite, its script is unresolved (`Zyyy` / `Zinh`), one of
+    /// A run's font size is not positive and finite, its script is unresolved (`Zyyy` / `Zinh`), one of
     /// its font variation coordinates is not finite, or its `byte_range`
     /// starts before the previous body run's `byte_range` ends (the body runs
     /// must be non-decreasing and non-overlapping in run order).
@@ -122,8 +121,7 @@ pub enum LayoutInputError {
         item: usize,
     },
     /// An inline object has a non-finite or negative width, ascent or descent,
-    /// an invalid baseline alignment or an unrepresentable bidi level, or owns
-    /// no source bytes.
+    /// an invalid baseline alignment, or owns no source bytes.
     InvalidInlineBox {
         /// Index into `ParagraphAst::items`.
         item: usize,
@@ -134,8 +132,7 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::items`.
         item: usize,
     },
-    /// A glue node has a non-finite or negative width, stretch or shrink or
-    /// an unrepresentable bidi level; is a `CjkPunctCompression` node with a
+    /// A glue node has a non-finite or negative width, stretch or shrink; is a `CjkPunctCompression` node with a
     /// natural width or a stretch; does not match its source (a `WordSpace`
     /// owns a non-empty run of word-space characters and is not collapsible
     /// over a no-break space; a synthetic kind owns no bytes).
@@ -242,12 +239,6 @@ fn fits(text: &str, range: TextRange) -> bool {
         && range.end <= text.len()
         && text.is_char_boundary(range.start)
         && text.is_char_boundary(range.end)
-}
-
-/// `true` when `level` is a level UAX #9 can resolve: explicit levels stop at
-/// `BIDI_MAX_DEPTH`, implicit resolution adds at most one.
-fn is_bidi_level(level: BidiLevel) -> bool {
-    level <= BIDI_MAX_DEPTH + 1
 }
 
 fn is_finite_nonnegative(value: f32) -> bool {
@@ -403,7 +394,6 @@ fn check_run(run: &ShapingRun, text: &str, index: usize) -> Result<(), LayoutInp
     if !(run.font_size.is_finite()
         && run.font_size > 0.0
         && !run.script.is_unresolved()
-        && is_bidi_level(run.bidi_level)
         && run
             .features
             .variations
@@ -1099,13 +1089,11 @@ impl<'a> ItemChecks<'a> {
                 width,
                 ascent,
                 descent,
-                bidi_level,
                 ..
             }) => {
                 // An object owns the bytes carets and selections address it by.
                 if byte_range.is_empty()
                     || !baseline_align.is_valid()
-                    || !is_bidi_level(*bidi_level)
                     || ![*width, *ascent, *descent]
                         .into_iter()
                         .all(is_finite_nonnegative)
@@ -1172,7 +1160,6 @@ impl<'a> ItemChecks<'a> {
             SpanEdge::Trailing => (span.byte_range.end, span.end_padding, last_level),
         };
         if byte_range.start != anchor
-            || !is_bidi_level(bidi_level)
             || !approx_eq(width, padding)
             || level.is_some_and(|level| level != bidi_level)
         {
@@ -1181,7 +1168,7 @@ impl<'a> ItemChecks<'a> {
         Ok(())
     }
 
-    /// Glue: finite, non-negative sizes at a representable level; the
+    /// Glue: finite, non-negative sizes; the
     /// compression pool is shrink only; and the node matches its source. A
     /// `WordSpace` owns a non-empty run of word-space characters and cannot
     /// collapse over a no-break space; the synthetic kinds own no bytes.
@@ -1200,11 +1187,7 @@ impl<'a> ItemChecks<'a> {
                 && source.chars().all(is_word_space)
                 && !(glue.is_collapsible && source.chars().any(is_no_break_space))
         };
-        if sizes_are_valid
-            && is_bidi_level(glue.bidi_level)
-            && pool_is_shrink_only
-            && matches_source
-        {
+        if sizes_are_valid && pool_is_shrink_only && matches_source {
             Ok(())
         } else {
             Err(LayoutInputError::InvalidGlue { item })
@@ -1725,7 +1708,7 @@ mod tests {
             style: Default::default(),
             script: ScriptTag::LATIN,
             locale: Default::default(),
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             decoration: Default::default(),
             atom_range: 0..0,
             cluster_range: 0..0,
@@ -1817,7 +1800,7 @@ mod tests {
             (1.0, 1.0, f32::INFINITY),
         ] {
             let a = with_items(vec![WordNode::Box(BoxNode::InlineObject {
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 baseline_align: crate::types::BaselineAlignment::Auto,
                 byte_range: TextRange::new(0, 1),
                 box_id: 1,
@@ -1836,7 +1819,7 @@ mod tests {
     fn glue(natural: f32, stretch: f32, shrink: f32) -> WordNode {
         WordNode::Glue(GlueNode {
             original_bidi_class: crate::types::BidiClass::Ws,
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             is_collapsible: true,
 
             byte_range: TextRange::new(1, 2),
@@ -2063,7 +2046,7 @@ mod tests {
         // Anything but a hyphenation point ends the chain.
         let space = WordNode::Glue(GlueNode {
             original_bidi_class: crate::types::BidiClass::Ws,
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
             is_collapsible: true,
 
             byte_range: TextRange::empty_at(1),
@@ -2327,7 +2310,7 @@ mod tests {
                 span_id: 5,
                 edge: SpanEdge::Leading,
                 width,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
             })
         };
         let with_span = |items, mode| {
@@ -2537,7 +2520,7 @@ mod tests {
             span_id: id,
             edge,
             width: 2.0,
-            bidi_level: 0,
+            bidi_level: BidiLevel::LTR,
         })
     }
 
@@ -2721,7 +2704,7 @@ mod tests {
         let pool = |natural, stretch, shrink| {
             WordNode::Glue(GlueNode {
                 original_bidi_class: crate::types::BidiClass::Ws,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 is_collapsible: true,
                 byte_range: TextRange::empty_at(1),
                 kind: GlueKind::CjkPunctCompression,
@@ -2751,7 +2734,7 @@ mod tests {
         let space = |range: (usize, usize), is_collapsible| {
             WordNode::Glue(GlueNode {
                 original_bidi_class: crate::types::BidiClass::Ws,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 is_collapsible,
                 byte_range: TextRange::new(range.0, range.1),
                 kind: GlueKind::WordSpace,
@@ -2790,8 +2773,8 @@ mod tests {
         // The atom 1..2 is the only one of a level-1 run.
         let inner = atom(1, 2);
         // Edge `edge` carries `level`; the other edge carries its correct level.
-        let build = |edge: SpanEdge, level: u8| {
-            let boundary = |e: SpanEdge, correct: u8, at: usize| {
+        let build = |edge: SpanEdge, level: BidiLevel| {
+            let boundary = |e: SpanEdge, correct: BidiLevel, at: usize| {
                 WordNode::Box(BoxNode::SpanBoundary {
                     byte_range: TextRange::empty_at(at),
                     span_id: 5,
@@ -2802,15 +2785,15 @@ mod tests {
             };
             let mut a = with_items(vec![
                 text_box(vec![atom(0, 1)]),
-                boundary(SpanEdge::Leading, 1, 1),
+                boundary(SpanEdge::Leading, BidiLevel::RTL, 1),
                 text_box(vec![inner.clone()]),
                 text_box(vec![atom(2, 3)]),
-                boundary(SpanEdge::Trailing, 0, 3),
+                boundary(SpanEdge::Trailing, BidiLevel::LTR, 3),
                 text_box(vec![atom(3, 4)]),
             ]);
             // Three disjoint runs in text order: `a` | the level-1 atom | `cd`.
             let mut rtl_run = run();
-            rtl_run.bidi_level = 1;
+            rtl_run.bidi_level = BidiLevel::RTL;
             rtl_run.byte_range = TextRange::new(1, 2);
             let mut tail = run();
             tail.byte_range = TextRange::new(2, 4);
@@ -2827,14 +2810,14 @@ mod tests {
         };
         let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
         // First atom inside the span is level 1, the last is level 0.
-        assert!(check(build(SpanEdge::Leading, 1)).is_ok());
-        assert!(check(build(SpanEdge::Trailing, 0)).is_ok());
+        assert!(check(build(SpanEdge::Leading, BidiLevel::RTL)).is_ok());
+        assert!(check(build(SpanEdge::Trailing, BidiLevel::LTR)).is_ok());
         assert_eq!(
-            check(build(SpanEdge::Leading, 0)),
+            check(build(SpanEdge::Leading, BidiLevel::LTR)),
             Err(LayoutInputError::InvalidSpanBoundary { item: 1 })
         );
         assert_eq!(
-            check(build(SpanEdge::Trailing, 1)),
+            check(build(SpanEdge::Trailing, BidiLevel::RTL)),
             Err(LayoutInputError::InvalidSpanBoundary { item: 4 })
         );
     }
@@ -2974,7 +2957,7 @@ mod tests {
         let autospace = |at: usize| {
             WordNode::Glue(GlueNode {
                 original_bidi_class: crate::types::BidiClass::Ws,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 is_collapsible: true,
 
                 byte_range: TextRange::empty_at(at),
@@ -3094,7 +3077,7 @@ mod tests {
         for kind in [GlueKind::CjkAutospace, GlueKind::CjkPunctCompression] {
             let a = with_items(vec![WordNode::Glue(GlueNode {
                 original_bidi_class: crate::types::BidiClass::Ws,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 is_collapsible: true,
 
                 byte_range: TextRange::new(1, 2),
@@ -3111,7 +3094,7 @@ mod tests {
         let mut inner = chip(5, Slice);
         inner.start_padding = 2.0;
         inner.end_padding = 6.0;
-        let build = |lead_w: f32, trail_w: f32, level: u8| {
+        let build = |lead_w: f32, trail_w: f32, level: BidiLevel| {
             let node = |edge, width, bidi_level| {
                 WordNode::Box(BoxNode::SpanBoundary {
                     byte_range: TextRange::empty_at(if edge == SpanEdge::Leading { 1 } else { 3 }),
@@ -3128,11 +3111,12 @@ mod tests {
             a.decoration_spans = vec![inner];
             a
         };
-        assert!(check(tiled(build(2.0, 6.0, 0))).is_ok());
+        assert!(check(tiled(build(2.0, 6.0, BidiLevel::LTR))).is_ok());
         let bad = |item| Err(LayoutInputError::InvalidSpanBoundary { item });
-        assert_eq!(check(build(6.0, 6.0, 0)), bad(0));
-        assert_eq!(check(build(2.0, 2.0, 0)), bad(1));
-        assert_eq!(check(build(2.0, 6.0, 127)), bad(0));
+        assert_eq!(check(build(6.0, 6.0, BidiLevel::LTR)), bad(0));
+        assert_eq!(check(build(2.0, 2.0, BidiLevel::LTR)), bad(1));
+        // A level 127 is not representable at all.
+        assert_eq!(BidiLevel::new(127), None);
 
         // Half of a CRLF pair is not a terminator.
         let run_over = |text: &str, items: Vec<WordNode>| {
@@ -3377,7 +3361,7 @@ mod tests {
         let ws = |kind: &str, range: (usize, usize)| match kind {
             "glue" => WordNode::Glue(GlueNode {
                 original_bidi_class: crate::types::BidiClass::Ws,
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 is_collapsible: true,
 
                 byte_range: TextRange::new(range.0, range.1),
@@ -3429,7 +3413,7 @@ mod tests {
         let mut a = with_items(vec![
             text_box(vec![atom(0, 1)]),
             WordNode::Box(BoxNode::InlineObject {
-                bidi_level: 0,
+                bidi_level: BidiLevel::LTR,
                 baseline_align: crate::types::BaselineAlignment::Auto,
                 byte_range: TextRange::new(1, 3),
                 box_id: 1,

@@ -194,7 +194,7 @@ pub enum BoxNode {
         /// Behaviour when wider than the line.
         overflow_policy: BoxOverflowPolicy,
         /// Resolved UAX #9 level of the object's source (U+FFFC is a neutral,
-        /// so the level comes from its context). At most `BIDI_MAX_DEPTH + 1`.
+        /// so the level comes from its context).
         bidi_level: BidiLevel,
     },
     /// The padding-plus-border advance at one end of an inline decoration span.
