@@ -455,11 +455,11 @@ fn check_presentation(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
         else {
             continue;
         };
-        let run = ast
-            .runs
-            .get(*run_index)
-            .ok_or(E::RunIndexOutOfRange { item })?;
-        let view = ast.text_box(item).ok_or(E::ItemNotSelfContained { item })?;
+        // `check_storage` proved the run index and the box's ranges.
+        let run = &ast.runs[*run_index];
+        let view = ast
+            .text_box(item)
+            .expect("check_storage resolves every text box");
         if run.orientation == GlyphOrientation::HorizontalInVertical
             && (view.clusters.len() != 1
                 || *atom_range != run.atom_range
@@ -638,9 +638,9 @@ fn annotation_payload_is_valid(ann: &AnnotationSpan, mode: WritingMode) -> bool 
 
 /// `true` when every measurement a cluster hands downstream is finite and the
 /// fallback scale is positive. `glyphs` is the buffer the cluster's
-/// `glyph_range` indexes.
+/// `glyph_range` indexes, already proved in bounds by `check_glyph_ranges`.
 fn cluster_measurements_are_valid(cluster: &ShapedCluster, glyphs: &[RawShapedGlyph]) -> bool {
-    let glyphs = glyphs.get(cluster.glyph_range.clone()).unwrap_or_default();
+    let glyphs = &glyphs[cluster.glyph_range.clone()];
     let total_advance: f64 = glyphs.iter().map(|g| f64::from(g.x_advance)).sum();
     cluster.font.scale.is_finite()
         && cluster.font.scale > 0.0
@@ -1130,15 +1130,14 @@ impl<'a> ItemChecks<'a> {
 
     /// A text box: its payload against its run.
     fn check_text_box(&mut self, item: usize) -> Result<(), LayoutInputError> {
-        use LayoutInputError as E;
         let ast = self.ast;
-        let Some(view) = ast.text_box(item) else {
-            return Err(E::ItemNotSelfContained { item });
-        };
-        let Some(run) = ast.runs.get(view.run_index) else {
-            return Err(E::RunIndexOutOfRange { item });
-        };
-        let base = view.atom_start.saturating_sub(run.atom_range.start);
+        // `check_storage` proved the run index and that the box's ranges lie
+        // inside its run's.
+        let view = ast
+            .text_box(item)
+            .expect("check_storage resolves every text box");
+        let run = &ast.runs[view.run_index];
+        let base = view.atom_start - run.atom_range.start;
         check_text_payload(self.text, run, &view, &ast.glyphs, base, item)
     }
 
@@ -1231,6 +1230,7 @@ impl<'a> ItemChecks<'a> {
             .enumerate()
             .all(|(i, id)| !d.cloned_spans[..i].contains(id));
         if !(widths_are_finite
+            && d.penalty >= DiscretionaryNode::MANDATORY_BREAK_PENALTY
             && d.penalty < DiscretionaryNode::FORBIDDEN_BREAK_PENALTY
             && is_hard == d.is_mandatory()
             && (!is_hard || d.no_break_width == 0.0)

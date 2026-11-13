@@ -7,8 +7,8 @@ use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub};
 /// UAX #14 `Line_Break` property values `[U7]`.
 ///
 /// Names follow the UAX #14 two-letter codes in Pascal case. The list covers
-/// the classes defined through Unicode 15.1 (including `Ak`, `Ap`, `As`, `Vf`,
-/// `Vi`); Unicode 18 may add values, hence `#[non_exhaustive]`. The data
+/// the classes defined through Unicode 17.0 (including `Ak`, `Ap`, `As`, `Vf`,
+/// `Vi` and `Hh`); later versions may add values, hence `#[non_exhaustive]`. The data
 /// version is pinned and reported by `conformance_report()` (§1.1).
 /// One byte wide.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -45,6 +45,8 @@ pub enum LineBreakClass {
     Bb,
     /// Hyphen.
     Hy,
+    /// Unambiguous hyphen (Unicode 17.0, split from `Ba`).
+    Hh,
     /// Contingent break.
     Cb,
     /// Close punctuation.
@@ -117,7 +119,7 @@ pub enum LineBreakClass {
 /// Per-atom boolean properties, stored as a 16-bit mask (spec §2.2).
 ///
 /// Hand-rolled instead of depending on `bitflags`, to keep the dependency
-/// surface minimal. Ten of sixteen bits are assigned; the high six are
+/// surface minimal. Nine of sixteen bits are assigned; the high seven are
 /// reserved and are masked off by [`AtomFlags::from_bits_truncate`] and `!`.
 /// Layout: 2 bytes, alignment 2.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]

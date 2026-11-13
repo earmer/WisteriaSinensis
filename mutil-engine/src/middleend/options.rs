@@ -257,9 +257,9 @@ pub enum SoftHyphenPolicy {
     Strip,
 }
 
-/// Tab-stop configuration: stops at every multiple of `step` from the line's
-/// left edge. **[Design decision]**: the spec names `next_tab_stop(x)` without
-/// defining the stops; a uniform step is the minimal configuration.
+/// Tab-stop configuration: stops at every multiple of `step` from the
+/// flow-space origin, whatever the line's indent or slot (spec OPT-1, ST3-1).
+/// A uniform step is the minimal configuration.
 ///
 /// Parsed, not validated (spec §1.5, A3): [`new`](Self::new) refuses a step
 /// that is not finite and positive, so a `TabStops` that exists is usable.
@@ -391,7 +391,10 @@ impl LayoutConstraints {
         }
     }
 
-    /// Queries and validates geometry, optionally checking an earlier smaller envelope.
+    /// Queries the geometry of a line. A provider's answer is untrusted and is
+    /// validated, optionally against an earlier smaller envelope; the built-in
+    /// geometry derives from constraints the gate accepted
+    /// ([`is_valid`](Self::is_valid)) and is returned as is (spec GEO-3, AX-3).
     ///
     /// # Errors
     /// Invalid query/response coordinates or a violation of provider monotonicity.
@@ -402,6 +405,9 @@ impl LayoutConstraints {
         block_end: f32,
         previous: Option<&LineGeometry>,
     ) -> Result<LineGeometry, LayoutInputError> {
+        if self.geometry_provider.is_none() {
+            return Ok(self.resolve_line_geometry(line_index, block_start, block_end));
+        }
         if !block_start.is_finite() || !block_end.is_finite() || block_end <= block_start {
             return Err(LayoutInputError::InvalidLineGeometry);
         }

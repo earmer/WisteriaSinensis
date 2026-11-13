@@ -413,10 +413,13 @@ impl DiscretionaryNode {
         self.byte_range.start()
     }
 
-    /// `true` when the break is mandatory (`penalty <= MANDATORY_BREAK_PENALTY`).
+    /// `true` when the break is mandatory (`penalty == MANDATORY_BREAK_PENALTY`).
+    ///
+    /// The mandatory penalty is the only one; a penalty below it is rejected by
+    /// the input validator (spec WN-18).
     #[must_use]
     pub const fn is_mandatory(&self) -> bool {
-        self.penalty <= Self::MANDATORY_BREAK_PENALTY
+        self.penalty == Self::MANDATORY_BREAK_PENALTY
     }
 }
 
@@ -441,7 +444,7 @@ pub enum WordNode {
     Glue(GlueNode),
     /// A break opportunity.
     Discretionary(DiscretionaryNode),
-    /// A tab; width is `next_tab_stop(x) - x`, evaluated during layout.
+    /// A tab; width is `TabStops::next_stop(x) - x`, evaluated during layout.
     Tab {
         /// Source bytes.
         ///

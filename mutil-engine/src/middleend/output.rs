@@ -152,7 +152,7 @@ pub struct PositionedInlineBox {
 ///
 /// A tab carries no glyph; this is where a painter (leaders, selection) and the
 /// hit-test code find its extent. **[Design decision]**; the spec left tab
-/// positions unrepresented. `width` is `next_tab_stop(x) - x`, resolved during
+/// positions unrepresented. `width` is `TabStops::next_stop(x) - x`, resolved during
 /// layout.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedTab {

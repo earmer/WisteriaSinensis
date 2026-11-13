@@ -1,6 +1,6 @@
 //! Frontend options (spec §3).
 
-use crate::types::{LocaleTag, TextOrientation, WritingMode};
+use crate::types::{BidiDirection, LocaleTag, TextOrientation, WritingMode};
 
 /// How quotation marks and paired punctuation resolve their script
 /// (spec §3 Step 3).
@@ -51,6 +51,39 @@ pub struct FrontendOptions {
     pub quote_policy: QuotePolicy,
     /// Locale for runs that carry none (spec §1.2 fallback rules).
     pub default_locale: LocaleTag,
+    /// The caller's paragraph direction, which wins over UAX #9 P2 and P3
+    /// (rule HL1, spec FE-8); `None` lets the text decide.
+    pub base_direction: Option<BidiDirection>,
+    /// Line-breaking strictness (spec FE-18).
+    pub line_break_strictness: LineBreakStrictness,
+    /// Word-breaking behaviour inside words (spec FE-18).
+    pub word_break_option: WordBreakOption,
+}
+
+/// Line-breaking strictness, after CSS Text `line-break` (spec FE-18).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LineBreakStrictness {
+    /// The least restrictive rules, for short lines.
+    Loose,
+    /// The common rules.
+    #[default]
+    Normal,
+    /// The most restrictive rules.
+    Strict,
+    /// A soft wrap opportunity around every typographic character unit.
+    Anywhere,
+}
+
+/// Word-breaking behaviour, after CSS Text `word-break` (spec FE-18).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WordBreakOption {
+    /// Breaks follow the line-breaking rules.
+    #[default]
+    Normal,
+    /// Breaks are allowed between any two letters of non-CJK text.
+    BreakAll,
+    /// No break inside CJK words, which wrap like other words.
+    KeepAll,
 }
 
 /// Language inference policy. Heuristics require explicit opt-in.
