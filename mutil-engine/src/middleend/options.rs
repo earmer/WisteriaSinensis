@@ -391,7 +391,10 @@ impl LayoutConstraints {
         }
     }
 
-    /// Queries and validates geometry, optionally checking an earlier smaller envelope.
+    /// Queries the geometry of a line. A provider's answer is untrusted and is
+    /// validated, optionally against an earlier smaller envelope; the built-in
+    /// geometry derives from constraints the gate accepted
+    /// ([`is_valid`](Self::is_valid)) and is returned as is (spec GEO-3, AX-3).
     ///
     /// # Errors
     /// Invalid query/response coordinates or a violation of provider monotonicity.
@@ -402,6 +405,9 @@ impl LayoutConstraints {
         block_end: f32,
         previous: Option<&LineGeometry>,
     ) -> Result<LineGeometry, LayoutInputError> {
+        if self.geometry_provider.is_none() {
+            return Ok(self.resolve_line_geometry(line_index, block_start, block_end));
+        }
         if !block_start.is_finite() || !block_end.is_finite() || block_end <= block_start {
             return Err(LayoutInputError::InvalidLineGeometry);
         }
