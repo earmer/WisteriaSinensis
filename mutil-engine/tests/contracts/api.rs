@@ -154,8 +154,8 @@ fn locale_heuristics_require_opt_in() {
 fn report_does_not_claim_uninstalled_unicode_components() {
     let r = conformance_report();
     assert_eq!(
-        (r.grapheme, r.bidi, r.line_break, r.word),
-        (None, None, None, None)
+        (r.grapheme, r.bidi, r.line_break, r.word, r.script, r.emoji),
+        (None, None, None, None, None, None)
     );
 }
 #[test]

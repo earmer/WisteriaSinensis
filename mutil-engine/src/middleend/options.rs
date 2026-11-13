@@ -257,9 +257,9 @@ pub enum SoftHyphenPolicy {
     Strip,
 }
 
-/// Tab-stop configuration: stops at every multiple of `step` from the line's
-/// left edge. **[Design decision]**: the spec names `next_tab_stop(x)` without
-/// defining the stops; a uniform step is the minimal configuration.
+/// Tab-stop configuration: stops at every multiple of `step` from the
+/// flow-space origin, whatever the line's indent or slot (spec OPT-1, ST3-1).
+/// A uniform step is the minimal configuration.
 ///
 /// Parsed, not validated (spec §1.5, A3): [`new`](Self::new) refuses a step
 /// that is not finite and positive, so a `TabStops` that exists is usable.

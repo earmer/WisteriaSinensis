@@ -1231,6 +1231,7 @@ impl<'a> ItemChecks<'a> {
             .enumerate()
             .all(|(i, id)| !d.cloned_spans[..i].contains(id));
         if !(widths_are_finite
+            && d.penalty >= DiscretionaryNode::MANDATORY_BREAK_PENALTY
             && d.penalty < DiscretionaryNode::FORBIDDEN_BREAK_PENALTY
             && is_hard == d.is_mandatory()
             && (!is_hard || d.no_break_width == 0.0)

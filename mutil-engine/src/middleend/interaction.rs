@@ -49,8 +49,6 @@ pub struct CaretVisual {
     /// Opposite-direction insertion point; `Some` only if its x differs from the
     /// primary's.
     pub secondary_rect: Option<Rect>,
-    /// Caret slant in degrees clockwise from vertical (italic fonts); 0 if upright.
-    pub slant_angle: f32,
 }
 
 /// A cursor movement request (spec §6.5). `Left`/`Right` are physical and

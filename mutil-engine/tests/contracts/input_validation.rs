@@ -192,6 +192,31 @@ fn explicit_spacing_and_discretionary_equations() {
         check(&a, "a"),
         Err(LayoutInputError::InvalidDiscretionary { item: 1 })
     );
+    // The mandatory penalty is the only one (WN-18): a hard break or a soft
+    // opportunity below it is rejected.
+    let mut a = ast("a");
+    if let WordNode::Discretionary(d) = &mut a.items[1] {
+        d.penalty = 2 * DiscretionaryNode::MANDATORY_BREAK_PENALTY;
+    }
+    assert_eq!(
+        check(&a, "a"),
+        Err(LayoutInputError::InvalidDiscretionary { item: 1 })
+    );
+    let mut a = ast("ab");
+    let mut disc = DiscretionaryNode::direct(1);
+    disc.penalty = DiscretionaryNode::MANDATORY_BREAK_PENALTY - 1;
+    rebuild_items(&mut a, |b| {
+        vec![
+            boxed(b, 0, 1),
+            WordNode::Discretionary(disc),
+            boxed(b, 1, 2),
+            end(2),
+        ]
+    });
+    assert_eq!(
+        check(&a, "ab"),
+        Err(LayoutInputError::InvalidDiscretionary { item: 1 })
+    );
 }
 
 /// Every opportunity of a long single-run chain cuts back to the chain start
