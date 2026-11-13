@@ -26,3 +26,6 @@ rustc-ice-*.txt
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Composed specification (scripts/build_full_spec.py)
+dist/
