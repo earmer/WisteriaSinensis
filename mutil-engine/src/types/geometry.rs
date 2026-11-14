@@ -2,6 +2,29 @@
 //! interaction types (spec §6.4, §6.6). All values are in `f32` layout units
 //! (the engine is unit-agnostic); the y axis grows downwards.
 
+/// The largest magnitude a primary measurement may have, in layout units
+/// (spec MSR-1).
+///
+/// The gates accept no width, extent, offset or metric beyond it. A paragraph
+/// has fewer than 2^64 records, so any sum the engine forms over them stays
+/// below `2^64 · 10^15 · 10^4 ≈ 1.8e38 < f32::MAX`: no layout arithmetic can
+/// overflow, and code behind the gates does not check for it.
+pub const MAX_MEASUREMENT: f32 = 1.0e15;
+
+/// `true` when `value` is a measurement: finite with `|value| <=
+/// MAX_MEASUREMENT` (spec MSR-1). Signed: offsets and deltas may be negative.
+#[must_use]
+pub fn is_measurement(value: f32) -> bool {
+    value.is_finite() && value.abs() <= MAX_MEASUREMENT
+}
+
+/// `true` when `value` is a non-negative measurement (spec MSR-1): a width,
+/// an extent or a capacity.
+#[must_use]
+pub fn is_extent(value: f32) -> bool {
+    is_measurement(value) && value >= 0.0
+}
+
 /// A point. `x` grows rightwards, `y` downwards.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {

@@ -1035,6 +1035,11 @@ fn context_follows_the_layout_options() {
         ..Default::default()
     };
     assert_eq!(f.default_locale.as_str(), "ja-JP");
+    // The caller's direction is optional (FE-8); the segmenter options default
+    // to the common rules (FE-18).
+    assert_eq!(f.base_direction, None);
+    assert_eq!(f.line_break_strictness, LineBreakStrictness::Normal);
+    assert_eq!(f.word_break_option, WordBreakOption::Normal);
 }
 
 #[test]
@@ -1154,6 +1159,8 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
     assert!(small_line().extreme_caret_stop(HangSide::Left).is_none());
 }
 
+/// Phase 0 skeleton behaviour: replaced, not frozen, once layout produces
+/// lines (RM-9).
 #[test]
 fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
     let ast = ParagraphAst {

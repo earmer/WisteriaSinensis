@@ -258,8 +258,9 @@ pub enum LineInvariantError {
     },
     /// A caret stop has a non-finite `x`, is out of visual order, lies outside
     /// the line's bytes or belongs to another line, or has a bidi level that
-    /// no glyph, box or tab owning its offset has (on an empty line: other
-    /// than the paragraph level).
+    /// no glyph, box or tab owning its offset has. At an offset no entity
+    /// touches (glyph-less glue, an empty line) the level is the paragraph
+    /// level or that of the nearest entity on either side (spec CRT-2).
     InvalidCaretStop {
         /// Index into `caret_stops`.
         index: usize,
@@ -410,19 +411,41 @@ struct RangeIndex<T> {
     entries: Vec<(TextRange, T)>,
     /// `reach[i]` is the largest `range.end` among `entries[..=i]`.
     reach: Vec<usize>,
+    /// `reach_at[i]` is the index of an entry in `entries[..=i]` that ends at
+    /// `reach[i]`.
+    reach_at: Vec<usize>,
 }
 
 impl<T> RangeIndex<T> {
     fn new(mut entries: Vec<(TextRange, T)>) -> Self {
         entries.sort_by_key(|(range, _)| range.start());
-        let reach = entries
-            .iter()
-            .scan(0, |reach, (range, _)| {
-                *reach = (*reach).max(range.end());
-                Some(*reach)
-            })
-            .collect();
-        Self { entries, reach }
+        let mut reach = Vec::with_capacity(entries.len());
+        let mut reach_at = Vec::with_capacity(entries.len());
+        let (mut far, mut far_at) = (0, 0);
+        for (index, (range, _)) in entries.iter().enumerate() {
+            if index == 0 || range.end() > far {
+                (far, far_at) = (range.end(), index);
+            }
+            reach.push(far);
+            reach_at.push(far_at);
+        }
+        Self {
+            entries,
+            reach,
+            reach_at,
+        }
+    }
+
+    /// For an `offset` that no entry touches: the entry ending last before it
+    /// and the entry starting first after it, if any.
+    fn neighbours(&self, offset: usize) -> [Option<&(TextRange, T)>; 2] {
+        let split = self
+            .entries
+            .partition_point(|(range, _)| range.start() <= offset);
+        let before = split
+            .checked_sub(1)
+            .map(|last| &self.entries[self.reach_at[last]]);
+        [before, self.entries.get(split)]
     }
 
     /// The entries that can have `end >= min_end` and `start <= max_start`.
@@ -924,15 +947,6 @@ impl PositionedLine {
                 )
                 .collect(),
         );
-        // No entity owns a source offset: an empty line, or an ellipsis-only
-        // line whose glyphs are all synthesized. Its one anchor is the base
-        // level at the line's offset.
-        let nothing_owns_source = self.visual_boxes.is_empty()
-            && self.tabs.is_empty()
-            && self
-                .visual_runs
-                .iter()
-                .all(|r| r.glyphs.iter().all(|g| g.byte_range.is_none()));
         for (index, stop) in self.caret_stops.iter().enumerate() {
             let in_order = index == 0 || {
                 let previous = self.caret_stops[index - 1].x;
@@ -944,11 +958,33 @@ impl PositionedLine {
                     .map(|(_, (level, _))| *level)
                     .chain(objects.touching(stop.offset).map(|(_, level)| *level))
                     .peekable();
-                if owners.peek().is_none() {
-                    nothing_owns_source && stop.level == ctx.base_direction.base_level()
-                } else {
-                    owners.any(|level| level == stop.level)
+                if owners.peek().is_some() {
+                    return owners.any(|level| level == stop.level);
                 }
+                // Inside bytes no entity renders (glyph-less `WordSpace` glue,
+                // spec CRT-2): the base level, or the level of the nearest
+                // entity on either side.
+                if stop.level == ctx.base_direction.base_level() {
+                    return true;
+                }
+                let [glyph_before, glyph_after] = glyphs.neighbours(stop.offset);
+                let [object_before, object_after] = objects.neighbours(stop.offset);
+                let glyph_before = glyph_before.map(|(r, (level, _))| (r.end(), *level));
+                let glyph_after = glyph_after.map(|(r, (level, _))| (r.start(), *level));
+                let object_before = object_before.map(|(r, level)| (r.end(), *level));
+                let object_after = object_after.map(|(r, level)| (r.start(), *level));
+                let before = glyph_before
+                    .into_iter()
+                    .chain(object_before)
+                    .max_by_key(|(end, _)| *end);
+                let after = glyph_after
+                    .into_iter()
+                    .chain(object_after)
+                    .min_by_key(|(start, _)| *start);
+                before
+                    .into_iter()
+                    .chain(after)
+                    .any(|(_, level)| level == stop.level)
             };
             if !in_order
                 || !(self.byte_range.start()..=self.byte_range.end()).contains(&stop.offset)
@@ -2440,9 +2476,13 @@ mod tests {
         assert_eq!(l.validate(&ctx()), Ok(()));
         l.caret_stops = vec![leveled(1, BidiLevel::RTL)];
         assert_eq!(l.validate(&ctx()), invalid(0));
-        // A stop no glyph, box or tab touches, on a line with content.
+        // A stop no glyph, box or tab touches lies in glyph-less glue bytes
+        // (CRT-2): the paragraph level or a neighbour's level, nothing else.
         l.caret_stops = vec![leveled(3, BidiLevel::LTR)];
+        assert_eq!(l.validate(&ctx()), Ok(()));
+        l.caret_stops = vec![leveled(3, BidiLevel::RTL)];
         assert_eq!(l.validate(&ctx()), invalid(0));
+        l.caret_stops = vec![leveled(3, BidiLevel::LTR)];
 
         // An inline object and a tab own their bytes and lend their levels.
         let object = PositionedInlineBox {

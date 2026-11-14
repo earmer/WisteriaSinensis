@@ -501,7 +501,6 @@ fn full_spec_type_surface_is_nameable() {
     let caret = CaretVisual {
         primary_rect: Rect::new(10.0, 0.0, 1.0, 16.0),
         secondary_rect: None,
-        slant_angle: 0.0,
     };
     assert!(!hit.inside && sel.anchor != sel.focus && caret.secondary_rect.is_none());
 

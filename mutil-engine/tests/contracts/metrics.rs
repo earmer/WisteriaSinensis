@@ -119,8 +119,13 @@ fn font_metrics_all_fields_and_overflow() {
         assert_eq!(check(&a, "a"), Err(expected), "field {i}");
     }
     let mut a = ast("a");
+    // Beyond MAX_MEASUREMENT (MSR-1): a strut extent is an invalid strut, any
+    // other field invalid metrics.
     a.strut_metrics.ascent = f32::MAX;
     a.strut_metrics.descent = f32::MAX;
+    assert_eq!(check(&a, "a"), Err(LayoutInputError::InvalidStrut));
+    a.strut_metrics = valid;
+    a.strut_metrics.x_height = 2.0 * MAX_MEASUREMENT;
     assert_eq!(check(&a, "a"), Err(LayoutInputError::InvalidFontMetrics));
     a.strut_metrics = valid;
     a.strut_metrics.vertical_ascent = -1.0;

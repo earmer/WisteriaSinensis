@@ -10,7 +10,7 @@ use super::{
 use crate::frontend::{AnnotationSide, BoxOverflowPolicy, ParagraphAst};
 use crate::types::{
     BaselineAlignment, BidiDirection, BidiLevel, ByteIndex, Direction, FontRef, FontVariation,
-    GlyphOrientation, TextRange, WritingMode,
+    GlyphOrientation, TextRange, WritingMode, is_extent, is_measurement,
 };
 use smallvec::SmallVec;
 
@@ -152,7 +152,7 @@ pub struct PositionedInlineBox {
 ///
 /// A tab carries no glyph; this is where a painter (leaders, selection) and the
 /// hit-test code find its extent. **[Design decision]**; the spec left tab
-/// positions unrepresented. `width` is `next_tab_stop(x) - x`, resolved during
+/// positions unrepresented. `width` is `TabStops::next_stop(x) - x`, resolved during
 /// layout.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedTab {
@@ -510,13 +510,11 @@ impl LayoutPolicySnapshot {
             return Err(LayoutInputError::InvalidLayoutOptions);
         }
         let raw = &ast.strut_metrics;
-        let extents_are_valid = [raw.ascent, raw.descent, raw.line_gap]
-            .iter()
-            .all(|v| v.is_finite())
-            && raw.ascent >= 0.0
-            && raw.descent >= 0.0
+        let extents_are_valid = is_extent(raw.ascent)
+            && is_extent(raw.descent)
+            && is_measurement(raw.line_gap)
             && raw.ascent + raw.descent > 0.0;
-        let font_size_is_valid = ast.strut_font_size.is_finite() && ast.strut_font_size > 0.0;
+        let font_size_is_valid = is_extent(ast.strut_font_size) && ast.strut_font_size > 0.0;
         if !(extents_are_valid && font_size_is_valid && options.line_height.is_valid()) {
             return Err(LayoutInputError::InvalidStrut);
         }

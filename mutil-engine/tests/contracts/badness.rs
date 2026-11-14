@@ -28,6 +28,22 @@ fn capacity_endpoint(stretch: [f32; 3], expected: f32) {
     assert!(after >= at && after - at < 0.1, "cliff {at} -> {after}");
 }
 
+/// An unbounded line (`wrap_width == +inf`) is an exact fit, whatever its
+/// capacities (ST1-8, AX-6). Other non-finite inputs are excluded by the
+/// precondition the input gate guarantees (MSR-1).
+#[test]
+fn an_unbounded_line_is_an_exact_fit() {
+    for stretch in [[0., 0., 0.], [6., 4., 10.]] {
+        let cap = TierCapacities {
+            stretch,
+            shrink: [1., 0.],
+        };
+        let fit = line_fit(f32::INFINITY, &cap, 16.);
+        assert!(!fit.overfull);
+        assert_eq!((fit.ratio, fit.badness), (0., 0.));
+    }
+}
+
 #[test]
 fn tier_zero_only_excess_starts_at_100() {
     capacity_endpoint([10., 0., 0.], 100.);

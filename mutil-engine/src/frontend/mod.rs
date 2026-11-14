@@ -22,7 +22,10 @@ pub use ast::{
     HyphenOpportunity, ParagraphAst, RepeatedOperator, ReplacementText, ReshapeWindow, SpanEdge,
     TextBoxView, WordNode,
 };
-pub use options::{AutospaceProfile, FrontendOptions, LocalePolicy, QuotePolicy};
+pub use options::{
+    AutospaceProfile, FrontendOptions, LineBreakStrictness, LocalePolicy, QuotePolicy,
+    WordBreakOption,
+};
 pub use run::{ShapingRun, TextDecoration};
 pub use span::{
     AtomicEditSpan, BoxDecorationBreak, CompositionSpan, InlineDecorationSpan,

@@ -44,6 +44,10 @@ pub struct ConformanceReport {
     pub line_break: Option<&'static str>,
     /// Word segmentation Unicode data version.
     pub word: Option<&'static str>,
+    /// Script and script-extension (UAX #24) Unicode data version.
+    pub script: Option<&'static str>,
+    /// Emoji property (UTS #51) data version.
+    pub emoji: Option<&'static str>,
 }
 
 /// Reports installed components rather than claiming target-version conformance.
@@ -53,5 +57,7 @@ pub fn conformance_report() -> ConformanceReport {
         bidi: None,
         line_break: None,
         word: None,
+        script: None,
+        emoji: None,
     }
 }

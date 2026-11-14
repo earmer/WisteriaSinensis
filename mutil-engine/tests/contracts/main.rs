@@ -8,6 +8,7 @@ mod api;
 mod badness;
 mod common;
 mod error_messages;
+mod gates;
 mod geometry;
 mod input_validation;
 mod line_validation;
