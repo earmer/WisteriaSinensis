@@ -9,10 +9,10 @@
 use super::input_validation::validate_layout_inputs;
 use super::{
     LayoutConstraints, LayoutInputError, LayoutOptions, LayoutPolicySnapshot, LineGeometry,
-    LineInvariantError, PositionedParagraph,
+    LineInvariantError, PositionedParagraph, VisualGlyphRun,
 };
 use crate::frontend::{BoxNode, ParagraphAst, TextBoxView, WordNode};
-use crate::types::{GraphemeAtom, RawShapedGlyph, ShapedCluster};
+use crate::types::{GraphemeAtom, Point, RawShapedGlyph, ShapedCluster, WritingMode};
 
 /// Layout inputs that passed the input gate (spec AX-3, G1), with the policy
 /// the gate resolved.
@@ -185,4 +185,89 @@ impl<'a> ValidatedLayout<'a> {
     pub fn text(&self) -> &'a str {
         self.text
     }
+
+    /// Every visual glyph run of the paragraph, line by line in screen order,
+    /// with its glyphs' drawing origins in paragraph-local physical
+    /// coordinates (spec HST-4, HST-5). A run keeps its font instance,
+    /// orientation and level, so a renderer submits it as one batch.
+    pub fn glyph_runs(&self) -> impl Iterator<Item = PlacedRun<'a>> + 'a {
+        let paragraph = self.paragraph;
+        let mode = paragraph.policy.writing_mode;
+        let total_block_size = paragraph.total_block_size;
+        paragraph
+            .lines
+            .iter()
+            .enumerate()
+            .flat_map(move |(line, positioned)| {
+                positioned.visual_runs.iter().map(move |run| PlacedRun {
+                    line,
+                    run,
+                    baseline_y: positioned.baseline_y,
+                    mode,
+                    total_block_size,
+                })
+            })
+    }
+}
+
+/// One visual glyph run of a validated paragraph, ready to draw
+/// (spec HST-4, HST-5).
+#[derive(Clone, Copy, Debug)]
+pub struct PlacedRun<'a> {
+    line: usize,
+    run: &'a VisualGlyphRun,
+    baseline_y: f32,
+    mode: WritingMode,
+    total_block_size: f32,
+}
+
+impl<'a> PlacedRun<'a> {
+    /// The index of the run's line.
+    #[must_use]
+    pub fn line(&self) -> usize {
+        self.line
+    }
+
+    /// The run: font instance, size, variations, orientation and level shared
+    /// by all its glyphs.
+    #[must_use]
+    pub fn run(&self) -> &'a VisualGlyphRun {
+        self.run
+    }
+
+    /// The run's glyphs in screen order, each with the paragraph-local
+    /// physical point where its outline's origin is drawn: the flow-space
+    /// drawing origin of OUT-1 (pen position plus the inline offset, baseline
+    /// moved towards line-over by the over offset) mapped by the writing mode
+    /// (spec ORI-1, ORI-2). A `VerticalSideways` glyph is then rotated 90°
+    /// clockwise about that point (spec HST-5).
+    pub fn glyphs(&self) -> impl Iterator<Item = PlacedGlyph> + 'a {
+        let Self {
+            baseline_y,
+            mode,
+            total_block_size,
+            ..
+        } = *self;
+        self.run.glyphs.iter().map(move |glyph| {
+            let flow = Point {
+                x: glyph.x + glyph.x_offset,
+                y: baseline_y + mode.over_to_block(glyph.y_offset),
+            };
+            PlacedGlyph {
+                glyph_id: glyph.glyph_id,
+                origin: mode.flow_to_physical_point(flow, total_block_size),
+            }
+        })
+    }
+}
+
+/// One glyph to draw: its id in the run's font and its paragraph-local
+/// physical drawing origin (spec HST-5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlacedGlyph {
+    /// The glyph id in the run's font.
+    pub glyph_id: u32,
+    /// Where the glyph outline's origin is drawn, in paragraph-local physical
+    /// coordinates.
+    pub origin: Point,
 }

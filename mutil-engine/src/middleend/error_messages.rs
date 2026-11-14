@@ -78,6 +78,7 @@ error_messages! {
     LineInvariantError {
         InvalidSlots { reason } => "invalid slots: {reason}",
         OrientationMismatch => "invalid visual orientation",
+        UnplacedTateChuYoko { run } => "visual run {run} is a tate-chu-yoko group, whose placement is not defined yet",
         InvalidGlyphSource { run, glyph } => "glyph {glyph} of run {run} has an invalid source range",
         InvalidAnnotation { index, reason } => "annotation {index} is invalid: {reason}",
         InvalidParagraph { reason } => "invalid paragraph: {reason}",

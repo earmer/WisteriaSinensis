@@ -6,8 +6,11 @@ use std::sync::Arc;
 
 /// Opaque, backend-assigned font identifier.
 ///
-/// Meaningful only to the [`TextShaper`](crate::shaping::TextShaper) that issued
-/// it; the engine never interprets the value.
+/// Meaningful only within the id space of the
+/// [`TextShaper`](crate::shaping::TextShaper) that issued it; a renderer resolves
+/// it through the [`FontSource`](crate::shaping::FontSource) that covers that
+/// space, never through its own font lookup (spec FNT-3, HST-2). The engine
+/// never interprets the value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FontId(pub u32);
 
