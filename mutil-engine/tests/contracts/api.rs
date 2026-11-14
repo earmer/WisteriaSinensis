@@ -106,15 +106,15 @@ fn invalid_gdef_carets_fall_back_to_atom_widths() {
 fn valid_gdef_carets_are_preserved() {
     assert_eq!(resolve_ligature_carets(30., 3, &[8., 21.]), vec![8., 21.]);
 }
+/// A zero-width cluster has no sub-slots. Other widths are excluded by the
+/// precondition the input gate guarantees (MSR-1).
 #[test]
-fn non_finite_or_non_positive_width_yields_no_carets() {
-    for width in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0] {
-        assert!(resolve_ligature_carets(width, 3, &[8., 21.]).is_empty());
-    }
+fn zero_width_yields_no_carets() {
+    assert!(resolve_ligature_carets(0.0, 3, &[8., 21.]).is_empty());
 }
 #[test]
-fn huge_width_fallback_carets_stay_finite_and_ordered() {
-    let carets = resolve_ligature_carets(f32::MAX, 4, &[]);
+fn largest_width_fallback_carets_stay_finite_and_ordered() {
+    let carets = resolve_ligature_carets(MAX_MEASUREMENT, 4, &[]);
     assert!(carets.iter().all(|v| v.is_finite() && *v > 0.0));
     assert!(carets.windows(2).all(|w| w[0] < w[1]));
 }

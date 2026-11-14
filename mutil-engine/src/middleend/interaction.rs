@@ -76,10 +76,44 @@ pub enum Motion {
     LineStart,
     /// End of the visual line.
     LineEnd,
-    /// One line up, keeping the preferred x held by the caller.
+    /// One physical step up: a block-axis move in horizontal modes, an
+    /// inline-axis one in vertical modes ([`Motion::flow_direction`]).
     Up,
-    /// One line down, keeping the preferred x held by the caller.
+    /// One physical step down: a block-axis move in horizontal modes, an
+    /// inline-axis one in vertical modes ([`Motion::flow_direction`]).
     Down,
+}
+
+/// The edge through which a motion leaves a paragraph, in logical (document)
+/// order (spec INT-13, INT-15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ParagraphEdge {
+    /// Towards the previous paragraph.
+    Start,
+    /// Towards the next paragraph.
+    End,
+}
+
+/// The result of a cursor motion (spec §6.5).
+///
+/// A paragraph does not know its neighbours, so a motion that would leave it
+/// reports the exit instead of clamping; a caller with no neighbour on that
+/// side clamps to the text start or end itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CursorMove {
+    /// The caret stays in this paragraph.
+    Moved(CursorPosition),
+    /// The motion leaves the paragraph through `edge`.
+    Exited {
+        /// Which neighbour the motion continues into.
+        edge: ParagraphEdge,
+        /// For a block-axis motion ([`FlowMotion::BlockPrev`],
+        /// [`FlowMotion::BlockNext`]): the preferred position along the inline
+        /// axis, in the paragraph's flow space, at which the caller re-enters
+        /// the neighbour on its nearest line (spec INT-15). `None` for any
+        /// other motion.
+        inline_position: Option<f32>,
+    },
 }
 
 /// A selection stored logically as anchor and focus (spec §6.5). Shift+arrow
@@ -133,11 +167,19 @@ impl AtomicFragment {
     }
 }
 
-/// Validates GDEF subdivisions or falls back to K equal atom slots.
+/// The shaper gate for ligature carets (spec INT-5, AX-3): accepts the
+/// shaper's GDEF subdivisions when usable and otherwise falls back to K equal
+/// atom slots. A cluster of one atom, or of zero width, has no sub-slots.
+///
+/// # Precondition
+/// `width` is the width of a validated cluster: a non-negative measurement
+/// (spec MSR-1). It is not checked again.
 pub fn resolve_ligature_carets(width: f32, atom_count: usize, carets: &[f32]) -> Vec<f32> {
-    // A non-finite or non-positive width cannot describe a ligature, so no
-    // supplied position is accepted against it.
-    if atom_count <= 1 || !width.is_finite() || width <= 0.0 {
+    debug_assert!(
+        crate::types::is_extent(width),
+        "resolve_ligature_carets precondition violated (spec MSR-1)"
+    );
+    if atom_count <= 1 || width == 0.0 {
         return Vec::new();
     }
 

@@ -163,8 +163,8 @@ pub enum BaselineAlignment {
 }
 
 impl BaselineAlignment {
-    /// Explicit offsets must be finite.
+    /// Explicit offsets must be measurements (spec MSR-1).
     pub fn is_valid(self) -> bool {
-        !matches!(self, Self::Offset(v) if !v.is_finite())
+        !matches!(self, Self::Offset(v) if !super::is_measurement(v))
     }
 }

@@ -15,7 +15,7 @@ use crate::frontend::{
 };
 use crate::types::{
     AtomFlags, BidiLevel, GlyphOrientation, GraphemeAtom, RawShapedGlyph, ShapedCluster, TextRange,
-    WritingMode,
+    WritingMode, is_extent, is_measurement,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -247,10 +247,6 @@ fn fits(text: &str, range: TextRange) -> bool {
         && text.is_char_boundary(range.end())
 }
 
-fn is_finite_nonnegative(value: f32) -> bool {
-    value.is_finite() && value >= 0.0
-}
-
 /// Whether `ranges` are non-overlapping and in byte order, which the binary
 /// searches below require. Validation computes this before searching: an
 /// unordered sequence always belongs to an AST that a later item check
@@ -378,27 +374,31 @@ fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
     Ok(())
 }
 
-/// A run's own shaping settings: its bytes fit `text`, its size is positive
-/// and its script resolved.
+/// A run's own shaping settings: its bytes fit `text`, its size is positive,
+/// its script resolved and its features canonical (FNT-2).
 fn check_run(run: &ShapingRun, text: &str, index: usize) -> Result<(), LayoutInputError> {
     use LayoutInputError as E;
     if !fits(text, run.byte_range) {
         return Err(E::RunOutsideText { run: index });
     }
-    if !(run.font_size.is_finite() && run.font_size > 0.0 && !run.script.is_unresolved()) {
+    if !(is_extent(run.font_size)
+        && run.font_size > 0.0
+        && !run.script.is_unresolved()
+        && run.features.is_normalized())
+    {
         return Err(E::InvalidShapingRun { run: index });
     }
     Ok(())
 }
 
 /// A run's orientation suits the writing mode and its level, and its explicit
-/// spacing and baseline shift are finite.
+/// spacing and baseline shift are measurements (MSR-1).
 fn check_run_presentation(run: &ShapingRun, mode: WritingMode) -> Result<(), LayoutInputError> {
     if !run.orientation.is_valid(mode, run.bidi_level) {
         return Err(LayoutInputError::OrientationMismatch);
     }
-    if !(run.letter_spacing.is_finite()
-        && run.word_spacing.is_finite()
+    if !(is_measurement(run.letter_spacing)
+        && is_measurement(run.word_spacing)
         && run.baseline_align.is_valid())
     {
         return Err(LayoutInputError::InvalidSpacing);
@@ -594,7 +594,7 @@ fn check_annotations(
             && edges.is_text_only(base);
         if !(ids.insert(ann.annotation_id)
             && base_is_valid
-            && is_finite_nonnegative(ann.block_extent)
+            && is_extent(ann.block_extent)
             && annotation_payload_is_valid(ann, ast.writing_mode))
         {
             return Err(LayoutInputError::InvalidAnnotationSpan { annotation });
@@ -615,7 +615,7 @@ fn annotation_payload_is_valid(ann: &AnnotationSpan, mode: WritingMode) -> bool 
         && run.cluster_range == (0..ann.clusters.len())
         && check_glyph_ranges(&ann.clusters, ann.glyphs.len()).is_ok();
     let kind_is_valid = match ann.kind {
-        AnnotationKind::Ruby { max_overhang, .. } => is_finite_nonnegative(max_overhang),
+        AnnotationKind::Ruby { max_overhang, .. } => is_extent(max_overhang),
         // One shaped mark, repeated over the base.
         AnnotationKind::Emphasis => ann.atoms.len() == 1 && ann.clusters.len() == 1,
     };
@@ -636,19 +636,17 @@ fn annotation_payload_is_valid(ann: &AnnotationSpan, mode: WritingMode) -> bool 
         && (run.orientation != GlyphOrientation::HorizontalInVertical || ann.clusters.len() == 1)
 }
 
-/// `true` when every measurement a cluster hands downstream is finite and the
-/// fallback scale is positive. `glyphs` is the buffer the cluster's
+/// `true` when every measurement a cluster hands downstream is a measurement
+/// (MSR-1) and the fallback scale is positive. `glyphs` is the buffer the cluster's
 /// `glyph_range` indexes, already proved in bounds by `check_glyph_ranges`.
 fn cluster_measurements_are_valid(cluster: &ShapedCluster, glyphs: &[RawShapedGlyph]) -> bool {
     let glyphs = &glyphs[cluster.glyph_range.clone()];
-    let total_advance: f64 = glyphs.iter().map(|g| f64::from(g.x_advance)).sum();
-    cluster.font.scale.is_finite()
+    is_measurement(cluster.font.scale)
         && cluster.font.scale > 0.0
-        && is_finite_nonnegative(cluster.natural_width)
-        && total_advance.abs() <= f64::from(f32::MAX)
-        && glyphs
-            .iter()
-            .all(|g| g.x_advance.is_finite() && g.x_offset.is_finite() && g.y_offset.is_finite())
+        && is_extent(cluster.natural_width)
+        && glyphs.iter().all(|g| {
+            is_measurement(g.x_advance) && is_measurement(g.x_offset) && is_measurement(g.y_offset)
+        })
 }
 
 /// Checks one text payload (a text box, or an annotation's text) against its
@@ -691,7 +689,6 @@ fn check_text_payload(
         .iter()
         .all(|c| cluster_measurements_are_valid(c, glyphs))
         || !natural_width.is_finite()
-        || total > f64::from(f32::MAX)
         || !approx_eq_f64(f64::from(natural_width), total)
     {
         return Err(E::InvalidTextWidth { item });
@@ -1101,9 +1098,7 @@ impl<'a> ItemChecks<'a> {
                 // An object owns the bytes carets and selections address it by.
                 if byte_range.is_empty()
                     || !baseline_align.is_valid()
-                    || ![*width, *ascent, *descent]
-                        .into_iter()
-                        .all(is_finite_nonnegative)
+                    || ![*width, *ascent, *descent].into_iter().all(is_extent)
                 {
                     return Err(LayoutInputError::InvalidInlineBox { item });
                 }
@@ -1154,7 +1149,7 @@ impl<'a> ItemChecks<'a> {
         bidi_level: BidiLevel,
     ) -> Result<(), LayoutInputError> {
         use LayoutInputError as E;
-        if !(byte_range.is_empty() && is_finite_nonnegative(width)) {
+        if !(byte_range.is_empty() && is_extent(width)) {
             return Err(E::InvalidSpanBoundary { item });
         }
         let Some(&span_index) = self.spans.by_id.get(&span_id) else {
@@ -1175,14 +1170,14 @@ impl<'a> ItemChecks<'a> {
         Ok(())
     }
 
-    /// Glue: finite, non-negative sizes; the
+    /// Glue: non-negative measurements (MSR-1); the
     /// compression pool is shrink only; and the node matches its source. A
     /// `WordSpace` owns a non-empty run of word-space characters and cannot
     /// collapse over a no-break space; the synthetic kinds own no bytes.
     fn check_glue(&self, item: usize, glue: &GlueNode) -> Result<(), LayoutInputError> {
         let sizes_are_valid = [glue.natural_width, glue.max_stretch, glue.max_shrink]
             .into_iter()
-            .all(is_finite_nonnegative);
+            .all(is_extent);
         let pool_is_shrink_only = glue.kind != GlueKind::CjkPunctCompression
             || (glue.natural_width == 0.0 && glue.max_stretch == 0.0);
         let matches_source = if glue.kind.is_synthetic() {
@@ -1211,8 +1206,8 @@ impl<'a> ItemChecks<'a> {
         use LayoutInputError as E;
         let invalid = Err(E::InvalidDiscretionary { item });
         let widths_are_finite = [d.pre_break_width, d.post_break_width, d.no_break_width]
-            .iter()
-            .all(|v| v.is_finite());
+            .into_iter()
+            .all(is_measurement);
         let is_hard = matches!(d.action, BreakAction::HardBreak);
         // Ownership: a soft opportunity owns nothing; a hard break in the text
         // owns exactly its U+2028; the paragraph-end sentinel is the empty
@@ -1307,7 +1302,7 @@ impl<'a> ItemChecks<'a> {
             // The repeated operator opens the next line.
             BreakAction::MathOperator { repeat } => {
                 let advance = repeat.map_or(0.0, |operator| operator.advance);
-                if !(is_finite_nonnegative(advance)
+                if !(is_extent(advance)
                     && is_zero(net_pre)
                     && approx_eq_f64(net_post, f64::from(advance)))
                 {
@@ -1386,7 +1381,7 @@ pub fn check_layout_inputs(
     constraints: &LayoutConstraints,
     options: &LayoutOptions,
 ) -> Result<(), LayoutInputError> {
-    validate_layout_inputs(ast, text, constraints, options).map(drop)
+    super::ValidatedInputs::new(ast, text, constraints, options).map(drop)
 }
 
 /// [`check_layout_inputs`], returning the policy it resolved on the way so

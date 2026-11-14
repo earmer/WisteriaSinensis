@@ -180,7 +180,7 @@ fn provider_monotonicity_clearance_and_snapshots() {
         layout_paragraph(
             &a,
             "a",
-            &NoopShaper,
+            &TEST_SHAPER,
             &constraints,
             &LayoutOptions::default()
         ),
@@ -245,7 +245,7 @@ fn probe_ignores_tall_input_after_first_break() {
         layout_paragraph(
             &a,
             text,
-            &NoopShaper,
+            &TEST_SHAPER,
             &constraints,
             &LayoutOptions::default()
         )
@@ -337,7 +337,7 @@ fn geometry_rejects_empty_without_progress_and_invalid_intervals() {
             layout_paragraph(
                 &ast("a"),
                 "a",
-                &NoopShaper,
+                &TEST_SHAPER,
                 &constraints,
                 &LayoutOptions::default()
             ),
@@ -387,7 +387,7 @@ fn provider_slots_must_lie_inside_the_wrap_envelope() {
         layout_paragraph(
             &ast("a"),
             "a",
-            &NoopShaper,
+            &TEST_SHAPER,
             &constraints,
             &LayoutOptions::default(),
         )

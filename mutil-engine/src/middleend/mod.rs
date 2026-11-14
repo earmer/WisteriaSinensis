@@ -12,7 +12,9 @@ mod layout;
 mod options;
 mod output;
 mod output_validation;
+mod shaper_gate;
 mod tolerance;
+mod validated;
 
 pub use badness::{
     CAPACITY_EPSILON, FIT_EPSILON, LineFit, MAX_BADNESS, OVERFULL_BADNESS, OVERFULL_RATIO,
@@ -20,8 +22,8 @@ pub use badness::{
 };
 pub use input_validation::{LayoutInputError, check_layout_inputs};
 pub use interaction::{
-    BoxHeightStyle, CaretVisual, CursorPosition, FlowMotion, HitResult, Motion, Selection,
-    SelectionRect, resolve_ligature_carets,
+    BoxHeightStyle, CaretVisual, CursorMove, CursorPosition, FlowMotion, HitResult, Motion,
+    ParagraphEdge, Selection, SelectionRect, resolve_ligature_carets,
 };
 pub use layout::layout_paragraph;
 pub use options::{
@@ -39,3 +41,4 @@ pub use output_validation::{
     AnnotationErrorReason, LineInvariantError, ParagraphErrorReason, SlotErrorReason,
 };
 pub use tolerance::{LINE_GEOMETRY_ABS_EPSILON, LINE_GEOMETRY_REL_EPSILON};
+pub use validated::{ValidatedInputs, ValidatedLayout};

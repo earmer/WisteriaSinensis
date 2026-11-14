@@ -20,7 +20,7 @@ pub use font::{
     FamilyStack, FontFamily, FontFeature, FontFeatures, FontId, FontInstanceRef, FontMetrics,
     FontRef, FontSlant, FontStyle, FontVariation, FontWeight, GenericFamily,
 };
-pub use geometry::{Point, Rect, Size};
+pub use geometry::{MAX_MEASUREMENT, Point, Rect, Size, is_extent, is_measurement};
 pub use tag::{InvalidLocaleTag, InvalidScriptTag, LocaleTag, ScriptTag};
 pub use text::{ByteIndex, InvertedRange, TextRange};
 pub use writing::{BaselineAlignment, GlyphOrientation, TextOrientation, WritingMode};

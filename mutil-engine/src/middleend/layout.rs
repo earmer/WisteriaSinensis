@@ -3,8 +3,11 @@
 //! **Validation-only skeleton:** it validates its inputs, resolves the policy
 //! and probes the first line's geometry, but lays nothing out.
 
-use super::input_validation::validate_layout_inputs;
-use super::{LayoutConstraints, LayoutInputError, LayoutOptions, LineHeight, PositionedParagraph};
+use super::shaper_gate::checked_line_box;
+use super::{
+    LayoutConstraints, LayoutInputError, LayoutOptions, LineHeight, PositionedParagraph,
+    ValidatedInputs,
+};
 use crate::frontend::{AnnotationSide, BoxNode, ParagraphAst, WordNode};
 use crate::shaping::TextShaper;
 use crate::types::FontInstanceRef;
@@ -12,8 +15,6 @@ use crate::types::FontInstanceRef;
 /// How many obstructed block positions the first-line probe tries before it
 /// gives up on a geometry provider.
 const MAX_CLEARANCE_PROBES: usize = 1024;
-/// The least block progress a provider must offer past an obstructed position.
-const MIN_CLEARANCE_STEP: f32 = 1e-4;
 
 /// Lays out one paragraph (spec §5).
 ///
@@ -22,14 +23,15 @@ const MIN_CLEARANCE_STEP: f32 = 1e-4;
 /// * `shaper`: used for re-shaping at breaks and for ligature carets.
 /// * `constraints`: container geometry; `options`: layout policy.
 ///
-/// **Validation-only skeleton.** It validates the inputs
-/// ([`check_layout_inputs`](super::check_layout_inputs)) and, with a geometry
-/// provider, the provider's answers for the first line, and performs no
+/// **Validation-only skeleton.** It passes the inputs through the input gate
+/// ([`ValidatedInputs::new`]) and, with a geometry provider, the provider's
+/// answers for the first line through the provider gate, and performs no
 /// layout: the result records the policy and the AST's base direction and has
 /// no lines, so it does not pass [`PositionedParagraph::validate`] yet.
 ///
 /// # Errors
-/// The first invalid input, or a geometry provider that breaks its contract.
+/// The first invalid input, or a shaper or geometry provider that breaks its
+/// contract.
 pub fn layout_paragraph(
     ast: &ParagraphAst,
     text: &str,
@@ -37,18 +39,12 @@ pub fn layout_paragraph(
     constraints: &LayoutConstraints,
     options: &LayoutOptions,
 ) -> Result<PositionedParagraph, LayoutInputError> {
-    let policy = validate_layout_inputs(ast, text, constraints, options)?;
+    let inputs = ValidatedInputs::new(ast, text, constraints, options)?;
     if constraints.geometry_provider.is_some() {
-        probe_first_line(
-            ast,
-            shaper,
-            constraints,
-            options,
-            policy.strut.line_height(),
-        )?;
+        probe_first_line(&inputs, shaper)?;
     }
     Ok(PositionedParagraph {
-        policy,
+        policy: inputs.policy().clone(),
         base_direction: ast.base_direction,
         truncated_range: None,
         total_block_size: 0.0,
@@ -63,50 +59,42 @@ pub fn layout_paragraph(
 /// paragraph is not evidence about the first line, so it must not turn a legal
 /// provider into a clearance failure.
 fn probe_first_line(
-    ast: &ParagraphAst,
+    inputs: &ValidatedInputs<'_>,
     shaper: &dyn TextShaper,
-    constraints: &LayoutConstraints,
-    options: &LayoutOptions,
-    strut_height: f32,
 ) -> Result<(), LayoutInputError> {
-    let tallest = tallest_first_line(ast, shaper, options, strut_height)?;
+    let strut_height = inputs.policy().strut.line_height();
+    let tallest = tallest_first_line(inputs, shaper, strut_height)?;
     let mut block_start = 0.0;
     for _ in 0..MAX_CLEARANCE_PROBES {
-        let probe =
-            constraints.query_checked_geometry(0, block_start, block_start + strut_height, None)?;
+        let probe = inputs.line_geometry(0, block_start, block_start + strut_height, None)?;
         if tallest > strut_height {
             // Contract check only: an expanded envelope must stay inside the
             // original one. Its contents do not decide whether the initial
             // position is legal.
-            constraints.query_checked_geometry(
-                0,
-                block_start,
-                block_start + tallest,
-                Some(&probe),
-            )?;
+            inputs.line_geometry(0, block_start, block_start + tallest, Some(&probe))?;
         }
         if !probe.slots.is_empty() {
             return Ok(());
         }
-        let next = probe
+        block_start = probe
             .next_feature_block_offset
-            .ok_or(LayoutInputError::InvalidLineGeometry)?;
-        if next - block_start < MIN_CLEARANCE_STEP {
-            return Err(LayoutInputError::InvalidLineGeometry);
-        }
-        block_start = next;
+            .expect("the provider gate proved an obstructed answer points ahead");
     }
     Err(LayoutInputError::InvalidLineGeometry)
 }
 
 /// The tallest line box the first line could need: the strut, the content up
 /// to the first break opportunity, and the annotations over that content.
+///
+/// Every term is a measurement (spec MSR-1: the input gate bounds the AST's,
+/// the shaper gate the shaper's), so the sum cannot overflow.
 fn tallest_first_line(
-    ast: &ParagraphAst,
+    inputs: &ValidatedInputs<'_>,
     shaper: &dyn TextShaper,
-    options: &LayoutOptions,
     strut_height: f32,
 ) -> Result<f32, LayoutInputError> {
+    let ast = inputs.ast();
+    let options = inputs.options();
     let first_break = ast
         .items
         .iter()
@@ -124,24 +112,19 @@ fn tallest_first_line(
         {
             content_height = content_height.max(ascent + descent);
         }
-        let Some(view) = ast.text_box(item) else {
+        let Some(view) = inputs.text_box(item) else {
             continue;
         };
         let run = &ast.runs[view.run_index];
         for cluster in view.clusters {
-            let metrics = shaper.font_metrics(FontInstanceRef {
+            let instance = FontInstanceRef {
                 font: cluster.font,
                 font_size: run.font_size,
                 variations: run.features.variations(),
-            });
-            let height = options
-                .line_height
-                .resolve_strut(&metrics, run.font_size, ast.writing_mode)
-                .line_height();
-            if !height.is_finite() {
-                return Err(LayoutInputError::InvalidFontMetrics);
-            }
-            content_height = content_height.max(height);
+            };
+            let line_box =
+                checked_line_box(shaper, instance, options.line_height, ast.writing_mode)?;
+            content_height = content_height.max(line_box.line_height());
         }
     }
     // A fixed line box does not grow for annotations; they overflow it.
@@ -158,12 +141,7 @@ fn tallest_first_line(
             }
         }
     }
-    let tallest = content_height + over + under;
-    if tallest.is_finite() {
-        Ok(tallest)
-    } else {
-        Err(LayoutInputError::InvalidFontMetrics)
-    }
+    Ok(content_height + over + under)
 }
 
 #[cfg(test)]

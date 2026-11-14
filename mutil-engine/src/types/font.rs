@@ -232,6 +232,16 @@ impl FontFeatures {
         &self.variations
     }
 
+    /// `true` when the value is in the canonical form [`normalize`](Self::normalize)
+    /// produces: features and variations each strictly ascending by tag. The
+    /// input gate accepts only canonical features (spec FNT-2), so `Eq` and
+    /// `Hash` agree with effective equality behind it.
+    #[must_use]
+    pub fn is_normalized(&self) -> bool {
+        self.features.windows(2).all(|w| w[0].tag < w[1].tag)
+            && self.variations.windows(2).all(|w| w[0].tag < w[1].tag)
+    }
+
     /// Canonical form for cache keys: sorted by tag, one entry per tag, the
     /// **last** setting for a tag winning (as in CSS cascade order).
     pub fn normalize(&mut self) {
@@ -305,11 +315,11 @@ impl FontMetrics {
         self.ascent + self.descent + self.line_gap
     }
 
-    /// Checks raw font metrics: every field finite, the depths non-negative
-    /// (ascent, descent, line gap and their vertical counterparts, underline
-    /// thickness, x-height, cap height), both line heights finite and both
-    /// `ascent + descent` sums positive. A resolved strut has other rules; see
-    /// `StrutMetrics`.
+    /// Checks raw font metrics: every field a measurement
+    /// ([`is_measurement`](super::is_measurement), spec MSR-1), the depths
+    /// non-negative (ascent, descent, line gap and their vertical counterparts,
+    /// underline thickness, x-height, cap height) and both `ascent + descent`
+    /// sums positive. A resolved strut has other rules; see `StrutMetrics`.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         let nonnegative = [
@@ -323,7 +333,7 @@ impl FontMetrics {
             self.x_height,
             self.cap_height,
         ];
-        nonnegative.iter().all(|v| v.is_finite() && *v >= 0.0)
+        nonnegative.iter().all(|v| super::is_extent(*v))
             && [
                 self.underline_position,
                 self.strikeout_position,
@@ -331,11 +341,9 @@ impl FontMetrics {
                 self.central_baseline_offset,
                 self.hanging_baseline_offset,
                 self.mathematical_baseline_offset,
-                self.natural_line_height(),
-                self.vertical_ascent + self.vertical_descent + self.vertical_line_gap,
             ]
             .iter()
-            .all(|v| v.is_finite())
+            .all(|v| super::is_measurement(*v))
             && self.ascent + self.descent > 0.0
             && self.vertical_ascent + self.vertical_descent > 0.0
     }

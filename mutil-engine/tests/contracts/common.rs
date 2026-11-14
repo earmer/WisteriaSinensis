@@ -579,3 +579,92 @@ pub fn shaping_run(text: &str, locale: &str) -> ShapingRun {
 }
 
 pub fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+
+/// A test shaper that answers valid metrics (FNT-4) for every instance and
+/// is otherwise `NoopShaper`: layout checks every metric a shaper returns
+/// (the shaper gate), and `NoopShaper`'s zero metrics are not valid.
+#[derive(Clone, Copy, Debug)]
+pub struct MetricsShaper(pub FontMetrics);
+
+/// The metrics of the [`ast`] fixture's strut.
+pub const TEST_SHAPER: MetricsShaper = MetricsShaper(FontMetrics {
+    vertical_ascent: 5.0,
+    vertical_descent: 5.0,
+    vertical_line_gap: 0.0,
+    ascent: 8.0,
+    descent: 2.0,
+    line_gap: 0.0,
+    underline_position: 0.0,
+    underline_thickness: 0.0,
+    strikeout_position: 0.0,
+    x_height: 0.0,
+    cap_height: 0.0,
+    ideographic_baseline_offset: 0.0,
+    central_baseline_offset: 0.0,
+    hanging_baseline_offset: 0.0,
+    mathematical_baseline_offset: 0.0,
+    use_typo_metrics: false,
+});
+
+impl TextShaper for MetricsShaper {
+    fn font_metrics(&self, _instance: FontInstanceRef<'_>) -> FontMetrics {
+        self.0
+    }
+
+    fn resolve_primary_font_metrics(
+        &self,
+        families: &[FontFamily],
+        style: FontStyle,
+        script: ScriptTag,
+        locale: &LocaleTag,
+        font_size: f32,
+        variations: &[FontVariation],
+    ) -> (FontId, FontMetrics) {
+        let (id, _) = NoopShaper
+            .resolve_primary_font_metrics(families, style, script, locale, font_size, variations);
+        (id, self.0)
+    }
+
+    fn shape_run(
+        &self,
+        text: &str,
+        run: &ShapingRun,
+        atoms: &[GraphemeAtom],
+        output_clusters: &mut Vec<ShapedCluster>,
+        output_glyphs: &mut Vec<RawShapedGlyph>,
+    ) {
+        NoopShaper.shape_run(text, run, atoms, output_clusters, output_glyphs);
+    }
+
+    fn reshape_window(
+        &self,
+        text: &str,
+        run: &ShapingRun,
+        atoms: &[GraphemeAtom],
+        window: TextRange,
+        leading_edit: LeadingEdit,
+        trailing_edit: TrailingEdit,
+        output_clusters: &mut Vec<ShapedCluster>,
+        output_glyphs: &mut Vec<RawShapedGlyph>,
+    ) {
+        NoopShaper.reshape_window(
+            text,
+            run,
+            atoms,
+            window,
+            leading_edit,
+            trailing_edit,
+            output_clusters,
+            output_glyphs,
+        );
+    }
+
+    fn ligature_carets(
+        &self,
+        instance: FontInstanceRef<'_>,
+        glyph_id: u32,
+        direction: Direction,
+    ) -> smallvec::SmallVec<[f32; 4]> {
+        NoopShaper.ligature_carets(instance, glyph_id, direction)
+    }
+}

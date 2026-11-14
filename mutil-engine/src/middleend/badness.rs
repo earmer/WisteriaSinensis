@@ -107,29 +107,30 @@ impl LineFit {
 ///   The cap sits below the overfull badness, so an underfull line always beats
 ///   an overfull one.
 ///
-/// `font_size` normalises the excess slack of case E. Any other non-finite
-/// input (a NaN or `-inf` slack, a non-finite `font_size` or capacity) or a
-/// negative capacity yields the overfull fit (never a NaN badness).
+/// `font_size` normalises the excess slack of case E.
+///
+/// # Precondition
+/// `slack` is finite or `+inf`, `font_size` is finite and non-negative, and every
+/// capacity is finite and non-negative (spec ST1-8). The input gate guarantees
+/// this for every sum the breaker forms (spec MSR-1), so `line_fit` does not
+/// check it; a violation is a bug in the caller and is caught by a debug
+/// assertion.
 #[must_use]
 pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
+    debug_assert!(
+        (slack.is_finite() || slack == f32::INFINITY)
+            && font_size.is_finite()
+            && font_size >= 0.0
+            && cap
+                .stretch
+                .iter()
+                .chain(&cap.shrink)
+                .all(|v| v.is_finite() && *v >= 0.0),
+        "line_fit precondition violated (spec ST1-8)"
+    );
     // An unbounded line (`wrap_width == +inf`, spec GEO-2) is an exact fit:
     // widening the envelope never makes a line worse (spec AX-6).
-    let unbounded = slack == f32::INFINITY;
-    let inputs = [
-        if unbounded { 0.0 } else { slack },
-        font_size,
-        cap.stretch[0],
-        cap.stretch[1],
-        cap.stretch[2],
-        cap.shrink[0],
-        cap.shrink[1],
-    ];
-    if !inputs.iter().all(|v| v.is_finite())
-        || cap.stretch.iter().chain(&cap.shrink).any(|v| *v < 0.0)
-    {
-        return LineFit::OVERFULL;
-    }
-    if unbounded {
+    if slack == f32::INFINITY {
         return LineFit {
             ratio: 0.0,
             badness: 0.0,
@@ -373,21 +374,9 @@ mod tests {
     }
 
     #[test]
-    fn non_finite_input_is_overfull_not_nan() {
-        for s in [f32::NAN, f32::NEG_INFINITY] {
-            assert!(line_fit(s, &CAP, 16.0).overfull);
-        }
+    fn an_unbounded_line_is_an_exact_fit() {
         // `+inf` is an unbounded line, an exact fit (spec ST1-8 case A).
-        assert_eq!(line_fit(f32::INFINITY, &CAP, 16.0).badness, 0.0);
-        let bad = TierCapacities {
-            stretch: [f32::NAN, 0.0, 0.0],
-            ..CAP
-        };
-        assert!(line_fit(1.0, &bad, 16.0).overfull);
-        let neg = TierCapacities {
-            shrink: [-1.0, 0.0],
-            ..CAP
-        };
-        assert!(line_fit(1.0, &neg, 16.0).overfull);
+        let fit = line_fit(f32::INFINITY, &CAP, 16.0);
+        assert_eq!((fit.ratio, fit.badness, fit.overfull), (0.0, 0.0, false));
     }
 }

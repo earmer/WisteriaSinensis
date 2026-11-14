@@ -650,7 +650,10 @@ impl ParagraphAst {
 
     /// The atoms of body run `run`: `atoms[runs[run].atom_range]`, which is
     /// exactly the slice `TextShaper::shape_run` and `reshape_window` take.
-    /// Empty for an out-of-range run or range (validation reports the error).
+    ///
+    /// Raw access for an AST that may not have passed the input gate (the
+    /// gate itself uses it): empty for an out-of-range run or range. Code
+    /// behind the gate uses `ValidatedInputs::run_atoms` (spec AX-3).
     #[must_use]
     pub fn run_atoms(&self, run: usize) -> &[GraphemeAtom] {
         self.runs
@@ -660,8 +663,9 @@ impl ParagraphAst {
     }
 
     /// The clusters of body run `run`: `clusters[runs[run].cluster_range]`;
-    /// their `atom_range`s index [`run_atoms`](Self::run_atoms). Empty for an
-    /// out-of-range run or range.
+    /// their `atom_range`s index [`run_atoms`](Self::run_atoms). Raw access:
+    /// empty for an out-of-range run or range; behind the gate use
+    /// `ValidatedInputs::run_clusters`.
     #[must_use]
     pub fn run_clusters(&self, run: usize) -> &[ShapedCluster] {
         self.runs
@@ -670,8 +674,9 @@ impl ParagraphAst {
             .unwrap_or_default()
     }
 
-    /// The glyphs of a body cluster: `glyphs[cluster.glyph_range]`. Empty for
-    /// an out-of-range range (validation reports the error).
+    /// The glyphs of a body cluster: `glyphs[cluster.glyph_range]`. Raw
+    /// access: empty for an out-of-range range; behind the gate use
+    /// `ValidatedInputs::cluster_glyphs`.
     #[must_use]
     pub fn cluster_glyphs(&self, cluster: &ShapedCluster) -> &[RawShapedGlyph] {
         self.glyphs
@@ -681,7 +686,9 @@ impl ParagraphAst {
 
     /// The text box at `items[item]` with its slices resolved, or `None` when
     /// that item is not a [`BoxNode::Text`] or one of its ranges is out of
-    /// bounds.
+    /// bounds. Raw access for an AST that may not have passed the input gate;
+    /// behind the gate, `ValidatedInputs::text_box` returns `None` only for an
+    /// item that is not text (spec AX-3).
     #[must_use]
     pub fn text_box(&self, item: usize) -> Option<TextBoxView<'_>> {
         let WordNode::Box(BoxNode::Text {

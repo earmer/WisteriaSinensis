@@ -3,7 +3,7 @@
 use super::tolerance::tolerance;
 use super::{HangSide, LayoutInputError};
 use crate::frontend::is_line_or_paragraph_separator;
-use crate::types::{Direction, FontMetrics, WritingMode};
+use crate::types::{Direction, FontMetrics, WritingMode, is_measurement};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -171,15 +171,14 @@ impl StrutMetrics {
         self.ascent + self.descent + self.line_gap
     }
 
-    /// `true` when every field is finite and the line height is finite and
-    /// positive.
+    /// `true` when every field and the line height are measurements
+    /// (spec MSR-1) and the line height is positive.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         let height = self.line_height();
-        [self.ascent, self.descent, self.line_gap]
+        [self.ascent, self.descent, self.line_gap, height]
             .iter()
-            .all(|v| v.is_finite())
-            && height.is_finite()
+            .all(|v| is_measurement(*v))
             && height > 0.0
     }
 }
@@ -408,11 +407,24 @@ impl LayoutConstraints {
         if self.geometry_provider.is_none() {
             return Ok(self.resolve_line_geometry(line_index, block_start, block_end));
         }
-        if !block_start.is_finite() || !block_end.is_finite() || block_end <= block_start {
-            return Err(LayoutInputError::InvalidLineGeometry);
-        }
+        // The envelope is computed by layout from gated measurements (MSR-1);
+        // only the provider's answer is untrusted.
+        debug_assert!(
+            block_start.is_finite() && block_end.is_finite() && block_end > block_start,
+            "query_checked_geometry: layout passed a malformed envelope"
+        );
         let geometry = self.resolve_line_geometry(line_index, block_start, block_end);
         if !geometry.is_valid(block_start, self.wrap_width) {
+            return Err(LayoutInputError::InvalidLineGeometry);
+        }
+        // A fully obstructed answer to an unexpanded query must point at least
+        // `MIN_CLEARANCE_STEP` ahead, so layout always progresses (spec GEO-4).
+        let stalls = previous.is_none()
+            && geometry.slots.is_empty()
+            && geometry
+                .next_feature_block_offset
+                .is_none_or(|next| next - block_start < MIN_CLEARANCE_STEP);
+        if stalls {
             return Err(LayoutInputError::InvalidLineGeometry);
         }
         if previous.is_some_and(|p| !geometry.is_subset_of(p)) {
@@ -553,6 +565,10 @@ pub(super) fn slots_are_valid(slots: &[InlineSlotConstraint], wrap_width: f32) -
         && slots.windows(2).all(|w| w[0].end <= w[1].start)
 }
 
+/// The least block progress an obstructed provider answer must offer
+/// (spec GEO-4).
+pub(super) const MIN_CLEARANCE_STEP: f32 = 1e-4;
+
 /// Available slots for one block-axis envelope.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LineGeometry {
@@ -567,13 +583,14 @@ impl LineGeometry {
     /// Checks a provider response at the given query start, for a container of
     /// inline width `wrap_width`: every slot lies in the
     /// envelope `[0, wrap_width]` ([`InlineSlotConstraint::lies_in_envelope`]),
-    /// the slots are sorted and disjoint, and the next feature lies ahead.
+    /// the slots are sorted and disjoint, and the next feature lies ahead by
+    /// at most [`MAX_MEASUREMENT`](crate::types::MAX_MEASUREMENT) (spec MSR-1).
     #[must_use]
     pub fn is_valid(&self, block_start: f32, wrap_width: f32) -> bool {
         slots_are_valid(&self.slots, wrap_width)
             && self
                 .next_feature_block_offset
-                .is_none_or(|v| v.is_finite() && v > block_start)
+                .is_none_or(|v| v > block_start && is_measurement(v - block_start))
     }
 
     /// Checks that an expanded block envelope introduced no new inline area.
