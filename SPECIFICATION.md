@@ -135,7 +135,7 @@ pub struct AtomFlags(..);
 
 **[ATM-1]** An atom is one extended grapheme cluster of UAX #29, GB9c included. It stores its bytes, script, bidi level (of its first code point; marks follow their base), glyph orientation, line-break class and flags. Script, level and orientation are primary data of the atom: the frontend resolves them in §3 Steps 1–4, before any run exists, and Step 5 partitions runs wherever one of them changes. Every atom of a run therefore agrees with the run on all three (AST-5).
 
-**[ATM-2]** `linebreak_class` is the UAX #14 class of the atom's first code point. The segmenter always runs over the original text, so LB9 and LB10 see the real sequence.
+**[ATM-2]** `linebreak_class` is the UAX #14 class of the atom's first code point. `LineBreakClass` is one byte wide, but its numeric values are not part of the contract: they move when Unicode adds a class, so it is never stored or exchanged as a number. The segmenter always runs over the original text, so LB9 and LB10 see the real sequence.
 
 **[ATM-3]** `AtomFlags` is a bit set (`AtomFlags::EMPTY`, `AtomFlags::ALL`, `AtomFlags::bits`, `AtomFlags::from_bits_truncate`, `AtomFlags::is_empty`, `AtomFlags::contains`, `AtomFlags::intersects`, `AtomFlags::union`, `AtomFlags::insert`, `AtomFlags::remove`, `AtomFlags::set`; bits outside `ALL` are masked off). Its flags are:
 

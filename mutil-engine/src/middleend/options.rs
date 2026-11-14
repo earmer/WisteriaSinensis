@@ -395,8 +395,17 @@ impl LayoutConstraints {
     /// geometry derives from constraints the gate accepted
     /// ([`is_valid`](Self::is_valid)) and is returned as is (spec GEO-3, AX-3).
     ///
+    /// # Precondition
+    /// `block_start` and `block_end` are finite and `block_end > block_start`.
+    /// Layout computes the envelope from gated measurements (spec MSR-1), so it
+    /// is not checked at run time (spec AX-3, GEO-3); a violation is a bug in
+    /// the caller and is caught by a debug assertion, with or without a
+    /// provider.
+    ///
     /// # Errors
-    /// Invalid query/response coordinates or a violation of provider monotonicity.
+    /// `InvalidLineGeometry` for a provider answer outside the envelope, out
+    /// of order or stalling, and `NonMonotonicGeometry` for one that breaks
+    /// monotonicity against `previous`.
     pub fn query_checked_geometry(
         &self,
         line_index: usize,
@@ -404,15 +413,13 @@ impl LayoutConstraints {
         block_end: f32,
         previous: Option<&LineGeometry>,
     ) -> Result<LineGeometry, LayoutInputError> {
+        debug_assert!(
+            block_start.is_finite() && block_end.is_finite() && block_end > block_start,
+            "query_checked_geometry precondition violated (spec GEO-3)"
+        );
         if self.geometry_provider.is_none() {
             return Ok(self.resolve_line_geometry(line_index, block_start, block_end));
         }
-        // The envelope is computed by layout from gated measurements (MSR-1);
-        // only the provider's answer is untrusted.
-        debug_assert!(
-            block_start.is_finite() && block_end.is_finite() && block_end > block_start,
-            "query_checked_geometry: layout passed a malformed envelope"
-        );
         let geometry = self.resolve_line_geometry(line_index, block_start, block_end);
         if !geometry.is_valid(block_start, self.wrap_width) {
             return Err(LayoutInputError::InvalidLineGeometry);

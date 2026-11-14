@@ -10,7 +10,9 @@ use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub};
 /// the classes defined through Unicode 17.0 (including `Ak`, `Ap`, `As`, `Vf`,
 /// `Vi` and `Hh`); later versions may add values, hence `#[non_exhaustive]`. The data
 /// version is pinned and reported by `conformance_report()` (§1.1).
-/// One byte wide.
+/// One byte wide. `#[repr(u8)]` fixes the size only: the numeric values are
+/// not part of the contract and move when Unicode adds a class, so the enum
+/// is never stored or exchanged as a number (spec ATM-2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 #[repr(u8)]
