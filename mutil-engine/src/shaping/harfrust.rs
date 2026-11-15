@@ -5,6 +5,7 @@
 //! built once per coordinate set and cached, with its metrics. Shaping uses
 //! HarfRust, metrics come from `read-fonts`.
 
+use super::clusters::{empty_cluster, push_clusters};
 use super::{FontFace, FontSource, LeadingEdit, TextShaper, TrailingEdit};
 use crate::types::{
     Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontRef, FontSlant, FontStyle,
@@ -203,8 +204,7 @@ type InstanceKey = (u32, SmallVec<[([u8; 4], u32); 2]>);
 /// (spec SHP-22). It is also the [`FontSource`] of its own id space.
 ///
 /// It implements the whole [`TextShaper`] contract for horizontal and
-/// vertical-upright text except GDEF ligature carets, which it does not read
-/// yet (`ligature_carets` answers none, the documented equal-slot fallback).
+/// vertical-upright text, GDEF ligature carets included.
 #[derive(Clone)]
 pub struct HarfRustShaper {
     registry: Arc<FontRegistry>,
@@ -524,102 +524,6 @@ fn context_after(text: &str, at: usize) -> &str {
     &text[at..end]
 }
 
-/// A glyph-less cluster over one atom.
-fn empty_cluster(
-    run: &ShapingRun,
-    atom: &GraphemeAtom,
-    index: usize,
-    font: FontId,
-) -> ShapedCluster {
-    ShapedCluster {
-        orientation: run.orientation,
-        byte_range: atom.byte_range,
-        atom_range: index..index + 1,
-        font: FontRef::unscaled(font),
-        bidi_level: run.bidi_level,
-        flags: atom.flags,
-        glyph_range: 0..0,
-        natural_width: 0.0,
-        safe_to_break_before: true,
-        safe_to_concat_before: true,
-    }
-}
-
-/// Groups glyphs, each tagged with the atom holding its cluster value, into
-/// clusters of whole atoms (spec SHP-13): a glyph that reaches back into an
-/// earlier cluster merges the two, and an atom with no glyph of its own (a
-/// ligature component) joins the cluster before it.
-fn push_clusters(
-    run: &ShapingRun,
-    atoms: &[GraphemeAtom],
-    range: core::ops::Range<usize>,
-    font: FontRef,
-    glyphs: &[(usize, RawShapedGlyph, bool, bool)],
-    output_clusters: &mut Vec<ShapedCluster>,
-    output_glyphs: &mut Vec<RawShapedGlyph>,
-) {
-    // Groups: (first atom, glyph indices).
-    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
-    for (index, (atom, ..)) in glyphs.iter().enumerate() {
-        let atom = *atom;
-        match groups.last_mut() {
-            Some((start, members)) if atom == *start => members.push(index),
-            Some((start, _)) if atom > *start => groups.push((atom, vec![index])),
-            Some(_) => {
-                // Out of order: merge back until the group starts at or
-                // before this atom.
-                let mut merged = vec![index];
-                while let Some((start, members)) = groups.pop() {
-                    merged.extend(members);
-                    if start <= atom {
-                        merged.sort_unstable();
-                        groups.push((start, merged));
-                        break;
-                    }
-                    if groups.is_empty() {
-                        merged.sort_unstable();
-                        groups.push((atom.min(start), merged));
-                        break;
-                    }
-                }
-            }
-            None => groups.push((atom, vec![index])),
-        }
-    }
-    if groups.is_empty() {
-        groups.push((range.start, Vec::new()));
-    }
-    groups[0].0 = range.start;
-    for (k, (start, members)) in groups.iter().enumerate() {
-        let end = groups.get(k + 1).map_or(range.end, |(next, _)| *next);
-        let first = output_glyphs.len();
-        output_glyphs.extend(members.iter().map(|&i| glyphs[i].1));
-        let (unsafe_break, unsafe_concat) = members
-            .first()
-            .map_or((false, false), |&i| (glyphs[i].2, glyphs[i].3));
-        let natural_width = members
-            .iter()
-            .map(|&i| glyphs[i].1.x_advance)
-            .sum::<f32>()
-            .max(0.0);
-        output_clusters.push(ShapedCluster {
-            orientation: run.orientation,
-            byte_range: TextRange::new(
-                atoms[*start].byte_range.start(),
-                atoms[end - 1].byte_range.end(),
-            ),
-            atom_range: *start..end,
-            font,
-            bidi_level: run.bidi_level,
-            flags: crate::types::AtomFlags::for_cluster(&atoms[*start..end]),
-            glyph_range: first..output_glyphs.len(),
-            natural_width,
-            safe_to_break_before: !unsafe_break,
-            safe_to_concat_before: !unsafe_break && !unsafe_concat,
-        });
-    }
-}
-
 /// The maximal byte-contiguous stretches of `atoms[range]`.
 fn contiguous_segments(
     atoms: &[GraphemeAtom],
@@ -797,11 +701,25 @@ impl TextShaper for HarfRustShaper {
 
     fn ligature_carets(
         &self,
-        _instance: FontInstanceRef<'_>,
-        _glyph_id: u32,
+        instance: FontInstanceRef<'_>,
+        glyph_id: u32,
         _direction: Direction,
     ) -> SmallVec<[f32; 4]> {
-        SmallVec::new()
+        // GDEF caret coordinates run along the glyph's advance from its
+        // origin in either direction; INT-5 orders the sub-slots for RTL.
+        let Some((font, units)) = self.instance(instance.font.font_id, instance.variations) else {
+            return SmallVec::new();
+        };
+        let scale = instance.font_size * instance.font.scale / units.units_per_em;
+        let mut carets = gdef_carets(&font, glyph_id);
+        for caret in &mut carets {
+            *caret *= scale;
+        }
+        if carets.iter().all(|c| c.is_finite()) {
+            carets
+        } else {
+            SmallVec::new()
+        }
     }
 
     fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32 {
@@ -932,6 +850,51 @@ fn metrics_value(font: &Font, c: char) -> Option<f32> {
 
 /// Baseline offsets read from the horizontal axis of `BASE`, relative to the
 /// alphabetic (`romn`) baseline when the font gives one.
+/// The GDEF ligature caret coordinates of `glyph_id` in font units, at the
+/// font's variation location (spec SHP-7). A caret given as a contour point
+/// (format 2) needs the outline, which the backend does not load, so a glyph
+/// with one answers none and takes the equal-slot fallback (INT-5); device
+/// tables only adjust hinted sizes and are ignored.
+fn gdef_carets(font: &Font, glyph_id: u32) -> SmallVec<[f32; 4]> {
+    use read_fonts::tables::gdef::CaretValue;
+    use read_fonts::tables::layout::DeviceOrVariationIndex;
+    use read_fonts::tables::variations::DeltaSetIndex;
+    let read = || -> Option<SmallVec<[f32; 4]>> {
+        let tables = font.tables();
+        let gdef = tables.gdef().ok()?;
+        let list = gdef.lig_caret_list()?.ok()?;
+        let index = list.coverage().ok()?.get(GlyphId::new(glyph_id))?;
+        let glyph = list.lig_glyphs().get(usize::try_from(index).ok()?).ok()?;
+        let coords = font.normalized_coords();
+        let store = || gdef.item_var_store()?.ok();
+        glyph
+            .caret_values()
+            .iter()
+            .map(|caret| match caret.ok()? {
+                CaretValue::Format1(c) => Some(f32::from(c.coordinate())),
+                CaretValue::Format2(_) => None,
+                CaretValue::Format3(c) => {
+                    let base = f32::from(c.coordinate());
+                    let delta = match c.device() {
+                        Ok(DeviceOrVariationIndex::VariationIndex(v))
+                            if coords.iter().any(|c| c.to_bits() != 0) =>
+                        {
+                            let index = DeltaSetIndex {
+                                outer: v.delta_set_outer_index(),
+                                inner: v.delta_set_inner_index(),
+                            };
+                            store()?.compute_delta(index, coords)?.to_f32()
+                        }
+                        _ => 0.0,
+                    };
+                    Some(base + delta)
+                }
+            })
+            .collect()
+    };
+    read().unwrap_or_default()
+}
+
 #[derive(Default)]
 struct BaseOffsets {
     ideo: Option<f32>,

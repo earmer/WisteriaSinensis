@@ -582,14 +582,14 @@ impl<'i, 'a> Layout<'i, 'a> {
                         if has_content && end > available + FIT_EPSILON {
                             return match last_fit {
                                 Some(b) => LineEnd::At(b),
-                                None => self.emergency(start, t),
+                                None => self.emergency(start, t, post, origin),
                             };
                         }
                         if !has_content && end > available + FIT_EPSILON {
                             if let Some(b) = last_fit {
                                 return LineEnd::At(b);
                             }
-                            return self.emergency(start, t);
+                            return self.emergency(start, t, post, origin);
                         }
                         body = end;
                         has_content = true;
@@ -618,12 +618,26 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// visible precedes it, else after `t` alone (one indivisible entity on
     /// its own overflowing line, SLT-5), together with the break right after
     /// it if only glue separates them.
-    fn emergency(&mut self, start: usize, t: usize) -> LineEnd {
-        let has_content_before =
-            (start..t).any(|k| matches!(&self.tokens[k], Token::Piece(p) if p.is_content()));
-        if has_content_before {
-            self.repair_seam(t);
-            return LineEnd::Before(t);
+    fn emergency(&mut self, start: usize, t: usize, post: f32, origin: f32) -> LineEnd {
+        let first_content =
+            (start..t).find(|&k| matches!(&self.tokens[k], Token::Piece(p) if p.is_content()));
+        if let Some(first) = first_content {
+            // Re-shaping an unsafe seam can widen its sides (kerning across
+            // it is lost); while the line then overflows, the seam moves one
+            // piece back and the abandoned re-shape is dropped.
+            let mut t = t;
+            loop {
+                let added = self.repair_seam(t);
+                if t <= first + 1
+                    || self.content_end(start, t, post, origin) <= self.reference + FIT_EPSILON
+                {
+                    return LineEnd::Before(t);
+                }
+                for c in added {
+                    self.reshaped.remove(&c);
+                }
+                t -= 1;
+            }
         }
         if let Some(b) = self.next_break_after(t) {
             return LineEnd::At(b);
@@ -641,17 +655,18 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// re-shapes the clusters on both sides of the seam (spec ST1-5), with no
     /// edit. A re-shape that does not return exactly one cluster per side is
     /// not used.
-    fn repair_seam(&mut self, t: usize) {
+    fn repair_seam(&mut self, t: usize) -> SmallVec<[usize; 2]> {
+        let mut added = SmallVec::new();
         let Some(Token::Piece(Piece {
             kind: PieceKind::Cluster { run, cluster },
             ..
         })) = self.tokens.get(t)
         else {
-            return;
+            return added;
         };
         let (run, after) = (*run, *cluster);
         if self.ast.clusters[after].safe_to_break_before {
-            return;
+            return added;
         }
         let run_clusters = &self.ast.runs[run].cluster_range;
         let mut sides = vec![after];
@@ -686,9 +701,36 @@ impl<'i, 'a> Layout<'i, 'a> {
             if usable {
                 let advance: f32 = glyphs.iter().map(|g| g.x_advance).sum();
                 let width = (advance + self.ast.runs[run].letter_spacing).max(0.0);
-                self.reshaped.insert(c, Reshaped { glyphs, width });
+                if self
+                    .reshaped
+                    .insert(c, Reshaped { glyphs, width })
+                    .is_none()
+                {
+                    added.push(c);
+                }
             }
         }
+        added
+    }
+
+    /// Where the content of a line from `start` ends when it stops before
+    /// token `end`, measured as [`fit`](Self::fit) measures it.
+    fn content_end(&self, start: usize, end: usize, post: f32, origin: f32) -> f32 {
+        let mut pen = post;
+        let mut body = post;
+        for token in &self.tokens[start..end] {
+            match token {
+                Token::Break(b) => pen += b.no_break,
+                Token::Piece(piece) => {
+                    let (advance, reach) = self.measure(piece, origin + pen);
+                    if piece.is_content() {
+                        body = pen + reach.max(advance);
+                    }
+                    pen += advance;
+                }
+            }
+        }
+        body
     }
 
     /// The line box of a cluster's font instance (spec MET-1, MET-2), through

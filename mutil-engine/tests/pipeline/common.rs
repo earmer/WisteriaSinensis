@@ -212,3 +212,21 @@ pub fn glyph_for(font: &[u8], c: char) -> Option<u32> {
     let font = read_fonts::FontRef::new(font).expect("the test font parses");
     font.cmap().ok()?.map_codepoint(c).map(|g| g.to_u32())
 }
+
+/// Compiles and lays out `text` in `families` with [`SCRIPT_SHAPER`], and
+/// passes the result through the output gate.
+#[track_caller]
+pub fn lay_out_in(
+    text: &str,
+    families: &[&str],
+    constraints: &LayoutConstraints,
+    options: &LayoutOptions,
+) -> PositionedParagraph {
+    let ast = compile_in(text, families);
+    let paragraph = layout_paragraph(&ast, text, &*SCRIPT_SHAPER, constraints, options)
+        .unwrap_or_else(|e| panic!("{text:?}: {e}"));
+    if let Err((line, error)) = ValidatedLayout::new(&paragraph, text) {
+        panic!("{text:?} in {constraints:?}: line {line}: {error}\n{paragraph:#?}");
+    }
+    paragraph
+}

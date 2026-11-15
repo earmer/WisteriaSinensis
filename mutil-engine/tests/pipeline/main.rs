@@ -6,5 +6,6 @@ mod common;
 mod fonts;
 mod frontend;
 mod layout;
+mod line_only;
 mod queries;
 mod shaper;
