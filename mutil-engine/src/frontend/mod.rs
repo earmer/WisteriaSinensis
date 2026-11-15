@@ -8,6 +8,8 @@
 mod annotation;
 mod ast;
 mod compile;
+#[cfg(test)]
+mod conformance;
 mod input;
 mod options;
 mod script;

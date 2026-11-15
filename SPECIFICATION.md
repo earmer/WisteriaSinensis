@@ -1519,6 +1519,8 @@ The data types and three pure helpers (`AtomicFragment::hit_test`, `Motion::flow
 
 **[RM-1]** Every phase passes the Unicode conformance data for its components against the pinned data version (`GraphemeBreakTest.txt`, `WordBreakTest.txt`, `LineBreakTest.txt`, `BidiTest.txt`, `BidiCharacterTest.txt`).
 
+**[RM-12] Recorded conformance differences.** Where a pinned segmenter's stable rule tables predate its data version, the RM-1 suite records the cases that differ, by line, in `mutil-engine/tests/assets/ucd/known-differences.txt`, and asserts exactly that set and its count, so that a fix and a regression both fail it; a suite with no recorded section passes in full. The set is regenerated from the harness's output when a dependency changes, never edited by hand. With ICU4X 2.4 the grapheme suite records 10 cases (the Unicode 18.0 form of GB9c), the line suite 328 (the stable line segmenter's Unicode 15.1 rules), and the word suite none; the `unstable` constructors, which FE-18's stable interfaces exclude, are not used to close them.
+
 ### Phase 0: foundation (done)
 
 **[RM-2]** The data model of §2 with its parsed value types, the coordinate transforms of §2.7, the input validator (§2.5) and the output validators (§2.6), checked geometry queries, the tiered badness function, the `TextShaper` contract with `NoopShaper`, and the contract tests (`tests/contracts/`, one test binary; span-scaling benchmarks are `#[ignore]`d and run explicitly). No segmenter, real shaper, line breaker or editing query exists yet.

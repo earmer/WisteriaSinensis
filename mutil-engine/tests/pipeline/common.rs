@@ -130,3 +130,85 @@ pub fn line_texts<'t>(paragraph: &PositionedParagraph, text: &'t str) -> Vec<&'t
         .map(|line| &text[line.byte_range.as_range()])
         .collect()
 }
+
+/// The vendored script fonts (`tests/assets/README.md`), in the order
+/// [`SCRIPT_SHAPER`] registers them after the monospace face: face `i + 1`
+/// is `SCRIPT_FONTS[i]`.
+pub static SCRIPT_FONTS: &[(&str, &[u8])] = &[
+    (
+        "Noto Serif",
+        include_bytes!("../assets/NotoSerif-Subset.ttf"),
+    ),
+    (
+        "Noto Sans Devanagari",
+        include_bytes!("../assets/NotoSansDevanagari-Subset.ttf"),
+    ),
+    (
+        "Noto Sans JP",
+        include_bytes!("../assets/NotoSansJP-Subset.ttf"),
+    ),
+    (
+        "Noto Sans Thai",
+        include_bytes!("../assets/NotoSansThai-Subset.ttf"),
+    ),
+    (
+        "Noto Sans Lao",
+        include_bytes!("../assets/NotoSansLao-Subset.ttf"),
+    ),
+    (
+        "Noto Sans Khmer",
+        include_bytes!("../assets/NotoSansKhmer-Subset.ttf"),
+    ),
+    (
+        "Noto Sans Myanmar",
+        include_bytes!("../assets/NotoSansMyanmar-Subset.ttf"),
+    ),
+];
+
+/// A shaper over every vendored face: the monospace face as `FontId(0)`,
+/// then [`SCRIPT_FONTS`]; Noto Serif is the generic serif family.
+pub static SCRIPT_SHAPER: LazyLock<HarfRustShaper> = LazyLock::new(|| {
+    let mut registry = FontRegistry::new();
+    let faces = std::iter::once((FAMILY, FONT_BYTES)).chain(SCRIPT_FONTS.iter().copied());
+    for (i, (family, bytes)) in faces.enumerate() {
+        let id = registry
+            .add_face(
+                family.into(),
+                FontStyle::default(),
+                FontFace::new(FontBytes::from_static(bytes), 0),
+            )
+            .unwrap_or_else(|| panic!("{family} parses"));
+        assert_eq!(id, FontId(i as u32));
+    }
+    registry.set_generic(GenericFamily::Serif, "Noto Serif".into());
+    HarfRustShaper::new(Arc::new(registry))
+});
+
+/// `font_size` in the given family stack, shaped by [`SCRIPT_SHAPER`].
+pub fn script_style(families: &[&str], font_size: f32) -> TextStyle {
+    TextStyle {
+        families: families
+            .iter()
+            .map(|f| FontFamily::Named((*f).into()))
+            .collect(),
+        ..style(font_size)
+    }
+}
+
+/// Compiles `text` in `families` at 10 units per em with [`SCRIPT_SHAPER`].
+pub fn compile_in(text: &str, families: &[&str]) -> ParagraphAst {
+    let style = script_style(families, 10.0);
+    compile_paragraph(
+        &input(text, &style),
+        &FrontendOptions::default(),
+        &*SCRIPT_SHAPER,
+    )
+    .unwrap_or_else(|e| panic!("{text:?}: {e}"))
+}
+
+/// The glyph id that `font`'s cmap gives `c`, if any.
+pub fn glyph_for(font: &[u8], c: char) -> Option<u32> {
+    use read_fonts::TableProvider;
+    let font = read_fonts::FontRef::new(font).expect("the test font parses");
+    font.cmap().ok()?.map_codepoint(c).map(|g| g.to_u32())
+}

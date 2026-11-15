@@ -3,6 +3,7 @@
 //! the vendored test font (`tests/assets/README.md`).
 
 mod common;
+mod fonts;
 mod frontend;
 mod layout;
 mod queries;
