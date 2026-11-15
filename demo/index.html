@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>mutil-engine · visual harness</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./web/style.css" />
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="masthead-inner">
+        <div class="title-row">
+          <h1>mutil-engine</h1>
+          <span class="phase">Phase 1</span>
+        </div>
+        <p class="lede">
+          Every glyph below is a glyph id and an origin returned by the engine's
+          validated layout, rasterised from the same face bytes. The page does
+          not run the browser's text shaper.
+        </p>
+        <div class="chips">
+          <span id="unicode-version" class="chip muted">Unicode data</span>
+          <span id="font-chip" class="chip muted">fonts…</span>
+          <span id="gate-chip" class="chip muted">waiting for layout</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="panel controls" aria-label="Layout controls">
+        <label class="field">
+          <span class="field-label">Sample</span>
+          <select id="samples">
+            <option value="mixed">Mixed scripts</option>
+            <option value="latin">Latin · ligatures &amp; marks</option>
+            <option value="japanese">Japanese</option>
+            <option value="zhHans">简体中文</option>
+            <option value="indic">Indic &amp; Southeast Asian</option>
+            <option value="rtl">Arabic · rejected today</option>
+          </select>
+        </label>
+
+        <label class="field grow">
+          <span class="field-label">Text <span class="field-hint">one paragraph per line</span></span>
+          <textarea id="text" spellcheck="false" autocomplete="off"></textarea>
+        </label>
+
+        <div class="two-up">
+          <label class="field slider-field">
+            <span class="field-label">Width <output id="width-value" for="width"></output></span>
+            <input id="width" type="range" min="240" max="1000" step="10" value="560" />
+          </label>
+          <label class="field slider-field">
+            <span class="field-label">Type size <output id="size-value" for="font-size"></output></span>
+            <input id="font-size" type="range" min="12" max="32" step="1" value="18" />
+          </label>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Line height</span>
+          <select id="line-height">
+            <option value="normal">normal (font metrics)</option>
+            <option value="1.4">1.4 × type size</option>
+            <option value="1.8">1.8 × type size</option>
+          </select>
+        </label>
+
+        <div class="two-up">
+          <label class="field">
+            <span class="field-label">Face</span>
+            <select id="face">
+              <option value="Noto Sans">Noto Sans</option>
+              <option value="Noto Serif">Noto Serif</option>
+              <option value="JetBrains Mono">JetBrains Mono</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Locale</span>
+            <input id="locale" type="text" placeholder="und" spellcheck="false" />
+          </label>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Quotation policy</span>
+          <select id="quotes">
+            <option value="standard">standard (FE-13)</option>
+            <option value="cjk-aware">CJK-aware (FE-14)</option>
+          </select>
+        </label>
+
+        <fieldset class="overlays">
+          <legend class="field-label">Overlays</legend>
+          <label><input id="show-boxes" type="checkbox" /> line boxes &amp; slots</label>
+          <label><input id="show-baselines" type="checkbox" /> baselines</label>
+          <label><input id="show-carets" type="checkbox" /> caret stops</label>
+        </fieldset>
+
+        <p id="font-note" class="note">loading fonts…</p>
+        <div id="stats" class="stats"></div>
+
+        <div class="engine-block">
+          <span class="field-label">Engine components</span>
+          <ul id="engine-status"></ul>
+        </div>
+      </section>
+
+      <section class="panel preview" aria-label="Rendered paragraph">
+        <div id="error" class="error" role="alert" hidden></div>
+        <div class="paper-wrap">
+          <canvas id="canvas" width="624" height="320"
+            aria-label="Text rendered from the engine's glyph positions"></canvas>
+          <div id="hint" class="hint" hidden>Paste text to lay it out.</div>
+        </div>
+        <p class="preview-note">
+          Width is the engine's <code>wrap_width</code>; the whitespace around the
+          text is the page's margin, not part of the container. Line boxes and
+          carets are the engine's slots and caret stops, not guesses.
+        </p>
+      </section>
+
+      <section id="scope" class="panel scope">
+        <h2>What this harness reflects</h2>
+        <div class="scope-grid">
+          <div>
+            <h3><span class="dot on"></span>Real today</h3>
+            <ul>
+              <li>
+                Unicode 18.0.0 segmentation through ICU4X: grapheme clusters,
+                UAX #14 break opportunities, word boundaries, scripts and emoji
+                sequences. The engine-components panel reports the engine's own
+                versions.
+              </li>
+              <li>
+                HarfRust shaping of the engine's runs, with per-atom font
+                fallback over the ten faces registered here (Latin sans, serif
+                and mono; Simplified and Japanese Chinese; Devanagari, Thai,
+                Lao, Khmer, Myanmar).
+              </li>
+              <li>
+                Greedy line breaking at UAX #14 opportunities with the emergency
+                cluster break, tabs, hard breaks and blank lines.
+              </li>
+              <li>
+                Strut-derived line boxes, caret stops in the output, and the
+                output gate every paragraph passes before it is drawn.
+              </li>
+            </ul>
+          </div>
+          <div>
+            <h3><span class="dot off"></span>Not in Phase 1</h3>
+            <ul>
+              <li>
+                Bidi and RTL text. Arabic or Hebrew characters are rejected by the
+                frontend; pick the Arabic sample to see the engine's own refusal
+                instead of text in the wrong order.
+              </li>
+              <li>
+                Vertical writing modes, annotations/ruby and decoration spans:
+                also rejected by the frontend.
+              </li>
+              <li>
+                Justification, hanging punctuation, hyphenation and clamping:
+                accepted as options but not applied.
+              </li>
+              <li>
+                Balanced and Publication line-breaking strategies: every strategy
+                breaks greedily today.
+              </li>
+              <li>
+                Cursor and hit-test rectangles (<code>range_rects</code>,
+                <code>rect_for_offset</code>) are not implemented; only the
+                emitted caret stops are shown.
+              </li>
+              <li>
+                Colour glyphs (COLR, sbix, CBDT) are not painted, and no emoji
+                face is registered here.
+              </li>
+              <li>
+                <strong>Known gap this harness exposes:</strong> SHP-12's
+                script-aware fallback is not implemented in the HarfRust
+                backend's <code>face_for</code>. In one Hani run, CJK
+                punctuation is still taken from the Latin face when that face
+                covers the code point, so U+201C/U+2026/U+00B7 keep Latin
+                advances instead of the CJK face's full-width ones. This page
+                reports that; it does not reorder the stack to hide it.
+              </li>
+            </ul>
+          </div>
+        </div>
+        <p class="scope-foot">
+          This list tracks the crate's Phase 1 scope
+          (<code>mutil-engine/src/middleend/layout.rs</code> and
+          <code>src/lib.rs</code>). If the engine gains a stage, this page should
+          change with it, not before it.
+        </p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span>mutil-engine visual harness</span>
+      <span>GPL-3.0-or-later</span>
+    </footer>
+
+    <script type="module" src="./web/app.js"></script>
+  </body>
+</html>
