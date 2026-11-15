@@ -253,7 +253,7 @@ pub struct FontMetrics {
 }
 ```
 
-**[FNT-4]** Raw `FontMetrics` are valid (`FontMetrics::is_valid`) when all fifteen numbers are measurements (MSR-1); ascent, descent, line gap, their vertical equivalents, underline thickness, x-height and cap height are non-negative; the horizontal and the vertical ascent-plus-descent are each positive; and every derived height is finite. The four baseline offsets are positive towards line-over. `FontMetrics::natural_line_height` is `ascent + descent + line_gap`. `use_typo_metrics` is OS/2 `fsSelection` bit 7.
+**[FNT-4]** Raw `FontMetrics` are valid (`FontMetrics::is_valid`) when all fifteen numbers are measurements (MSR-1); ascent, descent, line gap, their vertical equivalents, underline thickness, x-height and cap height are non-negative; the horizontal and the vertical ascent-plus-descent are each positive; and every derived height is finite. The four baseline offsets, `underline_position` and `strikeout_position` are positive towards line-over and negative towards line-under, the one vertical sign convention of the engine (OUT-1 `y_offset`, ORI-2 `over_to_block`); OpenType `post` `underlinePosition` and OS/2 `yStrikeoutPosition` already use it, so a typical underline position is negative and a typical strike-out position positive, and both pass through unchanged. `FontMetrics::natural_line_height` is `ascent + descent + line_gap`. `use_typo_metrics` is OS/2 `fsSelection` bit 7.
 
 ### 2.4 The item sequence: `WordNode`
 
@@ -753,7 +753,7 @@ pub struct CaretStop { pub x: f32, pub offset: ByteIndex, pub affinity: CaretAff
 
 **Decorations.**
 
-**[DEC-1]** A `DecorationLine` has finite coordinates, a non-negative width and thickness, and bytes inside the line.
+**[DEC-1]** A `DecorationLine`'s `y_offset` is an offset from the baseline positive towards line-over (FNT-4): a renderer draws the stroke at `baseline_y + over_to_block(y_offset)`, so "the lowest `underline_position`" of ST5-1 is the minimum. A `DecorationLine` has finite coordinates, a non-negative width and thickness, and bytes inside the line.
 
 **Annotations.**
 
@@ -1140,7 +1140,7 @@ pub enum FrontendError {                // #[non_exhaustive]
     ShaperContract { run: usize },
 }
 pub enum FrontendFeature { VerticalWritingMode, RtlBaseDirection, DecorationSpans, AtomicSpans,
-                           BidiSpans, Annotations }
+                           BidiSpans, Annotations, BidiText, BaselineAlignment }
 ```
 
 **[FE-25] Input.** `compile_paragraph(input, options, shaper)` compiles one paragraph into a `ParagraphAst` in the order of FE-3. `ParagraphInput::text` is one paragraph (AST-2), and every range of the input is local to it. A `TextStyle` is complete: nothing cascades from one style to another. `ParagraphInput::style_spans` are non-empty, ascending, disjoint and on character boundaries; a byte no span covers takes `ParagraphInput::default_style`. The frontend normalises each style's features (FNT-2), so a caller need not. A style's `TextStyle::script` stands over script resolution (FE-13) and its `TextStyle::locale` over the default locale (SCO-5). A paragraph in which no character has a resolved script (every one is `Zyyy` or `Zinh`) and no style states one resolves to `ScriptTag::LATIN`. The default style also gives the strut: `strut_font_size` is its `font_size` and `strut_metrics` what `TextShaper::resolve_primary_font_metrics` returns for it, so that an empty paragraph, whose items are the sentinel alone, has a valid strut (AST-6).
@@ -1161,7 +1161,9 @@ pub enum FrontendFeature { VerticalWritingMode, RtlBaseDirection, DecorationSpan
 | `Unsupported { feature }` | the input asks for something Phase 1 does not compile yet | RM-11 |
 | `ShaperContract { run }` | the shaper's clusters do not partition the atoms of a run in order | SHP-4, SHP-5 |
 
-`FrontendFeature` names what `Unsupported` refuses: `FrontendFeature::VerticalWritingMode`, `FrontendFeature::RtlBaseDirection`, and a non-empty stream of `FrontendFeature::DecorationSpans`, `FrontendFeature::AtomicSpans`, `FrontendFeature::BidiSpans` or `FrontendFeature::Annotations`. A feature leaves the list when it is implemented; an input is never accepted and then compiled without it. The types are the crate's; the analysis pass is *future*, and until it exists the crate's `compile_paragraph` compiles nothing.
+`FrontendFeature` names what `Unsupported` refuses: `FrontendFeature::VerticalWritingMode`; `FrontendFeature::RtlBaseDirection`, a right-to-left `FrontendOptions::base_direction` or, with none given, text whose first strong character is R or AL (UAX #9 P2, P3); `FrontendFeature::BidiText`, any character that would take a non-zero level in a left-to-right paragraph (classes R, AL and AN, and the explicit embedding, override and isolate controls); `FrontendFeature::BaselineAlignment`, a style or object aligned to anything but `BaselineAlignment::Auto`, `BaselineAlignment::Alphabetic` or `BaselineAlignment::Offset`; and a non-empty stream of `FrontendFeature::DecorationSpans`, `FrontendFeature::AtomicSpans`, `FrontendFeature::BidiSpans` or `FrontendFeature::Annotations`. A feature leaves the list when it is implemented; an input is never accepted and then compiled without it.
+
+**[FE-29] Phase 1 analysis.** The crate's `compile_paragraph` implements FE-25 to FE-28 for horizontal left-to-right text. Step 1 segments the whole text into UAX #29 graphemes; a lone tab becomes a `Tab`, a lone U+2028 a `HardBreak`, a lone `is_word_space` character a `WordSpace` glue, and every other grapheme an atom of level 0 whose class is that of its first code point and whose flags are `IS_OPEN_PUNCT` (class OP), `IS_CLOSE_PUNCT` (CL, CP) and `HAS_VARIATION_SELECTOR` (FE-7). Step 3 is the subset of FE-13 that needs no pairing: an atom takes the first specific script among its characters, so marks follow their base; an atom with none takes the preceding atom's resolved script, at the paragraph start the first following one, else `Latn`; a style's script stands. Step 4 takes a style's locale or `default_locale`. Runs are the maximal sequences of atoms that agree on style, script and locale; glue, tabs, breaks and objects between them stay inside the run's bytes. The UAX #14 opportunities of the segmenter for the options' strictness and word option (`Anywhere`: every grapheme boundary) become `Direct` discretionaries after the unit that ends there, never inside an atom or object nor after a hard break. A text box is a maximal sequence of atoms of one run with no other item between them; a cluster that straddles a box boundary is re-shaped on each side of the cut (CLU-8). Emoji flags (FE-6), Table S pairing and the CJK rules (FE-14, FE-15, FE-20), the locale heuristics (FE-16), URL tailoring (FE-22), the no-line-end words (FE-23) and hyphenation (FE-21) are not compiled yet; `LocalePolicy::ExperimentalHeuristics`, `QuotePolicy::CjkAware` and the autospace profile change nothing until they are.
 
 ---
 
@@ -1251,7 +1253,9 @@ pub struct HarfRustShaper { .. }        // the backend over one shared registry
 
 **[SHP-21] Registry.** A `FontRegistry` holds font faces in memory and is the id space of the shaper built on it. `FontRegistry::add_face` registers a `FontFace` under a family name and a `FontStyle` and returns its `FontId`, the index of the face in registration order, or `None`, registering nothing, when the bytes hold no font at the face index; the bytes are shared, never copied (HST-1). `FontRegistry::set_generic` names the family a `GenericFamily` resolves to. `FontRegistry::new` is empty. A registry is filled before it is shared and does not change afterwards, so an id is never reused and a face stays resolvable (HST-2). It is a `FontSource`.
 
-**[SHP-22] Shaper.** `HarfRustShaper::new` takes the shared registry and `HarfRustShaper::registry` returns it, for the renderer. The shaper is a `FontSource` over the same ids. *Future*: it implements the full `TextShaper` contract with HarfRust for shaping and `read-fonts` for metrics; the crate's type resolves faces and does not shape yet.
+**[SHP-22] Shaper.** `HarfRustShaper::new` takes the shared registry and `HarfRustShaper::registry` returns it, for the renderer. The shaper is a `FontSource` over the same ids. It implements `TextShaper` with HarfRust for shaping and `read-fonts` for metrics. A face is parsed once, when it is registered, together with its metrics in font units; a variable instance is built once per set of coordinates and cached with its metrics, so no call parses a font again. `ligature_carets` answers none until GDEF caret lists are read (RM-7), which leaves the equal-slot fallback of INT-5.
+
+**[SHP-23] Backend metrics and matching.** The HarfRust backend scales font units by `font_size · font.scale / unitsPerEm` and fills every `FontMetrics` field. The line uses OS/2 typo metrics when `USE_TYPO_METRICS` is set and they are non-zero, else `hhea`, else typo, else the OS/2 Windows extents with no gap, else 0.8 em above and 0.2 em below. `x_height` and `cap_height` come from OS/2, else the top of the ink of `x` and `H`, else 0.5 em and 0.7 em. The underline comes from `post`, else −0.1 em with 0.05 em thickness; the strike-out position from OS/2, else half the x-height. The vertical line comes from `vhea`, else half an em on each side with no gap. The ideographic, hanging and mathematical offsets come from the horizontal `BASE` axis (`DFLT`, else `latn`, else the first script), relative to `romn`, else `-descent`, `0.8 · ascent` and `0.5 · x_height`; the central offset is the midpoint of `ideo` and `idtp`, else the ideographic offset plus half an em. Faces are matched by family in stack order, a generic family through `FontRegistry::set_generic`, and within a family by slant before weight; every other registered face follows in registration order as the last resort of SHP-12. An instance whose id names no face answers all-zero metrics, which the shaper gate rejects.
 
 ---
 
@@ -1262,7 +1266,9 @@ pub fn break_lines_parameterized(inputs: &ValidatedInputs<'_>, beam_width: usize
     window_depth: usize) -> Vec<usize>;
 ```
 
-**[ME-1]** `layout_paragraph(ast, text, shaper, constraints, options)` lays out one paragraph and returns a `PositionedParagraph` or the first `LayoutInputError`. It first passes the inputs through the input gate (`ValidatedInputs::new`), which resolves the policy once (PAR-1), and asks the shaper for metrics only through the shaper gate (G2). With a geometry provider it also probes the first line (GEO-5). The line-fitting stages below are *future*: the crate's `layout_paragraph` returns the policy and the base direction with no line, which `PositionedParagraph::validate` rejects (`NoLines`).
+**[ME-1]** `layout_paragraph(ast, text, shaper, constraints, options)` lays out one paragraph and returns a `PositionedParagraph` or the first `LayoutInputError`. It first passes the inputs through the input gate (`ValidatedInputs::new`), which resolves the policy once (PAR-1), and asks the shaper for metrics only through the shaper gate (G2). With a geometry provider it also probes the first line (GEO-5).
+
+**[ME-2] Phase 1 layout.** The crate's `layout_paragraph` breaks every strategy greedily at natural widths: a line ends at the last opportunity that fits before its content overflows, at the first mandatory break, or, when nothing fits, at the emergency break of ST1-5 (before the overflowing piece when something visible precedes it, else after it alone, together with the break that follows it across glue). An emergency seam whose cluster is not safe to break re-shapes the cluster on each side with no edit. It fills the first slot of each line's geometry and leaves the others empty; a taller line re-queries its envelope, and an obstructed one moves to `next_feature_block_offset`. Lines are reordered by UAX #9 L1 and L2 on their resolved levels. Under `LineHeight::Normal` a line's ascent and descent are the largest of the strut's and its clusters' and objects', each with half its line gap, and its height their sum; under `Fixed` the box is the strut's. An object follows its overflow policy against its slot's width (WN-7). Justification, hanging punctuation, hyphenation, annotations and clamping are not applied yet: the line is ragged, nothing hangs, annotations are not placed and every line is rendered.
 
 ### Line geometry and slots
 
@@ -1387,6 +1393,8 @@ Precondition: `slack` is finite or `+∞`, `font_size` finite and non-negative, 
 
 **[ST3-4] 3.4 Tolerance.** A line whose ratio exceeds the tolerance is rejected by `Balanced` and `Publication` when an alternative exists; otherwise, and under `Greedy`, it is justified as far as the ladder allows and left ragged.
 
+**[ST3-6] Tabs at a slot's end.** A tab whose next stop lies beyond the end of its slot advances only to that end, so a tab never overflows its slot.
+
 **[ST3-5] 3.5 Scripts.** `NO_LETTER_SPACING` atoms receive no inter-letter expansion. Thai, Lao, Khmer and Burmese expand at word separators only.
 
 ### Stage 4: strut, blank lines and vertical extents
@@ -1403,7 +1411,7 @@ Precondition: `slack` is finite or `+∞`, `font_size` finite and non-negative, 
 
 ### Stage 5: decorations
 
-**[ST5-1]** Underline and strike-through merge across adjacent clusters and synthetic glue. An underline uses the lowest `underline_position` of the intersecting fonts.
+**[ST5-1]** Underline and strike-through merge across adjacent clusters and synthetic glue. An underline uses the lowest `underline_position` of the intersecting fonts, the minimum under FNT-4's sign, with that font's thickness. Phase 1 also merges across the word spaces between two decorated clusters, never into trailing whitespace; a strike-through takes the `strikeout_position` of the cluster that opens it and the `underline_thickness` of that font, since `FontMetrics` has no strike-out thickness.
 
 ### Line clamping
 
@@ -1449,7 +1457,7 @@ pub fn utf16_to_utf8(text: &str, offset: usize) -> Option<ByteIndex>;
 
 The receivers are the gate types (AX-3), which carry the text the data was validated against, so no query takes it again (AX-2). Visual queries read the caret-stop table of the validated output. Word motions segment the receiver's text. `BoxHeightStyle::Tight` asks the shaper, through the shaper gate, for the metrics of each run's font instance (`VisualGlyphRun::font`, `font_size`, `variations`). Deletion ranges read atoms, flags and atomic spans from the validated AST and code points from its text. `hit_test_on_line` places the caret on one line, by index, at a position along the inline axis in flow space; it is how a caller re-enters a paragraph on its first or last line (INT-15).
 
-The data types and three pure helpers (`AtomicFragment::hit_test`, `Motion::flow_direction`, `resolve_ligature_carets`) exist; the queries are *future*.
+The data types and three pure helpers (`AtomicFragment::hit_test`, `Motion::flow_direction`, `resolve_ligature_carets`) exist, and so do `hit_test`, `hit_test_on_line`, `caret_geometry`, `rect_for_offset` and `move_cursor` (INT-20); `selection_geometry`, `range_rects`, the deletion ranges and the UTF-16 conversions are *future*.
 
 ### 6.1 Caret representation
 
@@ -1499,11 +1507,13 @@ The data types and three pure helpers (`AtomicFragment::hit_test`, `Motion::flow
 
 ### 6.7 Platform interfaces
 
-**[INT-18]** *Future.* `range_rects(range)` (IME candidate placement), `rect_for_offset`, `offset_for_point` (`hit_test`), UTF-16 conversion that rejects offsets inside a code point (`utf8_to_utf16`, `utf16_to_utf8`), a `CompositionSpan` that never changes segmentation (SPN-5), and per-line accessibility exports of character lengths, positions and widths and word starts.
+**[INT-18]** `rect_for_offset` is the primary caret rectangle of the offset, downstream. *Future:* `range_rects(range)` (IME candidate placement), `offset_for_point` (`hit_test`), UTF-16 conversion that rejects offsets inside a code point (`utf8_to_utf16`, `utf16_to_utf8`), a `CompositionSpan` that never changes segmentation (SPN-5), and per-line accessibility exports of character lengths, positions and widths and word starts.
 
 ### 6.8 Writing modes, slots and truncation
 
 **[INT-19]** Physical arrows resolve once, at the interaction boundary, through `Motion::flow_direction(mode)` to `FlowMotion`; logical and word motions resolve to `None` there. Queries transform at their physical boundary (§2.7) and then work in flow space. A hit on an obstacle between slots snaps to the nearer caret stop, ties towards positive inline. Selections split by slot. Ruby hits map to the base text; an annotation is never a caret target. Ellipsis hits, and caret requests into the hidden tail, map upstream to `truncated_range.start()`. Tate-chu-yoko text is atomic for editing only under an `AtomicEditSpan`.
+
+**[INT-20] Phase 1 queries.** A line's caret stops are the visual edges of its pieces (clusters, objects, tabs, word spaces and span edges), with the INT-5 sub-slots inside a ligature, one stop per distinct offset and position, none strictly inside an atomic span. A soft-wrapped line's last logical stop is upstream; under `Collapsible` it has no stop past its visible end, whose offsets belong to the next line's start. A line that ends at a hard break or the paragraph end keeps stops on its trailing word spaces, on the far edge of the base direction: with their widths under `Preserved`, all at the edge under `Collapsible`, so the end of the text stays reachable; no stop lies after a U+2028, whose end starts the next line. `hit_test` places the point on the first line whose box ends below it, the last one past them; on a line, a point inside an atomic fragment snaps by INT-10, one beyond an edge by INT-8, and any other point takes the nearer of the two stops around it, the right one at the midpoint. `caret_geometry` finds the stop with the position's offset and affinity, else its offset, else the nearest offset before it on its line, and returns zero-width rectangles over the line box. `Previous` and `Next` move to the neighbouring caret offset of the paragraph, downstream; the word motions to the neighbouring caret offset that is also a UAX #29 word boundary, `WordLeft` and `WordRight` resolved through the base direction.
 
 ---
 
@@ -1528,6 +1538,8 @@ The data types and three pure helpers (`AtomicFragment::hit_test`, `Motion::flow
 - **Space advance (SHP-20).** `TextShaper` gained `space_advance`, so that a word space is sized without shaping one (WN-10, SHP-5); `NoopShaper` and the contract tests' shaper implement it.
 - **No-break spaces (WN-2, WN-10, WN-12, FE-19, ST1-12).** As glyph-less glue that stays in the body, a no-break space at a line end left the content block and `visible_byte_end` on no entity, which SLT-3 and SRC-3 forbid. It is now text, like U+3000; `is_word_space` excludes it, and the input gate accepts only a collapsible `WordSpace`.
 - **Indented single-entity overflow (SLT-5).** The overflow state required a slot as wide as `wrap_width`, so an entity too wide for an indented first line had no valid output. The state now needs one slot, content from its start, and content wider than it.
+- **Decoration sign (FNT-4, DEC-1, ST5-1).** No text fixed the sign of `underline_position`, `strikeout_position` or `DecorationLine::y_offset`; they now follow the engine's one convention, positive towards line-over.
+- **Refused features (FE-28).** `FrontendFeature` gained `BidiText` and `BaselineAlignment`, so that Phase 1 refuses, rather than compiles wrongly, text with non-zero levels and baselines it does not place.
 - **Phase 1 is unidirectional (RM-3, RM-11).** UAX #9 resolution (frontend Step 2) moves to Phase 2 with Stage 2 (RM-5).
 
 ### Phase 1: foundational core
@@ -1579,4 +1591,4 @@ pub struct PlacedGlyph { pub glyph_id: u32, pub origin: Point }
 
 **[HST-7] Colour glyphs.** The text colour applies to monochrome glyphs and to COLR layers that reference the foreground colour (palette index 0xFFFF). It never recolours COLR/CPAL palette colours, sbix or CBDT bitmaps.
 
-**[HST-8] Query geometry.** The rectangles of the §6 queries (*future*, INT-18) are in the same paragraph-local physical space as `PlacedGlyph::origin`; a range that wraps gives several. A host maps them to the screen by the paragraph's position in its container and then its own view transform.
+**[HST-8] Query geometry.** The rectangles of the §6 queries (INT-18) are in the same paragraph-local physical space as `PlacedGlyph::origin`; a range that wraps gives several. A host maps them to the screen by the paragraph's position in its container and then its own view transform.

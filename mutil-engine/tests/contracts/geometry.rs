@@ -250,7 +250,7 @@ fn probe_ignores_tall_input_after_first_break() {
             &LayoutOptions::default()
         )
         .map(|paragraph| paragraph.lines.len()),
-        Ok(0)
+        Ok(2)
     );
 }
 
@@ -393,7 +393,7 @@ fn provider_slots_must_lie_inside_the_wrap_envelope() {
         )
         .map(|paragraph| paragraph.lines.len())
     };
-    let accepted = Ok(0);
+    let accepted = Ok(1);
     assert_eq!(laid_out(100.0, 0.0, 100.0), accepted);
     assert_eq!(laid_out(100.0, 10.0, 60.0), accepted);
     for (start, end) in [(-5.0, 50.0), (0.0, 150.0), (0.0, f32::INFINITY)] {

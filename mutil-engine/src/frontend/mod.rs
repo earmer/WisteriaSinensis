@@ -1,8 +1,8 @@
 //! Frontend: input abstraction and the paragraph AST (spec §3, §2.4, §2.5).
 //!
 //! Defines the input, output and option types and the entry point
-//! [`compile_paragraph`]; the analysis pass that builds the AST from text is
-//! not implemented yet. The AST stores atoms and clusters once per
+//! [`compile_paragraph`], whose Phase 1 analysis compiles horizontal
+//! left-to-right text (spec FE-29). The AST stores atoms and clusters once per
 //! paragraph; text boxes and runs name slices of them by range.
 
 mod annotation;
@@ -10,6 +10,8 @@ mod ast;
 mod compile;
 mod input;
 mod options;
+mod script;
+mod segment;
 mod span;
 
 use crate::types::TextRange;
@@ -32,6 +34,7 @@ pub use options::{
     AutospaceProfile, FrontendOptions, LineBreakStrictness, LocalePolicy, QuotePolicy,
     WordBreakOption,
 };
+pub(crate) use segment::word_boundaries;
 pub use span::{
     AtomicEditSpan, BoxDecorationBreak, CompositionSpan, InlineDecorationSpan,
     MAX_DECORATION_NESTING_DEPTH,

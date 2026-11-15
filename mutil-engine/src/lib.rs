@@ -4,9 +4,11 @@
 //! The crate currently contains the strongly typed data model of the
 //! specification (§2), the `TextShaper` contract (§4), input and output
 //! validators, a `NoopShaper` that proves the types close over the whole
-//! pipeline, and the skeletons of the frontend entry point
-//! (`compile_paragraph`) and of the HarfRust backend. Segmentation, shaping,
-//! line breaking and justification are not implemented yet.
+//! pipeline, the Phase 1 frontend (`compile_paragraph`), the HarfRust
+//! backend, the greedy line breaker (`layout_paragraph`) and the caret,
+//! hit-test and movement queries for unidirectional horizontal text. Bidi
+//! reordering, justification, hyphenation and the optimising breakers are not
+//! implemented yet.
 //!
 //! Layers (dependencies point left or up; the frontend calls the shaping
 //! bridge through the `TextShaper` trait):
@@ -57,14 +59,18 @@ pub struct ConformanceReport {
     pub emoji: Option<&'static str>,
 }
 
-/// Reports installed components rather than claiming target-version conformance.
+/// Reports installed components rather than claiming target-version
+/// conformance: graphemes, line-break opportunities, scripts and the word
+/// boundaries of the word motions use ICU4X data of
+/// [`UNICODE_DATA_VERSION`]; bidi resolution and emoji properties are not
+/// wired in yet.
 pub fn conformance_report() -> ConformanceReport {
     ConformanceReport {
-        grapheme: None,
+        grapheme: Some(UNICODE_DATA_VERSION),
         bidi: None,
-        line_break: None,
-        word: None,
-        script: None,
+        line_break: Some(UNICODE_DATA_VERSION),
+        word: Some(UNICODE_DATA_VERSION),
+        script: Some(UNICODE_DATA_VERSION),
         emoji: None,
     }
 }

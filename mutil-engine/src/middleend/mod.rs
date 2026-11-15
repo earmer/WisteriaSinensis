@@ -2,7 +2,8 @@
 //! outputs, the output containers and the interaction types (spec §2.6, §5,
 //! §6).
 //!
-//! Line breaking, reordering and justification are not implemented yet.
+//! Layout breaks greedily (spec ME-2); justification, hanging punctuation,
+//! hyphenation and the optimising strategies are not implemented yet.
 
 mod badness;
 mod error_messages;
