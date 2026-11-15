@@ -42,7 +42,12 @@ enum Token {
 /// Reads `<…>` at `at`, if it is a tag of this markup.
 fn tag_at(source: &str, at: usize) -> Option<(Token, usize)> {
     let rest = &source[at..];
-    let end = rest.find('>')?;
+    // A tag holds no `<`: the scan stops at the next one, so each byte is
+    // read once per `<` before it and tokenizing stays linear.
+    let end = 1 + rest[1..].find(['<', '>'])?;
+    if rest.as_bytes()[end] != b'>' {
+        return None;
+    }
     let inner = &rest[1..end];
     let raw = at..at + end + 1;
     let name_ok = |s: &str| {
@@ -289,6 +294,15 @@ mod tests {
         let marked = parse(&source);
         assert_eq!(marked.spans.len(), 1, "adjacent ja spans merge");
         assert!(started.elapsed().as_secs() < 5);
+    }
+
+    #[test]
+    fn a_long_run_of_openers_tokenizes_in_linear_time() {
+        for source in ["<".repeat(200_000), "<".repeat(200_000) + ">"] {
+            let started = std::time::Instant::now();
+            assert_eq!(parse(&source).text, source);
+            assert!(started.elapsed().as_secs() < 5);
+        }
     }
 
     #[test]
