@@ -627,6 +627,15 @@ impl<'i, 'a> Layout<'i, 'a> {
             // piece back and the abandoned re-shape is dropped.
             let mut t = t;
             loop {
+                // A dash, ellipsis or middle-dot run never splits (FE-15):
+                // the seam moves to its start, or past its end when it
+                // starts the line.
+                while t > first + 1 && self.inside_dash_run(t) {
+                    t -= 1;
+                }
+                if self.inside_dash_run(t) {
+                    return LineEnd::Before(self.dash_run_end(t));
+                }
                 let added = self.repair_seam(t);
                 if t <= first + 1
                     || self.content_end(start, t, post, origin) <= self.reference + FIT_EPSILON
@@ -642,13 +651,35 @@ impl<'i, 'a> Layout<'i, 'a> {
         if let Some(b) = self.next_break_after(t) {
             return LineEnd::At(b);
         }
-        let next = t + 1;
+        let next = self.dash_run_end(t + 1);
         if matches!(self.tokens.get(next), Some(Token::Piece(_))) {
             self.repair_seam(next);
             LineEnd::Before(next)
         } else {
             LineEnd::Before(next)
         }
+    }
+
+    /// Whether the seam before token `t` lies inside a run of one of U+2014,
+    /// U+2026 and U+00B7 (spec FE-15).
+    fn inside_dash_run(&self, t: usize) -> bool {
+        let Some(Token::Piece(p)) = self.tokens.get(t) else {
+            return false;
+        };
+        let at = p.bytes.start();
+        self.text[at..]
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '\u{2014}' | '\u{2026}' | '\u{00B7}'))
+            .is_some_and(|c| self.text[..at].ends_with(c))
+    }
+
+    /// The first token at or after `t` whose seam is not inside such a run.
+    fn dash_run_end(&self, mut t: usize) -> usize {
+        while self.inside_dash_run(t) {
+            t += 1;
+        }
+        t
     }
 
     /// An emergency break before piece `t` that is not safe to break

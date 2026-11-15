@@ -2,6 +2,7 @@
 //! the output gate and the §6 queries, shaped by the HarfRust backend with
 //! the vendored test font (`tests/assets/README.md`).
 
+mod acceptance;
 mod common;
 mod fonts;
 mod frontend;
