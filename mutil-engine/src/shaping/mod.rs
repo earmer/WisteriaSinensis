@@ -10,7 +10,7 @@ mod profile;
 mod traits;
 
 pub use font_source::{FontBytes, FontFace, FontSource};
-pub use harfrust::{FontRegistry, HarfRustShaper};
+pub use harfrust::{CjkRegion, FaceProfile, FontRegistry, HarfRustShaper};
 pub use line_only::{LineGlyph, LineOnlyShaper, LineShaper};
 pub use noop::NoopShaper;
 pub use profile::ShaperProfile;

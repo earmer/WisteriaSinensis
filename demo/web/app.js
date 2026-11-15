@@ -5,6 +5,7 @@ const FONTS = [
   ['Noto Serif', 'NotoSerif[wdth,wght].ttf'],
   ['JetBrains Mono', 'JetBrainsMono[wght].ttf'],
   ['Noto Sans SC', 'NotoSansSC[wght].ttf'],
+  ['Noto Sans TC', 'NotoSansTC[wght].ttf'],
   ['Noto Sans JP', 'NotoSansJP[wght].ttf'],
   ['Noto Sans Devanagari', 'NotoSansDevanagari[wdth,wght].ttf'],
   ['Noto Sans Thai', 'NotoSansThai[wdth,wght].ttf'],
@@ -27,6 +28,9 @@ const SAMPLES = {
     'देवनागरी में मात्राएँ और संयुक्ताक्षर एक ही साँचे में ढलते हैं।\nการเรียงพิมพ์ภาษาไทยต้องวางสระบนและสระล่างให้ถูกตำแหน่ง\nການຈັດລຽງຕົວອັກສອນລາວ\nការរៀបចំអក្សរខ្មែរ\nမြန်မာစာ စာလုံးစီရာတွင်',
   zhHans:
     '《西江月》词牌：简体中文的标点“省略……”和破折号——、间隔号·都在这里。总结经验、发现问题、链接导航和时间校验，确保常用汉字不出现方框。',
+  regional:
+    '<zh-CN>令你甘心。骨肉分离。</zh-CN> <zh-TW>令你甘心。骨肉分離。</zh-TW> <ja>令。骨肉分離。</ja>\n' +
+    '<lang=zh-Hant>同一個字型堆疊，三種地區字形：「令」「骨」與置中的句號。標記只說明語言，字型由引擎依文字與語言挑選；未標記的漢字不作繁簡猜測。</lang>',
   rtl:
     'هذا النص مكتوب من اليمين إلى اليسار. The engine should reject this paragraph today, because bidi resolution is not implemented yet.',
 };
@@ -49,6 +53,8 @@ const sizeInput = $('font-size');
 const lineHeightInput = $('line-height');
 const localeInput = $('locale');
 const quotesInput = $('quotes');
+const policyInput = $('locale-policy');
+const localePresets = $('locale-presets');
 const faceInput = $('face');
 const showBoxes = $('show-boxes');
 const showBaselines = $('show-baselines');
@@ -150,6 +156,7 @@ function currentSettings() {
     lineHeight: lineHeightInput.value === 'normal' ? 0 : Number(lineHeightInput.value),
     locale: localeInput.value.trim(),
     cjkQuotes: quotesInput.value === 'cjk-aware',
+    heuristics: policyInput.value === 'heuristics',
     primary: faceInput.value,
     showBoxes: showBoxes.checked,
     showBaselines: showBaselines.checked,
@@ -183,6 +190,7 @@ function relayout() {
       settings.locale || null,
       settings.cjkQuotes,
       settings.primary || null,
+      settings.heuristics,
     );
     if (!result.ok) {
       showEngineError(result, index, paragraphs.length);
@@ -405,7 +413,7 @@ textarea.addEventListener('input', () => {
   textTimer = setTimeout(relayout, 140);
 });
 
-for (const input of [widthInput, sizeInput, lineHeightInput, quotesInput, faceInput]) {
+for (const input of [widthInput, sizeInput, lineHeightInput, quotesInput, faceInput, policyInput]) {
   input.addEventListener('input', () => {
     if (input === widthInput) {
       $('width-value').textContent = `${widthInput.value} px`;
@@ -418,6 +426,17 @@ for (const input of [widthInput, sizeInput, lineHeightInput, quotesInput, faceIn
 }
 
 localeInput.addEventListener('change', relayout);
+
+// Each preset only fills the locale field; the engine reads it with
+// `LocaleTag::parse_lenient`, so shorthand such as `jp` or `zh-tc` works too.
+localePresets.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-locale]');
+  if (!button) {
+    return;
+  }
+  localeInput.value = button.dataset.locale === 'und' ? '' : button.dataset.locale;
+  relayout();
+});
 
 for (const input of [showBoxes, showBaselines, showCarets]) {
   input.addEventListener('change', () => {
@@ -436,6 +455,7 @@ const PRESETS = {
   latin: { locale: 'en', quotes: 'standard', face: 'Noto Sans' },
   japanese: { locale: 'ja-JP', quotes: 'cjk-aware', face: 'Noto Sans' },
   zhHans: { locale: 'zh-CN', quotes: 'cjk-aware', face: 'Noto Sans' },
+  regional: { locale: '', quotes: 'cjk-aware', face: 'Noto Sans' },
   indic: { locale: '', quotes: 'standard', face: 'Noto Sans' },
   rtl: { locale: 'ar', quotes: 'standard', face: 'Noto Sans' },
 };

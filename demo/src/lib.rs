@@ -15,18 +15,36 @@
 //! SVG path). The demo is compiled to `wasm32-unknown-unknown`; the crate is
 //! also a plain `rlib` so `cargo test` can exercise it natively.
 
+mod markup;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use mutil_engine::{
     BaselineAlignment, FontBytes, FontFace, FontFamily, FontFeatures, FontRegistry, FontStyle,
     FontVariation, FrontendOptions, HarfRustShaper, LayoutConstraints, LayoutOptions, LineHeight,
-    LocaleTag, ParagraphInput, QuotePolicy, TextDecoration, TextStyle, ValidatedLayout,
-    compile_paragraph, conformance_report, layout_paragraph,
+    LocalePolicy, LocaleTag, ParagraphInput, QuotePolicy, StyleSpan, TextDecoration, TextStyle,
+    ValidatedLayout, compile_paragraph, conformance_report, layout_paragraph,
 };
 use skrifa::outline::DrawSettings;
 use skrifa::prelude::{LocationRef, Size};
 use skrifa::{FontRef as SkrifaFont, GlyphId, MetadataProvider};
+
+/// The registered families in the order every paragraph's stack lists them
+/// after the chosen face.
+const FIXED_STACK: [&str; 11] = [
+    "Noto Sans",
+    "Noto Serif",
+    "JetBrains Mono",
+    "Noto Sans SC",
+    "Noto Sans TC",
+    "Noto Sans JP",
+    "Noto Sans Devanagari",
+    "Noto Sans Thai",
+    "Noto Sans Lao",
+    "Noto Sans Khmer",
+    "Noto Sans Myanmar",
+];
 
 /// The harness asks for Regular. Noto Sans JP's variable font defaults to
 /// `wght=100`, so the setting is explicit and applied to shaping and drawing
@@ -86,12 +104,12 @@ impl Demo {
         self.shaper.as_ref().expect("just built")
     }
 
-    /// The family stack handed to the engine. The chosen face comes first,
-    /// then the Latin faces, then CJK in the order the locale prefers, then
-    /// the Indic faces, then anything else registered. The engine's fallback
-    /// is per atom (spec SHP-12), so this order decides which face a code
-    /// point that several faces cover comes from.
-    fn family_stack(&self, primary: Option<&str>, locale: &str) -> Arc<[FontFamily]> {
+    /// The family stack handed to the engine: the chosen face, then the
+    /// Latin faces, the CJK faces, the Indic and Southeast Asian faces and
+    /// anything else registered. It is the same for every locale: the engine
+    /// routes CJK runs to the regional face of their locale (spec SHP-12,
+    /// SHP-25), so the page never reorders the stack.
+    fn family_stack(&self, primary: Option<&str>) -> Arc<[FontFamily]> {
         let mut names: Vec<Arc<str>> = Vec::new();
         let mut push = |family: &str| {
             if let Some(face) = self.faces.iter().find(|face| *face.family == *family)
@@ -103,23 +121,7 @@ impl Demo {
         if let Some(primary) = primary {
             push(primary);
         }
-        for family in ["Noto Sans", "Noto Serif", "JetBrains Mono"] {
-            push(family);
-        }
-        if locale.to_ascii_lowercase().starts_with("zh") {
-            push("Noto Sans SC");
-            push("Noto Sans JP");
-        } else {
-            push("Noto Sans JP");
-            push("Noto Sans SC");
-        }
-        for family in [
-            "Noto Sans Devanagari",
-            "Noto Sans Thai",
-            "Noto Sans Lao",
-            "Noto Sans Khmer",
-            "Noto Sans Myanmar",
-        ] {
+        for family in FIXED_STACK {
             push(family);
         }
         for face in &self.faces {
@@ -147,20 +149,25 @@ impl Demo {
         locale: Option<&str>,
         cjk_quotes: bool,
         primary: Option<&str>,
+        heuristics: bool,
     ) -> String {
         let locale = match locale {
-            Some(tag) => match LocaleTag::try_from_str(tag) {
+            Some(tag) => match LocaleTag::parse_lenient(tag) {
                 Ok(tag) => Some(tag),
                 Err(_) => return error_json("input", "not a BCP 47 language tag", None),
             },
             None => None,
         };
+        // The host step: inline locale tags become style spans over the
+        // plain paragraph text (spec AX-1, FE-25).
+        let marked = markup::parse(text);
+        let text = marked.text.as_str();
         let mut features = FontFeatures::new();
         if let Some(weight) = FontVariation::new(*b"wght", WEIGHT) {
             features.push_variation(weight);
         }
         let style = TextStyle {
-            families: self.family_stack(primary, locale.as_ref().map_or("und", LocaleTag::as_str)),
+            families: self.family_stack(primary),
             font_size,
             style: FontStyle::default(),
             features,
@@ -171,10 +178,21 @@ impl Demo {
             script: None,
             locale: locale.clone(),
         };
+        let style_spans: Vec<StyleSpan> = marked
+            .spans
+            .iter()
+            .map(|(range, locale)| StyleSpan {
+                byte_range: *range,
+                style: TextStyle {
+                    locale: Some(locale.clone()),
+                    ..style.clone()
+                },
+            })
+            .collect();
         let input = ParagraphInput {
             text,
             default_style: &style,
-            style_spans: &[],
+            style_spans: &style_spans,
             inline_objects: &[],
             decoration_spans: &[],
             atomic_spans: &[],
@@ -200,6 +218,11 @@ impl Demo {
                 QuotePolicy::Standard
             },
             default_locale: locale.unwrap_or_default(),
+            locale_policy: if heuristics {
+                LocalePolicy::ExperimentalHeuristics
+            } else {
+                LocalePolicy::ExplicitOnly
+            },
             ..FrontendOptions::default()
         };
         let ast = match compile_paragraph(&input, &frontend, self.shaper()) {
@@ -570,6 +593,7 @@ pub unsafe extern "C" fn demo_layout(
     cjk_quotes: u32,
     primary_ptr: *const u8,
     primary_len: u32,
+    heuristics: u32,
 ) -> u64 {
     let Some(text) = read_str(text_ptr, text_len) else {
         return leak(error_json("input", "text is not UTF-8", None).into_bytes());
@@ -591,6 +615,7 @@ pub unsafe extern "C" fn demo_layout(
             locale,
             cjk_quotes != 0,
             primary,
+            heuristics != 0,
         )
     });
     let json =
@@ -659,9 +684,69 @@ mod tests {
             None,
             false,
             None,
+            false,
         );
         assert!(json.starts_with("{\"ok\":true"), "{json}");
         assert!(json.contains("\"lines\":[{"), "{json}");
+    }
+
+    fn asset(name: &str) -> Vec<u8> {
+        std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../mutil-engine/tests/assets")
+                .join(name),
+        )
+        .expect("a vendored test face")
+    }
+
+    /// The face ids of the runs of the first line, in order.
+    fn run_fonts(json: &str) -> Vec<u32> {
+        json.match_indices("{\"font\":")
+            .map(|(at, key)| {
+                let digits: String = json[at + key.len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                digits.parse().expect("a font id")
+            })
+            .collect()
+    }
+
+    /// The sample line of the page: one fixed stack, three regional faces,
+    /// chosen by the engine from the inline tags.
+    #[test]
+    fn inline_locale_tags_route_han_to_regional_faces() {
+        let mut demo = Demo::new();
+        let mut id =
+            |family: &str, file: &str| demo.add_font(family, asset(file)).expect("registers").0;
+        id("Noto Sans", "NotoSans-Subset.ttf");
+        let sc = id("Noto Sans SC", "NotoSansSC-Subset.ttf");
+        let tc = id("Noto Sans TC", "NotoSansTC-Subset.ttf");
+        let jp = id("Noto Sans JP", "NotoSansJP-Subset.ttf");
+        let json = demo.layout(
+            "<zh-CN>令你甘心。骨肉分离。</zh-CN> <zh-TW>令你甘心。骨肉分離。</zh-TW> <ja>令。骨肉分離。</ja>",
+            2000.0,
+            18.0,
+            0.0,
+            None,
+            true,
+            Some("Noto Sans"),
+            false,
+        );
+        assert!(json.starts_with("{\"ok\":true"), "{json}");
+        let mut fonts = run_fonts(&json);
+        fonts.dedup();
+        // The word spaces are glue, drawn by no run.
+        assert_eq!(fonts, [sc, tc, jp], "{json}");
+    }
+
+    #[test]
+    fn a_shorthand_locale_is_accepted_and_a_malformed_one_is_not() {
+        let mut demo = engine();
+        let ok = demo.layout("abc", 200.0, 16.0, 0.0, Some("jp"), false, None, true);
+        assert!(ok.starts_with("{\"ok\":true"), "{ok}");
+        let bad = demo.layout("abc", 200.0, 16.0, 0.0, Some("ja JP"), false, None, false);
+        assert!(bad.starts_with("{\"ok\":false"), "{bad}");
     }
 
     #[test]

@@ -25,9 +25,40 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// context (spec SHP-3). HarfBuzz reads at most five code points.
 const CONTEXT_BYTES: usize = 32;
 
+/// The regional design a CJK face is built for (spec SHP-25).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CjkRegion {
+    /// Simplified Chinese (`zh-Hans`, Mainland China and Singapore; OpenType `ZHS`).
+    Simplified,
+    /// Traditional Chinese as used in Taiwan (`zh-Hant`, `zh-TW`; OpenType `ZHT`).
+    Traditional,
+    /// Traditional Chinese as used in Hong Kong and Macao (`zh-HK`; OpenType `ZHH`).
+    HongKong,
+    /// Japanese (`ja`; OpenType `JAN`).
+    Japanese,
+    /// Korean (`ko`; OpenType `KOR`).
+    Korean,
+    /// Several regions in one face, told apart by `locl` under the run's
+    /// language (spec SHP-16).
+    Pan,
+}
+
+/// What a registered face is for, recorded once when it is registered
+/// (spec SHP-25).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FaceProfile {
+    /// The face is a CJK face: it maps core Han, kana, Hangul or Bopomofo, or
+    /// was registered under a CJK locale. A Latin face that maps only shared
+    /// punctuation is not.
+    pub cjk: bool,
+    /// The region a CJK face targets, when its tables or its registration
+    /// state one; always `None` for a face that is not CJK.
+    pub region: Option<CjkRegion>,
+}
+
 /// One registered face: the family and style it answers to, its bytes, the
 /// parsed font at its default location and that location's metrics, in font
-/// units.
+/// units, and its profile.
 #[derive(Clone)]
 struct RegisteredFace {
     family: Arc<str>,
@@ -35,6 +66,7 @@ struct RegisteredFace {
     face: FontFace,
     font: Font,
     metrics: UnitMetrics,
+    profile: FaceProfile,
 }
 
 /// [`FontMetrics`] in font units, before a size is applied.
@@ -76,6 +108,7 @@ impl fmt::Debug for RegisteredFace {
             .field("family", &self.family)
             .field("style", &self.style)
             .field("face", &self.face)
+            .field("profile", &self.profile)
             .finish_non_exhaustive()
     }
 }
@@ -104,22 +137,66 @@ impl FontRegistry {
     /// `None`, registering nothing, when its bytes hold no font at its face
     /// index. The bytes are shared, not copied (spec HST-1); they are parsed
     /// here, once.
+    ///
+    /// The face's [`FaceProfile`] is read from its tables (spec SHP-25).
     pub fn add_face(
         &mut self,
         family: Arc<str>,
         style: FontStyle,
         face: FontFace,
     ) -> Option<FontId> {
+        self.register(family, style, face, None)
+    }
+
+    /// Registers `face` like [`FontRegistry::add_face`], with the locale it
+    /// is designed for stated by the host instead of read from its tables
+    /// (spec SHP-25). A CJK locale (`zh-TW`, `ja`, `und-Hani` for a pan-CJK
+    /// face, ...) makes it a CJK face of that region; any other locale makes
+    /// it a non-CJK face; `und` reads the profile from the tables, as
+    /// `add_face` does.
+    pub fn add_face_with_locale(
+        &mut self,
+        family: Arc<str>,
+        style: FontStyle,
+        face: FontFace,
+        locale: &LocaleTag,
+    ) -> Option<FontId> {
+        let profile = (locale.as_str() != "und").then(|| {
+            let region = locale_region(locale);
+            FaceProfile {
+                cjk: region.is_some(),
+                region,
+            }
+        });
+        self.register(family, style, face, profile)
+    }
+
+    /// The profile recorded for `id` when it was registered, or `None` when
+    /// the registry did not issue it (spec SHP-25).
+    #[must_use]
+    pub fn profile(&self, id: FontId) -> Option<FaceProfile> {
+        self.face(id).map(|face| face.profile)
+    }
+
+    fn register(
+        &mut self,
+        family: Arc<str>,
+        style: FontStyle,
+        face: FontFace,
+        profile: Option<FaceProfile>,
+    ) -> Option<FontId> {
         let bytes: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(face.bytes().clone());
         let font = Font::new(bytes, face.face_index())?;
         let id = FontId(u32::try_from(self.faces.len()).ok()?);
         let metrics = unit_metrics(&font);
+        let profile = profile.unwrap_or_else(|| face_profile(&font));
         self.faces.push(RegisteredFace {
             family,
             style,
             face,
             font,
             metrics,
+            profile,
         });
         Some(id)
     }
@@ -266,10 +343,25 @@ impl HarfRustShaper {
         Some(entry.clone())
     }
 
-    /// The face that shapes `atom`: the first candidate whose character map
-    /// covers all of it, else the first that covers its first code point,
-    /// else the first candidate (spec SHP-12).
-    fn face_for(&self, text: &str, atom: &GraphemeAtom, candidates: &[FontId]) -> Option<FontId> {
+    /// The face that shapes `atom` of `run`, keyed by the run's script and
+    /// locale (spec SHP-12, SHP-25).
+    ///
+    /// In a CJK run (`Hani`, `Hira`, `Kana`, `Hang`, `Bopo`) an atom whose
+    /// first code point is ASCII keeps stack order; for any other atom the
+    /// CJK faces come first: the first candidate whose region the run prefers and
+    /// whose character map covers the whole atom, else the first CJK
+    /// candidate that covers it; a face that is not CJK is reached only when
+    /// no CJK face covers the atom. Every run then falls back to the first
+    /// candidate that covers the whole atom, else the first that covers its
+    /// first code point, else the first candidate, CJK faces first in a CJK
+    /// run.
+    fn face_for(
+        &self,
+        text: &str,
+        run: &ShapingRun,
+        atom: &GraphemeAtom,
+        candidates: &[FontId],
+    ) -> Option<FontId> {
         let chars = || text[atom.byte_range.as_range()].chars();
         let covers = |id: FontId, c: char| {
             is_coverage_exempt(c)
@@ -278,14 +370,42 @@ impl HarfRustShaper {
                     .face(id)
                     .is_some_and(|face| face.font.charmap().map_unicode(c).is_some())
         };
-        candidates
-            .iter()
-            .copied()
-            .find(|&id| chars().all(|c| covers(id, c)))
+        let covers_atom = |id: FontId| chars().all(|c| covers(id, c));
+        let profile = |id: FontId| self.registry.profile(id).unwrap_or_default();
+        let first = |pass: &dyn Fn(FontId) -> bool| candidates.iter().copied().find(|&id| pass(id));
+        // ASCII keeps stack order even in a CJK run: FE-13 folds digits and
+        // ASCII punctuation into a neighbouring Han run, and they belong to
+        // the stack's leading Latin face.
+        let ascii = chars().next().is_some_and(|c| c.is_ascii());
+        if !is_cjk_script(run.script) || ascii {
+            return first(&covers_atom)
+                .or_else(|| {
+                    let lead = chars().next()?;
+                    first(&|id| covers(id, lead))
+                })
+                .or_else(|| candidates.first().copied());
+        }
+        let cjk = |id: FontId| profile(id).cjk;
+        let preferred = preferred_regions(run);
+        for (tier, &region) in preferred.iter().enumerate() {
+            let found = first(&|id| {
+                let face = profile(id);
+                face.cjk
+                    && (face.region == Some(region)
+                        || (tier == 0 && face.region == Some(CjkRegion::Pan)))
+                    && covers_atom(id)
+            });
+            if found.is_some() {
+                return found;
+            }
+        }
+        first(&|id| cjk(id) && covers_atom(id))
+            .or_else(|| first(&covers_atom))
             .or_else(|| {
-                let first = chars().next()?;
-                candidates.iter().copied().find(|&id| covers(id, first))
+                let lead = chars().next()?;
+                first(&|id| cjk(id) && covers(id, lead)).or_else(|| first(&|id| covers(id, lead)))
             })
+            .or_else(|| first(&cjk))
             .or_else(|| candidates.first().copied())
     }
 
@@ -309,9 +429,9 @@ impl HarfRustShaper {
     ) {
         let mut start = range.start;
         while start < range.end {
-            let font = self.face_for(text, &atoms[start], candidates);
+            let font = self.face_for(text, run, &atoms[start], candidates);
             let mut end = start + 1;
-            while end < range.end && self.face_for(text, &atoms[end], candidates) == font {
+            while end < range.end && self.face_for(text, run, &atoms[end], candidates) == font {
                 end += 1;
             }
             let first_cluster = output_clusters.len();
@@ -511,6 +631,214 @@ impl HarfRustShaper {
 /// joiners and variation selectors, which faces rarely map.
 fn is_coverage_exempt(c: char) -> bool {
     matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
+}
+
+/// The scripts whose runs route to CJK faces first (spec SHP-12, SHP-25).
+fn is_cjk_script(script: ScriptTag) -> bool {
+    [
+        ScriptTag::HAN,
+        ScriptTag::HIRAGANA,
+        ScriptTag::KATAKANA,
+        ScriptTag::HANGUL,
+        ScriptTag::BOPOMOFO,
+    ]
+    .contains(&script)
+}
+
+/// The regions a CJK run prefers, best first: those of its locale, else
+/// those its script implies (kana Japanese, Hangul Korean, Bopomofo
+/// Taiwanese), else none, which leaves stack order (spec SHP-25).
+fn preferred_regions(run: &ShapingRun) -> &'static [CjkRegion] {
+    use CjkRegion::{HongKong, Japanese, Korean, Simplified, Traditional};
+    match locale_region(&run.locale) {
+        Some(Simplified) => &[Simplified],
+        Some(Traditional) => &[Traditional, HongKong],
+        Some(HongKong) => &[HongKong, Traditional],
+        Some(Japanese) => &[Japanese],
+        Some(Korean) => &[Korean],
+        Some(CjkRegion::Pan) => &[],
+        None => match run.script {
+            s if s == ScriptTag::HIRAGANA || s == ScriptTag::KATAKANA => &[Japanese],
+            s if s == ScriptTag::HANGUL => &[Korean],
+            s if s == ScriptTag::BOPOMOFO => &[Traditional],
+            _ => &[],
+        },
+    }
+}
+
+/// The CJK region a locale names, read from its subtags alone (spec
+/// SHP-25): Chinese by script, then region (`Hant` is Traditional, and Hong
+/// Kong's under `HK` or `MO`; `Hans` Simplified; `TW` Traditional; `HK` and
+/// `MO` Hong Kong; any other or none Simplified), Cantonese Hong Kong unless
+/// `Hans`, `ja` Japanese, `ko` Korean, and `und-Hani` pan-CJK. Any other
+/// locale names none.
+fn locale_region(locale: &LocaleTag) -> Option<CjkRegion> {
+    let mut subtags = locale.as_str().split('-');
+    let language = subtags.next()?.to_ascii_lowercase();
+    let mut script = None;
+    let mut region = None;
+    for subtag in subtags {
+        if subtag.len() == 1 {
+            break; // an extension or private use: nothing further is a region
+        }
+        if subtag.len() == 4 && subtag.bytes().all(|b| b.is_ascii_alphabetic()) {
+            script = script.or(Some(subtag.to_ascii_lowercase()));
+        } else if subtag.len() == 2
+            || (subtag.len() == 3 && subtag.bytes().all(|b| b.is_ascii_digit()))
+        {
+            region = region.or(Some(subtag.to_ascii_uppercase()));
+        }
+    }
+    let script = script.as_deref();
+    let region = region.as_deref();
+    let hong_kong = matches!(region, Some("HK" | "MO"));
+    match language.as_str() {
+        "zh" | "cmn" => Some(match (script, region) {
+            (Some("hant"), _) if hong_kong => CjkRegion::HongKong,
+            (Some("hant"), _) => CjkRegion::Traditional,
+            (Some("hans"), _) => CjkRegion::Simplified,
+            (_, Some("TW")) => CjkRegion::Traditional,
+            _ if hong_kong => CjkRegion::HongKong,
+            _ => CjkRegion::Simplified,
+        }),
+        "yue" if script == Some("hans") => Some(CjkRegion::Simplified),
+        "yue" => Some(CjkRegion::HongKong),
+        "ja" => Some(CjkRegion::Japanese),
+        "ko" => Some(CjkRegion::Korean),
+        "und" => match script {
+            Some("hani") => Some(CjkRegion::Pan),
+            Some("hans") => Some(CjkRegion::Simplified),
+            Some("hant") => Some(CjkRegion::Traditional),
+            Some("jpan" | "hira" | "kana") => Some(CjkRegion::Japanese),
+            Some("kore" | "hang") => Some(CjkRegion::Korean),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Code points only a CJK face maps: core Han, kana, Hangul and Bopomofo.
+const CJK_PROBES: [char; 12] = [
+    '一', '人', '中', '大', '日', '国', 'あ', 'の', 'ア', '가', '한', 'ㄅ',
+];
+
+/// The profile of `font`, read from its tables (spec SHP-25). The face is
+/// CJK when its character map holds a probe, or when its `OS/2` table
+/// claims both a CJK Unicode range and a CJK code page. Its region comes
+/// from the `GSUB` language systems first (one of `ZHS`, `ZHT`, `ZHH`,
+/// `ZHTM`, `JAN`, `KOR` names it; several make it pan-CJK), else from its
+/// typographic and legacy family names (a word `SC`, `TC`, `HK`, `JP`, `KR` or their spelled-out
+/// forms), else from its `OS/2` code pages when they name exactly one
+/// region; otherwise it is unknown.
+fn face_profile(font: &Font) -> FaceProfile {
+    let charmap = font.charmap();
+    let tables = font.tables();
+    let os2 = tables.os2().ok();
+    let pages = os2
+        .as_ref()
+        .and_then(|os2| os2.ul_code_page_range_1())
+        .unwrap_or(0);
+    let claims_cjk = os2.as_ref().is_some_and(|os2| {
+        // Bits 48-59 cover CJK symbols, kana, Bopomofo, Hangul and Han
+        // (ulUnicodeRange2 bits 16-27).
+        os2.ul_unicode_range_2() & 0x0FFF_0000 != 0
+    }) && pages & CJK_CODE_PAGES != 0;
+    let cjk = CJK_PROBES.iter().any(|&c| charmap.map_unicode(c).is_some()) || claims_cjk;
+    if !cjk {
+        return FaceProfile::default();
+    }
+    let region = gsub_region(font)
+        .or_else(|| name_region(font))
+        .or_else(|| code_page_region(pages));
+    FaceProfile { cjk, region }
+}
+
+/// `OS/2` code page bits 17 (JIS), 18 (GB 2312), 19 (Wansung), 20 (Big5)
+/// and 21 (Johab).
+const CJK_CODE_PAGES: u32 = 0b1_1111 << 17;
+
+/// The single region several region votes agree on, pan-CJK when they
+/// disagree, none without a vote.
+fn single_region(
+    votes: impl IntoIterator<Item = CjkRegion>,
+    many: Option<CjkRegion>,
+) -> Option<CjkRegion> {
+    let mut found: Option<CjkRegion> = None;
+    for vote in votes {
+        match found {
+            None => found = Some(vote),
+            Some(region) if region == vote => {}
+            Some(_) => return many,
+        }
+    }
+    found
+}
+
+fn gsub_region(font: &Font) -> Option<CjkRegion> {
+    let gsub = font.tables().gsub().ok()?;
+    let list = gsub.script_list().ok()?;
+    let data = list.offset_data();
+    let mut votes = Vec::new();
+    for record in list.script_records() {
+        let Ok(script) = record.script(data) else {
+            continue;
+        };
+        for lang in script.lang_sys_records() {
+            votes.extend(match &lang.lang_sys_tag().to_be_bytes() {
+                b"ZHS " => Some(CjkRegion::Simplified),
+                b"ZHT " => Some(CjkRegion::Traditional),
+                b"ZHH " | b"ZHTM" => Some(CjkRegion::HongKong),
+                b"JAN " => Some(CjkRegion::Japanese),
+                b"KOR " => Some(CjkRegion::Korean),
+                _ => None,
+            });
+        }
+    }
+    single_region(votes, Some(CjkRegion::Pan))
+}
+
+fn name_region(font: &Font) -> Option<CjkRegion> {
+    use read_fonts::model::name::NameId;
+    let names = font.names();
+    // Both the typographic and the legacy family name vote: a generic
+    // typographic name must not hide a regional legacy one.
+    let families: Vec<String> = [NameId::TYPOGRAPHIC_FAMILY_NAME, NameId::FAMILY_NAME]
+        .into_iter()
+        .filter_map(|id| names.get(id)?.english_or_first())
+        .map(|name| name.name().chars().collect())
+        .collect();
+    family_region(families.iter().map(String::as_str))
+}
+
+/// The region the words of `families` agree on, if any (spec SHP-25).
+fn family_region<'a>(families: impl IntoIterator<Item = &'a str>) -> Option<CjkRegion> {
+    let votes = families.into_iter().flat_map(|family| {
+        family
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter_map(|word| match word.to_ascii_uppercase().as_str() {
+                "SC" | "CN" | "GB" | "HANS" | "SIMPLIFIED" => Some(CjkRegion::Simplified),
+                "TC" | "TW" | "HANT" | "TRADITIONAL" => Some(CjkRegion::Traditional),
+                "HK" | "HKSCS" => Some(CjkRegion::HongKong),
+                "JP" | "JA" | "JAPANESE" => Some(CjkRegion::Japanese),
+                "KR" | "KO" | "KOREAN" => Some(CjkRegion::Korean),
+                _ => None,
+            })
+    });
+    single_region(votes, None)
+}
+
+fn code_page_region(pages: u32) -> Option<CjkRegion> {
+    let votes = [
+        (17, CjkRegion::Japanese),
+        (18, CjkRegion::Simplified),
+        (19, CjkRegion::Korean),
+        (20, CjkRegion::Traditional),
+        (21, CjkRegion::Korean),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| pages >> bit & 1 == 1)
+    .map(|(_, region)| region);
+    single_region(votes, None)
 }
 
 fn context_before(text: &str, at: usize) -> &str {
@@ -1048,6 +1376,63 @@ mod tests {
             shaper.space_advance(instance, GlyphOrientation::Horizontal),
             4.0
         );
+    }
+
+    #[test]
+    fn locales_name_their_cjk_region_from_subtags_alone() {
+        use CjkRegion::*;
+        for (tag, region) in [
+            ("zh", Some(Simplified)),
+            ("zh-CN", Some(Simplified)),
+            ("zh-SG", Some(Simplified)),
+            ("zh-Hans", Some(Simplified)),
+            ("zh-Hans-TW", Some(Simplified)),
+            ("zh-TW", Some(Traditional)),
+            ("zh-Hant", Some(Traditional)),
+            ("zh-Hant-TW", Some(Traditional)),
+            ("zh-HK", Some(HongKong)),
+            ("zh-MO", Some(HongKong)),
+            ("zh-Hant-HK", Some(HongKong)),
+            ("zh-Hans-HK", Some(Simplified)),
+            ("yue", Some(HongKong)),
+            ("ja", Some(Japanese)),
+            ("ja-JP", Some(Japanese)),
+            ("ko-KR", Some(Korean)),
+            ("und-Hani", Some(Pan)),
+            ("und", None),
+            ("en", None),
+            ("sr-Cyrl", None),
+            ("zh-x-tw", Some(Simplified)),
+        ] {
+            let locale = LocaleTag::try_from_str(tag).expect("well formed");
+            assert_eq!(locale_region(&locale), region, "{tag}");
+        }
+    }
+
+    #[test]
+    fn one_vote_names_a_region_and_disagreement_names_the_fallback() {
+        use CjkRegion::*;
+        assert_eq!(single_region([], Some(Pan)), None);
+        assert_eq!(
+            single_region([Japanese, Japanese], Some(Pan)),
+            Some(Japanese)
+        );
+        assert_eq!(single_region([Japanese, Korean], Some(Pan)), Some(Pan));
+        assert_eq!(single_region([Japanese, Korean], None), None);
+        // A generic typographic family name does not hide the legacy one.
+        assert_eq!(
+            family_region(["Foo Sans", "Foo Sans TC"]),
+            Some(Traditional)
+        );
+        assert_eq!(
+            family_region(["Foo Sans JP", "Foo Sans JP Thin"]),
+            Some(Japanese)
+        );
+        assert_eq!(family_region(["Foo Sans SC", "Foo Sans TC"]), None);
+        assert_eq!(family_region(["Foo Sans"]), None);
+        // Noto Sans JP sets JIS and GB 2312: code pages alone do not decide.
+        assert_eq!(code_page_region(0b11 << 17), None);
+        assert_eq!(code_page_region(1 << 20), Some(Traditional));
     }
 
     #[test]

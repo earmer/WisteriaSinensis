@@ -62,7 +62,7 @@ export class Engine {
     }
   }
 
-  layout(text, width, fontSize, lineHeight, locale, cjkQuotes, primary) {
+  layout(text, width, fontSize, lineHeight, locale, cjkQuotes, primary, heuristics) {
     const [ptr, len] = this.#put(text);
     const [localePtr, localeLen] = this.#put(locale ?? '');
     const [primaryPtr, primaryLen] = this.#put(primary ?? '');
@@ -70,6 +70,7 @@ export class Engine {
       const packed = this.#exports.demo_layout(
         ptr, len, width, fontSize, lineHeight,
         localePtr, localeLen, cjkQuotes ? 1 : 0, primaryPtr, primaryLen,
+        heuristics ? 1 : 0,
       );
       return JSON.parse(this.#take(packed));
     } finally {
