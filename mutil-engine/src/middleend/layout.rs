@@ -869,8 +869,8 @@ impl<'i, 'a> Layout<'i, 'a> {
         // The line's pieces, logical order, with their no-break gaps.
         let mut pieces: Vec<(Piece, f32)> = Vec::new();
         let mut gap = 0.0;
-        for t in start..last_piece {
-            match &self.tokens[t] {
+        for token in &self.tokens[start..last_piece] {
+            match token {
                 Token::Piece(p) => {
                     pieces.push((*p, gap));
                     gap = 0.0;
