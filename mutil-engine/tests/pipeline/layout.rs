@@ -128,9 +128,27 @@ fn tabs_advance_to_the_next_stop() {
     let tab = p.lines[0].tabs[0];
     assert_close(tab.x, 12.0);
     assert_close(tab.width, 28.0);
-    // A stop beyond the slot is cut back to the slot's end (ST3-6).
+}
+
+#[test]
+fn a_tab_with_no_reachable_stop_takes_no_advance_and_ends_the_line() {
+    // ST3-1, AX-6: the first stop (8) lies beyond a 5-unit slot.
     let p = lay_out("\tc", &column(5.0), &LayoutOptions::default());
-    assert_close(p.lines[0].tabs[0].width, 5.0);
+    assert_eq!(line_texts(&p, "\tc"), ["\t", "c"]);
+    assert_eq!(p.lines[0].tabs[0].width, 0.0);
+    // With content and an earlier opportunity, the line breaks before the
+    // tab: after "a b" the pen is at 18 and the next stop, 24, lies beyond a
+    // 20-unit slot. On the next line the stop after "b" (8) is reachable.
+    let text = "a b\td";
+    let p = lay_out(text, &column(20.0), &LayoutOptions::default());
+    assert_eq!(line_texts(&p, text), ["a ", "b\td"]);
+    let tab = p.lines[1].tabs[0];
+    assert_close(tab.x, 6.0);
+    assert_close(tab.width, 2.0);
+    // A stop exactly at the slot's end is reachable.
+    let p = lay_out("abc\td", &column(24.0), &LayoutOptions::default());
+    assert_eq!(line_texts(&p, "abc\td"), ["abc\t", "d"]);
+    assert_close(p.lines[0].tabs[0].width, 6.0);
 }
 
 #[test]
@@ -316,4 +334,44 @@ fn a_provider_fills_the_first_slot_and_clears_obstructions() {
     }
     // The third line starts below the obstruction.
     assert_close(p.lines[2].baseline_y - p.lines[2].ascent, 40.0);
+}
+
+#[test]
+fn a_run_of_exclamation_marks_splits_only_once_it_starts_an_empty_line() {
+    // RM-4. The run must be a unit of its own to reach an empty line: at
+    // the paragraph start or after a hard break. Every glyph is 6 wide and
+    // the column holds five.
+    let column = column(30.0);
+    let options = LayoutOptions::default();
+    for (text, expected) in [
+        ("!!!!!!!!", &["!!!!!", "!!!"][..]),
+        ("ab\u{2028}!!!!!!!!", &["ab\u{2028}", "!!!!!", "!!!"][..]),
+        // A word with the marks fused to it moves whole, then splits.
+        ("ab cd!!!!!!", &["ab ", "cd!!!", "!!!"][..]),
+        // UAX #14 LB13 (× EX) leaves no opportunity before `!`, after a
+        // space (SP × EX) or a letter (AL × EX) alike: the paragraph is one
+        // unit, already at the start of an empty line, and splits where it
+        // overflows.
+        ("ab !!!!!!", &["ab !!", "!!!!"][..]),
+        ("ab!!!!!!", &["ab!!!", "!!!"][..]),
+    ] {
+        let p = lay_out(text, &column, &options);
+        assert_eq!(line_texts(&p, text), expected, "{text:?}");
+    }
+}
+
+#[test]
+fn closing_punctuation_never_starts_a_line_while_its_unit_fits() {
+    // RM-4, WN-3: CL, CP, EX, IS and SY are fused to what precedes them.
+    let text = "(one) two, three. four! five; six? seven/eight";
+    let longest = text.split(' ').map(str::len).max().unwrap() as f32 * 6.0;
+    let mut width = longest;
+    while width <= 300.0 {
+        let p = lay_out(text, &column(width), &LayoutOptions::default());
+        for line in line_texts(&p, text) {
+            let first = line.chars().next().unwrap();
+            assert!(!")]},.!;?/".contains(first), "{width}: {line:?}");
+        }
+        width += 6.0;
+    }
 }

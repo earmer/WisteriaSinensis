@@ -455,19 +455,26 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
+    /// The next tab stop after the absolute pen position `pen` that lies
+    /// inside the current slot, if any (spec ST3-1): a stop beyond the slot's
+    /// end is not reachable from it.
+    fn reachable_stop(&self, pen: f32) -> Option<f32> {
+        self.inputs
+            .constraints()
+            .tab_stops
+            .next_stop(pen)
+            .filter(|&stop| {
+                stop <= self.slot_end + super::tolerance::tolerance(stop, self.slot_end)
+            })
+    }
+
     /// The advance and the reach (rightmost pen end, relative to the start)
     /// of a piece starting at the absolute pen position `pen`.
     fn measure(&self, piece: &Piece, pen: f32) -> (f32, f32) {
         match piece.kind {
             PieceKind::Tab => {
-                // A stop beyond the slot is cut back to its end: a tab never
-                // overflows its slot (spec ST3-6).
-                let width = self
-                    .inputs
-                    .constraints()
-                    .tab_stops
-                    .next_stop(pen)
-                    .map_or(0.0, |stop| (stop.min(self.slot_end) - pen).max(0.0));
+                // A tab with no reachable stop takes no advance (ST3-1, AX-6).
+                let width = self.reachable_stop(pen).map_or(0.0, |stop| stop - pen);
                 (width, width)
             }
             PieceKind::Cluster { cluster, run } => {
@@ -552,6 +559,21 @@ impl<'i, 'a> Layout<'i, 'a> {
                     }
                     pen += b.no_break;
                 }
+                Token::Piece(piece)
+                    if matches!(piece.kind, PieceKind::Tab)
+                        && self.reachable_stop(origin + pen).is_none() =>
+                {
+                    // No reachable stop (spec ST3-1, AX-6): break before the
+                    // tab at an earlier opportunity, else consume it with no
+                    // advance and end the line right after it.
+                    if has_content && let Some(b) = last_fit {
+                        return LineEnd::At(b);
+                    }
+                    return match self.tokens.get(t + 1) {
+                        Some(Token::Break(_)) => LineEnd::At(t + 1),
+                        _ => LineEnd::Before(t + 1),
+                    };
+                }
                 Token::Piece(piece) => {
                     let piece = *piece;
                     let (advance, reach) = self.measure(&piece, origin + pen);
@@ -573,20 +595,6 @@ impl<'i, 'a> Layout<'i, 'a> {
                         has_content = true;
                     }
                     pen += advance;
-                    if matches!(piece.kind, PieceKind::Tab)
-                        && self
-                            .inputs
-                            .constraints()
-                            .tab_stops
-                            .next_stop(origin + pen - advance)
-                            .is_none()
-                    {
-                        // No representable stop: the line ends at the tab
-                        // (spec ST3-1, AX-6), at the next break.
-                        if let Some(next) = self.next_break_after(t) {
-                            return LineEnd::At(next);
-                        }
-                    }
                 }
             }
             t += 1;

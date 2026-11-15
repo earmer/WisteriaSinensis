@@ -1385,15 +1385,13 @@ Precondition: `slack` is finite or `+∞`, `font_size` finite and non-negative, 
 
 ### Stage 3: justification and tabs
 
-**[ST3-1] 3.1 Tabs.** A tab advances to `TabStops::next_stop` of its pen position, measured in flow space from the flow-space origin (OPT-1), whatever the line's indent or slot. When `next_stop` is `None`, the tab is consumed with zero advance and the line ends there (AX-6). On a line with a tab, glue left of the last tab is frozen at natural width in scoring and in justification alike.
+**[ST3-1] 3.1 Tabs.** A tab advances to `TabStops::next_stop` of its pen position, measured in flow space from the flow-space origin (OPT-1), whatever the line's indent or slot. A stop is reachable only inside the tab's slot: when `next_stop` is `None` or lies beyond the slot's `InlineSlotConstraint::end`, the tab has no reachable stop. The line then breaks before the tab at an earlier opportunity that fits, if it has content before the tab and such an opportunity exists; otherwise the tab is consumed with zero advance and the line ends right after it, at the opportunity that follows it or, with none, at the tab's end, a second exception to WN-1 besides the emergency break (AX-6). On a line with a tab, glue left of the last tab is frozen at natural width in scoring and in justification alike.
 
 **[ST3-2] 3.2 Priority ladder.** Justification applies only to lines that end neither the paragraph nor at a hard break, with `slack = wrap_width - W`. Expansion spends Level 0 (`GlueTier::Tier0`: word spaces and the compression pool), then Level 1 (`Tier1`: CJK autospace), then Level 2 (`Tier2`: `ALLOW_CJK_JUSTIFY_AFTER` gaps), then Level 3 (equal residual expansion), with per-level capacities from the active profile. The same ladder drives the badness (ST1-8).
 
 **[ST3-3] 3.3 Compression.** Lines are broken optimistically and then compressed, in the profile's order of compression opportunities (word spaces, line-end and mid-line punctuation margins, middle dots, then the autospace gap down to its minimum).
 
 **[ST3-4] 3.4 Tolerance.** A line whose ratio exceeds the tolerance is rejected by `Balanced` and `Publication` when an alternative exists; otherwise, and under `Greedy`, it is justified as far as the ladder allows and left ragged.
-
-**[ST3-6] Tabs at a slot's end.** A tab whose next stop lies beyond the end of its slot advances only to that end, so a tab never overflows its slot.
 
 **[ST3-5] 3.5 Scripts.** `NO_LETTER_SPACING` atoms receive no inter-letter expansion. Thai, Lao, Khmer and Burmese expand at word separators only.
 
