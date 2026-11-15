@@ -22,6 +22,7 @@ fetch() {
 fetch notosans 'NotoSans[wdth,wght].ttf' 'NotoSans[wdth,wght].ttf'
 fetch notoserif 'NotoSerif[wdth,wght].ttf' 'NotoSerif[wdth,wght].ttf'
 fetch notosanssc 'NotoSansSC[wght].ttf' 'NotoSansSC[wght].ttf'
+fetch notosanstc 'NotoSansTC[wght].ttf' 'NotoSansTC[wght].ttf'
 fetch jetbrainsmono 'JetBrainsMono[wght].ttf' 'JetBrainsMono[wght].ttf'
 fetch notosansjp 'NotoSansJP[wght].ttf' 'NotoSansJP[wght].ttf'
 fetch notosansdevanagari 'NotoSansDevanagari[wdth,wght].ttf' 'NotoSansDevanagari[wdth,wght].ttf'

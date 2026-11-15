@@ -193,6 +193,31 @@ impl LocaleTag {
             .ok_or(InvalidLocaleTag)
     }
 
+    /// Parses host input that may use common shorthand (spec TYP-7).
+    ///
+    /// Surrounding white space is trimmed, `_` reads as `-`, and these
+    /// spellings, in any letter case, map before RFC 5646 parsing:
+    /// `jp` to `ja-JP`; `cn`, `zh-cn`, `zh-sc` and `zh-chs` to `zh-CN`; `tw`,
+    /// `zh-tw`, `zh-tc` and `zh-cht` to `zh-TW`; `hk` and `zh-hk` to `zh-HK`;
+    /// `kr` to `ko-KR`. Anything else is parsed by
+    /// [`LocaleTag::try_from_str`].
+    ///
+    /// # Errors
+    /// The input, after the mapping, does not match the RFC 5646
+    /// `Language-Tag` grammar.
+    pub fn parse_lenient(tag: &str) -> Result<Self, InvalidLocaleTag> {
+        let key = tag.trim().replace('_', "-").to_ascii_lowercase();
+        let mapped = match key.as_str() {
+            "jp" => "ja-JP",
+            "cn" | "zh-cn" | "zh-sc" | "zh-chs" => "zh-CN",
+            "tw" | "zh-tw" | "zh-tc" | "zh-cht" => "zh-TW",
+            "hk" | "zh-hk" => "zh-HK",
+            "kr" => "ko-KR",
+            other => other,
+        };
+        Self::try_from_str(mapped)
+    }
+
     /// The undetermined locale, `und` (no explicit tag; spec §1.2 fallback
     /// rules apply).
     #[must_use]
@@ -481,6 +506,35 @@ mod tests {
             LocaleTag::try_from_str("ja-jp"),
             LocaleTag::try_from_str("JA-JP")
         );
+    }
+
+    #[test]
+    fn lenient_parsing_maps_shorthand_before_rfc_5646() {
+        let lenient = |tag: &str| LocaleTag::parse_lenient(tag).map(|t| t.as_str().to_owned());
+        for (input, canonical) in [
+            ("jp", "ja-JP"),
+            ("JP", "ja-JP"),
+            ("cn", "zh-CN"),
+            ("zh-cn", "zh-CN"),
+            ("zh-SC", "zh-CN"),
+            ("zh-chs", "zh-CN"),
+            ("zh_CN", "zh-CN"),
+            ("tw", "zh-TW"),
+            ("zh-tc", "zh-TW"),
+            ("zh-CHT", "zh-TW"),
+            ("zh-TW", "zh-TW"),
+            ("hk", "zh-HK"),
+            ("zh-hk", "zh-HK"),
+            ("kr", "ko-KR"),
+            (" ja_jp ", "ja-JP"),
+            ("zh-hant", "zh-Hant"),
+            ("sr-cyrl", "sr-Cyrl"),
+            ("und", "und"),
+        ] {
+            assert_eq!(lenient(input).as_deref(), Ok(canonical), "{input}");
+        }
+        assert_eq!(LocaleTag::parse_lenient("ja JP"), Err(InvalidLocaleTag));
+        assert_eq!(LocaleTag::parse_lenient(""), Err(InvalidLocaleTag));
     }
 
     #[test]

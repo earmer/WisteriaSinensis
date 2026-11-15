@@ -36,13 +36,16 @@
             <option value="latin">Latin · ligatures &amp; marks</option>
             <option value="japanese">Japanese</option>
             <option value="zhHans">简体中文</option>
+            <option value="regional">简 · 繁 · 日 · inline locale tags</option>
             <option value="indic">Indic &amp; Southeast Asian</option>
             <option value="rtl">Arabic · rejected today</option>
           </select>
         </label>
 
         <label class="field grow">
-          <span class="field-label">Text <span class="field-hint">one paragraph per line</span></span>
+          <span class="field-label">Text <span class="field-hint">one paragraph per line;
+            <code>&lt;zh-TW&gt;…&lt;/zh-TW&gt;</code>, <code>&lt;ja&gt;…&lt;/ja&gt;</code> or
+            <code>&lt;lang=zh-Hant&gt;…&lt;/lang&gt;</code> tag a locale</span></span>
           <textarea id="text" spellcheck="false" autocomplete="off"></textarea>
         </label>
 
@@ -80,6 +83,24 @@
             <input id="locale" type="text" placeholder="und" spellcheck="false" />
           </label>
         </div>
+
+        <div class="presets" id="locale-presets" role="group" aria-label="Locale presets">
+          <button type="button" data-locale="und">und</button>
+          <button type="button" data-locale="zh-CN">zh-CN</button>
+          <button type="button" data-locale="zh-TW">zh-TW</button>
+          <button type="button" data-locale="ja-JP">ja-JP</button>
+          <button type="button" data-locale="sr-Cyrl">sr-Cyrl</button>
+          <button type="button" data-locale="de">de</button>
+          <button type="button" data-locale="cs">cs</button>
+        </div>
+
+        <label class="field">
+          <span class="field-label">Locale policy</span>
+          <select id="locale-policy">
+            <option value="explicit">explicit only (SCO-5)</option>
+            <option value="heuristics">experimental heuristics (FE-16)</option>
+          </select>
+        </label>
 
         <label class="field">
           <span class="field-label">Quotation policy</span>
@@ -133,9 +154,12 @@
               </li>
               <li>
                 HarfRust shaping of the engine's runs, with per-atom font
-                fallback over the ten faces registered here (Latin sans, serif
-                and mono; Simplified and Japanese Chinese; Devanagari, Thai,
-                Lao, Khmer, Myanmar).
+                fallback over the eleven faces registered here (Latin sans,
+                serif and mono; Simplified Chinese, Traditional Chinese and
+                Japanese; Devanagari, Thai, Lao, Khmer, Myanmar), keyed by
+                script and locale (SHP-12, SHP-25): a CJK run skips the Latin
+                faces that merely share its punctuation and takes the CJK face
+                of its locale from one fixed stack.
               </li>
               <li>
                 Greedy line breaking at UAX #14 opportunities with the emergency
@@ -177,13 +201,10 @@
                 face is registered here.
               </li>
               <li>
-                <strong>Known gap this harness exposes:</strong> SHP-12's
-                script-aware fallback is not implemented in the HarfRust
-                backend's <code>face_for</code>. In one Hani run, CJK
-                punctuation is still taken from the Latin face when that face
-                covers the code point, so U+201C/U+2026/U+00B7 keep Latin
-                advances instead of the CJK face's full-width ones. This page
-                reports that; it does not reorder the stack to hide it.
+                Simplified versus Traditional Han is never guessed from the
+                characters. Untagged Han takes the locale field; inline tags in
+                the text become the engine's style spans, which is how a
+                rich-text host states a language switch.
               </li>
             </ul>
           </div>

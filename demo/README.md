@@ -19,7 +19,7 @@ Requirements: Rust 1.88 or later with the `wasm32-unknown-unknown` target
 and a browser with `Path2D.addPath` (current Chrome, Firefox and Safari).
 
 `fetch-fonts.sh` downloads the variable faces used for Latin sans, serif and
-mono; Simplified and Japanese Chinese; Devanagari, Thai, Lao, Khmer and
+mono; Simplified Chinese, Traditional Chinese and Japanese; Devanagari, Thai, Lao, Khmer and
 Myanmar, checks them against `fonts.sha256`, and stores the OFL licence
 beside them. The files are not committed.
 
@@ -46,41 +46,31 @@ scope panel on the page says so. Pasted Arabic or Hebrew is rejected by the
 frontend, and the page shows that error verbatim rather than drawing text in
 the wrong order.
 
-## Known engine gap exposed here
+## Locales and CJK faces
 
-SHP-12 requires font fallback to use script and locale as the key and says
-`Hani` skips Latin-only faces. `HarfRustShaper::face_for` in
-`mutil-engine/src/shaping/harfrust.rs` currently decides by cmap coverage
-alone. With a stack whose Latin face precedes the CJK faces, a Chinese
-paragraph still forms one `Hani` run, but U+201C, U+2026, U+2014 and U+00B7
-are served by the Latin face: for example `“` advances 6.5 units at size 18,
-`…` 14.2 and `·` 4.8, where the same glyphs in Noto Sans SC advance 18.
-The page shows the real result and names the gap; it does not reorder or
-filter the stack to hide it. The fix belongs in the shaper.
+Every paragraph gets the same family stack: the chosen face, then Noto Sans,
+Noto Serif, JetBrains Mono, Noto Sans SC, Noto Sans TC, Noto Sans JP and the
+Indic and Southeast Asian faces. The page never reorders it by locale. The
+engine profiles each face when it is registered and routes a CJK run to the
+CJK face of its locale (spec SHP-12, SHP-25), so `zh-CN` Han comes from
+Noto Sans SC, `zh-TW` or `zh-Hant` from Noto Sans TC and `ja` from Noto Sans
+JP, and the Latin faces no longer serve the run's shared punctuation.
 
-Adding Noto Sans SC is a font-asset fix, not a shaper workaround: without a
-Simplified Chinese face, common GB 2312 characters such as 总/结/验/发/现
-fall through to glyph 0 and draw as boxes.
+The engine does not guess Simplified from Traditional Han. Untagged text takes
+the Locale field, which is read with `LocaleTag::parse_lenient` (so `jp`,
+`cn`, `zh-tc` and the preset buttons all work). For a switch inside a
+paragraph, tag the text:
 
-## Layout of the files
-
-```
-demo/
-  Cargo.toml          harness crate, depends on ../mutil-engine
-  src/lib.rs          FFI, JSON output, outline extraction
-  web/index.html      page
-  web/app.js          controls, paragraph loop, canvas drawing
-  web/wasm.js         wasm ABI wrapper
-  web/style.css       minimal styling
-  web/pkg/            built wasm (ignored)
-  fonts/              fetched faces (ignored)
-  build.sh            cargo build + copy the module
-  fetch-fonts.sh      download the Noto faces
-  serve.sh            static server
+```text
+<zh-CN>令你甘心。骨肉分离。</zh-CN> <zh-TW>令你甘心。骨肉分離。</zh-TW> <ja>令。骨肉分離。</ja>
+<lang=zh-Hant>…</lang>
 ```
 
-## Licence
-
-The harness is part of WisteriaSinensis, GPL-3.0-or-later. The fetched fonts
-are under the SIL Open Font License 1.1; `fetch-fonts.sh` stores the licence
-text in `fonts/OFL.txt`.
+`src/markup.rs` strips the tags, so the engine sees plain text (spec AX-1),
+and passes each tagged range as a `StyleSpan` with `style.locale` set
+(FE-25). A tag counts only when it parses as a locale and is closed by its own
+closing tag; nested tags give each byte the innermost locale; anything else
+stays in the text as typed. A tag cannot span two paragraphs, because the page
+lays out each line of the text box as its own paragraph. The Locale policy
+selector switches `FrontendOptions::locale_policy` between `ExplicitOnly` and
+`ExperimentalHeuristics` (FE-16).

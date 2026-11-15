@@ -3,6 +3,7 @@
 //! the vendored test font (`tests/assets/README.md`).
 
 mod acceptance;
+mod cjk_routing;
 mod common;
 mod fonts;
 mod frontend;
