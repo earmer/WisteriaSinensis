@@ -1,10 +1,14 @@
 //! Interactive types: caret, hit-test, movement and selection data (spec §6).
 //!
-//! Data only. The queries that produce and consume them (`hit_test`,
-//! `caret_geometry`, `move_cursor`, `selection_geometry`) are not implemented yet.
+//! The data types, and the queries on validated output: `hit_test`,
+//! `hit_test_on_line`, `caret_geometry`, `rect_for_offset`, `move_cursor`,
+//! `selection_geometry` and `range_rects`; on validated inputs, the
+//! deletion ranges and the copied text; and the UTF-16 conversions.
 
-use super::output::{AtomicFragment, CaretAffinity};
-use crate::types::{BidiLevel, ByteIndex, Rect, WritingMode};
+use super::output::{AtomicFragment, CaretAffinity, CaretStop, HangSide, PositionedParagraph};
+use super::tolerance::approx_eq;
+use super::{ValidatedInputs, ValidatedLayout};
+use crate::types::{AtomFlags, BidiLevel, ByteIndex, Point, Rect, TextRange, WritingMode};
 
 /// A caret location: offset plus affinity (spec §6.1).
 ///
@@ -240,4 +244,675 @@ impl Motion {
             _ => None,
         }
     }
+}
+
+/// The queries of §6 for laid-out, validated output (spec INT-1 to INT-15,
+/// INT-18 `rect_for_offset`). Points and rectangles are paragraph-local and
+/// physical (HST-8); inline positions are in flow space.
+impl ValidatedLayout<'_> {
+    /// The caret position nearest `point` (spec INT-7, INT-8): the point is
+    /// clamped to the first or last line, then placed on that line.
+    /// `inside` is `false` when the point was clamped to a line or to a line
+    /// edge.
+    #[must_use]
+    pub fn hit_test(&self, point: Point) -> HitResult {
+        let p = self.paragraph();
+        let flow = p
+            .policy
+            .writing_mode
+            .physical_to_flow_point(point, p.total_block_size);
+        let lines = &p.lines;
+        let (top, _) = line_block(p, 0);
+        let (_, bottom) = line_block(p, lines.len() - 1);
+        let line = lines
+            .iter()
+            .enumerate()
+            .position(|(i, _)| flow.y < line_block(p, i).1)
+            .unwrap_or(lines.len() - 1);
+        let hit = self.hit_test_on_line(line, flow.x);
+        HitResult {
+            position: hit.position,
+            inside: hit.inside && flow.y >= top && flow.y < bottom,
+        }
+    }
+
+    /// The caret position on line `line` nearest the flow-space inline
+    /// position `inline_position` (spec INT-7 to INT-10, INT-15). A line
+    /// index past the last line is clamped to it.
+    #[must_use]
+    pub fn hit_test_on_line(&self, line: usize, inline_position: f32) -> HitResult {
+        let lines = &self.paragraph().lines;
+        let line = &lines[line.min(lines.len() - 1)];
+        let x = inline_position;
+        // Atomic spans snap to an end (INT-10).
+        if let Some(fragment) = line
+            .atomic_fragments
+            .iter()
+            .find(|f| f.x <= x && x <= f.x + f.width)
+        {
+            return HitResult {
+                position: fragment.hit_test(x),
+                inside: true,
+            };
+        }
+        let stops = &line.caret_stops;
+        let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
+            return HitResult {
+                position: CursorPosition {
+                    byte_offset: line.byte_range.start(),
+                    affinity: CaretAffinity::Downstream,
+                },
+                inside: false,
+            };
+        };
+        let to_position = |s: &CaretStop| CursorPosition {
+            byte_offset: s.offset,
+            affinity: s.affinity,
+        };
+        // Beyond an edge: the extreme stop on that side (INT-8).
+        if x < first.x {
+            let stop = line.extreme_caret_stop(HangSide::Left).unwrap_or(first);
+            return HitResult {
+                position: to_position(stop),
+                inside: false,
+            };
+        }
+        if x > last.x {
+            let stop = line.extreme_caret_stop(HangSide::Right).unwrap_or(last);
+            return HitResult {
+                position: to_position(stop),
+                inside: false,
+            };
+        }
+        // The nearest stop; the midpoint belongs to the right half, and of
+        // two stops at one x the one on the side of the point wins.
+        let right = stops.partition_point(|s| s.x <= x).min(stops.len() - 1);
+        let left = right.saturating_sub(1);
+        let (l, r) = (&stops[left], &stops[right]);
+        let stop = if r.x - x <= x - l.x || r.x <= x {
+            // Approaching from the left: the first stop at that x.
+            let at = stops.partition_point(|s| s.x < r.x);
+            &stops[at.min(right)]
+        } else {
+            // From the right: the last stop at the left one's x.
+            let at = stops.partition_point(|s| s.x <= l.x);
+            &stops[at.saturating_sub(1)]
+        };
+        HitResult {
+            position: to_position(stop),
+            inside: true,
+        }
+    }
+
+    /// The caret rectangles of `position` (spec INT-11): zero-width
+    /// rectangles spanning the line box, physical and paragraph-local.
+    #[must_use]
+    pub fn caret_geometry(&self, position: CursorPosition) -> CaretVisual {
+        let p = self.paragraph();
+        let (line, index) = self.locate(position);
+        let stops = &p.lines[line].caret_stops;
+        let (top, bottom) = line_block(p, line);
+        let rect = |x: f32| {
+            p.policy
+                .writing_mode
+                .flow_to_physical_rect(Rect::new(x, top, 0.0, bottom - top), p.total_block_size)
+        };
+        let primary = stops[index];
+        let secondary = stops
+            .iter()
+            .find(|s| s.offset == primary.offset && !approx_eq(s.x, primary.x))
+            .map(|s| rect(s.x));
+        CaretVisual {
+            primary_rect: rect(primary.x),
+            secondary_rect: secondary,
+        }
+    }
+
+    /// The caret rectangle of `offset`, downstream (spec INT-18).
+    #[must_use]
+    pub fn rect_for_offset(&self, offset: ByteIndex) -> Rect {
+        self.caret_geometry(CursorPosition {
+            byte_offset: offset,
+            affinity: CaretAffinity::Downstream,
+        })
+        .primary_rect
+    }
+
+    /// Moves `position` by `motion` (spec INT-13 to INT-15). Physical arrows
+    /// move over the visual caret stops; `Previous` and `Next` over caret
+    /// offsets in logical order; word motions over UAX #29 word boundaries;
+    /// `LineStart` and `LineEnd` to the visual line's edges; block-axis
+    /// arrows keep `preferred_inline` (the caret's own inline position when
+    /// `None`).
+    #[must_use]
+    pub fn move_cursor(
+        &self,
+        position: CursorPosition,
+        motion: Motion,
+        preferred_inline: Option<f32>,
+    ) -> CursorMove {
+        let p = self.paragraph();
+        let rtl = p.base_direction.is_rtl();
+        let (line, index) = self.locate(position);
+        if let Some(flow) = motion.flow_direction(p.policy.writing_mode) {
+            return match flow {
+                FlowMotion::InlinePrev => self.move_visual(line, index, false),
+                FlowMotion::InlineNext => self.move_visual(line, index, true),
+                FlowMotion::BlockPrev | FlowMotion::BlockNext => {
+                    let inline =
+                        preferred_inline.unwrap_or_else(|| p.lines[line].caret_stops[index].x);
+                    let target = if flow == FlowMotion::BlockPrev {
+                        line.checked_sub(1)
+                    } else {
+                        Some(line + 1).filter(|&l| l < p.lines.len())
+                    };
+                    match target {
+                        Some(target) => {
+                            CursorMove::Moved(self.hit_test_on_line(target, inline).position)
+                        }
+                        None => CursorMove::Exited {
+                            edge: if flow == FlowMotion::BlockPrev {
+                                ParagraphEdge::Start
+                            } else {
+                                ParagraphEdge::End
+                            },
+                            inline_position: Some(inline),
+                        },
+                    }
+                }
+            };
+        }
+        let l = &p.lines[line];
+        let to_position = |s: &CaretStop| CursorPosition {
+            byte_offset: s.offset,
+            affinity: s.affinity,
+        };
+        match motion {
+            Motion::LineStart | Motion::LineEnd => {
+                let start_side = if rtl { HangSide::Right } else { HangSide::Left };
+                let side = if motion == Motion::LineStart {
+                    start_side
+                } else if rtl {
+                    HangSide::Left
+                } else {
+                    HangSide::Right
+                };
+                let stop = l
+                    .extreme_caret_stop(side)
+                    .expect("a validated line has caret stops");
+                CursorMove::Moved(to_position(stop))
+            }
+            Motion::Previous | Motion::Next => {
+                self.move_logical(position.byte_offset, motion == Motion::Next, None)
+            }
+            Motion::WordPrevious | Motion::WordNext => {
+                let words = crate::frontend::word_boundaries(self.text());
+                self.move_logical(
+                    position.byte_offset,
+                    motion == Motion::WordNext,
+                    Some(&words),
+                )
+            }
+            Motion::WordLeft | Motion::WordRight => {
+                let words = crate::frontend::word_boundaries(self.text());
+                let forward = (motion == Motion::WordRight) != rtl;
+                self.move_logical(position.byte_offset, forward, Some(&words))
+            }
+            _ => unreachable!("physical arrows resolved above"),
+        }
+    }
+
+    /// The line and caret stop that show `position`: a stop with its offset
+    /// and affinity, else one with its offset, else the nearest offset
+    /// before it on the line that holds it.
+    fn locate(&self, position: CursorPosition) -> (usize, usize) {
+        let lines = &self.paragraph().lines;
+        let offset = position.byte_offset;
+        let mut fallback = None;
+        for (i, line) in lines.iter().enumerate() {
+            for (k, stop) in line.caret_stops.iter().enumerate() {
+                if stop.offset == offset {
+                    if stop.affinity == position.affinity {
+                        return (i, k);
+                    }
+                    fallback.get_or_insert((i, k));
+                }
+            }
+        }
+        if let Some(found) = fallback {
+            return found;
+        }
+        let line = lines
+            .iter()
+            .position(|l| offset < l.byte_range.end())
+            .unwrap_or(lines.len() - 1);
+        let stops = &lines[line].caret_stops;
+        let k = stops
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.offset <= offset)
+            .max_by_key(|(_, s)| s.offset)
+            .or_else(|| stops.iter().enumerate().min_by_key(|(_, s)| s.offset))
+            .map_or(0, |(k, _)| k);
+        (line, k)
+    }
+
+    /// One visual stop left or right (spec INT-13), onto the neighbouring
+    /// line past a line edge, or out of the paragraph past its first or
+    /// last line.
+    fn move_visual(&self, line: usize, index: usize, rightwards: bool) -> CursorMove {
+        let p = self.paragraph();
+        let lines = &p.lines;
+        let current = lines[line].caret_stops[index];
+        let to_position = |s: &CaretStop| CursorPosition {
+            byte_offset: s.offset,
+            affinity: s.affinity,
+        };
+        let stops = &lines[line].caret_stops;
+        let mut k = index;
+        loop {
+            let next = if rightwards {
+                k.checked_add(1).filter(|&n| n < stops.len())
+            } else {
+                k.checked_sub(1)
+            };
+            match next {
+                Some(n) if stops[n].offset == current.offset => k = n,
+                Some(n) => return CursorMove::Moved(to_position(&stops[n])),
+                None => break,
+            }
+        }
+        // Past the edge: rightwards is forward in LTR, backward in RTL.
+        let forward = rightwards != p.base_direction.is_rtl();
+        let target = if forward {
+            Some(line + 1).filter(|&l| l < lines.len())
+        } else {
+            line.checked_sub(1)
+        };
+        let Some(target) = target else {
+            return CursorMove::Exited {
+                edge: if forward {
+                    ParagraphEdge::End
+                } else {
+                    ParagraphEdge::Start
+                },
+                inline_position: None,
+            };
+        };
+        let side = if rightwards {
+            HangSide::Left
+        } else {
+            HangSide::Right
+        };
+        let target_stops = &lines[target].caret_stops;
+        let entry = lines[target]
+            .extreme_caret_stop(side)
+            .expect("a validated line has caret stops");
+        if entry.offset != current.offset {
+            return CursorMove::Moved(to_position(entry));
+        }
+        // The same offset on both sides of a wrap: one more step.
+        let at = target_stops
+            .iter()
+            .position(|s| s == entry)
+            .unwrap_or_default();
+        let next = if rightwards {
+            target_stops.get(at + 1)
+        } else {
+            at.checked_sub(1).and_then(|n| target_stops.get(n))
+        };
+        CursorMove::Moved(to_position(next.unwrap_or(entry)))
+    }
+
+    /// The next or previous caret offset in logical order (spec INT-13),
+    /// restricted to `boundaries` when given (word motions, INT-14); the
+    /// motion exits at offset 0 and at the text end.
+    fn move_logical(
+        &self,
+        offset: usize,
+        forward: bool,
+        boundaries: Option<&[usize]>,
+    ) -> CursorMove {
+        let text_end = self.text().len();
+        if (forward && offset >= text_end) || (!forward && offset == 0) {
+            return CursorMove::Exited {
+                edge: if forward {
+                    ParagraphEdge::End
+                } else {
+                    ParagraphEdge::Start
+                },
+                inline_position: None,
+            };
+        }
+        let mut offsets: Vec<usize> = self
+            .paragraph()
+            .lines
+            .iter()
+            .flat_map(|l| l.caret_stops.iter().map(|s| s.offset))
+            .filter(|o| boundaries.is_none_or(|b| b.binary_search(o).is_ok()))
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        let target = if forward {
+            offsets.iter().copied().find(|&o| o > offset)
+        } else {
+            offsets.iter().rev().copied().find(|&o| o < offset)
+        };
+        let target = target.unwrap_or(if forward { text_end } else { 0 });
+        CursorMove::Moved(CursorPosition {
+            byte_offset: target,
+            affinity: CaretAffinity::Downstream,
+        })
+    }
+}
+
+/// The flow-space block interval of line `line`: its line box.
+fn line_block(paragraph: &PositionedParagraph, line: usize) -> (f32, f32) {
+    let l = &paragraph.lines[line];
+    let above = if paragraph.policy.writing_mode == WritingMode::VerticalLr {
+        l.descent
+    } else {
+        l.ascent
+    };
+    let top = l.baseline_y - above;
+    (top, top + l.line_height)
+}
+
+/// A visual slot of a line: the stretch between two neighbouring caret
+/// stops, with the bytes between their offsets.
+struct Slot {
+    x0: f32,
+    x1: f32,
+    lo: ByteIndex,
+    hi: ByteIndex,
+    level: BidiLevel,
+}
+
+fn slots(stops: &[CaretStop]) -> impl Iterator<Item = Slot> + '_ {
+    stops.windows(2).map(|w| Slot {
+        x0: w[0].x.min(w[1].x),
+        x1: w[0].x.max(w[1].x),
+        lo: w[0].offset.min(w[1].offset),
+        hi: w[0].offset.max(w[1].offset),
+        level: w[0].level,
+    })
+}
+
+/// The inline intervals of line `line` that `range` selects (spec INT-16):
+/// visually adjacent selected slots merge, a zero-width slot between two
+/// selected ones bridges them, and an unselected slot breaks the merge.
+fn selected_intervals(
+    paragraph: &PositionedParagraph,
+    line: usize,
+    range: TextRange,
+) -> Vec<(f32, f32, BidiLevel)> {
+    let mut out = Vec::new();
+    let mut open: Option<(f32, f32, BidiLevel)> = None;
+    for slot in slots(&paragraph.lines[line].caret_stops) {
+        if slot.lo == slot.hi {
+            continue;
+        }
+        if range.start() <= slot.lo && slot.hi <= range.end() {
+            open = Some(match open {
+                Some((a, b, level)) => (a.min(slot.x0), b.max(slot.x1), level),
+                None => (slot.x0, slot.x1, slot.level),
+            });
+        } else if let Some(done) = open.take() {
+            out.push(done);
+        }
+    }
+    out.extend(open);
+    out
+}
+
+impl ValidatedLayout<'_> {
+    /// The selection rectangles of `range` (spec INT-16), physical and
+    /// paragraph-local, line by line in visual order. `Tight` spans the
+    /// ascent and descent of the font instances and inline boxes the piece
+    /// crosses, asked of `shaper` through the shaper gate; `Max` the line
+    /// box, which holds the line gap and the tallest inline box; `Strut` the
+    /// resolved strut. An empty range gives none, and no line-end extension
+    /// is drawn.
+    #[must_use]
+    pub fn selection_geometry(
+        &self,
+        shaper: &dyn crate::shaping::TextShaper,
+        range: TextRange,
+        height: BoxHeightStyle,
+    ) -> Vec<SelectionRect> {
+        let p = self.paragraph();
+        if range.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (index, line) in p.lines.iter().enumerate() {
+            if line.byte_range.end() <= range.start() && !line.byte_range.is_empty() {
+                continue;
+            }
+            if line.byte_range.start() >= range.end() {
+                break;
+            }
+            for (x0, x1, level) in selected_intervals(p, index, range) {
+                let (top, bottom) = match height {
+                    BoxHeightStyle::Max => line_block(p, index),
+                    BoxHeightStyle::Strut => (
+                        line.baseline_y - p.policy.strut.ascent,
+                        line.baseline_y + p.policy.strut.descent,
+                    ),
+                    BoxHeightStyle::Tight => self.tight_block(shaper, index, x0, x1, range),
+                };
+                out.push(SelectionRect {
+                    rect: p.policy.writing_mode.flow_to_physical_rect(
+                        Rect::new(x0, top, x1 - x0, (bottom - top).max(0.0)),
+                        p.total_block_size,
+                    ),
+                    line: index,
+                    level,
+                    is_line_end_extension: false,
+                });
+            }
+        }
+        out
+    }
+
+    /// The rectangles of `range` over full line boxes, for placing an IME
+    /// candidate window (spec INT-18).
+    #[must_use]
+    pub fn range_rects(&self, range: TextRange) -> Vec<Rect> {
+        let p = self.paragraph();
+        let mut out = Vec::new();
+        if range.is_empty() {
+            return out;
+        }
+        for index in 0..p.lines.len() {
+            let (top, bottom) = line_block(p, index);
+            for (x0, x1, _) in selected_intervals(p, index, range) {
+                out.push(p.policy.writing_mode.flow_to_physical_rect(
+                    Rect::new(x0, top, x1 - x0, bottom - top),
+                    p.total_block_size,
+                ));
+            }
+        }
+        out
+    }
+
+    /// The block interval of a `Tight` piece `[x0, x1]` of line `line`: the
+    /// union of the ascents and descents of the selected glyph runs' font
+    /// instances (through the shaper gate) and inline boxes, else the strut.
+    fn tight_block(
+        &self,
+        shaper: &dyn crate::shaping::TextShaper,
+        line: usize,
+        x0: f32,
+        x1: f32,
+        range: TextRange,
+    ) -> (f32, f32) {
+        let p = self.paragraph();
+        let l = &p.lines[line];
+        let (mut above, mut below) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let inside = |x: f32| x >= x0 - 1e-3 && x <= x1 + 1e-3;
+        for run in &l.visual_runs {
+            // A glyph counts when its extent meets the piece and its bytes
+            // meet the selection: part of a ligature selects its font.
+            let selected = run.glyphs.iter().any(|g| {
+                let (lo, hi) = (g.x.min(g.x + g.advance), g.x.max(g.x + g.advance));
+                lo < x1 - 1e-3
+                    && hi > x0 + 1e-3
+                    && g.byte_range
+                        .is_some_and(|b| b.start() < range.end() && range.start() < b.end())
+            });
+            if !selected {
+                continue;
+            }
+            let Ok(line_box) = super::shaper_gate::checked_line_box(
+                shaper,
+                crate::types::FontInstanceRef {
+                    font: run.font,
+                    font_size: run.font_size,
+                    variations: &run.variations,
+                },
+                super::LineHeight::Normal,
+                p.policy.writing_mode,
+            ) else {
+                continue;
+            };
+            // The instance's own extents, without its half-leading.
+            let gap = line_box.line_gap / 2.0;
+            above = above.max(line_box.ascent - gap);
+            below = below.max(line_box.descent - gap);
+        }
+        for b in &l.visual_boxes {
+            if inside(b.x) && range.contains_range(b.byte_range) {
+                above = above.max(b.ascent - b.y);
+                below = below.max(b.descent + b.y);
+            }
+        }
+        if !above.is_finite() || !below.is_finite() {
+            above = p.policy.strut.ascent;
+            below = p.policy.strut.descent;
+        }
+        (l.baseline_y - above, l.baseline_y + below)
+    }
+}
+
+impl ValidatedInputs<'_> {
+    /// The range Backspace deletes before `offset` (spec INT-12): a whole
+    /// atomic span when the unit before the offset lies in one; else a whole
+    /// emoji sequence, an atom with a variation selector or an inline object;
+    /// else the last code point before the offset. Empty at the start of
+    /// the text; an offset past the text or off a character boundary is
+    /// first moved back to one.
+    #[must_use]
+    pub fn delete_backward_range(&self, offset: ByteIndex) -> TextRange {
+        let text = self.text();
+        let ast = self.ast();
+        let offset = floor_boundary(text, offset);
+        if offset == 0 {
+            return TextRange::empty_at(0);
+        }
+        if let Some(span) = ast.atomic_span_containing(offset - 1) {
+            return span.byte_range;
+        }
+        if let Some(object) = object_holding(ast, offset - 1) {
+            return object;
+        }
+        let k = ast.atoms.partition_point(|a| a.byte_range.end() < offset);
+        if let Some(atom) = ast.atoms.get(k).filter(|a| a.byte_range.end() == offset)
+            && atom
+                .flags
+                .intersects(AtomFlags::IS_EMOJI_SEQUENCE.union(AtomFlags::HAS_VARIATION_SELECTOR))
+        {
+            return atom.byte_range;
+        }
+        let last = text[..offset].chars().next_back().map_or(1, char::len_utf8);
+        TextRange::new(offset - last, offset)
+    }
+
+    /// The range Delete removes after `offset` (spec INT-12): a whole atomic
+    /// span when the unit after the offset lies in one; else the whole atom
+    /// or inline object after it; else the next code point. Empty at the end
+    /// of the text.
+    #[must_use]
+    pub fn delete_forward_range(&self, offset: ByteIndex) -> TextRange {
+        let text = self.text();
+        let ast = self.ast();
+        let offset = floor_boundary(text, offset);
+        if offset >= text.len() {
+            return TextRange::empty_at(text.len());
+        }
+        if let Some(span) = ast.atomic_span_containing(offset) {
+            return span.byte_range;
+        }
+        if let Some(object) = object_holding(ast, offset) {
+            return object;
+        }
+        let k = ast.atoms.partition_point(|a| a.byte_range.start() < offset);
+        if let Some(atom) = ast.atoms.get(k).filter(|a| a.byte_range.start() == offset) {
+            return atom.byte_range;
+        }
+        let next = text[offset..].chars().next().map_or(1, char::len_utf8);
+        TextRange::new(offset, offset + next)
+    }
+
+    /// The text a copy of `range` puts on the clipboard (spec INT-17): the
+    /// source bytes, so no synthesized glyph is copied, with U+00AD dropped
+    /// under `SoftHyphenPolicy::Strip`. The range is clamped to the text and
+    /// to character boundaries.
+    #[must_use]
+    pub fn copied_text(&self, range: TextRange) -> String {
+        let text = self.text();
+        let start = floor_boundary(text, range.start());
+        let end = floor_boundary(text, range.end()).max(start);
+        let source = &text[start..end];
+        match self.options().soft_hyphen {
+            super::SoftHyphenPolicy::Keep => source.to_owned(),
+            super::SoftHyphenPolicy::Strip => source.replace('\u{AD}', ""),
+        }
+    }
+}
+
+/// The range of the inline object holding `byte`, if any.
+fn object_holding(ast: &crate::frontend::ParagraphAst, byte: ByteIndex) -> Option<TextRange> {
+    ast.items.iter().find_map(|item| match item {
+        crate::frontend::WordNode::Box(crate::frontend::BoxNode::InlineObject {
+            byte_range,
+            ..
+        }) if byte_range.start() <= byte && byte < byte_range.end() => Some(*byte_range),
+        _ => None,
+    })
+}
+
+/// `offset` clamped to `text` and moved back to a character boundary.
+fn floor_boundary(text: &str, offset: ByteIndex) -> ByteIndex {
+    let mut at = offset.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// The UTF-16 offset of byte `offset` of `text`, or `None` when the offset
+/// lies past the text or inside a code point (spec INT-18).
+#[must_use]
+pub fn utf8_to_utf16(text: &str, offset: ByteIndex) -> Option<usize> {
+    text.get(..offset)
+        .map(|prefix| prefix.chars().map(char::len_utf16).sum())
+}
+
+/// The byte offset of UTF-16 offset `offset` of `text`, or `None` when it
+/// lies past the text or between the two halves of a surrogate pair
+/// (spec INT-18).
+#[must_use]
+pub fn utf16_to_utf8(text: &str, offset: usize) -> Option<ByteIndex> {
+    let mut units = 0;
+    for (byte, c) in text.char_indices() {
+        if units == offset {
+            return Some(byte);
+        }
+        units += c.len_utf16();
+        if units > offset {
+            return None;
+        }
+    }
+    (units == offset).then_some(text.len())
 }

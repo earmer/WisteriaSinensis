@@ -10,8 +10,8 @@ use crate::frontend::{
     AnnotationKind, AnnotationSide, AnnotationSpan, BoxDecorationBreak, BoxNode, BreakAction,
     DiscretionaryNode, GlueKind, GlueNode, HyphenOpportunity, InlineDecorationSpan,
     MAX_BIDI_SPAN_DEPTH, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, ShapingRun, SpanEdge,
-    TextBoxView, WordNode, is_line_or_paragraph_separator, is_no_break_space,
-    is_paragraph_separator, is_word_space, text_is_self_contained,
+    TextBoxView, WordNode, is_line_or_paragraph_separator, is_paragraph_separator, is_word_space,
+    text_is_self_contained,
 };
 use crate::types::{
     AtomFlags, BidiLevel, GlyphOrientation, GraphemeAtom, RawShapedGlyph, ShapedCluster, TextRange,
@@ -139,8 +139,8 @@ pub enum LayoutInputError {
     },
     /// A glue node has a non-finite or negative width, stretch or shrink; is a `CjkPunctCompression` node with a
     /// natural width or a stretch; does not match its source (a `WordSpace`
-    /// owns a non-empty run of word-space characters and is not collapsible
-    /// over a no-break space; a synthetic kind owns no bytes).
+    /// is collapsible and owns a non-empty run of word-space characters,
+    /// which excludes the no-break spaces; a synthetic kind owns no bytes).
     InvalidGlue {
         /// Index into `ParagraphAst::items`.
         item: usize,
@@ -1172,8 +1172,9 @@ impl<'a> ItemChecks<'a> {
 
     /// Glue: non-negative measurements (MSR-1); the
     /// compression pool is shrink only; and the node matches its source. A
-    /// `WordSpace` owns a non-empty run of word-space characters and cannot
-    /// collapse over a no-break space; the synthetic kinds own no bytes.
+    /// `WordSpace` is collapsible and owns a non-empty run of word-space
+    /// characters (a no-break space is text, WN-12); the synthetic kinds own
+    /// no bytes.
     fn check_glue(&self, item: usize, glue: &GlueNode) -> Result<(), LayoutInputError> {
         let sizes_are_valid = [glue.natural_width, glue.max_stretch, glue.max_shrink]
             .into_iter()
@@ -1185,9 +1186,7 @@ impl<'a> ItemChecks<'a> {
         } else {
             // Every item was checked to fit `text` before the item checks.
             let source = &self.text[glue.byte_range.as_range()];
-            !source.is_empty()
-                && source.chars().all(is_word_space)
-                && !(glue.is_collapsible && source.chars().any(is_no_break_space))
+            glue.is_collapsible && !source.is_empty() && source.chars().all(is_word_space)
         };
         if sizes_are_valid && pool_is_shrink_only && matches_source {
             Ok(())
@@ -2767,9 +2766,13 @@ mod tests {
         assert_eq!(check("a b", space((1, 3), true)), bad);
         // A word space owns bytes.
         assert_eq!(check("a", space((1, 1), true)), bad);
-        // A no-break space cannot collapse.
-        assert_eq!(check("a\u{a0}", space((1, 3), false)), Ok(()));
-        assert_eq!(check("a\u{a0}", space((1, 3), true)), bad);
+        // A no-break space is text, not glue, collapsible or not.
+        for no_break in ["a\u{a0}", "a\u{2007}", "a\u{202f}"] {
+            assert_eq!(check(no_break, space((1, no_break.len()), true)), bad);
+            assert_eq!(check(no_break, space((1, no_break.len()), false)), bad);
+        }
+        // A word space is always collapsible.
+        assert_eq!(check("a ", space((1, 2), false)), bad);
     }
 
     #[test]

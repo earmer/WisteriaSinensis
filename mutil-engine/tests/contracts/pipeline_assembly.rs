@@ -1159,10 +1159,10 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
     assert!(small_line().extreme_caret_stop(HangSide::Left).is_none());
 }
 
-/// Phase 0 skeleton behaviour: replaced, not frozen, once layout produces
-/// lines (RM-9).
+/// An empty paragraph is one empty line, the strut high (MET-3, BOX-2); this
+/// replaces the Phase 0 skeleton test that expected no line (RM-9).
 #[test]
-fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
+fn layout_paragraph_lays_out_an_empty_paragraph_as_one_empty_line() {
     let ast = ParagraphAst {
         annotations: Vec::new(),
         bidi_spans: Vec::new(),
@@ -1197,6 +1197,10 @@ fn layout_paragraph_skeleton_assembles_and_returns_an_empty_paragraph() {
     let shaper: &dyn TextShaper = &NoopShaper;
     let p = layout_paragraph(&ast, "", shaper, &constraints, &options).unwrap();
     assert_eq!(p.base_direction, BidiDirection::Rtl);
-    assert!(p.lines.is_empty());
+    assert_eq!(p.lines.len(), 1);
+    assert_eq!(p.lines[0].byte_range, TextRange::empty_at(0));
+    assert_eq!(p.lines[0].line_height, p.policy.strut.line_height());
+    assert_eq!(p.total_block_size, p.policy.strut.line_height());
+    assert!(ValidatedLayout::new(&p, "").is_ok());
     assert!(check_layout_inputs(&ast, "", &constraints, &options).is_ok());
 }

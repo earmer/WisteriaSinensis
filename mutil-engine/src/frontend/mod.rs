@@ -1,16 +1,28 @@
 //! Frontend: input abstraction and the paragraph AST (spec §3, §2.4, §2.5).
 //!
-//! Defines the output and option types; the analysis pass that builds the AST
-//! from text is not implemented yet. The AST stores atoms and clusters once per
+//! Defines the input, output and option types and the entry point
+//! [`compile_paragraph`], whose Phase 1 analysis compiles horizontal
+//! left-to-right text (spec FE-29). The AST stores atoms and clusters once per
 //! paragraph; text boxes and runs name slices of them by range.
 
 mod annotation;
 mod ast;
+mod compile;
+#[cfg(test)]
+mod conformance;
+mod emoji;
+mod input;
+mod locale;
 mod options;
-mod run;
+mod script;
+mod segment;
 mod span;
+mod url;
 
 use crate::types::TextRange;
+// The run and the hyphenation opportunity are defined in `types`, below the
+// shaping bridge (spec SCO-6); they stay part of the frontend's vocabulary.
+pub use crate::types::{HyphenOpportunity, ReplacementText, ShapingRun, TextDecoration};
 
 pub use annotation::{
     AnnotationAlignment, AnnotationKind, AnnotationSide, AnnotationSpan, BidiControlKind,
@@ -19,14 +31,15 @@ pub use annotation::{
 pub(crate) use ast::text_is_self_contained;
 pub use ast::{
     BoxNode, BoxOverflowPolicy, BreakAction, DiscretionaryNode, GlueKind, GlueNode, GlueTier,
-    HyphenOpportunity, ParagraphAst, RepeatedOperator, ReplacementText, ReshapeWindow, SpanEdge,
-    TextBoxView, WordNode,
+    ParagraphAst, RepeatedOperator, ReshapeWindow, SpanEdge, TextBoxView, WordNode,
 };
+pub use compile::{FrontendError, FrontendFeature, compile_paragraph};
+pub use input::{AnnotationInput, InlineObjectInput, ParagraphInput, StyleSpan, TextStyle};
 pub use options::{
     AutospaceProfile, FrontendOptions, LineBreakStrictness, LocalePolicy, QuotePolicy,
     WordBreakOption,
 };
-pub use run::{ShapingRun, TextDecoration};
+pub(crate) use segment::word_boundaries;
 pub use span::{
     AtomicEditSpan, BoxDecorationBreak, CompositionSpan, InlineDecorationSpan,
     MAX_DECORATION_NESTING_DEPTH,
@@ -64,9 +77,14 @@ pub fn is_line_or_paragraph_separator(c: char) -> bool {
 }
 
 /// `true` for a character a [`GlueKind::WordSpace`] may own: the Unicode space
-/// separators (`General_Category=Zs`) except the ideographic space U+3000.
-/// Tabs, line and paragraph separators are not word spaces; they have nodes of
-/// their own.
+/// separators (`General_Category=Zs`) except the ideographic space U+3000 and
+/// the no-break spaces ([`is_no_break_space`]). Tabs, line and paragraph
+/// separators are not word spaces; they have nodes of their own.
+///
+/// A no-break space is a fixed-width character that never ends a line (UAX #14
+/// class GL), so the frontend shapes it as ordinary text in a
+/// [`BoxNode::Text`] with no break opportunity on either side (spec WN-12): a
+/// line's visible content then always ends on a glyph, a box or a tab.
 ///
 /// U+3000 is a fixed full-width character in CJK typography (JLReq class
 /// cl-14), neither stretched by justification nor collapsed, so the frontend
@@ -76,12 +94,13 @@ pub fn is_line_or_paragraph_separator(c: char) -> bool {
 pub fn is_word_space(c: char) -> bool {
     matches!(
         c,
-        ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}'
+        ' ' | '\u{1680}' | '\u{2000}'..='\u{2006}' | '\u{2008}'..='\u{200a}' | '\u{205f}'
     )
 }
 
-/// `true` for the word spaces that never collapse and never offer a break:
-/// NBSP U+00A0, figure space U+2007 and narrow NBSP U+202F.
+/// `true` for the space separators that never collapse and never offer a
+/// break: NBSP U+00A0, figure space U+2007 and narrow NBSP U+202F. They are
+/// text, not glue (spec WN-12): [`is_word_space`] is `false` for them.
 #[must_use]
 pub fn is_no_break_space(c: char) -> bool {
     matches!(c, '\u{a0}' | '\u{2007}' | '\u{202f}')

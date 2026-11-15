@@ -2,7 +2,8 @@
 //! outputs, the output containers and the interaction types (spec §2.6, §5,
 //! §6).
 //!
-//! Line breaking, reordering and justification are not implemented yet.
+//! Layout breaks greedily (spec ME-2); justification, hanging punctuation,
+//! hyphenation and the optimising strategies are not implemented yet.
 
 mod badness;
 mod error_messages;
@@ -23,7 +24,7 @@ pub use badness::{
 pub use input_validation::{LayoutInputError, check_layout_inputs};
 pub use interaction::{
     BoxHeightStyle, CaretVisual, CursorMove, CursorPosition, FlowMotion, HitResult, Motion,
-    ParagraphEdge, Selection, SelectionRect, resolve_ligature_carets,
+    ParagraphEdge, Selection, SelectionRect, resolve_ligature_carets, utf8_to_utf16, utf16_to_utf8,
 };
 pub use layout::layout_paragraph;
 pub use options::{

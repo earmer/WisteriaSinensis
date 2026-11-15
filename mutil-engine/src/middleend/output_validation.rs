@@ -498,8 +498,8 @@ impl PositionedLine {
     ///    annotations sit where their rules put them.
     ///
     /// A slot's content may end beyond its constraint only when the line has a
-    /// single slot as wide as the wrap width that holds one indivisible entity
-    /// (see `is_single_entity_overflow`), optionally with a synthesized clamp
+    /// single slot that holds, from its start, one indivisible entity wider
+    /// than it (see `is_single_entity_overflow`), optionally with a synthesized clamp
     /// suffix. Geometry describes pen advances, not glyph ink bounds:
     /// zero-advance combining marks are exempt from containment.
     ///
@@ -1325,9 +1325,11 @@ impl PositionedLine {
     }
 
     /// A slot's content ends inside its constraint, unless the line is one
-    /// slot as wide as the wrap width holding, from the slot's start, a
-    /// single entity that cannot be divided and is wider than the slot
-    /// (`is_single_entity_overflow`).
+    /// slot holding, from the slot's start, a single entity that cannot be
+    /// divided and is wider than the slot (`is_single_entity_overflow`). The
+    /// slot need not be as wide as the wrap width: an indented line, or a
+    /// provider's narrow slot, places an entity that fits nowhere the same way
+    /// (spec SLT-5).
     fn check_slot_overflow(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
         for (index, slot) in self.slots.iter().enumerate() {
@@ -1337,7 +1339,6 @@ impl PositionedLine {
             // The exemption is for an entity that cannot fit: wider than the
             // slot, and not pushed out of it by an alignment offset.
             let is_exempt = self.slots.len() == 1
-                && capacity >= ctx.wrap_width - eps
                 && slot.visual_width > capacity + eps
                 && approx_eq(slot.content_start, slot.constraint.start())
                 && self.is_single_entity_overflow(slot.content_start);
@@ -1627,10 +1628,10 @@ impl PositionedParagraph {
                 self.total_block_size,
             )
             .map_err(|e| (i, e))?;
-            if let Some(standard) = self.policy.slot_source.standard_slot(i, ctx.wrap_width) {
-                if !matches!(line.slots.as_slice(), [slot] if slot.constraint == standard) {
-                    return invalid(i, R::NotStandardSlots);
-                }
+            if let Some(standard) = self.policy.slot_source.standard_slot(i, ctx.wrap_width)
+                && !matches!(line.slots.as_slice(), [slot] if slot.constraint == standard)
+            {
+                return invalid(i, R::NotStandardSlots);
             }
             let (top, bottom) =
                 self.policy

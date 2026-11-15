@@ -2,10 +2,10 @@
 //! pipeline types.
 
 use super::{LeadingEdit, TextShaper, TrailingEdit};
-use crate::frontend::ShapingRun;
 use crate::types::{
     Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
-    GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster, TextRange,
+    GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster,
+    ShapingRun, TextRange,
 };
 use smallvec::SmallVec;
 
@@ -63,5 +63,9 @@ impl TextShaper for NoopShaper {
         _direction: Direction,
     ) -> SmallVec<[f32; 4]> {
         SmallVec::new()
+    }
+
+    fn space_advance(&self, _instance: FontInstanceRef<'_>, _orientation: GlyphOrientation) -> f32 {
+        0.0
     }
 }

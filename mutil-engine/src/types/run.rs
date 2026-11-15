@@ -1,8 +1,11 @@
 //! Shaping runs: the unit handed to a shaping backend (spec §2.5, §3 Step 5).
+//!
+//! The run lives in `types` so that the shaping bridge depends on no layer
+//! above it (spec SCO-6); the frontend re-exports it.
 
 use core::ops::Range;
 
-use crate::types::{
+use super::{
     BaselineAlignment, BidiLevel, Direction, FamilyStack, FontFeatures, FontStyle,
     GlyphOrientation, LocaleTag, ScriptTag, TextRange,
 };

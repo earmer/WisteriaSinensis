@@ -1,9 +1,9 @@
 //! The abstract shaping bridge (spec §4.1).
 
-use crate::frontend::{HyphenOpportunity, ShapingRun};
 use crate::types::{
     Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
-    GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster, TextRange,
+    GlyphOrientation, GraphemeAtom, HyphenOpportunity, LocaleTag, RawShapedGlyph, ScriptTag,
+    ShapedCluster, ShapingRun, TextRange,
 };
 use smallvec::SmallVec;
 
@@ -237,6 +237,18 @@ pub trait TextShaper: Send + Sync {
         glyph_id: u32,
         direction: Direction,
     ) -> SmallVec<[f32; 4]>;
+
+    /// The nominal advance of U+0020 SPACE in `instance`, along the inline
+    /// axis of `orientation` (spec SHP-20): the horizontal advance for
+    /// `Horizontal`, `VerticalSideways` and `HorizontalInVertical`, the
+    /// vertical advance for `VerticalUpright`.
+    ///
+    /// In layout units, with `font_size · font.scale` applied. No OpenType
+    /// feature, letter spacing or word spacing enters it: the frontend adds
+    /// the run's `word_spacing` itself when it sizes a `WordSpace` glue
+    /// (spec WN-10). A face without a space glyph answers
+    /// `0.25 · font_size · font.scale`. The answer is finite and non-negative.
+    fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32;
 }
 
 #[cfg(test)]
