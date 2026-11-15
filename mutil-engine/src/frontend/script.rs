@@ -407,6 +407,18 @@ fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
             .chars()
             .all(|c| is_dash_run_char(c) || c.is_whitespace() || is_punctuation(c))
     };
+    // The nearest anchor before each atom and at or after it, from one
+    // forward and one backward pass, so every run finds its neighbours in
+    // constant time.
+    let n = atoms.len();
+    let mut before: Vec<Option<usize>> = vec![None; n + 1];
+    for k in 0..n {
+        before[k + 1] = if anchor(k) { Some(k) } else { before[k] };
+    }
+    let mut from: Vec<Option<usize>> = vec![None; n + 1];
+    for k in (0..n).rev() {
+        from[k] = if anchor(k) { Some(k) } else { from[k + 1] };
+    }
     let mut i = 0;
     while i < atoms.len() {
         let Some(c) = atoms[i]
@@ -422,8 +434,7 @@ fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
         while end < atoms.len() && atoms[end].text.starts_with(c) && atoms[end].explicit.is_none() {
             end += 1;
         }
-        let left = (0..i).rev().find(|&k| anchor(k));
-        let right = (end..atoms.len()).find(|&k| anchor(k));
+        let (left, right) = (before[i], from[end]);
         let cjk = |k: Option<usize>| k.is_some_and(|k| is_cjk(atoms, resolved, k));
         let host = resolved[i];
         let script = match (cjk(left), cjk(right)) {
@@ -607,5 +618,15 @@ mod tests {
         let a = atoms("a——b");
         assert!(binds_to_next(&a, 1));
         assert!(!binds_to_next(&a, 2));
+    }
+
+    #[test]
+    fn many_runs_without_anchors_resolve_in_linear_time() {
+        // 100,000 runs separated by commas, with no anchor anywhere: each
+        // run's neighbour search is constant, not a scan of the paragraph.
+        let text = "—,".repeat(100_000);
+        let resolved = resolve(&atoms(&text), QuotePolicy::Standard);
+        assert_eq!(resolved.len(), 200_000);
+        assert!(resolved.iter().all(|&s| s == ScriptTag::LATIN));
     }
 }

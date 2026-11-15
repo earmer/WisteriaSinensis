@@ -438,13 +438,16 @@ impl<'a> Compiler<'a> {
         // Atom indices that start a text box: after any other unit, after a
         // discretionary, or at a style, script or locale change.
         let mut box_starts = vec![false; self.atoms.len()];
+        let decoration_edges = self.decoration_edges();
         let mut previous: Option<(Unit, bool)> = None;
         for (i, unit) in self.units.iter().enumerate() {
             if let Unit::Atom(a) = *unit {
                 let at = self.atoms[a].byte_range.start();
                 box_starts[a] = match previous {
                     Some((Unit::Atom(p), broke)) => {
-                        broke || !self.same_run(p, a) || self.is_decoration_edge(at)
+                        broke
+                            || !self.same_run(p, a)
+                            || decoration_edges.get(at).copied().unwrap_or(false)
                     }
                     _ => true,
                 };
@@ -589,81 +592,75 @@ impl<'a> Compiler<'a> {
         );
     }
 
-    /// Whether a decoration span starts or ends at `offset`.
-    fn is_decoration_edge(&self, offset: usize) -> bool {
-        self.input
-            .decoration_spans
-            .iter()
-            .any(|s| s.byte_range.start() == offset || s.byte_range.end() == offset)
+    /// For each byte offset of the text, its end included, whether a
+    /// decoration span starts or ends there: one pass over the spans, and
+    /// nothing to allocate when there are none.
+    fn decoration_edges(&self) -> Vec<bool> {
+        if self.input.decoration_spans.is_empty() {
+            return Vec::new();
+        }
+        let mut edges = vec![false; self.text.len() + 1];
+        for span in self.input.decoration_spans {
+            edges[span.byte_range.start()] = true;
+            edges[span.byte_range.end()] = true;
+        }
+        edges
     }
 
     /// The edge checks of AST-7 and AST-9 that need units: a decoration
     /// edge lies between units, an atomic edge at the start or end of a text
     /// atom or object, and an atomic span holds one.
     fn check_span_edges(&self) -> Result<(), FrontendError> {
-        let objects = self.input.inline_objects;
-        let ranges: Vec<(TextRange, bool)> = self
-            .units
-            .iter()
-            .map(|u| {
-                let content = matches!(u, Unit::Atom(_) | Unit::Object(_));
-                (u.range(&self.atoms, objects), content)
-            })
-            .collect();
-        let between_units = |at: usize| at == 0 || ranges.iter().any(|(r, _)| r.end() == at);
-        for (index, span) in self.input.decoration_spans.iter().enumerate() {
+        let input = self.input;
+        if input.decoration_spans.is_empty() && input.atomic_spans.is_empty() {
+            return Ok(());
+        }
+        // Per byte offset, from one pass over the units: whether a unit ends
+        // there, and the end of the content unit (an atom or object) that
+        // starts there and whether one ends there. Each span is then checked
+        // in constant time.
+        let n = self.text.len() + 1;
+        let mut unit_end = vec![false; n];
+        let mut content_from: Vec<Option<usize>> = vec![None; n];
+        let mut content_end = vec![false; n];
+        unit_end[0] = true;
+        for u in &self.units {
+            let r = u.range(&self.atoms, input.inline_objects);
+            unit_end[r.end()] = true;
+            if matches!(u, Unit::Atom(_) | Unit::Object(_)) {
+                content_from[r.start()] = Some(r.end());
+                content_end[r.end()] = true;
+            }
+        }
+        for (index, span) in input.decoration_spans.iter().enumerate() {
             let r = span.byte_range;
-            if !between_units(r.start()) || !between_units(r.end()) {
+            if !unit_end[r.start()] || !unit_end[r.end()] {
                 return Err(FrontendError::InvalidDecorationSpan { span: index });
             }
         }
-        for (index, span) in self.input.atomic_spans.iter().enumerate() {
+        for (index, span) in input.atomic_spans.iter().enumerate() {
             let r = span.byte_range;
-            let starts = ranges.iter().any(|(u, c)| *c && u.start() == r.start());
-            let ends = ranges.iter().any(|(u, c)| *c && u.end() == r.end());
-            let holds = ranges.iter().any(|(u, c)| *c && r.contains_range(*u));
-            if !(starts && ends && holds) {
+            // Starting on a content unit that fits inside it, the span holds
+            // one; ending on a content unit's end closes it on an edge.
+            let holds = content_from[r.start()].is_some_and(|end| end <= r.end());
+            if !(holds && content_end[r.end()]) {
                 return Err(FrontendError::InvalidAtomicSpan { span: index });
             }
         }
         Ok(())
     }
 
-    /// The `SpanBoundary` items at `offset` of one edge (WN-8, AST-8): the
-    /// trailing ones inner first, the leading ones outer first.
-    fn boundaries_at(&self, offset: usize, edge: SpanEdge) -> Vec<WordNode> {
-        let spans = self.input.decoration_spans;
-        let node = |s: &InlineDecorationSpan| {
-            WordNode::Box(BoxNode::SpanBoundary {
-                byte_range: TextRange::empty_at(offset),
-                span_id: s.span_id,
-                edge,
-                width: match edge {
-                    SpanEdge::Leading => s.start_padding,
-                    SpanEdge::Trailing => s.end_padding,
-                },
-                bidi_level: BidiLevel::LTR,
-            })
-        };
-        match edge {
-            SpanEdge::Leading => spans
-                .iter()
-                .filter(|s| s.byte_range.start() == offset)
-                .map(node)
-                .collect(),
-            SpanEdge::Trailing => spans
-                .iter()
-                .rev()
-                .filter(|s| s.byte_range.end() == offset)
-                .map(node)
-                .collect(),
-        }
-    }
-
     /// WN-21: every discretionary but the sentinel lists the `Clone` spans
     /// that hold it strictly inside, with their padding in its widths and,
-    /// unless mandatory, `CLONED_SPAN_PENALTY` each in its penalty.
+    /// unless mandatory, `CLONED_SPAN_PENALTY` each in its penalty. One sweep
+    /// over the items, whose offsets ascend, with a cursor over the spans in
+    /// order and a stack of the spans open at the current offset: the spans
+    /// nest (AST-7), so the stack is one chain, innermost on top, no deeper
+    /// than `MAX_DECORATION_NESTING_DEPTH`.
     fn clone_padding(&self, items: &mut [WordNode]) {
+        let spans = self.input.decoration_spans;
+        let mut next = 0;
+        let mut open: Vec<&InlineDecorationSpan> = Vec::new();
         for item in items {
             let WordNode::Discretionary(d) = item else {
                 continue;
@@ -672,12 +669,20 @@ impl<'a> Compiler<'a> {
                 continue;
             }
             let offset = d.byte_offset();
-            for span in self.input.decoration_spans {
-                let r = span.byte_range;
-                if span.break_mode == BoxDecorationBreak::Clone
-                    && r.start() < offset
-                    && offset < r.end()
-                {
+            while next < spans.len() && spans[next].byte_range.start() < offset {
+                let start = spans[next].byte_range.start();
+                while open.last().is_some_and(|s| s.byte_range.end() <= start) {
+                    open.pop();
+                }
+                open.push(&spans[next]);
+                next += 1;
+            }
+            while open.last().is_some_and(|s| s.byte_range.end() <= offset) {
+                open.pop();
+            }
+            // Outer first, as the spans are given.
+            for span in &open {
+                if span.break_mode == BoxDecorationBreak::Clone {
                     d.cloned_spans.push(span.span_id);
                     d.pre_break_width += span.end_padding;
                     d.post_break_width += span.start_padding;
@@ -931,7 +936,8 @@ impl<'a> Compiler<'a> {
             }
         };
         let mut atom_end = 0;
-        items.extend(self.boundaries_at(0, SpanEdge::Leading));
+        let mut boundaries = BoundarySweep::new(self.input.decoration_spans);
+        items.extend(boundaries.leading(0));
         for (i, unit) in self.units.iter().enumerate() {
             match *unit {
                 Unit::Atom(a) => {
@@ -980,9 +986,9 @@ impl<'a> Compiler<'a> {
                 }
             }
             let end = unit.range(&self.atoms, objects).end();
-            let trailing = self.boundaries_at(end, SpanEdge::Trailing);
+            let trailing = boundaries.trailing(end);
             let leading = if end < self.text.len() {
-                self.boundaries_at(end, SpanEdge::Leading)
+                boundaries.leading(end)
             } else {
                 Vec::new()
             };
@@ -1031,6 +1037,67 @@ impl<'a> Compiler<'a> {
         );
         let width = (advance + s.word_spacing).max(0.0);
         if width.is_finite() { width } else { 0.0 }
+    }
+}
+
+/// The `SpanBoundary` items of the decoration spans in text order (WN-8,
+/// AST-8), from one sweep: asked at ascending offsets, among them every
+/// span edge (AST-7, checked by `check_span_edges`), it yields the leading
+/// boundaries at an offset outer first, from a cursor over the spans in
+/// order, and the trailing ones inner first, from the stack of open spans.
+struct BoundarySweep<'s> {
+    spans: &'s [InlineDecorationSpan],
+    next: usize,
+    open: Vec<&'s InlineDecorationSpan>,
+}
+
+impl<'s> BoundarySweep<'s> {
+    fn new(spans: &'s [InlineDecorationSpan]) -> Self {
+        Self {
+            spans,
+            next: 0,
+            open: Vec::new(),
+        }
+    }
+
+    fn node(span: &InlineDecorationSpan, offset: usize, edge: SpanEdge) -> WordNode {
+        WordNode::Box(BoxNode::SpanBoundary {
+            byte_range: TextRange::empty_at(offset),
+            span_id: span.span_id,
+            edge,
+            width: match edge {
+                SpanEdge::Leading => span.start_padding,
+                SpanEdge::Trailing => span.end_padding,
+            },
+            bidi_level: BidiLevel::LTR,
+        })
+    }
+
+    /// The spans starting at `offset`, outer first.
+    fn leading(&mut self, offset: usize) -> Vec<WordNode> {
+        let mut out = Vec::new();
+        while let Some(span) = self.spans.get(self.next) {
+            if span.byte_range.start() != offset {
+                break;
+            }
+            out.push(Self::node(span, offset, SpanEdge::Leading));
+            self.open.push(span);
+            self.next += 1;
+        }
+        out
+    }
+
+    /// The spans ending at `offset`, inner first.
+    fn trailing(&mut self, offset: usize) -> Vec<WordNode> {
+        let mut out = Vec::new();
+        while let Some(span) = self.open.last() {
+            if span.byte_range.end() != offset {
+                break;
+            }
+            out.push(Self::node(span, offset, SpanEdge::Trailing));
+            self.open.pop();
+        }
+        out
     }
 }
 

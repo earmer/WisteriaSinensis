@@ -335,6 +335,62 @@ fn table_s_reads_the_override_of_the_stated_locale() {
 }
 
 #[test]
+fn many_spans_compile_in_linear_time() {
+    // 20,000 one-letter decoration spans, every other one nested in a
+    // two-letter Clone span, and 20,000 atomic spans over the other letters:
+    // checking and placing them is one sweep, not atoms × spans.
+    let n = 40_000;
+    let text = "a".repeat(n);
+    let base = style(10.0);
+    let mut decoration = Vec::new();
+    for i in (0..n).step_by(2) {
+        decoration.push(InlineDecorationSpan {
+            span_id: i as u64,
+            byte_range: TextRange::new(i, i + 2),
+            break_mode: BoxDecorationBreak::Clone,
+            start_padding: 1.0,
+            end_padding: 1.0,
+        });
+        decoration.push(InlineDecorationSpan {
+            span_id: i as u64 + 1,
+            byte_range: TextRange::new(i, i + 1),
+            break_mode: BoxDecorationBreak::Slice,
+            start_padding: 0.0,
+            end_padding: 0.0,
+        });
+    }
+    let atomic: Vec<AtomicEditSpan> = (1..n)
+        .step_by(2)
+        .map(|i| AtomicEditSpan {
+            span_id: i as u64,
+            byte_range: TextRange::new(i, i + 1),
+        })
+        .collect();
+    let paragraph = ParagraphInput {
+        decoration_spans: &decoration,
+        atomic_spans: &atomic,
+        ..input(&text, &base)
+    };
+    let anywhere = FrontendOptions {
+        line_break_strictness: LineBreakStrictness::Anywhere,
+        ..Default::default()
+    };
+    let ast = compile_with(&paragraph, &anywhere);
+    let boundaries = ast
+        .items
+        .iter()
+        .filter(|i| matches!(i, WordNode::Box(BoxNode::SpanBoundary { .. })))
+        .count();
+    assert_eq!(boundaries, 2 * decoration.len());
+    // The break inside each Clone span (after its first letter) carries it.
+    let cloned = discretionaries(&ast)
+        .iter()
+        .filter(|d| d.cloned_spans.len() == 1)
+        .count();
+    assert_eq!(cloned, n / 2);
+}
+
+#[test]
 fn greedy_breaking_prefers_the_lowest_tier_of_the_overflow_ladder() {
     // 6 units a character. At 156 "https://example.com/abcdef" fits, and
     // the long piece "abcdefghijklmnop" may break anywhere, but the break at

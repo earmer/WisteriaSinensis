@@ -52,27 +52,40 @@ pub(crate) fn url_ranges(text: &str) -> Vec<TextRange> {
             .char_indices()
             .find(|&(_, c)| c.is_whitespace())
             .map_or(text.len(), |(k, _)| start + k);
-        while end > start
-            && text[..end].chars().next_back().is_some_and(|c| {
-                matches!(
-                    c,
-                    '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | ')' | ']'
-                )
-            })
-        {
-            let last = text[..end].chars().next_back().map_or(1, char::len_utf8);
-            let c = text[end - last..end].chars().next();
+        // Bracket balances over `start..end`, counted once and kept as the
+        // tail is trimmed, so trimming is linear in the URL's length.
+        let (mut paren, mut square) = (0_isize, 0_isize);
+        for b in &bytes[start..end] {
+            match b {
+                b'(' => paren += 1,
+                b')' => paren -= 1,
+                b'[' => square += 1,
+                b']' => square -= 1,
+                _ => {}
+            }
+        }
+        while let Some(c) = text[start..end].chars().next_back() {
+            if !matches!(
+                c,
+                '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | ')' | ']'
+            ) {
+                break;
+            }
             // A closing bracket stays when the URL opened it.
-            let count = |ch: char| text[start..end].matches(ch).count();
             let opened = match c {
-                Some(')') => count('(') >= count(')'),
-                Some(']') => count('[') >= count(']'),
+                ')' => paren >= 0,
+                ']' => square >= 0,
                 _ => false,
             };
             if opened {
                 break;
             }
-            end -= last;
+            match c {
+                ')' => paren += 1,
+                ']' => square += 1,
+                _ => {}
+            }
+            end -= c.len_utf8();
         }
         if end > start + 3 {
             out.push(TextRange::new(start, end));
@@ -172,6 +185,15 @@ mod tests {
             .collect();
         assert_eq!(found, ["https://example.com/a(b)", "www.rust-lang.org"]);
         assert!(url_ranges("no url: here").is_empty());
+        // Unopened closers go, opened ones stay, in one linear pass.
+        let text = "(see https://x.org/a(b)c))) now";
+        let found: Vec<&str> = url_ranges(text)
+            .iter()
+            .map(|r| &text[r.as_range()])
+            .collect();
+        assert_eq!(found, ["https://x.org/a(b)c"]);
+        let long = format!("https://x.org/{}", ")".repeat(100_000));
+        assert_eq!(url_ranges(&long)[0].end(), "https://x.org/".len());
     }
 
     #[test]

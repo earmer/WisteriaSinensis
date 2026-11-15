@@ -254,7 +254,7 @@ impl HarfRustShaper {
             .instances
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let entry = cache.entry(key).or_insert_with(|| {
+        let entry = bounded_entry(&mut cache, key, MAX_CACHED_INSTANCES, || {
             let font = face
                 .font
                 .instance_builder()
@@ -527,6 +527,26 @@ fn context_after(text: &str, at: usize) -> &str {
         end -= 1;
     }
     &text[at..end]
+}
+
+/// The most variation instances the shaper keeps parsed at once. A caller
+/// animating an axis asks for a new instance each frame: past this bound
+/// the cache is cleared, so memory stays bounded and the working set is
+/// rebuilt on demand.
+const MAX_CACHED_INSTANCES: usize = 128;
+
+/// The entry for `key` in `cache`, built by `build` when absent. A cache
+/// holding `cap` entries is cleared before a new one goes in.
+fn bounded_entry<K: Eq + std::hash::Hash, V>(
+    cache: &mut HashMap<K, V>,
+    key: K,
+    cap: usize,
+    build: impl FnOnce() -> V,
+) -> &mut V {
+    if cache.len() >= cap && !cache.contains_key(&key) {
+        cache.clear();
+    }
+    cache.entry(key).or_insert_with(build)
 }
 
 /// The OpenType features of `run`, for HarfRust.
@@ -965,6 +985,22 @@ fn base_offsets(font: &Font) -> BaseOffsets {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_instance_cache_is_bounded() {
+        let mut cache: HashMap<u32, u32> = HashMap::new();
+        for key in 0..1000 {
+            let built = *bounded_entry(&mut cache, key, MAX_CACHED_INSTANCES, || key * 2);
+            assert_eq!(built, key * 2);
+            assert!(cache.len() <= MAX_CACHED_INSTANCES);
+        }
+        // A cached key is served without rebuilding, even when full.
+        let full = cache.len();
+        let key = *cache.keys().next().expect("an entry");
+        let served = *bounded_entry(&mut cache, key, full, || unreachable!("cached"));
+        assert_eq!(served, key * 2);
+        assert_eq!(cache.len(), full);
+    }
     use super::*;
     use crate::shaping::FontBytes;
 
