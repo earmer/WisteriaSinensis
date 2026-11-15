@@ -5,7 +5,8 @@
 //! Under `LocalePolicy::ExperimentalHeuristics` an untagged atom looks at
 //! its UAX #29 sentence, tagged atoms included: when the sentence holds kana,
 //! its Han and kana atoms take `ja-JP`; else, when it holds Hangul, its Han
-//! and Hangul atoms take `ko-KR`; when it holds U+0452 or U+045B, its
+//! and Hangul atoms take `ko-KR`; when it holds U+0402, U+040B, U+0452 or
+//! U+045B (Ђ, Ћ, ђ, ћ), its
 //! Cyrillic atoms take `sr-Cyrl`. Script is the one resolved in Step 3, so
 //! punctuation that joined CJK text follows it. The frequency of ideographs
 //! decides nothing.
@@ -71,9 +72,10 @@ pub(crate) fn resolve(
         let has = |s: ScriptTag| sentence.iter().any(|a| a.script == s);
         let has_kana = has(hira) || has(kana);
         let has_hangul = has(hang);
-        let serbian = sentence
-            .iter()
-            .any(|a| a.text.contains(['\u{0452}', '\u{045B}']));
+        let serbian = sentence.iter().any(|a| {
+            a.text
+                .contains(['\u{0402}', '\u{040B}', '\u{0452}', '\u{045B}'])
+        });
         for (k, atom) in sentence.iter().enumerate() {
             if atom.explicit.is_some() {
                 continue;
@@ -156,6 +158,8 @@ mod tests {
     fn serbian_letters_make_cyrillic_serbian_and_tags_win() {
         let h = LocalePolicy::ExperimentalHeuristics;
         assert_eq!(locales("ђак", &[], h), ["sr-Cyrl"; 3]);
+        assert_eq!(locales("ЋАК", &[], h), ["sr-Cyrl"; 3]);
+        assert_eq!(locales("ЂАК", &[], h), ["sr-Cyrl"; 3]);
         assert_eq!(locales("дак", &[], h), ["en-US"; 3]);
         // An explicit tag stands, and still counts as evidence.
         let zh = known("zh-Hant");

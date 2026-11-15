@@ -94,7 +94,8 @@ pub enum LocalePolicy {
     ExplicitOnly,
     /// Experimental script-based inference (spec FE-16): within a UAX #29
     /// sentence, kana makes untagged Han and kana `ja-JP`, else Hangul makes
-    /// untagged Han and Hangul `ko-KR`, and U+0452 or U+045B makes untagged
+    /// untagged Han and Hangul `ko-KR`, and U+0402, U+040B, U+0452 or U+045B
+    /// (Ђ, Ћ, ђ, ћ) makes untagged
     /// Cyrillic `sr-Cyrl`. Explicit tags always win.
     ExperimentalHeuristics,
 }

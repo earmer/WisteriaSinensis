@@ -1060,7 +1060,7 @@ pub struct ParagraphSlice { pub content: TextRange, pub separator: TextRange }
 
 ### Step 4: locale
 
-**[FE-16]** Explicit tags win; untagged text takes `default_locale` under `ExplicitOnly`. Under `ExperimentalHeuristics` only, within a UAX #29 sentence (whose tagged atoms count as evidence but keep their tags), on the scripts resolved in Step 3: kana present makes the untagged Han and kana atoms `ja-JP`; else Hangul present makes the untagged Han and Hangul atoms `ko-KR`; U+0452 or U+045B present makes the untagged Cyrillic atoms `sr-Cyrl`; every other untagged atom takes `default_locale`. Kana and Hangul take the locale with Han so that a run does not split between them. The engine never switches locale on the frequency of ideographs.
+**[FE-16]** Explicit tags win; untagged text takes `default_locale` under `ExplicitOnly`. Under `ExperimentalHeuristics` only, within a UAX #29 sentence (whose tagged atoms count as evidence but keep their tags), on the scripts resolved in Step 3: kana present makes the untagged Han and kana atoms `ja-JP`; else Hangul present makes the untagged Han and Hangul atoms `ko-KR`; U+0402, U+040B, U+0452 or U+045B (Ђ, Ћ, ђ, ћ) present makes the untagged Cyrillic atoms `sr-Cyrl`, so that an all-capitals Serbian heading resolves like lower-case text; every other untagged atom takes `default_locale`. Kana and Hangul take the locale with Han so that a run does not split between them. The engine never switches locale on the frequency of ideographs.
 
 ### Step 5: shaping runs
 
@@ -1569,7 +1569,7 @@ The data types and three pure helpers (`AtomicFragment::hit_test`, `Motion::flow
 - **Phase 1 is unidirectional (RM-3, RM-11).** UAX #9 resolution (frontend Step 2) moves to Phase 2 with Stage 2 (RM-5).
 - **Oversized FE-15 runs (FE-15, ME-2).** An unbreakable dash, ellipsis or middle-dot run wider than an empty line's slot had no valid output: kept whole, several clusters overflowed the slot, which SLT-5 forbids. Such a run now moves whole only when something precedes it on the line, and is otherwise split by ST1-5.
 - **Ladder tiers (ST1-1, ME-2).** ME-2's greedy breaker took the furthest fitting opportunity of any kind, which skipped ST1-1's order and broke inside long URL pieces while a slash or a space fitted. ST1-1 now assigns each discretionary a tier by its penalty, and the greedy breaker ends a line at the lowest tier that fits.
-- **Locale heuristics and Table S overrides (FE-9, FE-16).** The CLDR override of Table S is fixed as a table keyed by the primary language of the stated locale. FE-16 is scoped to a UAX #29 sentence, and kana and Hangul take the inferred locale with Han, so that a run does not split between them.
+- **Locale heuristics and Table S overrides (FE-9, FE-16).** The CLDR override of Table S is fixed as a table keyed by the primary language of the stated locale. FE-16 is scoped to a UAX #29 sentence, and kana and Hangul take the inferred locale with Han, so that a run does not split between them; the Serbian evidence covers the capitals Ђ and Ћ as well as ђ and ћ.
 
 ### Phase 1: foundational core
 
