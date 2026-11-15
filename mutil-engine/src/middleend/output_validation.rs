@@ -8,7 +8,7 @@ use super::{
     PositionedGlyph, PositionedLine, PositionedParagraph, PositionedSlot,
 };
 use crate::frontend::{AnnotationSide, BoxOverflowPolicy};
-use crate::types::{BidiDirection, BidiLevel, TextRange};
+use crate::types::{BidiDirection, BidiLevel, GlyphOrientation, TextRange};
 use std::collections::{HashMap, HashSet};
 
 /// A violated [`PositionedLine`] invariant.
@@ -22,6 +22,12 @@ pub enum LineInvariantError {
     },
     /// Run orientation does not match the writing mode or level parity.
     OrientationMismatch,
+    /// A visual run is a tate-chu-yoko group, whose glyph placement the
+    /// output model does not define yet (spec ORI-7).
+    UnplacedTateChuYoko {
+        /// Index into `visual_runs`.
+        run: usize,
+    },
     /// A glyph's source range is empty, inverted or outside the line, or a
     /// glyph of an ellipsis-only line has a source range.
     InvalidGlyphSource {
@@ -857,6 +863,9 @@ impl PositionedLine {
             if !r.orientation.is_valid(ctx.writing_mode, r.bidi_level) {
                 return Err(E::OrientationMismatch);
             }
+            if r.orientation == GlyphOrientation::HorizontalInVertical {
+                return Err(E::UnplacedTateChuYoko { run });
+            }
             if let Some(glyph) = r.glyphs.iter().position(|g| !valid_glyph(g)) {
                 return Err(E::InvalidGlyphSource { run, glyph });
             }
@@ -1612,6 +1621,12 @@ impl PositionedParagraph {
         for (i, line) in self.lines.iter().enumerate() {
             let ctx = self.policy.line_context(self.base_direction, i);
             line.validate(&ctx).map_err(|e| (i, e))?;
+            super::validated::check_drawing_origins(
+                line,
+                self.policy.writing_mode,
+                self.total_block_size,
+            )
+            .map_err(|e| (i, e))?;
             if let Some(standard) = self.policy.slot_source.standard_slot(i, ctx.wrap_width) {
                 if !matches!(line.slots.as_slice(), [slot] if slot.constraint == standard) {
                     return invalid(i, R::NotStandardSlots);

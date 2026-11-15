@@ -10,6 +10,7 @@ mod common;
 mod error_messages;
 mod gates;
 mod geometry;
+mod host_contract;
 mod input_validation;
 mod line_validation;
 mod metrics;

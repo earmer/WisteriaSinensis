@@ -234,7 +234,7 @@ pub struct FontInstanceRef<'a> { pub font: FontRef, pub font_size: f32, pub vari
 
 **[FNT-2]** `ShapingRun::features` is the single source of OpenType features and variation coordinates. `FontFeatures::normalize` sorts by tag and keeps the last setting per tag, and `FontFeatures::is_normalized` tests that canonical form; the input gate accepts only canonical features, so `Eq` and `Hash` on features agree with effective equality behind it; `FontFeatures::new`, `FontFeatures::push`, `FontFeatures::push_variation`, `FontFeatures::as_slice` and `FontFeatures::variations` build and read it.
 
-**[FNT-3]** `FontId` names a physical face, not a size or variation instance; `FontInstanceRef` is the complete query context of a font instance. A renderer never resolves a `FontId` through its own font lookup: resolution to font bytes and face index goes through a separate `FontSource` trait implemented by the issuing shaper (the host contract, after Phase 0). `FontId` keeps the meaning stated here and `TextShaper` gains no method for it.
+**[FNT-3]** `FontId` names a physical face, not a size or variation instance; `FontInstanceRef` is the complete query context of a font instance. A `FontId` is meaningful only within the id space of the shaper that issued it. A renderer resolves it to font bytes and a face index only through the `FontSource` that covers that id space, typically the font registry the shaper was built on and shared with the renderer (HST-2), never through its own font lookup; `TextShaper` gains no method for it.
 
 ```rust
 pub struct FontMetrics {
@@ -682,7 +682,7 @@ pub struct CaretStop { pub x: f32, pub offset: ByteIndex, pub affinity: CaretAff
 
 **Coordinates.**
 
-**[OUT-1]** Lines are in canonical flow space (§2.7): `x` is line-local and inline, `baseline_y` block-progressing. A glyph's `x` is its **pen position**, not its drawing origin: it is drawn at `x + x_offset` and `baseline_y - y_offset`. Containment is judged on the pen interval `[min(x, x + advance), max(x, x + advance)]`; an advance MAY be negative. A zero-advance mark is a pen position, not an extent, and is exempt from containment.
+**[OUT-1]** Lines are in canonical flow space (§2.7): `x` is line-local and inline, `baseline_y` block-progressing. A glyph's `x` is its **pen position**, not its drawing origin. Its offsets are flow-relative: `x_offset` runs along the inline axis and `y_offset` towards line-over, in every writing mode and orientation (SHP-19). It is drawn at `x + x_offset` and `baseline_y + over_to_block(y_offset)` (ORI-2), which is `baseline_y - y_offset` except in `VerticalLr`. Containment is judged on the pen interval `[min(x, x + advance), max(x, x + advance)]`; an advance MAY be negative. A zero-advance mark is a pen position, not an extent, and is exempt from containment.
 
 **[OUT-2]** Equality and ordering of output geometry use the tolerance `max(LINE_GEOMETRY_ABS_EPSILON, LINE_GEOMETRY_REL_EPSILON · max(|a|, |b|))` with `LINE_GEOMETRY_ABS_EPSILON = 1e-3` and `LINE_GEOMETRY_REL_EPSILON = 1e-5`, everywhere and only in that form. A finite and an infinite value are never approximately equal.
 
@@ -784,6 +784,7 @@ pub struct ValidatedLayout<'a> { .. }   // a PositionedParagraph that passed the
 pub enum LineInvariantError {
     InvalidSlots { reason: SlotErrorReason },
     OrientationMismatch,
+    UnplacedTateChuYoko { run: usize },
     InvalidGlyphSource { run: usize, glyph: usize },
     InvalidAnnotation { index: usize, reason: AnnotationErrorReason },
     InvalidParagraph { reason: ParagraphErrorReason },
@@ -847,6 +848,7 @@ pub enum ParagraphErrorReason {
 |---|---|---|
 | `InvalidSlots { reason }` | see the slot reasons below | SLT-1 to SLT-3 |
 | `OrientationMismatch` | a visual run's orientation does not suit the writing mode or its level | SRC-4 |
+| `UnplacedTateChuYoko { run }` | a visual run is a tate-chu-yoko group, whose placement is not defined yet | ORI-7 |
 | `InvalidGlyphSource { run, glyph }` | a glyph's range is empty or outside the line, or an ellipsis-only line holds a source glyph | SRC-1, BOX-3 |
 | `InvalidAnnotation { index, reason }` | see the annotation reasons below | ANO-1 to ANO-4 |
 | `InvalidParagraph { reason }` | see the paragraph reasons below | PAR-2, PAR-3 |
@@ -945,6 +947,8 @@ pub enum BaselineAlignment { Auto, Alphabetic, Ideographic, Central, Hanging, Ma
 **[ORI-4] Tate-chu-yoko.** A `HorizontalInVertical` run is one indivisible horizontal group: one cluster covering all of the run's atoms, referenced by one text box spanning the run, so no break can fall inside it. Its `natural_width` is the group's advance along the vertical line. It is atomic for editing only when an `AtomicEditSpan` covers it.
 
 **[ORI-5] Vertical metrics.** In a vertical mode the strut and line extents come from the vertical metrics (§5 Stage 4).
+
+**[ORI-7] Unplaced tate-chu-yoko.** OUT-1 cannot yet express where the glyphs of an upright horizontal group go: they share one inline extent. Until Phase 1 defines that placement, the output gate rejects a `HorizontalInVertical` visual run (`UnplacedTateChuYoko`), so every validated output can be drawn exactly (HST-5). Phase 1 lifts this together with the placement rule.
 
 **[ORI-6] Baselines.** Baseline offsets in `FontMetrics` and `BaselineAlignment::Offset` are positive towards line-over; an explicit offset is finite (`BaselineAlignment::is_valid`).
 
@@ -1149,6 +1153,8 @@ How HarfBuzz, Pango, Blink, Parley and cosmic-text cluster, re-shape and fall ba
 ### 4.6 Profiles
 
 **[SHP-18]** `ShaperProfile::FullContract` (the default) carries the whole contract. `ShaperProfile::LineOnly` is a degraded profile for a backend that exposes only line shaping: it reconstructs clusters from glyph byte indices, reports `safe_to_break_before = false` at ambiguous seams, does not honour `locl` and has no ligature carets. A full-contract integration calls HarfRust, CoreText or DirectWrite directly.
+
+**[SHP-19] Offset axes.** The bridge stores glyph offsets flow-relative (OUT-1): `x_offset` along the inline axis, positive towards the inline end, and `y_offset` towards line-over. Horizontal shaping already uses these axes, also for a `VerticalSideways` glyph, which is rotated clockwise afterwards. For `VerticalUpright` the bridge converts the backend's vertical-shaping offsets, given in the font's own up-and-right frame: `x_offset = -dy` (font up is the inline start) and `y_offset = dx` (font right is line-over). Any vertical-origin adjustment is folded into the offsets, so the drawing origin is where the glyph outline's own origin goes.
 
 ---
 
@@ -1418,6 +1424,8 @@ The data types and three pure helpers (`AtomicFragment::hit_test`, `Motion::flow
 - frozen under the additive rule: `mutil-engine/src/lib.rs`, `mutil-engine/src/{types,frontend,shaping,middleend}/mod.rs` and `mutil-engine/Cargo.toml`, together with the existing public items of `mutil-engine/src/middleend/{layout,interaction}.rs` (among them `is_word_space`, `is_paragraph_separator`, `split_paragraphs`, `layout_paragraph` and the §6 data types and helpers). Their signatures and meaning are frozen; new modules, exports, dependencies and implementations MAY be added;
 - open: the new frontend modules (`segment`, `bidi`, `script`, `compile`) that build a `ParagraphAst`, `mutil-engine/src/shaping/{harfrust,gpui}.rs`, and the bodies of `layout_paragraph` (the `Greedy` solver and vertical stacking) and of the §6 queries.
 
+**[RM-10] Recorded exceptions to RM-9.** With the owner's explicit approval, the host contract (§8) changed frozen items: FNT-3 and the `FontId` documentation scope a `FontId` to its issuing shaper's id space and resolve it through a `FontSource` that need not be the shaper (the shaper-bound wording rested on a wrong premise); OUT-1 places the over offset through `over_to_block`, removing its contradiction with ORI-2 in `VerticalLr`, and states the offset axes (SHP-19); and the output gate rejects tate-chu-yoko runs until Phase 1 defines their placement (ORI-7).
+
 ### Phase 1: foundational core
 
 **[RM-3]** Scope: frontend Steps 1 to 6; the `TextShaper` with a HarfRust backend and the `LineOnly` profile; cluster merging by `atom_range`; the `Greedy` breaker with the overflow ladder, kinsoku and emergency splitting; atomic-span caret suppression, hit-test snapping and whole-span deletion; the strut; unidirectional caret, hit-test and selection queries.
@@ -1435,3 +1443,34 @@ The data types and three pure helpers (`AtomicFragment::hit_test`, `Motion::flow
 **[RM-7]** Scope: hyphenation behind an adapter (Liang patterns; libhyphen-style dictionaries for spelling changes); prefix re-shaping; synthesized hyphens; `Balanced` and `Publication` with thresholds, passes and the active-node cap; lazy re-shaping and dominator commits; GDEF ligature carets; whole-run caches; `locl` through the full-contract profile.
 
 **[RM-8]** Acceptance: narrow English and German columns hyphenate with balanced line densities, honouring minimum characters on each side, and nothing is hyphenated in a word containing U+00AD; copied text holds no synthesized hyphen and U+00AD follows `SoftHyphenPolicy`; `zh-Hans`, `zh-Hant`, `ja` and `ko` variants resolve through `locl` under the full-contract profile; spelling-change hyphenation produces the replacement forms in a Dutch, a Catalan and a Hungarian test; candidate evaluation never calls `reshape_window`, which runs once per committed hyphenated boundary, and a micro-overflow falls back to the runner-up path; full single-paragraph relayout is benchmarked, and no frame-time guarantee is made before an invalidation model exists.
+
+---
+
+## 8. Host contract
+
+This section binds any renderer that draws validated output. It states only what decides whether the drawn text is correct; drawing order, caching and other integration practice are non-normative and live in `docs/host-integration.md`.
+
+```rust
+pub struct FontBytes(..);               // shared font file bytes, never copied
+pub struct FontFace { .. }              // bytes and face index, private fields
+pub trait FontSource: Send + Sync { fn resolve_font(&self, font: FontId) -> Option<FontFace>; }
+pub struct PlacedRun<'a> { .. }         // one body or annotation glyph run with its line
+pub enum PlacedRunSource<'a> { Body(&'a VisualGlyphRun), Annotation(&'a PositionedAnnotationRun) }
+pub struct PlacedGlyph { pub glyph_id: u32, pub origin: Point }
+```
+
+**[HST-1] Fonts.** A renderer resolves each run's `FontId` (`PlacedRun::font`) through the `FontSource` that covers the issuing shaper's id space (FNT-3), with `FontSource::resolve_font`, and draws the face `FontFace::face_index` of `FontFace::bytes`. Variation coordinates come only from `PlacedRun::variations`. `FontBytes::from_static`, `FontBytes::new` and `FontBytes::from_shared` wrap static data, an owned buffer and a shared buffer without copying their bytes (`FontBytes::as_bytes`).
+
+**[HST-2] Font lifetime.** A `FontSource` never reuses an id, and keeps a face resolvable while any output that names its id may still be drawn. Never unloading a face within a session is the simplest way to satisfy this; a host that tracks its cached output MAY unload a face no output names.
+
+**[HST-3] No re-shaping.** A renderer draws the glyph ids of the output, run by run, at the origins `ValidatedLayout::glyph_runs` gives. It yields every glyph of the paragraph: each line's visual runs, then its annotation runs (`PlacedRun::source`, `PlacedRunSource::Body`, `PlacedRunSource::Annotation`), with `PlacedRun::line`, `PlacedRun::font`, `PlacedRun::font_size`, `PlacedRun::orientation` and `PlacedRun::glyphs`. It never re-shapes, re-positions, substitutes or merges glyphs.
+
+**[HST-4] Placement and orientation.** A `PlacedGlyph`'s `origin` is the paragraph-local physical point where the glyph outline's own origin is drawn: OUT-1's drawing origin mapped by the writing mode (ORI-1). An annotation glyph's baseline is the line's moved towards line-over by its run's `baseline_offset` (ANO-3, ORI-2), and its offsets are applied from there. The output gate checks that every origin is finite (AX-3), so `PlacedRun::glyphs` never yields a non-finite one. `Horizontal` and `VerticalUpright` glyphs are drawn unrotated there; a `VerticalSideways` glyph is rotated 90° clockwise about it, with `y` growing downwards. Vertical-origin and baseline adjustments are already in the origin (SHP-19), so a renderer never reads a font's vertical metrics or vertical-origin table to correct a position.
+
+**[HST-5] Locked geometry.** A renderer keeps every glyph origin and advance exactly, on both axes, under any scale, and never changes a variation coordinate, `opsz` included. How it rasterises an outline (bitmap atlas, distance field, path rendering) is its own choice.
+
+**[HST-6] Hinting.** A renderer that draws horizontal text at one fixed scale MAY hint along the block axis only. A renderer that applies a continuous scale, or draws vertical text, uses no grid fitting on either axis, since snapping to device pixels would break HST-5.
+
+**[HST-7] Colour glyphs.** The text colour applies to monochrome glyphs and to COLR layers that reference the foreground colour (palette index 0xFFFF). It never recolours COLR/CPAL palette colours, sbix or CBDT bitmaps.
+
+**[HST-8] Query geometry.** The rectangles of the §6 queries (*future*, INT-18) are in the same paragraph-local physical space as `PlacedGlyph::origin`; a range that wraps gives several. A host maps them to the screen by the paragraph's position in its container and then its own view transform.
