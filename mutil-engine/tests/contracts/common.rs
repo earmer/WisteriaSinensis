@@ -60,11 +60,10 @@ pub fn push_text(
             cluster_range,
             ..
         }) = item
+            && *run_index > run
         {
-            if *run_index > run {
-                *atom_range = atom_range.start + n_atoms..atom_range.end + n_atoms;
-                *cluster_range = cluster_range.start + n_clusters..cluster_range.end + n_clusters;
-            }
+            *atom_range = atom_range.start + n_atoms..atom_range.end + n_atoms;
+            *cluster_range = cluster_range.start + n_clusters..cluster_range.end + n_clusters;
         }
     }
     retile_glyphs(ast);
@@ -666,5 +665,9 @@ impl TextShaper for MetricsShaper {
         direction: Direction,
     ) -> smallvec::SmallVec<[f32; 4]> {
         NoopShaper.ligature_carets(instance, glyph_id, direction)
+    }
+
+    fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32 {
+        NoopShaper.space_advance(instance, orientation)
     }
 }

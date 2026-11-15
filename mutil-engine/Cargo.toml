@@ -2,12 +2,16 @@
 name = "mutil-engine"
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Headless multilingual typesetting and interactive layout engine"
 license = "GPL-3.0-or-later"
 publish = false
 
 [dependencies]
+harfrust = "0.16.0"
+icu_properties = "2.4.0"
+icu_segmenter = "2.4.0"
+read-fonts = "0.47.0"
 smallvec = "1"
 
 [lints.rust]

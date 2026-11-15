@@ -9,7 +9,7 @@
 
 ## Build
 
-Rust 1.85 or later.
+Rust 1.88 or later.
 
 ```sh
 cd mutil-engine

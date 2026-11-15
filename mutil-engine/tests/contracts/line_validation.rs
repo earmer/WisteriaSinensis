@@ -518,10 +518,30 @@ fn slot_overflow_names_the_slot_and_its_capacity() {
     );
 }
 
+/// [`slot_line`] with its content split into two one-byte clusters, so the
+/// line is divisible and never in the single-entity overflow state.
+fn divisible_slot_line(
+    start: f32,
+    capacity: f32,
+    width: f32,
+    wrap_width: f32,
+) -> (PositionedLine, LineContext) {
+    let (mut l, c) = slot_line(start, capacity, width, wrap_width);
+    l.byte_range = TextRange::new(0, 2);
+    l.visible_byte_end = 2;
+    let half = width / 2.;
+    let mut second = glyph(start + half, half, false);
+    second.byte_range = Some(TextRange::new(1, 2));
+    l.visual_runs[0].glyphs[0].advance = half;
+    l.visual_runs[0].glyphs.push(second);
+    l.visual_runs[0].byte_range = l.byte_range;
+    (l, c)
+}
+
 #[test]
 fn line_wider_than_wrap_width_reports_the_container_not_the_slot() {
     // An indented slot has capacity 92 in a 100-wide container.
-    let (l, c) = slot_line(8., 92., 95., 100.);
+    let (l, c) = divisible_slot_line(8., 92., 95., 100.);
     assert_eq!(
         l.validate(&c),
         Err(LineInvariantError::SlotOverflow {
@@ -531,12 +551,70 @@ fn line_wider_than_wrap_width_reports_the_container_not_the_slot() {
         })
     );
     // Wider than the container itself: the report is the container's width.
-    let (l, c) = slot_line(8., 92., 105., 100.);
+    let (l, c) = divisible_slot_line(8., 92., 105., 100.);
     assert_eq!(
         l.validate(&c),
         Err(LineInvariantError::LineWiderThanWrapWidth {
             visual_width: 105.,
             wrap_width: 100.
+        })
+    );
+}
+
+/// SLT-5: one indivisible entity wider than the line's single slot overflows
+/// it from the slot's start, however wide the slot is against `wrap_width`.
+#[test]
+fn a_single_entity_may_overflow_an_indented_slot() {
+    // One cluster in the indented slot `[8, 100]`: wider than the slot, and
+    // then wider than the container too.
+    for width in [95., 105.] {
+        let (l, c) = slot_line(8., 92., width, 100.);
+        assert_eq!(l.validate(&c), Ok(()), "{width}");
+    }
+    // The entity starts where the slot starts: pushed along the slot, it is
+    // an ordinary overflow.
+    let (mut l, c) = slot_line(8., 92., 95., 100.);
+    l.slots[0].content_start = 10.;
+    l.visual_runs[0].glyphs[0].x = 10.;
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::SlotOverflow {
+            slot: 0,
+            extent: 97.,
+            capacity: 92.
+        })
+    );
+    // An `AllowOverflow` box alone on the indented line overflows the same way.
+    let (mut l, c) = slot_line(8., 92., 95., 100.);
+    l.visual_runs.clear();
+    l.visual_boxes = vec![PositionedInlineBox {
+        bidi_level: BidiLevel::LTR,
+        baseline_align: BaselineAlignment::Auto,
+        box_id: 1,
+        byte_range: TextRange::new(0, 1),
+        x: 8.,
+        y: 0.,
+        width: 95.,
+        ascent: 5.,
+        descent: 1.,
+        overflow_policy: BoxOverflowPolicy::AllowOverflow,
+    }];
+    assert_eq!(l.validate(&c), Ok(()));
+    // Two slots never form the single-entity state.
+    let (mut l, c) = two_slots();
+    l.visual_runs[0].glyphs.pop();
+    l.visual_runs[0].glyphs[0].advance = 110.;
+    l.slots[0].visual_width = 110.;
+    l.slots[1].visual_width = 0.;
+    l.byte_range = TextRange::new(0, 1);
+    l.visible_byte_end = 1;
+    l.visual_runs[0].byte_range = l.byte_range;
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::SlotOverflow {
+            slot: 0,
+            extent: 110.,
+            capacity: 100.
         })
     );
 }

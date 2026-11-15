@@ -7,6 +7,7 @@ mod annotations;
 mod api;
 mod badness;
 mod common;
+mod data_versions;
 mod error_messages;
 mod gates;
 mod geometry;

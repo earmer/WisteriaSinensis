@@ -3,42 +3,10 @@
 use super::{AnnotationSpan, AtomicEditSpan, ExplicitBidiSpan, InlineDecorationSpan, ShapingRun};
 use crate::types::{
     AtomFlags, BaselineAlignment, BidiClass, BidiDirection, BidiLevel, ByteIndex, FontMetrics,
-    GraphemeAtom, RawShapedGlyph, ShapedCluster, TextRange, WritingMode,
+    GraphemeAtom, HyphenOpportunity, RawShapedGlyph, ShapedCluster, TextRange, WritingMode,
 };
 use core::ops::Range;
 use smallvec::SmallVec;
-
-/// Replacement text for spelling-change hyphenation.
-///
-/// Replacements are rare (`Option`, usually `None`), so `Box<str>` costs 16
-/// bytes inline (niche-optimised) and one allocation only when present.
-pub type ReplacementText = Box<str>;
-
-/// Hyphenation opportunity mirroring libhyphen's `(rep, pos, cut)` `[H3]`
-/// (spec §2.4). Example: Dutch "omaatje" becomes "oma-tje".
-///
-/// The break position is that of the [`DiscretionaryNode`] carrying the
-/// opportunity ([`DiscretionaryNode::byte_offset`]), in the **original** text:
-/// the prefix ends and the suffix begins there, before any replacement is
-/// applied.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct HyphenOpportunity {
-    /// Text replacing the bytes cut from the end of the prefix, if the
-    /// spelling changes.
-    pub prefix_replacement: Option<ReplacementText>,
-    /// Text replacing the bytes cut from the start of the suffix, if the
-    /// spelling changes.
-    pub suffix_replacement: Option<ReplacementText>,
-    /// Original bytes removed immediately **before** the break position. A cut
-    /// that straddles the break is split between the two counts. Each cut ends
-    /// on an atom boundary within the word's contiguous same-run hyphen chain,
-    /// so it may cross an unchosen hyphenation point of the same word but never
-    /// a run or span boundary.
-    pub prefix_cut_bytes: u32,
-    /// Original bytes removed immediately **after** the break position; the
-    /// same rules apply.
-    pub suffix_cut_bytes: u32,
-}
 
 /// Kind of stretchable space (spec §2.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -108,9 +76,9 @@ pub struct GlueNode {
     pub original_bidi_class: BidiClass,
     /// Resolved level before line-local L1.
     pub bidi_level: BidiLevel,
-    /// Only collapsible trailing whitespace can disappear. `false` for a
-    /// `WordSpace` over a no-break space
-    /// ([`is_no_break_space`](super::is_no_break_space)).
+    /// Only collapsible trailing whitespace can disappear. Always `true` for
+    /// a `WordSpace` (spec WN-12): a no-break space
+    /// ([`is_no_break_space`](super::is_no_break_space)) is text, not glue.
     pub is_collapsible: bool,
     /// Source bytes: the space characters of a `WordSpace`, an empty range for
     /// the synthetic kinds.
@@ -434,8 +402,9 @@ impl DiscretionaryNode {
 /// discretionary comes **after** the glue run, so on a break the spaces stay on
 /// the trailing edge of line `k` (spec §2.6: `byte_range` includes trailing
 /// whitespace, `visible_byte_end` does not). Several consecutive spaces share
-/// one discretionary at the end of the run. A non-breaking space (NBSP, Czech
-/// `v `) is `[Box, Glue]`.
+/// one discretionary at the end of the run. A space the frontend binds to the
+/// next word (Czech `v `) is `[Box, Glue]`; a no-break space character is
+/// text in a box.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WordNode {
     /// A rigid item.

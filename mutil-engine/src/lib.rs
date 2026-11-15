@@ -3,14 +3,16 @@
 //!
 //! The crate currently contains the strongly typed data model of the
 //! specification (§2), the `TextShaper` contract (§4), input and output
-//! validators, and a `NoopShaper` that proves the types close over the whole
-//! pipeline. Segmentation, shaping, line breaking and justification are not
-//! implemented yet.
+//! validators, a `NoopShaper` that proves the types close over the whole
+//! pipeline, and the skeletons of the frontend entry point
+//! (`compile_paragraph`) and of the HarfRust backend. Segmentation, shaping,
+//! line breaking and justification are not implemented yet.
 //!
-//! Layers (dependencies point left or up):
+//! Layers (dependencies point left or up; the frontend calls the shaping
+//! bridge through the `TextShaper` trait):
 //!
 //! ```text
-//! types  <-  frontend  <-  shaping
+//! types  <-  shaping  <-  frontend
 //!   ^           ^           ^
 //!   +-----  middleend  -----+
 //! ```
@@ -32,6 +34,11 @@ pub use frontend::*;
 pub use middleend::*;
 pub use shaping::*;
 pub use types::*;
+
+/// The Unicode version of the data every Unicode component of the engine is
+/// built on (spec SCO-8): the compiled data of `icu_segmenter` and
+/// `icu_properties`, which the lock file pins to one release.
+pub const UNICODE_DATA_VERSION: &str = "18.0.0";
 
 /// Active component data version. None means the component is not implemented.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -112,7 +112,7 @@ fn concat_unsafety_alone_is_valid() {
 }
 
 #[test]
-fn nbsp_glue_must_not_be_collapsible() {
+fn a_no_break_space_is_text_not_glue() {
     let mut a = ast("\u{a0}");
     rebuild_items(&mut a, |_| {
         vec![
@@ -129,14 +129,57 @@ fn nbsp_glue_must_not_be_collapsible() {
             end(2),
         ]
     });
-    assert_eq!(
-        check(&a, "\u{a0}"),
-        Err(LayoutInputError::InvalidGlue { item: 0 })
-    );
-    if let WordNode::Glue(g) = &mut a.items[0] {
-        g.is_collapsible = false;
+    // No `WordSpace` may own a no-break space (WN-12), collapsible or not.
+    for is_collapsible in [true, false] {
+        if let WordNode::Glue(g) = &mut a.items[0] {
+            g.is_collapsible = is_collapsible;
+        }
+        assert_eq!(
+            check(&a, "\u{a0}"),
+            Err(LayoutInputError::InvalidGlue { item: 0 })
+        );
     }
-    assert!(check(&a, "\u{a0}").is_ok());
+    // It is shaped as ordinary text: one atom, one cluster, one box.
+    rebuild_items(&mut a, |a| {
+        let mut nbsp = atom(0);
+        nbsp.byte_range = TextRange::new(0, 2);
+        nbsp.linebreak_class = LineBreakClass::Gl;
+        let mut shaped = cluster(0, 0);
+        shaped.byte_range = TextRange::new(0, 2);
+        vec![push_text(a, 0, vec![nbsp], vec![shaped]), end(2)]
+    });
+    assert_eq!(check(&a, "\u{a0}"), Ok(()));
+}
+
+/// A word space is always collapsible (WN-12): the only spaces that never
+/// collapse are text.
+#[test]
+fn a_word_space_is_collapsible() {
+    let mut a = ast("a ");
+    rebuild_items(&mut a, |a| {
+        vec![
+            boxed(a, 0, 1),
+            WordNode::Glue(GlueNode {
+                original_bidi_class: BidiClass::Ws,
+                bidi_level: BidiLevel::LTR,
+                is_collapsible: false,
+                byte_range: TextRange::new(1, 2),
+                kind: GlueKind::WordSpace,
+                natural_width: 4.,
+                max_stretch: 0.,
+                max_shrink: 0.,
+            }),
+            end(2),
+        ]
+    });
+    assert_eq!(
+        check(&a, "a "),
+        Err(LayoutInputError::InvalidGlue { item: 1 })
+    );
+    if let WordNode::Glue(g) = &mut a.items[1] {
+        g.is_collapsible = true;
+    }
+    assert_eq!(check(&a, "a "), Ok(()));
 }
 
 #[test]
