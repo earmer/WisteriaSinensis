@@ -1,11 +1,14 @@
 //! The HarfRust backend and its in-memory font registry (spec §4.7, SHP-21,
-//! SHP-22).
+//! SHP-22, SHP-23, SHP-25).
 //!
 //! Fonts are parsed once, when they are registered; a variable instance is
 //! built once per coordinate set and cached, with its metrics. Shaping uses
 //! HarfRust, metrics come from `read-fonts`.
 
-use super::clusters::{empty_cluster, push_clusters};
+use super::clusters::{
+    attach_synthesized, finite_nonnegative, finite_or_zero, plan_window, push_clusters,
+    push_empty_clusters,
+};
 use super::{FontFace, FontSource, LeadingEdit, TextShaper, TrailingEdit};
 use crate::types::{
     Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontRef, FontSlant, FontStyle,
@@ -185,7 +188,7 @@ impl FontRegistry {
         face: FontFace,
         profile: Option<FaceProfile>,
     ) -> Option<FontId> {
-        let bytes: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(face.bytes().clone());
+        let bytes = face.bytes().shared_arc();
         let font = Font::new(bytes, face.face_index())?;
         let id = FontId(u32::try_from(self.faces.len()).ok()?);
         let metrics = unit_metrics(&font);
@@ -218,20 +221,20 @@ impl FontRegistry {
     fn candidates(&self, families: &[FontFamily], style: FontStyle) -> Vec<FontId> {
         let mut order: Vec<FontId> = Vec::new();
         for family in families {
-            let name = match family {
-                FontFamily::Named(name) => Some(name.clone()),
+            let name: Option<&str> = match family {
+                FontFamily::Named(name) => Some(name.as_ref()),
                 FontFamily::Generic(generic) => self
                     .generics
                     .iter()
                     .find(|(keyword, _)| keyword == generic)
-                    .map(|(_, name)| name.clone()),
+                    .map(|(_, name)| name.as_ref()),
             };
             let Some(name) = name else { continue };
             let mut members: Vec<(u32, FontId)> = self
                 .faces
                 .iter()
                 .enumerate()
-                .filter(|(_, face)| face.family.eq_ignore_ascii_case(&name))
+                .filter(|(_, face)| face.family.eq_ignore_ascii_case(name))
                 .map(|(index, face)| (style_distance(face.style, style), id_of(index)))
                 .collect();
             members.sort_by_key(|&(distance, id)| (distance, id.0));
@@ -428,10 +431,17 @@ impl HarfRustShaper {
         output_glyphs: &mut Vec<RawShapedGlyph>,
     ) {
         let mut start = range.start;
-        while start < range.end {
-            let font = self.face_for(text, run, &atoms[start], candidates);
+        let mut current_font =
+            (start < range.end).then(|| self.face_for(text, run, &atoms[start], candidates));
+        while let Some(font) = current_font {
             let mut end = start + 1;
-            while end < range.end && self.face_for(text, run, &atoms[end], candidates) == font {
+            let mut next_font = None;
+            while end < range.end {
+                let candidate = self.face_for(text, run, &atoms[end], candidates);
+                if candidate != font {
+                    next_font = Some(candidate);
+                    break;
+                }
                 end += 1;
             }
             let first_cluster = output_clusters.len();
@@ -451,6 +461,7 @@ impl HarfRustShaper {
                 cluster.safe_to_concat_before = false;
             }
             start = end;
+            current_font = next_font;
         }
     }
 
@@ -477,11 +488,14 @@ impl HarfRustShaper {
         let instance =
             font.and_then(|id| Some((id, self.instance(id, run.features.variations())?)));
         let Some((font_id, (parsed, units))) = instance else {
-            for (index, atom) in atoms.iter().enumerate().take(range.end).skip(range.start) {
-                output_clusters.push(empty_cluster(run, atom, index, font.unwrap_or_default()));
-                let at = output_glyphs.len();
-                output_clusters.last_mut().expect("just pushed").glyph_range = at..at;
-            }
+            push_empty_clusters(
+                run,
+                atoms,
+                range,
+                font.unwrap_or_default(),
+                output_clusters,
+                output_glyphs,
+            );
             return;
         };
         let vertical = run.orientation == GlyphOrientation::VerticalUpright;
@@ -492,13 +506,7 @@ impl HarfRustShaper {
         }
         buffer.set_pre_context(context_before(text, bytes.start()));
         buffer.set_post_context(context_after(text, bytes.end()));
-        buffer.set_direction(if vertical {
-            harfrust::Direction::TopToBottom
-        } else if rtl {
-            harfrust::Direction::RightToLeft
-        } else {
-            harfrust::Direction::LeftToRight
-        });
+        buffer.set_direction(harfrust_direction(vertical, rtl));
         buffer.set_script(Script::from_iso15924_tag(Tag::new(&run.script.as_bytes())));
         if run.locale.as_str() != "und" {
             buffer.set_language(Language::new(run.locale.as_str()));
@@ -519,11 +527,7 @@ impl HarfRustShaper {
         // A fresh buffer with its direction set and no cached plan: none of
         // `ShapeError`'s misuse cases can arise.
         if harfrust::shape(&shaper_font, &mut buffer, options).is_err() {
-            for (index, atom) in atoms.iter().enumerate().take(range.end).skip(range.start) {
-                output_clusters.push(empty_cluster(run, atom, index, font_id));
-                let at = output_glyphs.len();
-                output_clusters.last_mut().expect("just pushed").glyph_range = at..at;
-            }
+            push_empty_clusters(run, atoms, range, font_id, output_clusters, output_glyphs);
             return;
         }
         let k = run.font_size / units.units_per_em;
@@ -538,19 +542,14 @@ impl HarfRustShaper {
                     + atoms[range.clone()]
                         .partition_point(|a| a.byte_range.start() <= byte)
                         .saturating_sub(1);
-                let (advance, x_offset, y_offset) = if vertical {
-                    (
-                        -pos.y_advance as f32 * k,
-                        -pos.y_offset as f32 * k,
-                        pos.x_offset as f32 * k,
-                    )
-                } else {
-                    (
-                        pos.x_advance as f32 * k,
-                        pos.x_offset as f32 * k,
-                        pos.y_offset as f32 * k,
-                    )
-                };
+                let (advance, x_offset, y_offset) = flow_offsets(
+                    pos.x_advance as f32,
+                    pos.y_advance as f32,
+                    pos.x_offset as f32,
+                    pos.y_offset as f32,
+                    k,
+                    vertical,
+                );
                 let glyph = RawShapedGlyph {
                     glyph_id: info.glyph_id,
                     x_advance: advance,
@@ -587,13 +586,11 @@ impl HarfRustShaper {
         let Some((parsed, units)) = self.instance(font, run.features.variations()) else {
             return Vec::new();
         };
+        let vertical = run.orientation == GlyphOrientation::VerticalUpright;
+        let rtl = run.bidi_level.direction().is_rtl();
         let mut buffer = Buffer::new();
         buffer.push_str(replacement);
-        buffer.set_direction(if run.bidi_level.direction().is_rtl() {
-            harfrust::Direction::RightToLeft
-        } else {
-            harfrust::Direction::LeftToRight
-        });
+        buffer.set_direction(harfrust_direction(vertical, rtl));
         buffer.set_script(Script::from_iso15924_tag(Tag::new(&run.script.as_bytes())));
         // The replacement takes the kept text's language, features and size.
         if run.locale.as_str() != "und" {
@@ -612,18 +609,53 @@ impl HarfRustShaper {
             .glyph_infos()
             .iter()
             .zip(buffer.glyph_positions())
-            .map(|(info, pos)| RawShapedGlyph {
-                glyph_id: info.glyph_id,
-                x_advance: pos.x_advance as f32 * k,
-                x_offset: pos.x_offset as f32 * k,
-                y_offset: pos.y_offset as f32 * k,
-                is_synthesized: true,
+            .map(|(info, pos)| {
+                let (x_advance, x_offset, y_offset) = flow_offsets(
+                    pos.x_advance as f32,
+                    pos.y_advance as f32,
+                    pos.x_offset as f32,
+                    pos.y_offset as f32,
+                    k,
+                    vertical,
+                );
+                RawShapedGlyph {
+                    glyph_id: info.glyph_id,
+                    x_advance,
+                    x_offset,
+                    y_offset,
+                    is_synthesized: true,
+                }
             })
             .collect();
-        if run.bidi_level.direction().is_rtl() {
+        if rtl && !vertical {
             glyphs.reverse();
         }
         glyphs
+    }
+}
+
+fn harfrust_direction(vertical: bool, rtl: bool) -> harfrust::Direction {
+    if vertical {
+        harfrust::Direction::TopToBottom
+    } else if rtl {
+        harfrust::Direction::RightToLeft
+    } else {
+        harfrust::Direction::LeftToRight
+    }
+}
+
+fn flow_offsets(
+    x_advance: f32,
+    y_advance: f32,
+    x_offset: f32,
+    y_offset: f32,
+    k: f32,
+    vertical: bool,
+) -> (f32, f32, f32) {
+    if vertical {
+        (-y_advance * k, -y_offset * k, x_offset * k)
+    } else {
+        (x_advance * k, x_offset * k, y_offset * k)
     }
 }
 
@@ -674,46 +706,65 @@ fn preferred_regions(run: &ShapingRun) -> &'static [CjkRegion] {
 /// locale names none.
 fn locale_region(locale: &LocaleTag) -> Option<CjkRegion> {
     let mut subtags = locale.as_str().split('-');
-    let language = subtags.next()?.to_ascii_lowercase();
-    let mut script = None;
-    let mut region = None;
+    let language = subtags.next()?;
+    let mut script: Option<&str> = None;
+    let mut region: Option<&str> = None;
     for subtag in subtags {
         if subtag.len() == 1 {
             break; // an extension or private use: nothing further is a region
         }
         if subtag.len() == 4 && subtag.bytes().all(|b| b.is_ascii_alphabetic()) {
-            script = script.or(Some(subtag.to_ascii_lowercase()));
+            script = script.or(Some(subtag));
         } else if subtag.len() == 2
             || (subtag.len() == 3 && subtag.bytes().all(|b| b.is_ascii_digit()))
         {
-            region = region.or(Some(subtag.to_ascii_uppercase()));
+            region = region.or(Some(subtag));
         }
     }
-    let script = script.as_deref();
-    let region = region.as_deref();
-    let hong_kong = matches!(region, Some("HK" | "MO"));
-    match language.as_str() {
-        "zh" | "cmn" => Some(match (script, region) {
-            (Some("hant"), _) if hong_kong => CjkRegion::HongKong,
-            (Some("hant"), _) => CjkRegion::Traditional,
-            (Some("hans"), _) => CjkRegion::Simplified,
-            (_, Some("TW")) => CjkRegion::Traditional,
-            _ if hong_kong => CjkRegion::HongKong,
-            _ => CjkRegion::Simplified,
-        }),
-        "yue" if script == Some("hans") => Some(CjkRegion::Simplified),
-        "yue" => Some(CjkRegion::HongKong),
-        "ja" => Some(CjkRegion::Japanese),
-        "ko" => Some(CjkRegion::Korean),
-        "und" => match script {
-            Some("hani") => Some(CjkRegion::Pan),
-            Some("hans") => Some(CjkRegion::Simplified),
-            Some("hant") => Some(CjkRegion::Traditional),
-            Some("jpan" | "hira" | "kana") => Some(CjkRegion::Japanese),
-            Some("kore" | "hang") => Some(CjkRegion::Korean),
-            _ => None,
-        },
-        _ => None,
+    let eq = |opt: Option<&str>, target: &str| opt.is_some_and(|s| s.eq_ignore_ascii_case(target));
+    let hong_kong = eq(region, "HK") || eq(region, "MO");
+    if language.eq_ignore_ascii_case("zh") || language.eq_ignore_ascii_case("cmn") {
+        Some(if eq(script, "hant") {
+            if hong_kong {
+                CjkRegion::HongKong
+            } else {
+                CjkRegion::Traditional
+            }
+        } else if eq(script, "hans") {
+            CjkRegion::Simplified
+        } else if eq(region, "TW") {
+            CjkRegion::Traditional
+        } else if hong_kong {
+            CjkRegion::HongKong
+        } else {
+            CjkRegion::Simplified
+        })
+    } else if language.eq_ignore_ascii_case("yue") {
+        Some(if eq(script, "hans") {
+            CjkRegion::Simplified
+        } else {
+            CjkRegion::HongKong
+        })
+    } else if language.eq_ignore_ascii_case("ja") {
+        Some(CjkRegion::Japanese)
+    } else if language.eq_ignore_ascii_case("ko") {
+        Some(CjkRegion::Korean)
+    } else if language.eq_ignore_ascii_case("und") {
+        if eq(script, "hani") {
+            Some(CjkRegion::Pan)
+        } else if eq(script, "hans") {
+            Some(CjkRegion::Simplified)
+        } else if eq(script, "hant") {
+            Some(CjkRegion::Traditional)
+        } else if eq(script, "jpan") || eq(script, "hira") || eq(script, "kana") {
+            Some(CjkRegion::Japanese)
+        } else if eq(script, "kore") || eq(script, "hang") {
+            Some(CjkRegion::Korean)
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
 
@@ -778,23 +829,28 @@ fn gsub_region(font: &Font) -> Option<CjkRegion> {
     let gsub = font.tables().gsub().ok()?;
     let list = gsub.script_list().ok()?;
     let data = list.offset_data();
-    let mut votes = Vec::new();
+    let mut found: Option<CjkRegion> = None;
     for record in list.script_records() {
         let Ok(script) = record.script(data) else {
             continue;
         };
         for lang in script.lang_sys_records() {
-            votes.extend(match &lang.lang_sys_tag().to_be_bytes() {
-                b"ZHS " => Some(CjkRegion::Simplified),
-                b"ZHT " => Some(CjkRegion::Traditional),
-                b"ZHH " | b"ZHTM" => Some(CjkRegion::HongKong),
-                b"JAN " => Some(CjkRegion::Japanese),
-                b"KOR " => Some(CjkRegion::Korean),
-                _ => None,
-            });
+            let vote = match &lang.lang_sys_tag().to_be_bytes() {
+                b"ZHS " => CjkRegion::Simplified,
+                b"ZHT " => CjkRegion::Traditional,
+                b"ZHH " | b"ZHTM" => CjkRegion::HongKong,
+                b"JAN " => CjkRegion::Japanese,
+                b"KOR " => CjkRegion::Korean,
+                _ => continue,
+            };
+            match found {
+                None => found = Some(vote),
+                Some(region) if region == vote => {}
+                Some(_) => return Some(CjkRegion::Pan),
+            }
         }
     }
-    single_region(votes, Some(CjkRegion::Pan))
+    found
 }
 
 fn name_region(font: &Font) -> Option<CjkRegion> {
@@ -802,29 +858,83 @@ fn name_region(font: &Font) -> Option<CjkRegion> {
     let names = font.names();
     // Both the typographic and the legacy family name vote: a generic
     // typographic name must not hide a regional legacy one.
-    let families: Vec<String> = [NameId::TYPOGRAPHIC_FAMILY_NAME, NameId::FAMILY_NAME]
-        .into_iter()
-        .filter_map(|id| names.get(id)?.english_or_first())
-        .map(|name| name.name().chars().collect())
-        .collect();
-    family_region(families.iter().map(String::as_str))
+    let mut found = None;
+    for id in [NameId::TYPOGRAPHIC_FAMILY_NAME, NameId::FAMILY_NAME] {
+        let Some(name) = names.get(id).and_then(|entry| entry.english_or_first()) else {
+            continue;
+        };
+        if !scan_chars_region(name.name().chars(), &mut found) {
+            return None;
+        }
+    }
+    found
 }
 
-/// The region the words of `families` agree on, if any (spec SHP-25).
-fn family_region<'a>(families: impl IntoIterator<Item = &'a str>) -> Option<CjkRegion> {
-    let votes = families.into_iter().flat_map(|family| {
-        family
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter_map(|word| match word.to_ascii_uppercase().as_str() {
-                "SC" | "CN" | "GB" | "HANS" | "SIMPLIFIED" => Some(CjkRegion::Simplified),
-                "TC" | "TW" | "HANT" | "TRADITIONAL" => Some(CjkRegion::Traditional),
-                "HK" | "HKSCS" => Some(CjkRegion::HongKong),
-                "JP" | "JA" | "JAPANESE" => Some(CjkRegion::Japanese),
-                "KR" | "KO" | "KOREAN" => Some(CjkRegion::Korean),
-                _ => None,
-            })
-    });
-    single_region(votes, None)
+fn scan_chars_region(chars: impl IntoIterator<Item = char>, found: &mut Option<CjkRegion>) -> bool {
+    let mut buf = [0u8; 12];
+    let mut len = 0usize;
+    let mut flush = |buf: &[u8; 12], len: &mut usize| -> bool {
+        let word_len = *len;
+        *len = 0;
+        if word_len == 0 || word_len > buf.len() {
+            return true;
+        }
+        let Ok(word) = core::str::from_utf8(&buf[..word_len]) else {
+            return true;
+        };
+        if let Some(vote) = word_region(word) {
+            match *found {
+                None => *found = Some(vote),
+                Some(region) if region == vote => {}
+                Some(_) => return false,
+            }
+        }
+        true
+    };
+    for c in chars {
+        if c.is_ascii_alphanumeric() {
+            if len < buf.len()
+                && let Ok(byte) = u8::try_from(u32::from(c))
+            {
+                buf[len] = byte;
+            }
+            len += 1;
+        } else if !flush(&buf, &mut len) {
+            return false;
+        }
+    }
+    flush(&buf, &mut len)
+}
+
+fn word_region(word: &str) -> Option<CjkRegion> {
+    if word.eq_ignore_ascii_case("SC")
+        || word.eq_ignore_ascii_case("CN")
+        || word.eq_ignore_ascii_case("GB")
+        || word.eq_ignore_ascii_case("HANS")
+        || word.eq_ignore_ascii_case("SIMPLIFIED")
+    {
+        Some(CjkRegion::Simplified)
+    } else if word.eq_ignore_ascii_case("TC")
+        || word.eq_ignore_ascii_case("TW")
+        || word.eq_ignore_ascii_case("HANT")
+        || word.eq_ignore_ascii_case("TRADITIONAL")
+    {
+        Some(CjkRegion::Traditional)
+    } else if word.eq_ignore_ascii_case("HK") || word.eq_ignore_ascii_case("HKSCS") {
+        Some(CjkRegion::HongKong)
+    } else if word.eq_ignore_ascii_case("JP")
+        || word.eq_ignore_ascii_case("JA")
+        || word.eq_ignore_ascii_case("JAPANESE")
+    {
+        Some(CjkRegion::Japanese)
+    } else if word.eq_ignore_ascii_case("KR")
+        || word.eq_ignore_ascii_case("KO")
+        || word.eq_ignore_ascii_case("KOREAN")
+    {
+        Some(CjkRegion::Korean)
+    } else {
+        None
+    }
 }
 
 fn code_page_region(pages: u32) -> Option<CjkRegion> {
@@ -878,7 +988,7 @@ fn bounded_entry<K: Eq + std::hash::Hash, V>(
 }
 
 /// The OpenType features of `run`, for HarfRust.
-fn run_features(run: &ShapingRun) -> Vec<Feature> {
+fn run_features(run: &ShapingRun) -> SmallVec<[Feature; 8]> {
     run.features
         .as_slice()
         .iter()
@@ -890,8 +1000,8 @@ fn run_features(run: &ShapingRun) -> Vec<Feature> {
 fn contiguous_segments(
     atoms: &[GraphemeAtom],
     range: core::ops::Range<usize>,
-) -> Vec<core::ops::Range<usize>> {
-    let mut segments = Vec::new();
+) -> SmallVec<[core::ops::Range<usize>; 4]> {
+    let mut segments = SmallVec::new();
     let mut start = range.start;
     for index in range.clone() {
         if index > start && atoms[index - 1].byte_range.end() != atoms[index].byte_range.start() {
@@ -966,47 +1076,24 @@ impl TextShaper for HarfRustShaper {
         output_clusters: &mut Vec<ShapedCluster>,
         output_glyphs: &mut Vec<RawShapedGlyph>,
     ) {
-        let first = atoms.partition_point(|a| a.byte_range.start() < window.start());
-        let end = atoms.partition_point(|a| a.byte_range.end() <= window.end());
-        if first >= end {
+        let Some(plan) = plan_window(atoms, window, &leading_edit, &trailing_edit) else {
             return;
-        }
+        };
         let candidates = self.registry.candidates(&run.families, run.style);
         let first_cluster = output_clusters.len();
         // A cut edit removes atoms: they keep empty clusters, so the window's
         // atoms stay partitioned (SHP-6), and the rest is shaped as is.
-        let (leading_cut, leading_text) = match &leading_edit {
-            LeadingEdit::None => (0, None),
-            LeadingEdit::ReplaceSuffix {
-                replacement,
-                cut_bytes,
-            } => (*cut_bytes as usize, Some(replacement.to_string())),
-        };
-        let (trailing_cut, trailing_text) = match &trailing_edit {
-            TrailingEdit::None => (0, None),
-            TrailingEdit::AppendHyphen { hyphen } => (0, Some(hyphen.to_string())),
-            TrailingEdit::ReplacePrefix {
-                replacement,
-                cut_bytes,
-                hyphen,
-            } => (*cut_bytes as usize, Some(format!("{replacement}{hyphen}"))),
-        };
-        let kept_start =
-            atoms.partition_point(|a| a.byte_range.start() < window.start() + leading_cut);
-        let kept_end = atoms
-            .partition_point(|a| a.byte_range.end() <= window.end().saturating_sub(trailing_cut));
-        let (kept_start, kept_end) = (kept_start.clamp(first, end), kept_end.clamp(first, end));
         let fallback = candidates.first().copied().unwrap_or_default();
-        let blank = |index: usize, out: &mut Vec<ShapedCluster>, glyphs: &Vec<RawShapedGlyph>| {
-            let mut cluster = empty_cluster(run, &atoms[index], index, fallback);
-            cluster.glyph_range = glyphs.len()..glyphs.len();
-            out.push(cluster);
-        };
-        for index in first..kept_start.min(kept_end) {
-            blank(index, output_clusters, output_glyphs);
-        }
-        if kept_start < kept_end {
-            for (k, segment) in contiguous_segments(atoms, kept_start..kept_end)
+        push_empty_clusters(
+            run,
+            atoms,
+            plan.first..plan.kept_start,
+            fallback,
+            output_clusters,
+            output_glyphs,
+        );
+        if plan.kept_start < plan.kept_end {
+            for (k, segment) in contiguous_segments(atoms, plan.kept_start..plan.kept_end)
                 .into_iter()
                 .enumerate()
             {
@@ -1022,43 +1109,37 @@ impl TextShaper for HarfRustShaper {
                 );
             }
         }
-        for index in kept_end.max(kept_start)..end {
-            blank(index, output_clusters, output_glyphs);
-        }
+        push_empty_clusters(
+            run,
+            atoms,
+            plan.kept_end..plan.end,
+            fallback,
+            output_clusters,
+            output_glyphs,
+        );
         let appended = output_clusters.len();
         if appended == first_cluster {
             return;
         }
         output_clusters[first_cluster].safe_to_concat_before = false;
-        // Replacement glyphs go on the first (leading) or last (trailing)
-        // cluster; glyph ranges after an insertion shift.
-        if let Some(replacement) = trailing_text {
-            let last = appended - 1;
-            let font = output_clusters[last].font.font_id;
-            let glyphs = self.synthesized_glyphs(run, font, &replacement);
-            let width: f32 = glyphs.iter().map(|g| g.x_advance).sum();
-            output_glyphs.extend(glyphs.iter().copied());
-            let cluster = &mut output_clusters[last];
-            cluster.glyph_range.end = output_glyphs.len();
-            cluster.natural_width = (cluster.natural_width + width).max(0.0);
-        }
-        if let Some(replacement) = leading_text.filter(|r| !r.is_empty()) {
+        let leading = if plan.leading_text.is_empty() {
+            Vec::new()
+        } else {
             let font = output_clusters[first_cluster].font.font_id;
-            let glyphs = self.synthesized_glyphs(run, font, &replacement);
-            let width: f32 = glyphs.iter().map(|g| g.x_advance).sum();
-            let at = output_clusters[first_cluster].glyph_range.start;
-            let count = glyphs.len();
-            output_glyphs.splice(at..at, glyphs);
-            for (k, cluster) in output_clusters[first_cluster..].iter_mut().enumerate() {
-                if k == 0 {
-                    cluster.glyph_range.end += count;
-                    cluster.natural_width = (cluster.natural_width + width).max(0.0);
-                } else {
-                    cluster.glyph_range =
-                        cluster.glyph_range.start + count..cluster.glyph_range.end + count;
-                }
-            }
-        }
+            self.synthesized_glyphs(run, font, plan.leading_text)
+        };
+        let trailing = if plan.trailing_text.is_empty() {
+            Vec::new()
+        } else {
+            let font = output_clusters[appended - 1].font.font_id;
+            self.synthesized_glyphs(run, font, plan.trailing_text.as_str())
+        };
+        attach_synthesized(
+            &mut output_clusters[first_cluster..],
+            output_glyphs,
+            leading,
+            trailing,
+        );
     }
 
     fn ligature_carets(
@@ -1088,10 +1169,10 @@ impl TextShaper for HarfRustShaper {
         let size = instance.font_size * instance.font.scale;
         let fallback = 0.25 * size;
         let Some((font, units)) = self.instance(instance.font.font_id, instance.variations) else {
-            return fallback.max(0.0);
+            return finite_nonnegative(fallback);
         };
         let Some(glyph) = font.charmap().map_unicode(' ') else {
-            return fallback.max(0.0);
+            return finite_nonnegative(fallback);
         };
         let metrics = font.glyph_metrics();
         let advance = if orientation == GlyphOrientation::VerticalUpright {
@@ -1099,12 +1180,7 @@ impl TextShaper for HarfRustShaper {
         } else {
             metrics.h_advance(glyph)
         };
-        let value = advance * size / units.units_per_em;
-        if value.is_finite() {
-            value.max(0.0)
-        } else {
-            0.0
-        }
+        finite_nonnegative(advance * size / units.units_per_em)
     }
 }
 
@@ -1179,25 +1255,24 @@ fn unit_metrics(font: &Font) -> UnitMetrics {
         (Some(bottom), Some(top)) => (bottom + top) / 2.0,
         _ => ideographic + 0.5 * upem,
     };
-    let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
     UnitMetrics {
         units_per_em: upem,
         metrics: FontMetrics {
-            vertical_ascent: finite(vertical_ascent),
-            vertical_descent: finite(vertical_descent),
-            vertical_line_gap: finite(vertical_line_gap),
-            ideographic_baseline_offset: finite(ideographic),
-            central_baseline_offset: finite(central),
-            hanging_baseline_offset: finite(base.hang.unwrap_or(0.8 * ascent)),
-            mathematical_baseline_offset: finite(base.math.unwrap_or(0.5 * x_height)),
-            ascent: finite(ascent),
-            descent: finite(descent),
-            line_gap: finite(line_gap),
-            underline_position: finite(underline_position),
-            underline_thickness: finite(underline_thickness),
-            strikeout_position: finite(strikeout_position),
-            x_height: finite(x_height.max(0.0)),
-            cap_height: finite(cap_height.max(0.0)),
+            vertical_ascent: finite_or_zero(vertical_ascent),
+            vertical_descent: finite_or_zero(vertical_descent),
+            vertical_line_gap: finite_or_zero(vertical_line_gap),
+            ideographic_baseline_offset: finite_or_zero(ideographic),
+            central_baseline_offset: finite_or_zero(central),
+            hanging_baseline_offset: finite_or_zero(base.hang.unwrap_or(0.8 * ascent)),
+            mathematical_baseline_offset: finite_or_zero(base.math.unwrap_or(0.5 * x_height)),
+            ascent: finite_or_zero(ascent),
+            descent: finite_or_zero(descent),
+            line_gap: finite_or_zero(line_gap),
+            underline_position: finite_or_zero(underline_position),
+            underline_thickness: finite_or_zero(underline_thickness),
+            strikeout_position: finite_or_zero(strikeout_position),
+            x_height: finite_or_zero(x_height.max(0.0)),
+            cap_height: finite_or_zero(cap_height.max(0.0)),
             use_typo_metrics: metrics.use_typo_metrics,
         },
     }
@@ -1210,8 +1285,6 @@ fn metrics_value(font: &Font, c: char) -> Option<f32> {
     Some(extents.y_bearing).filter(|v| *v > 0.0)
 }
 
-/// Baseline offsets read from the horizontal axis of `BASE`, relative to the
-/// alphabetic (`romn`) baseline when the font gives one.
 /// The GDEF ligature caret coordinates of `glyph_id` in font units, at the
 /// font's variation location (spec SHP-7). A caret given as a contour point
 /// (format 2) needs the outline, which the backend does not load, so a glyph
@@ -1265,18 +1338,15 @@ struct BaseOffsets {
     math: Option<f32>,
 }
 
+/// Baseline offsets read from the horizontal axis of `BASE`, relative to the
+/// alphabetic (`romn`) baseline when the font gives one.
 fn base_offsets(font: &Font) -> BaseOffsets {
     let read = || -> Option<BaseOffsets> {
         let tables = font.tables();
         let base = tables.base().ok()?;
         let axis = base.horiz_axis()?.ok()?;
-        let tags: Vec<Tag> = axis
-            .base_tag_list()?
-            .ok()?
-            .baseline_tags()
-            .iter()
-            .map(|t| t.get())
-            .collect();
+        let tag_list = axis.base_tag_list()?.ok()?;
+        let tags = tag_list.baseline_tags();
         let list = axis.base_script_list().ok()?;
         let records = list.base_script_records();
         let record = records
@@ -1295,7 +1365,7 @@ fn base_offsets(font: &Font) -> BaseOffsets {
             .ok()?;
         let coords = values.base_coords();
         let coordinate = |tag: &[u8; 4]| -> Option<f32> {
-            let index = tags.iter().position(|t| *t == Tag::new(tag))?;
+            let index = tags.iter().position(|t| t.get() == Tag::new(tag))?;
             let coord = coords.get(index).ok()?;
             Some(f32::from(coord.coordinate()))
         };
@@ -1409,6 +1479,25 @@ mod tests {
         }
     }
 
+    fn family_region<'a>(families: impl IntoIterator<Item = &'a str>) -> Option<CjkRegion> {
+        let votes = families.into_iter().flat_map(|family| {
+            family
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .filter_map(word_region)
+        });
+        single_region(votes, None)
+    }
+
+    fn scan_families(families: &[&str]) -> Option<CjkRegion> {
+        let mut found = None;
+        for family in families {
+            if !scan_chars_region(family.chars(), &mut found) {
+                return None;
+            }
+        }
+        found
+    }
+
     #[test]
     fn one_vote_names_a_region_and_disagreement_names_the_fallback() {
         use CjkRegion::*;
@@ -1420,16 +1509,22 @@ mod tests {
         assert_eq!(single_region([Japanese, Korean], Some(Pan)), Some(Pan));
         assert_eq!(single_region([Japanese, Korean], None), None);
         // A generic typographic family name does not hide the legacy one.
-        assert_eq!(
-            family_region(["Foo Sans", "Foo Sans TC"]),
-            Some(Traditional)
-        );
-        assert_eq!(
-            family_region(["Foo Sans JP", "Foo Sans JP Thin"]),
-            Some(Japanese)
-        );
-        assert_eq!(family_region(["Foo Sans SC", "Foo Sans TC"]), None);
-        assert_eq!(family_region(["Foo Sans"]), None);
+        for (families, expected) in [
+            (&["Foo Sans", "Foo Sans TC"][..], Some(Traditional)),
+            (&["Foo Sans JP", "Foo Sans JP Thin"][..], Some(Japanese)),
+            (&["Foo Sans SC", "Foo Sans TC"][..], None),
+            (&["Foo Sans"][..], None),
+            (&["Foo Sans TRADITIONALFOO"][..], None),
+        ] {
+            assert_eq!(family_region(families.iter().copied()), expected);
+            assert_eq!(scan_families(families), expected);
+        }
+        let mut found = None;
+        assert!(scan_chars_region("Foo Sans TC".chars(), &mut found));
+        assert_eq!(found, Some(Traditional));
+        let mut overlong = None;
+        assert!(scan_chars_region("TRADITIONALFOO".chars(), &mut overlong));
+        assert_eq!(overlong, None);
         // Noto Sans JP sets JIS and GB 2312: code pages alone do not decide.
         assert_eq!(code_page_region(0b11 << 17), None);
         assert_eq!(code_page_region(1 << 20), Some(Traditional));

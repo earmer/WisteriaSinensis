@@ -1,14 +1,13 @@
 //! `mutil-engine`: a headless, synchronous, GUI-free multilingual typesetting and
 //! interactive layout engine.
 //!
-//! The crate currently contains the strongly typed data model of the
-//! specification (§2), the `TextShaper` contract (§4), input and output
-//! validators, a `NoopShaper` that proves the types close over the whole
-//! pipeline, the Phase 1 frontend (`compile_paragraph`), the HarfRust
-//! backend, the greedy line breaker (`layout_paragraph`) and the caret,
-//! hit-test and movement queries for unidirectional horizontal text. Bidi
-//! reordering, justification, hyphenation and the optimising breakers are not
-//! implemented yet.
+//! The crate contains the data model (§2), the `TextShaper` contract and
+//! backends (`HarfRustShaper`, `LineOnlyShaper`, `NoopShaper`, §4), the
+//! Phase 1 frontend (`compile_paragraph`, §3), input and output validators
+//! (§2.6), greedy line breaking with per-line L1/L2 bidi reordering and
+//! vertical stacking (`layout_paragraph`, §5), and the Phase 1 interaction
+//! queries (§6). Paragraph-level bidi analysis, justification, hyphenation,
+//! annotations, clamping and the optimising breakers are not implemented yet.
 //!
 //! Layers (dependencies point left or up; the frontend calls the shaping
 //! bridge through the `TextShaper` trait):

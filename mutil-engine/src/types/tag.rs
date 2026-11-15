@@ -206,23 +206,27 @@ impl LocaleTag {
     /// The input, after the mapping, does not match the RFC 5646
     /// `Language-Tag` grammar.
     pub fn parse_lenient(tag: &str) -> Result<Self, InvalidLocaleTag> {
-        let key = tag.trim().replace('_', "-").to_ascii_lowercase();
-        let mapped = match key.as_str() {
-            "jp" => "ja-JP",
-            "cn" | "zh-cn" | "zh-sc" | "zh-chs" => "zh-CN",
-            "tw" | "zh-tw" | "zh-tc" | "zh-cht" => "zh-TW",
-            "hk" | "zh-hk" => "zh-HK",
-            "kr" => "ko-KR",
-            other => other,
-        };
-        Self::try_from_str(mapped)
+        let trimmed = tag.trim();
+        if let Some(&(_, canonical)) = SHORTHANDS
+            .iter()
+            .find(|&&(short, _)| eq_shorthand(trimmed, short))
+        {
+            return Self::try_from_str(canonical);
+        }
+        if trimmed.contains('_') {
+            let normalized = trimmed.replace('_', "-");
+            Self::try_from_str(&normalized)
+        } else {
+            Self::try_from_str(trimmed)
+        }
     }
 
     /// The undetermined locale, `und` (no explicit tag; spec §1.2 fallback
     /// rules apply).
     #[must_use]
     pub fn und() -> Self {
-        Self("und".into())
+        static UND: std::sync::LazyLock<Arc<str>> = std::sync::LazyLock::new(|| Arc::from("und"));
+        Self(Arc::clone(&UND))
     }
 
     /// The tag text, in canonical case.
@@ -251,6 +255,35 @@ impl fmt::Display for LocaleTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+const SHORTHANDS: [(&str, &str); 12] = [
+    ("jp", "ja-JP"),
+    ("cn", "zh-CN"),
+    ("zh-cn", "zh-CN"),
+    ("zh-sc", "zh-CN"),
+    ("zh-chs", "zh-CN"),
+    ("tw", "zh-TW"),
+    ("zh-tw", "zh-TW"),
+    ("zh-tc", "zh-TW"),
+    ("zh-cht", "zh-TW"),
+    ("hk", "zh-HK"),
+    ("zh-hk", "zh-HK"),
+    ("kr", "ko-KR"),
+];
+
+fn eq_shorthand(s: &str, target: &str) -> bool {
+    let sb = s.as_bytes();
+    let tb = target.as_bytes();
+    sb.len() == tb.len()
+        && sb.iter().zip(tb).all(|(&a, &b)| {
+            let norm = if a == b'_' {
+                b'-'
+            } else {
+                a.to_ascii_lowercase()
+            };
+            norm == b
+        })
 }
 
 /// The `irregular` grandfathered tags of RFC 5646 §2.1, which the `langtag`
@@ -333,14 +366,17 @@ impl<'a> Subtags<'a> {
         if !self.canonical.is_empty() {
             self.canonical.push('-');
         }
-        // An accepted subtag is ASCII and non-empty, so byte 1 is a boundary.
-        let (head, tail) = subtag.split_at(1);
+        let start = self.canonical.len();
+        self.canonical.push_str(subtag);
+        let written = &mut self.canonical[start..];
         match case {
-            SubtagCase::Lower => self.canonical.push_str(&subtag.to_ascii_lowercase()),
-            SubtagCase::Upper => self.canonical.push_str(&subtag.to_ascii_uppercase()),
+            SubtagCase::Lower => written.make_ascii_lowercase(),
+            SubtagCase::Upper => written.make_ascii_uppercase(),
             SubtagCase::Title => {
-                self.canonical.push_str(&head.to_ascii_uppercase());
-                self.canonical.push_str(&tail.to_ascii_lowercase());
+                // An accepted subtag is ASCII and non-empty, so byte 1 is a boundary.
+                let (head, tail) = written.split_at_mut(1);
+                head.make_ascii_uppercase();
+                tail.make_ascii_lowercase();
             }
         }
         Some(subtag)
@@ -519,9 +555,11 @@ mod tests {
             ("zh-SC", "zh-CN"),
             ("zh-chs", "zh-CN"),
             ("zh_CN", "zh-CN"),
+            ("ZH_chs", "zh-CN"),
             ("tw", "zh-TW"),
             ("zh-tc", "zh-TW"),
             ("zh-CHT", "zh-TW"),
+            ("zh_cht", "zh-TW"),
             ("zh-TW", "zh-TW"),
             ("hk", "zh-HK"),
             ("zh-hk", "zh-HK"),
@@ -535,6 +573,7 @@ mod tests {
         }
         assert_eq!(LocaleTag::parse_lenient("ja JP"), Err(InvalidLocaleTag));
         assert_eq!(LocaleTag::parse_lenient(""), Err(InvalidLocaleTag));
+        assert!(Arc::ptr_eq(&LocaleTag::und().0, &LocaleTag::und().0));
     }
 
     #[test]

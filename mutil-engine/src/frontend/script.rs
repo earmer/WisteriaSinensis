@@ -15,7 +15,7 @@
 
 use super::QuotePolicy;
 use super::segment::{SCRIPT, SCRIPT_NAMES};
-use crate::types::{ScriptTag, TextRange};
+use crate::types::{GraphemeAtom, ScriptTag, TextRange};
 use icu_properties::props::{
     BidiMirroringGlyph, BidiPairedBracketType, EastAsianWidth, Script, WordBreak,
 };
@@ -245,8 +245,6 @@ pub(crate) struct ScriptAtom<'a> {
 pub(crate) fn resolve(atoms: &[ScriptAtom<'_>], policy: QuotePolicy) -> Vec<ScriptTag> {
     let n = atoms.len();
     let mut scripts: Vec<Option<ScriptTag>> = vec![None; n];
-    // Closer index -> opener index, for the final pass.
-    let mut paired: Vec<Option<usize>> = vec![None; n];
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     // Table S: (closer it waits for, opener atom).
     let mut stack: Vec<(char, usize)> = Vec::new();
@@ -310,7 +308,6 @@ pub(crate) fn resolve(atoms: &[ScriptAtom<'_>], policy: QuotePolicy) -> Vec<Scri
             {
                 let opener = stack[at].1;
                 stack.truncate(at);
-                paired[index] = Some(opener);
                 pairs.push((opener, index));
                 continue;
             }
@@ -345,10 +342,8 @@ pub(crate) fn resolve(atoms: &[ScriptAtom<'_>], policy: QuotePolicy) -> Vec<Scri
         .iter()
         .map(|s| s.unwrap_or(ScriptTag::LATIN))
         .collect();
-    for index in 0..n {
-        if let Some(opener) = paired[index] {
-            resolved[index] = resolved[opener];
-        }
+    for &(opener, closer) in &pairs {
+        resolved[closer] = resolved[opener];
     }
     if policy == QuotePolicy::CjkAware {
         cjk_quotes(atoms, &mut resolved, &pairs);
@@ -383,8 +378,10 @@ fn cjk_quotes(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag], pairs: &[(us
         let left_cjk = left.is_some_and(|i| is_cjk(atoms, resolved, i));
         let right_cjk = right.is_some_and(|i| is_cjk(atoms, resolved, i));
         let after_space = atoms[opener].after_space;
-        let inner_cjk = (opener + 1..closer).any(|i| is_cjk(atoms, resolved, i));
-        if !(left_cjk || right_cjk || (inner_cjk && !after_space)) {
+        if !(left_cjk
+            || right_cjk
+            || (!after_space && (opener + 1..closer).any(|i| is_cjk(atoms, resolved, i))))
+        {
             continue;
         }
         let script = match (left, right) {
@@ -407,18 +404,9 @@ fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
             .chars()
             .all(|c| is_dash_run_char(c) || c.is_whitespace() || is_punctuation(c))
     };
-    // The nearest anchor before each atom and at or after it, from one
-    // forward and one backward pass, so every run finds its neighbours in
-    // constant time.
-    let n = atoms.len();
-    let mut before: Vec<Option<usize>> = vec![None; n + 1];
-    for k in 0..n {
-        before[k + 1] = if anchor(k) { Some(k) } else { before[k] };
-    }
-    let mut from: Vec<Option<usize>> = vec![None; n + 1];
-    for k in (0..n).rev() {
-        from[k] = if anchor(k) { Some(k) } else { from[k + 1] };
-    }
+    let mut last_anchor: Option<usize> = None;
+    let mut next_anchor: Option<usize> = None;
+    let mut next_scanned = 0usize;
     let mut i = 0;
     while i < atoms.len() {
         let Some(c) = atoms[i]
@@ -427,6 +415,9 @@ fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
             .next()
             .filter(|&c| is_dash_run_char(c) && atoms[i].explicit.is_none())
         else {
+            if anchor(i) {
+                last_anchor = Some(i);
+            }
             i += 1;
             continue;
         };
@@ -434,7 +425,19 @@ fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
         while end < atoms.len() && atoms[end].text.starts_with(c) && atoms[end].explicit.is_none() {
             end += 1;
         }
-        let (left, right) = (before[i], from[end]);
+        if next_anchor.is_none_or(|k| k < end) {
+            next_scanned = next_scanned.max(end);
+            next_anchor = None;
+            while next_scanned < atoms.len() {
+                let k = next_scanned;
+                next_scanned += 1;
+                if anchor(k) {
+                    next_anchor = Some(k);
+                    break;
+                }
+            }
+        }
+        let (left, right) = (last_anchor, next_anchor);
         let cjk = |k: Option<usize>| k.is_some_and(|k| is_cjk(atoms, resolved, k));
         let host = resolved[i];
         let script = match (cjk(left), cjk(right)) {
@@ -449,6 +452,11 @@ fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
         for s in &mut resolved[i..end] {
             *s = script;
         }
+        for k in i..end {
+            if anchor(k) {
+                last_anchor = Some(k);
+            }
+        }
         i = end;
     }
 }
@@ -461,12 +469,31 @@ fn is_punctuation(c: char) -> bool {
 
 /// Atoms whose dash, ellipsis or middle-dot run must not break inside
 /// (FE-15): `true` for every atom of such a run but its last.
-pub(crate) fn binds_to_next(atoms: &[ScriptAtom<'_>], index: usize) -> bool {
-    let first = |i: usize| atoms[i].text.chars().next();
-    match (first(index), atoms.get(index + 1).and(first(index + 1))) {
-        (Some(a), Some(b)) => {
-            a == b && is_dash_run_char(a) && atoms[index].text.chars().count() == 1
-        }
+pub(crate) fn binds_to_next(text: &str, atoms: &[GraphemeAtom], index: usize) -> bool {
+    let (Some(a), Some(b)) = (
+        atoms.get(index),
+        index.checked_add(1).and_then(|i| atoms.get(i)),
+    ) else {
+        return false;
+    };
+    if a.byte_range.end() != b.byte_range.start() || a.script != b.script {
+        return false;
+    }
+    let (Some(sa), Some(sb)) = (
+        text.get(a.byte_range.as_range()),
+        text.get(b.byte_range.as_range()),
+    ) else {
+        return false;
+    };
+    let mut chars_a = sa.chars();
+    let mut chars_b = sb.chars();
+    match (
+        chars_a.next(),
+        chars_a.next(),
+        chars_b.next(),
+        chars_b.next(),
+    ) {
+        (Some(ch_a), None, Some(ch_b), None) => ch_a == ch_b && is_dash_run_char(ch_a),
         _ => false,
     }
 }
@@ -615,9 +642,20 @@ mod tests {
         let text = "ab……cd";
         let r = resolve(&atoms(text), QuotePolicy::Standard);
         assert_eq!((r[2], r[3]), (ScriptTag::LATIN, ScriptTag::LATIN));
-        let a = atoms("a——b");
-        assert!(binds_to_next(&a, 1));
-        assert!(!binds_to_next(&a, 2));
+        let text = "a——b";
+        let g: Vec<GraphemeAtom> = text
+            .char_indices()
+            .map(|(i, c)| GraphemeAtom {
+                orientation: crate::types::GlyphOrientation::Horizontal,
+                byte_range: TextRange::new(i, i + c.len_utf8()),
+                script: ScriptTag::LATIN,
+                bidi_level: crate::types::BidiLevel::LTR,
+                linebreak_class: crate::types::LineBreakClass::Al,
+                flags: crate::types::AtomFlags::EMPTY,
+            })
+            .collect();
+        assert!(binds_to_next(text, &g, 1));
+        assert!(!binds_to_next(text, &g, 2));
     }
 
     #[test]

@@ -111,24 +111,24 @@ pub fn is_no_break_space(c: char) -> bool {
 /// pair is one separator. U+2028 is not a separator. Empty input yields one
 /// empty slice; trailing separator yields a final empty slice.
 pub fn split_paragraphs(text: &str) -> Vec<ParagraphSlice> {
-    let bytes = text.as_bytes();
     let mut paragraphs = Vec::new();
     let mut content_start = 0usize;
-    let mut offset = 0usize;
+    let mut iter = text.char_indices().peekable();
 
-    while offset < bytes.len() {
-        if let Some(separator_len) = separator_len_at(text, offset) {
-            paragraphs.push(ParagraphSlice {
-                content: TextRange::new(content_start, offset),
-                separator: TextRange::new(offset, offset + separator_len),
-            });
-            offset += separator_len;
-            content_start = offset;
+    while let Some((offset, c)) = iter.next() {
+        if !is_paragraph_separator(c) {
             continue;
         }
-
-        let char_len = text[offset..].chars().next().map_or(1, char::len_utf8);
-        offset += char_len;
+        let mut sep_end = offset + c.len_utf8();
+        if c == '\r' && iter.peek().is_some_and(|&(_, next)| next == '\n') {
+            iter.next();
+            sep_end += 1;
+        }
+        paragraphs.push(ParagraphSlice {
+            content: TextRange::new(content_start, offset),
+            separator: TextRange::new(offset, sep_end),
+        });
+        content_start = sep_end;
     }
 
     paragraphs.push(ParagraphSlice {
@@ -136,18 +136,4 @@ pub fn split_paragraphs(text: &str) -> Vec<ParagraphSlice> {
         separator: TextRange::empty_at(text.len()),
     });
     paragraphs
-}
-
-/// Length in bytes of the separator starting at `offset`, or `None` when the
-/// character there is ordinary content. CRLF is a single two-byte separator.
-fn separator_len_at(text: &str, offset: usize) -> Option<usize> {
-    let c = text[offset..].chars().next()?;
-    if !is_paragraph_separator(c) {
-        return None;
-    }
-    if c == '\r' && text.as_bytes().get(offset + 1) == Some(&b'\n') {
-        Some(2)
-    } else {
-        Some(c.len_utf8())
-    }
 }

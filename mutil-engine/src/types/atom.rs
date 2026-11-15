@@ -121,7 +121,7 @@ pub enum LineBreakClass {
 /// Per-atom boolean properties, stored as a 16-bit mask (spec §2.2).
 ///
 /// Hand-rolled instead of depending on `bitflags`, to keep the dependency
-/// surface minimal. Nine of sixteen bits are assigned; the high seven are
+/// surface minimal. Ten of sixteen bits are assigned; the high six are
 /// reserved and are masked off by [`AtomFlags::from_bits_truncate`] and `!`.
 /// Layout: 2 bytes, alignment 2.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -151,6 +151,8 @@ impl AtomFlags {
     pub const HAS_VARIATION_SELECTOR: Self = Self(1 << 7);
     /// Resolved intra-word apostrophe (spec §3 Step 2, FE-11).
     pub const IS_APOSTROPHE: Self = Self(1 << 8);
+    /// Continues an unbreakable FE-15 dash, ellipsis or middle-dot run (spec §3 Step 3, FE-15).
+    pub const BINDS_TO_PREVIOUS: Self = Self(1 << 9);
 
     /// No flags set.
     pub const EMPTY: Self = Self(0);
@@ -165,10 +167,11 @@ impl AtomFlags {
             | Self::IS_OPEN_PUNCT.0
             | Self::IS_CLOSE_PUNCT.0
             | Self::HAS_VARIATION_SELECTOR.0
-            | Self::IS_APOSTROPHE.0,
+            | Self::IS_APOSTROPHE.0
+            | Self::BINDS_TO_PREVIOUS.0,
     );
 
-    const NAMES: [(Self, &'static str); 9] = [
+    const NAMES: [(Self, &'static str); 10] = [
         (Self::IS_CJK_IDEOGRAPH, "IS_CJK_IDEOGRAPH"),
         (Self::ALLOW_CJK_JUSTIFY_AFTER, "ALLOW_CJK_JUSTIFY_AFTER"),
         (Self::NO_LETTER_SPACING, "NO_LETTER_SPACING"),
@@ -178,10 +181,11 @@ impl AtomFlags {
         (Self::IS_CLOSE_PUNCT, "IS_CLOSE_PUNCT"),
         (Self::HAS_VARIATION_SELECTOR, "HAS_VARIATION_SELECTOR"),
         (Self::IS_APOSTROPHE, "IS_APOSTROPHE"),
+        (Self::BINDS_TO_PREVIOUS, "BINDS_TO_PREVIOUS"),
     ];
 
     /// Flags a cluster takes only from its **first** atom.
-    pub const FIRST_ATOM_ONLY: Self = Self::IS_OPEN_PUNCT;
+    pub const FIRST_ATOM_ONLY: Self = Self(Self::IS_OPEN_PUNCT.0 | Self::BINDS_TO_PREVIOUS.0);
     /// Flags a cluster takes only from its **last** atom: the justification
     /// opportunity *after* a ligature is the one after its last component, and
     /// a closing mark closes at the end.
@@ -413,7 +417,11 @@ mod tests {
         let all = AtomFlags::ALL;
         // A three-atom ligature: only the outer atoms carry position-dependent flags.
         let lig = [
-            atom_with(AtomFlags::IS_OPEN_PUNCT | AtomFlags::ALLOW_CJK_JUSTIFY_AFTER),
+            atom_with(
+                AtomFlags::IS_OPEN_PUNCT
+                    | AtomFlags::BINDS_TO_PREVIOUS
+                    | AtomFlags::ALLOW_CJK_JUSTIFY_AFTER,
+            ),
             atom_with(
                 AtomFlags::IS_OPEN_PUNCT
                     | AtomFlags::IS_CLOSE_PUNCT
@@ -426,23 +434,27 @@ mod tests {
         // ALLOW_CJK_JUSTIFY_AFTER: last atom has it not, so the cluster does not,
         // although the first and middle atoms do.
         assert!(!f.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER));
-        // IS_OPEN_PUNCT: from the first atom only.
+        // IS_OPEN_PUNCT and BINDS_TO_PREVIOUS: from the first atom only.
         assert!(f.contains(AtomFlags::IS_OPEN_PUNCT));
+        assert!(f.contains(AtomFlags::BINDS_TO_PREVIOUS));
         // IS_CLOSE_PUNCT: from the last atom only.
         assert!(f.contains(AtomFlags::IS_CLOSE_PUNCT));
         // Everything else is ORed.
         assert!(f.contains(AtomFlags::KASHIDA_CAPABLE | AtomFlags::IS_EMOJI_SEQUENCE));
 
-        // Reverse the roles: first has no open mark, middle atoms do; last has
-        // the justification opportunity but no close mark.
+        // Reverse the roles: first has no open mark or continuation bind, middle
+        // atoms do; last has the justification opportunity but no close mark.
         let lig = [
             atom_with(AtomFlags::IS_CLOSE_PUNCT),
-            atom_with(AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT),
-            atom_with(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER),
+            atom_with(
+                AtomFlags::IS_OPEN_PUNCT | AtomFlags::IS_CLOSE_PUNCT | AtomFlags::BINDS_TO_PREVIOUS,
+            ),
+            atom_with(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER | AtomFlags::BINDS_TO_PREVIOUS),
         ];
         let f = AtomFlags::for_cluster(&lig);
         assert!(f.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER));
         assert!(!f.contains(AtomFlags::IS_OPEN_PUNCT)); // first atom lacks it
+        assert!(!f.contains(AtomFlags::BINDS_TO_PREVIOUS)); // first atom lacks it
         assert!(!f.contains(AtomFlags::IS_CLOSE_PUNCT)); // last atom lacks it
 
         // One atom: identity. No atoms: empty.

@@ -4,9 +4,9 @@
 
 use super::{
     BoxDecorationBreak, BoxNode, DiscretionaryNode, FrontendOptions, GlueKind, GlueNode,
-    InlineDecorationSpan, InlineObjectInput, MAX_DECORATION_NESTING_DEPTH, ParagraphAst,
-    ParagraphInput, SpanEdge, TextStyle, WordNode, emoji, is_paragraph_separator, is_word_space,
-    locale, script, segment, url,
+    InlineDecorationSpan, InlineObjectInput, LocalePolicy, MAX_DECORATION_NESTING_DEPTH,
+    ParagraphAst, ParagraphInput, SpanEdge, TextStyle, WordNode, emoji, is_paragraph_separator,
+    is_word_space, locale, script, segment, url,
 };
 use crate::shaping::{LeadingEdit, TextShaper, TrailingEdit};
 use crate::types::{
@@ -15,6 +15,7 @@ use crate::types::{
     ShapedCluster, ShapingRun, TextRange, WritingMode, is_extent, is_measurement,
 };
 use core::fmt;
+use smallvec::SmallVec;
 
 /// Why [`compile_paragraph`] refused its input (spec FE-28). Each variant has
 /// one root cause.
@@ -182,12 +183,6 @@ fn check_input(input: &ParagraphInput<'_>, options: &FrontendOptions) -> Result<
     if u32::try_from(text.len()).is_err() {
         return Err(FrontendError::TextTooLong);
     }
-    if let Some((byte, _)) = text
-        .char_indices()
-        .find(|&(_, c)| is_paragraph_separator(c))
-    {
-        return Err(FrontendError::ParagraphSeparatorInText { byte });
-    }
     if options.writing_mode.is_vertical() {
         return Err(unsupported(FrontendFeature::VerticalWritingMode));
     }
@@ -232,23 +227,35 @@ fn check_input(input: &ParagraphInput<'_>, options: &FrontendOptions) -> Result<
         }
         previous_end = r.end();
     }
-    // An object's bytes are neither atoms nor shaped (FE-27): they take no
-    // part in direction.
+    // Single pass over the text for paragraph separators (AST-2) and bidi
+    // detection; an object's bytes are neither atoms nor shaped (FE-27), so
+    // they take no part in direction.
     let objects = input.inline_objects;
-    let outside_objects = text.char_indices().filter_map(|(i, c)| {
-        let after = objects.partition_point(|o| o.byte_range.start() <= i);
-        let inside = after
-            .checked_sub(1)
-            .is_some_and(|k| i < objects[k].byte_range.end());
-        (!inside).then_some(c)
-    });
-    if options.base_direction.is_none()
-        && outside_objects.clone().find_map(segment::strong_direction) == Some(true)
-    {
+    let mut obj_idx = 0usize;
+    let mut first_strong: Option<bool> = None;
+    let mut has_bidi = false;
+    for (offset, ch) in text.char_indices() {
+        if is_paragraph_separator(ch) {
+            return Err(FrontendError::ParagraphSeparatorInText { byte: offset });
+        }
+        while obj_idx < objects.len() && objects[obj_idx].byte_range.end() <= offset {
+            obj_idx += 1;
+        }
+        if obj_idx < objects.len() && objects[obj_idx].byte_range.start() <= offset {
+            continue;
+        }
+        if options.base_direction.is_none() && first_strong.is_none() {
+            first_strong = segment::strong_direction(ch);
+        }
+        if !has_bidi && segment::is_bidi_significant(ch) {
+            has_bidi = true;
+        }
+    }
+    if options.base_direction.is_none() && first_strong == Some(true) {
         // UAX #9 P2 and P3 would make the paragraph right-to-left.
         return Err(unsupported(FrontendFeature::RtlBaseDirection));
     }
-    if outside_objects.clone().any(segment::is_bidi_significant) {
+    if has_bidi {
         return Err(unsupported(FrontendFeature::BidiText));
     }
     Ok(())
@@ -260,7 +267,7 @@ fn check_input(input: &ParagraphInput<'_>, options: &FrontendOptions) -> Result<
 fn check_decoration_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendError> {
     let text = input.text;
     let mut ids = std::collections::HashSet::new();
-    let mut stack: Vec<TextRange> = Vec::new();
+    let mut stack: SmallVec<[TextRange; MAX_DECORATION_NESTING_DEPTH]> = SmallVec::new();
     for (index, span) in input.decoration_spans.iter().enumerate() {
         let r = span.byte_range;
         let invalid = Err(FrontendError::InvalidDecorationSpan { span: index });
@@ -337,8 +344,8 @@ struct Compiler<'a> {
     options: &'a FrontendOptions,
     shaper: &'a dyn TextShaper,
     text: &'a str,
-    /// Every style: the default first, then the spans' in order.
-    styles: Vec<&'a TextStyle>,
+    /// Every style with normalized features: the default first, then the spans' in order.
+    styles: Vec<TextStyle>,
     atoms: Vec<GraphemeAtom>,
     /// The style index of each atom.
     atom_styles: Vec<usize>,
@@ -355,6 +362,11 @@ impl<'a> Compiler<'a> {
     ) -> Self {
         let styles = core::iter::once(input.default_style)
             .chain(input.style_spans.iter().map(|span| &span.style))
+            .map(|style| {
+                let mut normalized = style.clone();
+                normalized.features.normalize();
+                normalized
+            })
             .collect();
         Self {
             input,
@@ -396,58 +408,101 @@ impl<'a> Compiler<'a> {
         // WN-2, WN-3), with URL tailoring (FE-22), unbreakable dash runs
         // (FE-15) and the no-line-end words (FE-23).
         let urls = url::url_ranges(text);
-        let mut added: Vec<(usize, i32)> = urls
+        let added: Vec<(usize, i32)> = urls
             .iter()
             .flat_map(|&u| url::url_opportunities(text, u, &graphemes))
             .collect();
-        added.sort_unstable();
-        let in_url = |at: usize| {
-            let k = urls.partition_point(|u| u.end() <= at);
-            urls.get(k).is_some_and(|u| u.start() < at && at < u.end())
-        };
-        let script_atoms = self.script_atoms();
-        let breaks_after: Vec<Option<i32>> = (0..self.units.len())
-            .map(|i| {
-                let unit = self.units[i];
-                let end = unit.range(&self.atoms, self.input.inline_objects).end();
-                if end >= text.len() || matches!(unit, Unit::HardBreak(_)) {
-                    return None;
-                }
-                if let (Unit::Atom(a), Some(Unit::Atom(b))) = (unit, self.units.get(i + 1))
-                    && *b == a + 1
-                    && script::binds_to_next(&script_atoms, a)
+        let mut breaks_after = Vec::with_capacity(self.units.len());
+        let mut opp_idx = 0usize;
+        let mut add_idx = 0usize;
+        let mut url_idx = 0usize;
+        for i in 0..self.units.len() {
+            let unit = self.units[i];
+            let end = unit.range(&self.atoms, self.input.inline_objects).end();
+            if end >= text.len() || matches!(unit, Unit::HardBreak(_)) {
+                breaks_after.push(None);
+                continue;
+            }
+            if let (Unit::Atom(a), Some(Unit::Atom(b))) = (unit, self.units.get(i + 1).copied())
+                && b == a + 1
+                && self.same_run(a, b)
+                && script::binds_to_next(self.text, &self.atoms, a)
+            {
+                self.atoms[b].flags.insert(AtomFlags::BINDS_TO_PREVIOUS);
+                breaks_after.push(None);
+                continue;
+            }
+            if self.binds_one_letter_word(i) {
+                breaks_after.push(None);
+                continue;
+            }
+            while opp_idx < opportunities.len() && opportunities[opp_idx] < end {
+                opp_idx += 1;
+            }
+            let natural = opportunities.get(opp_idx).copied() == Some(end);
+            while add_idx < added.len() && added[add_idx].0 < end {
+                add_idx += 1;
+            }
+            let tailored = added
+                .get(add_idx)
+                .filter(|&&(at, _)| at == end)
+                .map(|&(_, p)| p);
+            while url_idx < urls.len() && urls[url_idx].end() <= end {
+                url_idx += 1;
+            }
+            let penalty = match (natural, tailored) {
+                (_, Some(p)) => Some(p),
+                (true, None)
+                    if urls
+                        .get(url_idx)
+                        .is_some_and(|u| u.start() < end && end < u.end()) =>
                 {
-                    return None;
+                    Some(DiscretionaryNode::URL_PENALTY_MIN)
                 }
-                if self.binds_one_letter_word(i) {
-                    return None;
-                }
-                let natural = opportunities.binary_search(&end).is_ok();
-                let tailored = added
-                    .binary_search_by_key(&end, |&(at, _)| at)
-                    .ok()
-                    .map(|k| added[k].1);
-                match (natural, tailored) {
-                    (_, Some(p)) => Some(p),
-                    (true, None) if in_url(end) => Some(DiscretionaryNode::URL_PENALTY_MIN),
-                    (true, None) => Some(DiscretionaryNode::NATURAL_PENALTY),
-                    (false, None) => None,
-                }
-            })
-            .collect();
+                (true, None) => Some(DiscretionaryNode::NATURAL_PENALTY),
+                (false, None) => None,
+            };
+            breaks_after.push(penalty);
+        }
         // Atom indices that start a text box: after any other unit, after a
-        // discretionary, or at a style, script or locale change.
+        // discretionary, or at a style, script, locale or decoration edge.
         let mut box_starts = vec![false; self.atoms.len()];
-        let decoration_edges = self.decoration_edges();
+        let dec_spans = self.input.decoration_spans;
+        let mut dec_next = 0usize;
+        let mut dec_ends: SmallVec<[usize; MAX_DECORATION_NESTING_DEPTH]> = SmallVec::new();
+        let mut has_decoration_edge_at = |at: usize| {
+            let mut edge = false;
+            while let Some(&end) = dec_ends.last() {
+                if end > at {
+                    break;
+                }
+                if end == at {
+                    edge = true;
+                }
+                dec_ends.pop();
+            }
+            while dec_next < dec_spans.len() && dec_spans[dec_next].byte_range.start() <= at {
+                let r = dec_spans[dec_next].byte_range;
+                if r.start() == at || r.end() == at {
+                    edge = true;
+                }
+                if r.end() > at {
+                    while dec_ends.last().is_some_and(|&end| end <= r.start()) {
+                        dec_ends.pop();
+                    }
+                    dec_ends.push(r.end());
+                }
+                dec_next += 1;
+            }
+            edge
+        };
         let mut previous: Option<(Unit, bool)> = None;
         for (i, unit) in self.units.iter().enumerate() {
             if let Unit::Atom(a) = *unit {
                 let at = self.atoms[a].byte_range.start();
                 box_starts[a] = match previous {
                     Some((Unit::Atom(p), broke)) => {
-                        broke
-                            || !self.same_run(p, a)
-                            || decoration_edges.get(at).copied().unwrap_or(false)
+                        broke || !self.same_run(p, a) || has_decoration_edge_at(at)
                     }
                     _ => true,
                 };
@@ -458,6 +513,7 @@ impl<'a> Compiler<'a> {
         let mut ast = self.empty_ast()?;
         self.shape_runs(&runs, &box_starts, &mut ast)?;
         self.assemble_items(&box_starts, &breaks_after, &mut ast);
+        ast.atoms = core::mem::take(&mut self.atoms);
         Ok(ast)
     }
 
@@ -541,7 +597,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    /// The atoms as script resolution and FE-15 see them.
+    /// The atoms as script resolution sees them.
     fn script_atoms(&self) -> Vec<script::ScriptAtom<'a>> {
         let text = self.text;
         self.atoms
@@ -572,6 +628,14 @@ impl<'a> Compiler<'a> {
     /// `default_locale`, or under `ExperimentalHeuristics` the locale their
     /// sentence's scripts imply.
     fn resolve_locales(&mut self) {
+        if self.options.locale_policy == LocalePolicy::ExplicitOnly {
+            self.atom_locales = self
+                .atom_styles
+                .iter()
+                .map(|&style| self.locale_of(style))
+                .collect();
+            return;
+        }
         let text = self.text;
         let atoms: Vec<locale::LocaleAtom<'_>> = self
             .atoms
@@ -592,106 +656,86 @@ impl<'a> Compiler<'a> {
         );
     }
 
-    /// For each byte offset of the text, its end included, whether a
-    /// decoration span starts or ends there: one pass over the spans, and
-    /// nothing to allocate when there are none.
-    fn decoration_edges(&self) -> Vec<bool> {
-        if self.input.decoration_spans.is_empty() {
-            return Vec::new();
-        }
-        let mut edges = vec![false; self.text.len() + 1];
-        for span in self.input.decoration_spans {
-            edges[span.byte_range.start()] = true;
-            edges[span.byte_range.end()] = true;
-        }
-        edges
-    }
-
     /// The edge checks of AST-7 and AST-9 that need units: a decoration
     /// edge lies between units, an atomic edge at the start or end of a text
     /// atom or object, and an atomic span holds one.
     fn check_span_edges(&self) -> Result<(), FrontendError> {
         let input = self.input;
-        if input.decoration_spans.is_empty() && input.atomic_spans.is_empty() {
-            return Ok(());
-        }
-        // Per byte offset, from one pass over the units: whether a unit ends
-        // there, and the end of the content unit (an atom or object) that
-        // starts there and whether one ends there. Each span is then checked
-        // in constant time.
-        let n = self.text.len() + 1;
-        let mut unit_end = vec![false; n];
-        let mut content_from: Vec<Option<usize>> = vec![None; n];
-        let mut content_end = vec![false; n];
-        unit_end[0] = true;
-        for u in &self.units {
-            let r = u.range(&self.atoms, input.inline_objects);
-            unit_end[r.end()] = true;
-            if matches!(u, Unit::Atom(_) | Unit::Object(_)) {
-                content_from[r.start()] = Some(r.end());
-                content_end[r.end()] = true;
-            }
-        }
-        for (index, span) in input.decoration_spans.iter().enumerate() {
-            let r = span.byte_range;
-            if !unit_end[r.start()] || !unit_end[r.end()] {
-                return Err(FrontendError::InvalidDecorationSpan { span: index });
-            }
-        }
-        for (index, span) in input.atomic_spans.iter().enumerate() {
-            let r = span.byte_range;
-            // Starting on a content unit that fits inside it, the span holds
-            // one; ending on a content unit's end closes it on an edge.
-            let holds = content_from[r.start()].is_some_and(|end| end <= r.end());
-            if !(holds && content_end[r.end()]) {
-                return Err(FrontendError::InvalidAtomicSpan { span: index });
-            }
-        }
-        Ok(())
-    }
-
-    /// WN-21: every discretionary but the sentinel lists the `Clone` spans
-    /// that hold it strictly inside, with their padding in its widths and,
-    /// unless mandatory, `CLONED_SPAN_PENALTY` each in its penalty. One sweep
-    /// over the items, whose offsets ascend, with a cursor over the spans in
-    /// order and a stack of the spans open at the current offset: the spans
-    /// nest (AST-7), so the stack is one chain, innermost on top, no deeper
-    /// than `MAX_DECORATION_NESTING_DEPTH`.
-    fn clone_padding(&self, items: &mut [WordNode]) {
-        let spans = self.input.decoration_spans;
-        let mut next = 0;
-        let mut open: Vec<&InlineDecorationSpan> = Vec::new();
-        for item in items {
-            let WordNode::Discretionary(d) = item else {
-                continue;
+        if !input.decoration_spans.is_empty() {
+            let mut next_span = 0usize;
+            let mut open: SmallVec<[(usize, usize); MAX_DECORATION_NESTING_DEPTH]> =
+                SmallVec::new();
+            let mut first_bad: Option<usize> = None;
+            let mut record_bad = |idx: usize| {
+                first_bad = Some(first_bad.map_or(idx, |cur| cur.min(idx)));
             };
-            if d.is_paragraph_end() {
-                continue;
-            }
-            let offset = d.byte_offset();
-            while next < spans.len() && spans[next].byte_range.start() < offset {
-                let start = spans[next].byte_range.start();
-                while open.last().is_some_and(|s| s.byte_range.end() <= start) {
-                    open.pop();
+            for unit in &self.units {
+                let ur = unit.range(&self.atoms, input.inline_objects);
+                while next_span < input.decoration_spans.len()
+                    && input.decoration_spans[next_span].byte_range.start() == ur.start()
+                {
+                    open.push((
+                        next_span,
+                        input.decoration_spans[next_span].byte_range.end(),
+                    ));
+                    next_span += 1;
                 }
-                open.push(&spans[next]);
-                next += 1;
-            }
-            while open.last().is_some_and(|s| s.byte_range.end() <= offset) {
-                open.pop();
-            }
-            // Outer first, as the spans are given.
-            for span in &open {
-                if span.break_mode == BoxDecorationBreak::Clone {
-                    d.cloned_spans.push(span.span_id);
-                    d.pre_break_width += span.end_padding;
-                    d.post_break_width += span.start_padding;
-                    if !d.is_mandatory() {
-                        d.penalty += DiscretionaryNode::CLONED_SPAN_PENALTY;
+                while next_span < input.decoration_spans.len()
+                    && input.decoration_spans[next_span].byte_range.start() < ur.end()
+                {
+                    record_bad(next_span);
+                    next_span += 1;
+                }
+                while let Some(&(span_idx, span_end)) = open.last() {
+                    if span_end > ur.end() {
+                        break;
+                    }
+                    open.pop();
+                    if span_end < ur.end() {
+                        record_bad(span_idx);
                     }
                 }
             }
+            if let Some(span) = first_bad {
+                return Err(FrontendError::InvalidDecorationSpan { span });
+            }
         }
+        if !input.atomic_spans.is_empty() {
+            let mut u = 0usize;
+            for (index, span) in input.atomic_spans.iter().enumerate() {
+                let r = span.byte_range;
+                while u < self.units.len()
+                    && self.units[u].range(&self.atoms, input.inline_objects).end() <= r.start()
+                {
+                    u += 1;
+                }
+                let Some(&start_unit) = self.units.get(u) else {
+                    return Err(FrontendError::InvalidAtomicSpan { span: index });
+                };
+                let start_range = start_unit.range(&self.atoms, input.inline_objects);
+                if start_range.start() != r.start()
+                    || !matches!(start_unit, Unit::Atom(_) | Unit::Object(_))
+                    || start_range.end() > r.end()
+                {
+                    return Err(FrontendError::InvalidAtomicSpan { span: index });
+                }
+                while u < self.units.len()
+                    && self.units[u].range(&self.atoms, input.inline_objects).end() < r.end()
+                {
+                    u += 1;
+                }
+                let Some(&end_unit) = self.units.get(u) else {
+                    return Err(FrontendError::InvalidAtomicSpan { span: index });
+                };
+                let end_range = end_unit.range(&self.atoms, input.inline_objects);
+                if end_range.end() != r.end()
+                    || !matches!(end_unit, Unit::Atom(_) | Unit::Object(_))
+                {
+                    return Err(FrontendError::InvalidAtomicSpan { span: index });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Whether unit `i` is the word space after a listed one-letter word of
@@ -722,7 +766,8 @@ impl<'a> Compiler<'a> {
     /// Whether atoms `a` and `b` can share a run (FE-17).
     fn same_run(&self, a: usize, b: usize) -> bool {
         let (sa, sb) = (self.atom_styles[a], self.atom_styles[b]);
-        self.atoms[a].script == self.atoms[b].script
+        self.atoms[a].bidi_level == self.atoms[b].bidi_level
+            && self.atoms[a].script == self.atoms[b].script
             && (sa == sb || self.styles[sa] == self.styles[sb])
             && self.atom_locales[a] == self.atom_locales[b]
     }
@@ -737,15 +782,13 @@ impl<'a> Compiler<'a> {
             if end < self.atoms.len() && self.same_run(start, end) {
                 continue;
             }
-            let style = self.styles[self.atom_styles[start]];
-            let mut features = style.features.clone();
-            features.normalize();
+            let style = &self.styles[self.atom_styles[start]];
             runs.push(ShapingRun {
                 baseline_align: style.baseline_align,
                 letter_spacing: style.letter_spacing,
                 word_spacing: style.word_spacing,
                 orientation: GlyphOrientation::Horizontal,
-                features,
+                features: style.features.clone(),
                 byte_range: TextRange::new(
                     self.atoms[start].byte_range.start(),
                     self.atoms[end - 1].byte_range.end(),
@@ -767,20 +810,18 @@ impl<'a> Compiler<'a> {
 
     /// The AST with its strut and nothing else (FE-25, AST-6).
     fn empty_ast(&self) -> Result<ParagraphAst, FrontendError> {
-        let style = self.input.default_style;
+        let style = &self.styles[0];
         let script = style
             .script
             .or_else(|| self.atoms.first().map(|atom| atom.script))
             .unwrap_or(ScriptTag::LATIN);
-        let mut features = style.features.clone();
-        features.normalize();
         let (_, strut_metrics) = self.shaper.resolve_primary_font_metrics(
             &style.families,
             style.style,
             script,
             &self.locale_of(0),
             style.font_size,
-            features.variations(),
+            style.features.variations(),
         );
         Ok(ParagraphAst {
             writing_mode: WritingMode::HorizontalTb,
@@ -807,11 +848,15 @@ impl<'a> Compiler<'a> {
         box_starts: &[bool],
         ast: &mut ParagraphAst,
     ) -> Result<(), FrontendError> {
+        let mut clusters: Vec<ShapedCluster> = Vec::new();
+        let mut glyphs: Vec<RawShapedGlyph> = Vec::new();
+        let mut out_clusters: Vec<ShapedCluster> = Vec::new();
+        let mut out_glyphs: Vec<RawShapedGlyph> = Vec::new();
         for (run_index, run) in runs.iter().enumerate() {
             let contract = FrontendError::ShaperContract { run: run_index };
             let atoms = &self.atoms[run.atom_range.clone()];
-            let mut clusters = Vec::new();
-            let mut glyphs = Vec::new();
+            clusters.clear();
+            glyphs.clear();
             self.shaper
                 .shape_run(self.text, run, atoms, &mut clusters, &mut glyphs);
             if !partitions(&clusters, &glyphs, 0..atoms.len(), 0) {
@@ -819,27 +864,35 @@ impl<'a> Compiler<'a> {
             }
             // Cuts are the run-local atoms that start a box, except the first.
             let is_cut = |local: usize| local > 0 && box_starts[run.atom_range.start + local];
-            let mut pieces: Vec<(ShapedCluster, Vec<RawShapedGlyph>)> = Vec::new();
-            for cluster in clusters {
-                let own = glyphs[cluster.glyph_range.clone()].to_vec();
+            let push_cluster = |mut cluster: ShapedCluster,
+                                source_glyphs: &[RawShapedGlyph],
+                                ast: &mut ParagraphAst| {
+                let own = &source_glyphs[cluster.glyph_range.clone()];
+                let advance: f32 = own.iter().map(|g| g.x_advance).sum();
+                let raw = advance + run.letter_spacing;
+                cluster.natural_width = if raw.is_finite() { raw.max(0.0) } else { raw };
+                let at = ast.glyphs.len();
+                ast.glyphs.extend_from_slice(own);
+                cluster.glyph_range = at..ast.glyphs.len();
+                ast.clusters.push(cluster);
+            };
+            let cluster_start = ast.clusters.len();
+            for cluster in clusters.drain(..) {
                 let range = cluster.atom_range.clone();
-                let cuts: Vec<usize> = (range.start + 1..range.end)
-                    .filter(|&a| is_cut(a))
-                    .collect();
-                if cuts.is_empty() {
-                    pieces.push((cluster, own));
+                let Some(first_cut) = (range.start + 1..range.end).find(|&a| is_cut(a)) else {
+                    push_cluster(cluster, &glyphs, ast);
                     continue;
-                }
-                let bounds: Vec<usize> = core::iter::once(range.start)
-                    .chain(cuts)
-                    .chain(core::iter::once(range.end))
-                    .collect();
-                for (k, window) in bounds.windows(2).enumerate() {
-                    let mut out_clusters = Vec::new();
-                    let mut out_glyphs = Vec::new();
+                };
+                let mut w_start = range.start;
+                let mut next_cut = Some(first_cut);
+                let mut k = 0usize;
+                loop {
+                    let w_end = next_cut.unwrap_or(range.end);
+                    out_clusters.clear();
+                    out_glyphs.clear();
                     let bytes = TextRange::new(
-                        atoms[window[0]].byte_range.start(),
-                        atoms[window[1] - 1].byte_range.end(),
+                        atoms[w_start].byte_range.start(),
+                        atoms[w_end - 1].byte_range.end(),
                     );
                     self.shaper.reshape_window(
                         self.text,
@@ -851,40 +904,32 @@ impl<'a> Compiler<'a> {
                         &mut out_clusters,
                         &mut out_glyphs,
                     );
-                    if !partitions(&out_clusters, &out_glyphs, window[0]..window[1], 0) {
+                    if !partitions(&out_clusters, &out_glyphs, w_start..w_end, 0) {
                         return Err(contract);
                     }
-                    for (j, mut c) in out_clusters.into_iter().enumerate() {
+                    for (j, mut c) in out_clusters.drain(..).enumerate() {
                         if k > 0 && j == 0 {
                             c.safe_to_concat_before = false;
                         }
-                        let own = out_glyphs[c.glyph_range.clone()].to_vec();
-                        pieces.push((c, own));
+                        push_cluster(c, &out_glyphs, ast);
                     }
+                    let Some(cut) = next_cut else {
+                        break;
+                    };
+                    w_start = cut;
+                    next_cut = (cut + 1..range.end).find(|&a| is_cut(a));
+                    k += 1;
                 }
             }
             let mut stored = run.clone();
-            stored.atom_range = ast.atoms.len()..ast.atoms.len() + atoms.len();
-            ast.atoms.extend_from_slice(atoms);
-            let cluster_start = ast.clusters.len();
-            for (mut cluster, own) in pieces {
-                let advance: f32 = own.iter().map(|g| g.x_advance).sum();
-                cluster.natural_width = (advance + run.letter_spacing).max(0.0);
-                if !cluster.natural_width.is_finite() {
-                    cluster.natural_width = 0.0;
-                }
-                let at = ast.glyphs.len();
-                ast.glyphs.extend(own);
-                cluster.glyph_range = at..ast.glyphs.len();
-                ast.clusters.push(cluster);
-            }
+            stored.atom_range = run.atom_range.clone();
             stored.cluster_range = cluster_start..ast.clusters.len();
             ast.runs.push(stored);
         }
         Ok(())
     }
 
-    /// Step 6: the item sequence (FE-19, FE-27, WN-17).
+    /// Step 6: the item sequence (FE-19, FE-27, WN-17, WN-21).
     fn assemble_items(
         &self,
         box_starts: &[bool],
@@ -892,63 +937,64 @@ impl<'a> Compiler<'a> {
         ast: &mut ParagraphAst,
     ) {
         let objects = self.input.inline_objects;
-        // The paragraph-level cluster of every atom start, and the run of
-        // every atom.
-        let mut cluster_of_atom = vec![usize::MAX; self.atoms.len()];
-        let mut run_of_atom = vec![0; self.atoms.len()];
-        for (run_index, run) in ast.runs.iter().enumerate() {
-            for a in run.atom_range.clone() {
-                run_of_atom[a] = run_index;
-            }
-            for c in run.cluster_range.clone() {
-                let first = run.atom_range.start + ast.clusters[c].atom_range.start;
-                cluster_of_atom[first] = c;
-            }
-        }
+        let runs = &ast.runs;
+        let clusters = &ast.clusters;
+        let atoms = &self.atoms;
         let mut space_cache: Vec<Option<f32>> = vec![None; self.styles.len()];
         let mut items: Vec<WordNode> = Vec::new();
-        // The open text box: its first atom.
+        // The open text box: its first atom, plus monotonic run and cluster cursors.
         let mut open: Option<usize> = None;
-        let close = |open: &mut Option<usize>,
-                     end_atom: usize,
-                     items: &mut Vec<WordNode>,
-                     ast: &ParagraphAst| {
-            if let Some(first) = open.take() {
-                // Box edges are cluster edges once CLU-8 has been applied.
-                let run = run_of_atom[first];
-                let c0 = cluster_of_atom[first];
-                let c1 = if end_atom < run_of_atom.len() && run_of_atom[end_atom] == run {
-                    cluster_of_atom[end_atom]
-                } else {
-                    ast.runs[run].cluster_range.end
-                };
-                let natural_width = ast.clusters[c0..c1].iter().map(|c| c.natural_width).sum();
-                items.push(WordNode::Box(BoxNode::Text {
-                    run_index: run,
-                    byte_range: TextRange::new(
-                        ast.atoms[first].byte_range.start(),
-                        ast.atoms[end_atom - 1].byte_range.end(),
-                    ),
-                    atom_range: first..end_atom,
-                    cluster_range: c0..c1,
-                    natural_width,
-                }));
+        let mut run_cursor = 0usize;
+        let mut cluster_cursor = 0usize;
+        let mut close = |open: &mut Option<usize>, end_atom: usize, items: &mut Vec<WordNode>| {
+            let Some(first) = open.take() else {
+                return;
+            };
+            // Box edges are cluster edges once CLU-8 has been applied.
+            while runs[run_cursor].atom_range.end <= first {
+                run_cursor += 1;
+                cluster_cursor = runs[run_cursor].cluster_range.start;
             }
+            let run = &runs[run_cursor];
+            while cluster_cursor < run.cluster_range.end
+                && run.atom_range.start + clusters[cluster_cursor].atom_range.end <= first
+            {
+                cluster_cursor += 1;
+            }
+            let c0 = cluster_cursor;
+            let mut natural_width = 0.0;
+            while cluster_cursor < run.cluster_range.end
+                && run.atom_range.start + clusters[cluster_cursor].atom_range.start < end_atom
+            {
+                natural_width += clusters[cluster_cursor].natural_width;
+                cluster_cursor += 1;
+            }
+            let c1 = cluster_cursor;
+            items.push(WordNode::Box(BoxNode::Text {
+                run_index: run_cursor,
+                byte_range: TextRange::new(
+                    atoms[first].byte_range.start(),
+                    atoms[end_atom - 1].byte_range.end(),
+                ),
+                atom_range: first..end_atom,
+                cluster_range: c0..c1,
+                natural_width,
+            }));
         };
         let mut atom_end = 0;
         let mut boundaries = BoundarySweep::new(self.input.decoration_spans);
-        items.extend(boundaries.leading(0));
+        boundaries.emit_leading(0, &mut items);
         for (i, unit) in self.units.iter().enumerate() {
             match *unit {
                 Unit::Atom(a) => {
                     if box_starts[a] {
-                        close(&mut open, a, &mut items, ast);
+                        close(&mut open, a, &mut items);
                         open = Some(a);
                     }
                     atom_end = a + 1;
                 }
                 other => {
-                    close(&mut open, atom_end, &mut items, ast);
+                    close(&mut open, atom_end, &mut items);
                     items.push(match other {
                         Unit::Glue(range, style) => {
                             let width =
@@ -966,7 +1012,9 @@ impl<'a> Compiler<'a> {
                         }
                         Unit::Tab(range) => WordNode::Tab { byte_range: range },
                         Unit::HardBreak(range) => {
-                            WordNode::Discretionary(DiscretionaryNode::hard_break(range))
+                            let mut node = DiscretionaryNode::hard_break(range);
+                            boundaries.apply_clones(&mut node);
+                            WordNode::Discretionary(node)
                         }
                         Unit::Object(index) => {
                             let o = &objects[index];
@@ -985,70 +1033,69 @@ impl<'a> Compiler<'a> {
                     });
                 }
             }
-            let end = unit.range(&self.atoms, objects).end();
-            let trailing = boundaries.trailing(end);
-            let leading = if end < self.text.len() {
-                boundaries.leading(end)
-            } else {
-                Vec::new()
-            };
-            if breaks_after[i].is_some() || !trailing.is_empty() || !leading.is_empty() {
-                close(&mut open, atom_end, &mut items, ast);
+            let end = unit.range(atoms, objects).end();
+            let has_trailing = boundaries.has_trailing_at(end);
+            let has_leading = end < self.text.len() && boundaries.has_leading_at(end);
+            if breaks_after[i].is_some() || has_trailing || has_leading {
+                close(&mut open, atom_end, &mut items);
             }
-            items.extend(trailing);
+            if has_trailing {
+                boundaries.emit_trailing(end, &mut items);
+            }
             if let Some(penalty) = breaks_after[i] {
                 let mut node = DiscretionaryNode::direct(end);
                 node.penalty = penalty;
+                boundaries.apply_clones(&mut node);
                 items.push(WordNode::Discretionary(node));
             }
-            items.extend(leading);
+            if has_leading {
+                boundaries.emit_leading(end, &mut items);
+            }
         }
-        close(&mut open, atom_end, &mut items, ast);
+        close(&mut open, atom_end, &mut items);
         items.push(WordNode::Discretionary(DiscretionaryNode::paragraph_end(
             self.text.len(),
         )));
-        self.clone_padding(&mut items);
         ast.items = items;
         ast.decoration_spans = self.input.decoration_spans.to_vec();
         ast.atomic_spans = self.input.atomic_spans.to_vec();
     }
 
-    /// `max(0, space advance + word_spacing)` for the primary font of a
-    /// style (FE-27, SHP-20).
+    /// `max(0, space advance + word_spacing)` for the primary font of a style
+    /// (FE-27, SHP-20), leaving non-finite shaper advances intact for the input
+    /// gate.
     fn glue_width(&self, style: usize) -> f32 {
-        let s = self.styles[style];
-        let mut features = s.features.clone();
-        features.normalize();
+        let s = &self.styles[style];
         let (font, _) = self.shaper.resolve_primary_font_metrics(
             &s.families,
             s.style,
             s.script.unwrap_or(ScriptTag::LATIN),
             &self.locale_of(style),
             s.font_size,
-            features.variations(),
+            s.features.variations(),
         );
         let advance = self.shaper.space_advance(
             FontInstanceRef {
                 font: FontRef::unscaled(font),
                 font_size: s.font_size,
-                variations: features.variations(),
+                variations: s.features.variations(),
             },
             GlyphOrientation::Horizontal,
         );
-        let width = (advance + s.word_spacing).max(0.0);
-        if width.is_finite() { width } else { 0.0 }
+        let raw = advance + s.word_spacing;
+        if raw.is_finite() { raw.max(0.0) } else { raw }
     }
 }
 
-/// The `SpanBoundary` items of the decoration spans in text order (WN-8,
-/// AST-8), from one sweep: asked at ascending offsets, among them every
-/// span edge (AST-7, checked by `check_span_edges`), it yields the leading
-/// boundaries at an offset outer first, from a cursor over the spans in
-/// order, and the trailing ones inner first, from the stack of open spans.
+/// The `SpanBoundary` items and `Clone` discretionary padding of the
+/// decoration spans in text order (WN-8, WN-21, AST-8), from one sweep: asked
+/// at ascending offsets, among them every span edge (AST-7, checked by
+/// `check_span_edges`), it emits leading boundaries outer first, trailing ones
+/// inner first, and clones open `Clone` spans onto enclosed discretionaries.
 struct BoundarySweep<'s> {
     spans: &'s [InlineDecorationSpan],
     next: usize,
-    open: Vec<&'s InlineDecorationSpan>,
+    open: SmallVec<[&'s InlineDecorationSpan; MAX_DECORATION_NESTING_DEPTH]>,
 }
 
 impl<'s> BoundarySweep<'s> {
@@ -1056,7 +1103,7 @@ impl<'s> BoundarySweep<'s> {
         Self {
             spans,
             next: 0,
-            open: Vec::new(),
+            open: SmallVec::new(),
         }
     }
 
@@ -1073,31 +1120,57 @@ impl<'s> BoundarySweep<'s> {
         })
     }
 
-    /// The spans starting at `offset`, outer first.
-    fn leading(&mut self, offset: usize) -> Vec<WordNode> {
-        let mut out = Vec::new();
+    fn has_leading_at(&self, offset: usize) -> bool {
+        self.spans
+            .get(self.next)
+            .is_some_and(|span| span.byte_range.start() == offset)
+    }
+
+    fn has_trailing_at(&self, offset: usize) -> bool {
+        self.open
+            .last()
+            .is_some_and(|span| span.byte_range.end() == offset)
+    }
+
+    /// Emits the spans starting at `offset`, outer first.
+    fn emit_leading(&mut self, offset: usize, items: &mut Vec<WordNode>) {
         while let Some(span) = self.spans.get(self.next) {
             if span.byte_range.start() != offset {
                 break;
             }
-            out.push(Self::node(span, offset, SpanEdge::Leading));
+            items.push(Self::node(span, offset, SpanEdge::Leading));
             self.open.push(span);
             self.next += 1;
         }
-        out
     }
 
-    /// The spans ending at `offset`, inner first.
-    fn trailing(&mut self, offset: usize) -> Vec<WordNode> {
-        let mut out = Vec::new();
+    /// Emits the spans ending at `offset`, inner first.
+    fn emit_trailing(&mut self, offset: usize, items: &mut Vec<WordNode>) {
         while let Some(span) = self.open.last() {
             if span.byte_range.end() != offset {
                 break;
             }
-            out.push(Self::node(span, offset, SpanEdge::Trailing));
+            items.push(Self::node(span, offset, SpanEdge::Trailing));
             self.open.pop();
         }
-        out
+    }
+
+    /// Applies open `Clone` spans strictly containing `d`'s break offset.
+    fn apply_clones(&self, d: &mut DiscretionaryNode) {
+        let offset = d.byte_offset();
+        for span in &self.open {
+            if span.break_mode == BoxDecorationBreak::Clone
+                && span.byte_range.start() < offset
+                && offset < span.byte_range.end()
+            {
+                d.cloned_spans.push(span.span_id);
+                d.pre_break_width += span.end_padding;
+                d.post_break_width += span.start_padding;
+                if !d.is_mandatory() {
+                    d.penalty += DiscretionaryNode::CLONED_SPAN_PENALTY;
+                }
+            }
+        }
     }
 }
 

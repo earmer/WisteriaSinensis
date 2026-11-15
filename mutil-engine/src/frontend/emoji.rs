@@ -34,19 +34,29 @@ fn is_tag(c: char) -> bool {
 /// makes nothing an emoji, and a base whose default is text style is emoji
 /// only with U+FE0F (a modifier sequence needs none), never with U+FE0E.
 pub(crate) fn is_emoji_sequence(atom: &str) -> bool {
-    let chars: Vec<char> = atom.chars().collect();
-    match chars.as_slice() {
-        [] => false,
-        // A flag: two regional indicators.
-        [a, b] if REGIONAL.contains(*a) && REGIONAL.contains(*b) => true,
-        // A lone regional indicator is no flag.
-        [a, ..] if REGIONAL.contains(*a) => false,
-        // A keycap: [0-9#*] FE0F? 20E3.
-        [base, EMOJI_STYLE, KEYCAP] | [base, KEYCAP] if is_keycap_base(*base) => true,
-        _ if chars.contains(&ZWJ) => chars
-            .split(|&c| c == ZWJ)
-            .all(|element| !element.is_empty() && is_element(element, true)),
-        _ => is_element(&chars, false),
+    if atom.is_ascii() {
+        return false;
+    }
+    let mut chars = atom.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if is_keycap_base(first) {
+        return matches!(
+            (chars.next(), chars.next(), chars.next()),
+            (Some(KEYCAP), None, None) | (Some(EMOJI_STYLE), Some(KEYCAP), None)
+        );
+    }
+    if REGIONAL.contains(first) {
+        return matches!(
+            (chars.next(), chars.next()),
+            (Some(second), None) if REGIONAL.contains(second)
+        );
+    }
+    if atom.contains(ZWJ) {
+        atom.split(ZWJ).all(|piece| is_element(piece, true))
+    } else {
+        is_element(atom, false)
     }
 }
 
@@ -55,21 +65,25 @@ fn is_keycap_base(c: char) -> bool {
 }
 
 /// One element of a sequence: a base with what may follow it.
-fn is_element(element: &[char], in_zwj_sequence: bool) -> bool {
-    let Some((&base, rest)) = element.split_first() else {
+fn is_element(element: &str, in_zwj_sequence: bool) -> bool {
+    let mut chars = element.chars();
+    let Some(base) = chars.next() else {
         return false;
     };
     if !(EMOJI.contains(base) || PICTOGRAPHIC.contains(base)) || is_keycap_base(base) {
         return false;
     }
-    match rest.first() {
+    match chars.next() {
         // A modifier sequence needs no variation selector.
-        Some(&m) if MODIFIER.contains(m) => MODIFIER_BASE.contains(base),
-        Some(&TEXT_STYLE) => false,
-        Some(&EMOJI_STYLE) => true,
+        Some(m) if MODIFIER.contains(m) => MODIFIER_BASE.contains(base),
+        Some(TEXT_STYLE) => false,
+        Some(EMOJI_STYLE) => true,
         // A tag sequence: tags ended by the cancel tag.
-        Some(&t) if is_tag(t) => {
-            rest.last() == Some(&CANCEL_TAG) && rest[..rest.len() - 1].iter().all(|&c| is_tag(c))
+        Some(t) if is_tag(t) => {
+            let Some(last) = chars.next_back() else {
+                return false;
+            };
+            last == CANCEL_TAG && chars.all(is_tag)
         }
         // A core emoji in its default emoji style, possibly with marks that
         // UAX #29 keeps in its atom; inside a ZWJ sequence any pictograph.

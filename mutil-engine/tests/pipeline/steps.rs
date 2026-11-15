@@ -251,6 +251,32 @@ fn dash_and_ellipsis_runs_never_break_inside() {
     let (dash, ellipsis) = (text.find('—').unwrap(), text.find('…').unwrap());
     assert!(!at.contains(&(dash + 3)), "{at:?}");
     assert!(!at.contains(&(ellipsis + 3)), "{at:?}");
+    assert!(!ast.atoms[1].flags.contains(AtomFlags::BINDS_TO_PREVIOUS));
+    assert!(ast.atoms[2].flags.contains(AtomFlags::BINDS_TO_PREVIOUS));
+    assert!(!ast.atoms[4].flags.contains(AtomFlags::BINDS_TO_PREVIOUS));
+    assert!(ast.atoms[5].flags.contains(AtomFlags::BINDS_TO_PREVIOUS));
+
+    // A ShapingRun boundary (here a style span) prevents binding across runs.
+    let split_spans = [StyleSpan {
+        byte_range: TextRange::new(3, 6),
+        style: style(20.0),
+    }];
+    let split = ParagraphInput {
+        style_spans: &split_spans,
+        ..input("——", &base)
+    };
+    let split_ast = compile_with(&split, &anywhere);
+    assert_eq!(split_ast.runs.len(), 2);
+    assert!(
+        !split_ast.atoms[0]
+            .flags
+            .contains(AtomFlags::BINDS_TO_PREVIOUS)
+    );
+    assert!(
+        !split_ast.atoms[1]
+            .flags
+            .contains(AtomFlags::BINDS_TO_PREVIOUS)
+    );
 }
 
 fn locale(tag: &str) -> LocaleTag {

@@ -6,7 +6,7 @@ pub const BIDI_MAX_DEPTH: u8 = 125;
 
 /// A UAX #9 embedding level: even = LTR, odd = RTL (spec §2.1).
 ///
-/// Parsed, not validated (spec §1.5, A3): [`new`](Self::new) refuses a level
+/// Parsed, not validated (spec §1.5, AX-3): [`new`](Self::new) refuses a level
 /// above [`BidiLevel::MAX`] (`BIDI_MAX_DEPTH + 1`, the highest level implicit
 /// resolution reaches), so a level that exists is one UAX #9 can produce.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]

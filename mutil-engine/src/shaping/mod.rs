@@ -1,5 +1,6 @@
-//! Abstract shaping bridge, its empty implementation, the HarfRust backend
-//! skeleton and the font source renderers resolve faces through (spec §4, §8).
+//! Abstract shaping bridge, the HarfRust backend, the `LineOnly` adapter,
+//! the empty test double and the font source renderers resolve faces through
+//! (spec §4, §8).
 
 mod clusters;
 mod font_source;

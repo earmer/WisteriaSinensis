@@ -1,4 +1,4 @@
-//! Font bytes for renderers (spec §8, HST-2, HST-3).
+//! Font bytes for renderers (spec §8, HST-1, HST-2).
 //!
 //! A renderer resolves a [`FontId`] to the exact face the shaper used through
 //! a [`FontSource`], typically the font registry the shaper was built on and
@@ -10,7 +10,7 @@ use crate::types::FontId;
 use core::fmt;
 use std::sync::Arc;
 
-/// The bytes of a font file, shared without copying (spec HST-3).
+/// The bytes of a font file, shared without copying (spec HST-1).
 ///
 /// Cheap to clone and safe to send to another thread. The representation is
 /// private: static data is borrowed, and any other buffer (a `Vec<u8>`, a
@@ -53,6 +53,15 @@ impl FontBytes {
             Repr::Shared(owner) => (**owner).as_ref(),
         }
     }
+
+    /// Returns a reference-counted handle to the underlying bytes without
+    /// wrapping an already-shared buffer in a second `Arc`.
+    pub(crate) fn shared_arc(&self) -> Arc<dyn AsRef<[u8]> + Send + Sync> {
+        match &self.0 {
+            Repr::Static(bytes) => Arc::new(*bytes),
+            Repr::Shared(owner) => Arc::clone(owner),
+        }
+    }
 }
 
 impl AsRef<[u8]> for FontBytes {
@@ -70,7 +79,7 @@ impl fmt::Debug for FontBytes {
 }
 
 /// One face of a font file: its bytes and its index in a collection
-/// (spec HST-2).
+/// (spec HST-1).
 #[derive(Clone, Debug)]
 pub struct FontFace {
     bytes: FontBytes,
@@ -104,7 +113,7 @@ impl FontFace {
 /// Implemented by whatever owns the shaper's id space, usually a font
 /// registry shared by the shaper and the renderer. A source never reuses an
 /// id and keeps a face resolvable while any output that names it may still be
-/// drawn (spec HST-3).
+/// drawn (spec HST-2).
 pub trait FontSource: Send + Sync {
     /// The face `font` names, or `None` when this source did not issue it.
     fn resolve_font(&self, font: FontId) -> Option<FontFace>;
@@ -137,5 +146,8 @@ mod tests {
         let address = (*owner).as_ref().as_ptr();
         let bytes = FontBytes::from_shared(Arc::clone(&owner));
         assert_eq!(bytes.as_bytes().as_ptr(), address);
+        let shared = bytes.shared_arc();
+        assert_eq!((*shared).as_ref().as_ptr(), address);
+        assert_eq!(Arc::strong_count(&owner), 3);
     }
 }

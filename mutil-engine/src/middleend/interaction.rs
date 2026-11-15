@@ -6,7 +6,7 @@
 //! deletion ranges and the copied text; and the UTF-16 conversions.
 
 use super::output::{AtomicFragment, CaretAffinity, CaretStop, HangSide, PositionedParagraph};
-use super::tolerance::approx_eq;
+use super::tolerance::{approx_eq, tolerance};
 use super::{ValidatedInputs, ValidatedLayout};
 use crate::types::{AtomFlags, BidiLevel, ByteIndex, Point, Rect, TextRange, WritingMode};
 
@@ -584,19 +584,16 @@ impl ValidatedLayout<'_> {
                 inline_position: None,
             };
         }
-        let mut offsets: Vec<usize> = self
+        let offsets = self
             .paragraph()
             .lines
             .iter()
             .flat_map(|l| l.caret_stops.iter().map(|s| s.offset))
-            .filter(|o| boundaries.is_none_or(|b| b.binary_search(o).is_ok()))
-            .collect();
-        offsets.sort_unstable();
-        offsets.dedup();
+            .filter(|o| boundaries.is_none_or(|b| b.binary_search(o).is_ok()));
         let target = if forward {
-            offsets.iter().copied().find(|&o| o > offset)
+            offsets.filter(|&o| o > offset).min()
         } else {
-            offsets.iter().rev().copied().find(|&o| o < offset)
+            offsets.filter(|&o| o < offset).max()
         };
         let target = target.unwrap_or(if forward { text_end } else { 0 });
         CursorMove::Moved(CursorPosition {
@@ -609,13 +606,10 @@ impl ValidatedLayout<'_> {
 /// The flow-space block interval of line `line`: its line box.
 fn line_block(paragraph: &PositionedParagraph, line: usize) -> (f32, f32) {
     let l = &paragraph.lines[line];
-    let above = if paragraph.policy.writing_mode == WritingMode::VerticalLr {
-        l.descent
-    } else {
-        l.ascent
-    };
-    let top = l.baseline_y - above;
-    (top, top + l.line_height)
+    paragraph
+        .policy
+        .writing_mode
+        .line_bounds(l.baseline_y, l.ascent, l.descent)
 }
 
 /// A visual slot of a line: the stretch between two neighbouring caret
@@ -750,36 +744,38 @@ impl ValidatedLayout<'_> {
         let p = self.paragraph();
         let l = &p.lines[line];
         let (mut above, mut below) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-        let inside = |x: f32| x >= x0 - 1e-3 && x <= x1 + 1e-3;
+        let eps = tolerance(x0, x1);
+        let inside = |x: f32| x >= x0 - eps && x <= x1 + eps;
         for run in &l.visual_runs {
             // A glyph counts when its extent meets the piece and its bytes
             // meet the selection: part of a ligature selects its font.
             let selected = run.glyphs.iter().any(|g| {
-                let (lo, hi) = (g.x.min(g.x + g.advance), g.x.max(g.x + g.advance));
-                lo < x1 - 1e-3
-                    && hi > x0 + 1e-3
+                let (lo, hi) = g.pen_interval();
+                lo < x1 - eps
+                    && hi > x0 + eps
                     && g.byte_range
                         .is_some_and(|b| b.start() < range.end() && range.start() < b.end())
             });
             if !selected {
                 continue;
             }
-            let Ok(line_box) = super::shaper_gate::checked_line_box(
+            let Ok(metrics) = super::shaper_gate::checked_font_metrics(
                 shaper,
                 crate::types::FontInstanceRef {
                     font: run.font,
                     font_size: run.font_size,
                     variations: &run.variations,
                 },
-                super::LineHeight::Normal,
-                p.policy.writing_mode,
             ) else {
                 continue;
             };
-            // The instance's own extents, without its half-leading.
-            let gap = line_box.line_gap / 2.0;
-            above = above.max(line_box.ascent - gap);
-            below = below.max(line_box.descent - gap);
+            let (ascent, descent) = if p.policy.writing_mode.is_vertical() {
+                (metrics.vertical_ascent, metrics.vertical_descent)
+            } else {
+                (metrics.ascent, metrics.descent)
+            };
+            above = above.max(ascent);
+            below = below.max(descent);
         }
         for b in &l.visual_boxes {
             if inside(b.x) && range.contains_range(b.byte_range) {
@@ -791,7 +787,9 @@ impl ValidatedLayout<'_> {
             above = p.policy.strut.ascent;
             below = p.policy.strut.descent;
         }
-        (l.baseline_y - above, l.baseline_y + below)
+        p.policy
+            .writing_mode
+            .line_bounds(l.baseline_y, above, below)
     }
 }
 
@@ -873,13 +871,16 @@ impl ValidatedInputs<'_> {
 
 /// The range of the inline object holding `byte`, if any.
 fn object_holding(ast: &crate::frontend::ParagraphAst, byte: ByteIndex) -> Option<TextRange> {
-    ast.items.iter().find_map(|item| match item {
+    let i = ast
+        .items
+        .partition_point(|item| item.byte_span().end <= byte);
+    match ast.items.get(i)? {
         crate::frontend::WordNode::Box(crate::frontend::BoxNode::InlineObject {
             byte_range,
             ..
         }) if byte_range.start() <= byte && byte < byte_range.end() => Some(*byte_range),
         _ => None,
-    })
+    }
 }
 
 /// `offset` clamped to `text` and moved back to a character boundary.

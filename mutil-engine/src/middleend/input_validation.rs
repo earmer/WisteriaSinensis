@@ -241,10 +241,7 @@ pub enum LayoutInputError {
 /// `true` when `range` is well formed, inside `text` and on character
 /// boundaries.
 fn fits(text: &str, range: TextRange) -> bool {
-    range.start() <= range.end()
-        && range.end() <= text.len()
-        && text.is_char_boundary(range.start())
-        && text.is_char_boundary(range.end())
+    range.slice(text).is_some()
 }
 
 /// Whether `ranges` are non-overlapping and in byte order, which the binary
@@ -749,6 +746,9 @@ fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
             return Err(E::InvalidDecorationSpan { span });
         }
         stack.push(r);
+    }
+    if ast.atomic_spans.is_empty() {
+        return Ok(());
     }
     let content = concrete_content(ast);
     if !in_byte_order(content.iter().copied()) {
@@ -1399,9 +1399,11 @@ pub(super) fn validate_layout_inputs(
     }
     check_storage(ast)?;
     check_presentation(ast)?;
-    let edges = ContentEdges::new(ast);
-    check_bidi_spans(ast, text, &edges)?;
-    check_annotations(ast, text, &edges)?;
+    if !ast.bidi_spans.is_empty() || !ast.annotations.is_empty() {
+        let edges = ContentEdges::new(ast);
+        check_bidi_spans(ast, text, &edges)?;
+        check_annotations(ast, text, &edges)?;
+    }
     // `check_run` proves each run's range is ordered and inside `text`; the body
     // runs then progress through the text (`prev.end <= next.start`).
     let mut previous_end = 0;

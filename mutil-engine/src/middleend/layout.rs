@@ -10,7 +10,8 @@
 //! justification, hanging punctuation, hyphenation, the optimising
 //! strategies (every strategy breaks greedily), annotations and clamping.
 
-use super::shaper_gate::checked_line_box;
+use super::shaper_gate::{checked_font_metrics, checked_line_box, checked_reshape_window};
+use super::tolerance::approx_eq;
 use super::{
     AtomicFragment, CaretAffinity, CaretStop, DecorationKind, DecorationLine,
     HangingWhitespaceMode, InlineSlotConstraint, LayoutConstraints, LayoutInputError,
@@ -19,12 +20,13 @@ use super::{
     ValidatedInputs, VisualGlyphRun, resolve_ligature_carets,
 };
 use crate::frontend::{
-    AnnotationSide, BoxNode, BoxOverflowPolicy, DiscretionaryNode, ParagraphAst, WordNode,
+    AnnotationSide, BoxNode, BoxOverflowPolicy, DiscretionaryNode, InlineDecorationSpan,
+    ParagraphAst, WordNode,
 };
 use crate::shaping::TextShaper;
 use crate::types::{
     AtomFlags, BaselineAlignment, BidiDirection, BidiLevel, FontInstanceRef, FontMetrics,
-    TextRange, WritingMode,
+    RawShapedGlyph, TextRange, WritingMode,
 };
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -256,37 +258,32 @@ enum LineEnd {
 /// A cluster whose glyphs an emergency re-shape replaced.
 #[derive(Clone, Debug)]
 struct Reshaped {
-    glyphs: Vec<crate::types::RawShapedGlyph>,
+    glyphs: Vec<RawShapedGlyph>,
     width: f32,
 }
 
 struct Layout<'i, 'a> {
     inputs: &'i ValidatedInputs<'a>,
     ast: &'a ParagraphAst,
-    text: &'a str,
     shaper: &'i dyn TextShaper,
     options: &'a LayoutOptions,
     tokens: Vec<Token>,
     strut: StrutMetrics,
     base: BidiDirection,
-    line_boxes: HashMap<(u32, u32, usize), StrutMetrics>,
     metrics: HashMap<(u32, u32, usize), FontMetrics>,
     reshaped: HashMap<usize, Reshaped>,
-    /// The width of the slot being filled: an object's reference width
-    /// (spec WN-7).
-    reference: f32,
-    /// The end of that slot, in line-local coordinates.
-    slot_end: f32,
 }
 
-/// A line's content placed relative to its own origin, before the slot
-/// offset is known.
-struct Placed {
-    line: PositionedLine,
-    /// The relative left edge of the content block.
-    content_lo: f32,
-    /// Its width.
-    content_width: f32,
+/// One piece of the current line together with its L1-resolved bidi level,
+/// preceding no-break gap, horizontal placement and baseline shift.
+#[derive(Clone, Copy, Debug)]
+struct PlacedPiece {
+    piece: Piece,
+    level: BidiLevel,
+    gap: f32,
+    x: f32,
+    width: f32,
+    y_shift: f32,
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
@@ -364,17 +361,13 @@ impl<'i, 'a> Layout<'i, 'a> {
         Self {
             inputs,
             ast,
-            text: inputs.text(),
             shaper,
             options: inputs.options(),
             tokens,
             strut: inputs.policy().strut,
             base: ast.base_direction,
-            line_boxes: HashMap::new(),
             metrics: HashMap::new(),
             reshaped: HashMap::new(),
-            reference: f32::INFINITY,
-            slot_end: f32::INFINITY,
         }
     }
 
@@ -385,6 +378,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut post = 0.0;
         let mut byte_start = 0;
         let mut block = 0.0_f32;
+        let has_provider = self.inputs.constraints().geometry_provider.is_some();
         loop {
             let index = lines.len();
             let mut envelope = strut_height;
@@ -406,11 +400,12 @@ impl<'i, 'a> Layout<'i, 'a> {
                 let mut geometry = geometry;
                 for _ in 0..MAX_ENVELOPE_REFITS {
                     let slot = geometry.slots[0];
+                    let saved_reshaped = has_provider.then(|| self.reshaped.clone());
                     let end = self.fit(start, post, slot);
-                    let line = self.place(index, start, post, byte_start, end, &geometry)?;
+                    let line = self.place(index, start, post, byte_start, block, end, &geometry)?;
                     if line.line_height
                         <= envelope + super::tolerance::tolerance(line.line_height, envelope)
-                        || self.inputs.constraints().geometry_provider.is_none()
+                        || !has_provider
                     {
                         break 'place (line, end);
                     }
@@ -421,7 +416,19 @@ impl<'i, 'a> Layout<'i, 'a> {
                         block + envelope,
                         Some(&geometry),
                     )?;
+                    if expanded == geometry {
+                        break 'place (line, end);
+                    }
+                    // This attempt was not committed: discard speculative seam
+                    // re-shapes before refitting in `expanded` or relocating.
+                    if let Some(saved) = saved_reshaped {
+                        self.reshaped = saved;
+                    }
                     if expanded.slots.is_empty() {
+                        obstructed += 1;
+                        if obstructed > MAX_CLEARANCE_PROBES {
+                            return Err(LayoutInputError::InvalidLineGeometry);
+                        }
                         // No room for a line this tall here: move past the
                         // obstruction and start again.
                         block = expanded
@@ -430,22 +437,11 @@ impl<'i, 'a> Layout<'i, 'a> {
                             .ok_or(LayoutInputError::InvalidLineGeometry)?;
                         continue 'place;
                     }
-                    if expanded == geometry {
-                        break 'place (line, end);
-                    }
                     geometry = expanded;
                 }
                 return Err(LayoutInputError::InvalidLineGeometry);
             };
-            let mut line = line;
-            let (top, _) = (block, ());
-            line.baseline_y = top
-                + if self.ast.writing_mode == WritingMode::VerticalLr {
-                    line.descent
-                } else {
-                    line.ascent
-                };
-            block = top + line.line_height;
+            block += line.line_height;
             let finished = match end {
                 LineEnd::At(t) => {
                     let Token::Break(b) = &self.tokens[t] else {
@@ -485,29 +481,30 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     /// The next tab stop after the absolute pen position `pen` that lies
-    /// inside the current slot, if any (spec ST3-1): a stop beyond the slot's
-    /// end is not reachable from it.
-    fn reachable_stop(&self, pen: f32) -> Option<f32> {
+    /// inside `slot`, if any (spec ST3-1): a stop beyond the slot's end is
+    /// not reachable from it.
+    fn reachable_stop(&self, pen: f32, slot: InlineSlotConstraint) -> Option<f32> {
+        let slot_end = slot.end();
         self.inputs
             .constraints()
             .tab_stops
             .next_stop(pen)
-            .filter(|&stop| {
-                stop <= self.slot_end + super::tolerance::tolerance(stop, self.slot_end)
-            })
+            .filter(|&stop| stop <= slot_end + super::tolerance::tolerance(stop, slot_end))
     }
 
     /// The advance and the reach (rightmost pen end, relative to the start)
-    /// of a piece starting at the absolute pen position `pen`.
-    fn measure(&self, piece: &Piece, pen: f32) -> (f32, f32) {
+    /// of a piece starting at the absolute pen position `pen` in `slot`.
+    fn measure(&self, piece: &Piece, pen: f32, slot: InlineSlotConstraint) -> (f32, f32) {
         match piece.kind {
             PieceKind::Tab => {
                 // A tab with no reachable stop takes no advance (ST3-1, AX-6).
-                let width = self.reachable_stop(pen).map_or(0.0, |stop| stop - pen);
+                let width = self
+                    .reachable_stop(pen, slot)
+                    .map_or(0.0, |stop| stop - pen);
                 (width, width)
             }
-            PieceKind::Cluster { cluster, run } => {
-                let (glyphs, width) = self.cluster_glyphs(cluster, run);
+            PieceKind::Cluster { cluster, .. } => {
+                let (glyphs, width) = self.cluster_glyphs(cluster);
                 let mut x = 0.0_f32;
                 let mut reach = width;
                 for g in glyphs {
@@ -517,7 +514,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 (width, reach)
             }
             PieceKind::Object { item } => {
-                let (width, _, _) = self.fitted_object(item);
+                let (width, _, _) = self.fitted_object(item, slot);
                 (width, width)
             }
             _ => (piece.width, piece.width),
@@ -525,9 +522,9 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     /// An object's width, ascent and descent under its overflow policy in
-    /// the current slot (spec WN-7): `Clip` clamps to the reference width,
+    /// `slot` (spec WN-7): `Clip` clamps to the reference width,
     /// `ScaleToFit` scales uniformly to it, `AllowOverflow` keeps its size.
-    fn fitted_object(&self, item: usize) -> (f32, f32, f32) {
+    fn fitted_object(&self, item: usize, slot: InlineSlotConstraint) -> (f32, f32, f32) {
         let WordNode::Box(BoxNode::InlineObject {
             width,
             ascent,
@@ -539,7 +536,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             unreachable!("an object piece names an object item")
         };
         let (width, ascent, descent) = (*width, *ascent, *descent);
-        let reference = self.reference;
+        let reference = slot.width();
         match overflow_policy {
             BoxOverflowPolicy::AllowOverflow => (width, ascent, descent),
             _ if width <= reference => (width, ascent, descent),
@@ -552,16 +549,12 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     /// The glyphs and width of a cluster, after any emergency re-shape.
-    fn cluster_glyphs(
-        &self,
-        cluster: usize,
-        _run: usize,
-    ) -> (Vec<crate::types::RawShapedGlyph>, f32) {
+    fn cluster_glyphs(&self, cluster: usize) -> (&[RawShapedGlyph], f32) {
         if let Some(r) = self.reshaped.get(&cluster) {
-            return (r.glyphs.clone(), r.width);
+            return (&r.glyphs, r.width);
         }
         let c = &self.ast.clusters[cluster];
-        (self.inputs.cluster_glyphs(c).to_vec(), c.natural_width)
+        (self.inputs.cluster_glyphs(c), c.natural_width)
     }
 
     /// Greedy fitting (spec ST1-1, ST1-5, WN-1): the last break of the
@@ -569,8 +562,6 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// mandatory break, or an emergency cluster break when nothing fits.
     fn fit(&mut self, start: usize, post: f32, slot: InlineSlotConstraint) -> LineEnd {
         let available = slot.width();
-        self.reference = available;
-        self.slot_end = slot.end();
         let origin = slot.start();
         let mut pen = post;
         let mut body = post;
@@ -592,7 +583,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 Token::Piece(piece)
                     if matches!(piece.kind, PieceKind::Tab)
-                        && self.reachable_stop(origin + pen).is_none() =>
+                        && self.reachable_stop(origin + pen, slot).is_none() =>
                 {
                     // No reachable stop (spec ST3-1, AX-6): break before the
                     // tab at an earlier opportunity, else consume it with no
@@ -607,20 +598,14 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 Token::Piece(piece) => {
                     let piece = *piece;
-                    let (advance, reach) = self.measure(&piece, origin + pen);
+                    let (advance, reach) = self.measure(&piece, origin + pen, slot);
                     if piece.is_content() {
                         let end = pen + reach.max(advance);
-                        if has_content && end > available + FIT_EPSILON {
+                        if end > available + FIT_EPSILON {
                             return match best(&fits) {
                                 Some(b) => LineEnd::At(b),
-                                None => self.emergency(start, t, post, origin),
+                                None => self.emergency(start, t, post, slot),
                             };
-                        }
-                        if !has_content && end > available + FIT_EPSILON {
-                            if let Some(b) = best(&fits) {
-                                return LineEnd::At(b);
-                            }
-                            return self.emergency(start, t, post, origin);
                         }
                         body = end;
                         has_content = true;
@@ -649,13 +634,20 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// visible precedes it, else after `t` alone (one indivisible entity on
     /// its own overflowing line, SLT-5), together with the break right after
     /// it if only glue separates them.
-    fn emergency(&mut self, start: usize, t: usize, post: f32, origin: f32) -> LineEnd {
+    fn emergency(
+        &mut self,
+        start: usize,
+        t: usize,
+        post: f32,
+        slot: InlineSlotConstraint,
+    ) -> LineEnd {
         let first_content =
             (start..t).find(|&k| matches!(&self.tokens[k], Token::Piece(p) if p.is_content()));
         if let Some(first) = first_content {
             // Re-shaping an unsafe seam can widen its sides (kerning across
             // it is lost); while the line then overflows, the seam moves one
             // piece back and the abandoned re-shape is dropped.
+            let available = slot.width();
             let mut t = t;
             loop {
                 // A dash, ellipsis or middle-dot run (FE-15) moves whole to
@@ -669,7 +661,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 let added = self.repair_seam(t);
                 if t <= first + 1
-                    || self.content_end(start, t, post, origin) <= self.reference + FIT_EPSILON
+                    || self.content_end(start, t, post, slot) <= available + FIT_EPSILON
                 {
                     return LineEnd::Before(t);
                 }
@@ -686,18 +678,21 @@ impl<'i, 'a> Layout<'i, 'a> {
         LineEnd::Before(t + 1)
     }
 
-    /// Whether the seam before token `t` lies inside a run of one of U+2014,
-    /// U+2026 and U+00B7 (spec FE-15).
-    fn inside_dash_run(&self, t: usize) -> bool {
-        let Some(Token::Piece(p)) = self.tokens.get(t) else {
-            return false;
-        };
-        let at = p.bytes.start();
-        self.text[at..]
-            .chars()
-            .next()
-            .filter(|c| matches!(c, '\u{2014}' | '\u{2026}' | '\u{00B7}'))
-            .is_some_and(|c| self.text[..at].ends_with(c))
+    /// Whether the seam before token `t` lies inside a binding punctuation run
+    /// such as consecutive U+2014, U+2026 or U+00B7 (spec FE-15).
+    fn inside_dash_run(&self, mut t: usize) -> bool {
+        while let Some(Token::Piece(p)) = self.tokens.get(t) {
+            match p.kind {
+                PieceKind::SpanEdge { .. } => t += 1,
+                PieceKind::Cluster { cluster, .. } => {
+                    return self.ast.clusters[cluster]
+                        .flags
+                        .contains(AtomFlags::BINDS_TO_PREVIOUS);
+                }
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// The first token of the run whose seam `t` lies inside, or `t`.
@@ -731,40 +726,22 @@ impl<'i, 'a> Layout<'i, 'a> {
             sides.push(after - 1);
         }
         let atoms = self.inputs.run_atoms(run);
+        let text = self.inputs.text();
         for c in sides {
-            let window = self.ast.clusters[c].byte_range;
-            let mut clusters = Vec::new();
-            let mut glyphs = Vec::new();
-            self.shaper.reshape_window(
-                self.text,
+            let cluster = &self.ast.clusters[c];
+            if let Some((glyphs, width)) = checked_reshape_window(
+                self.shaper,
+                text,
                 &self.ast.runs[run],
                 atoms,
-                window,
-                crate::shaping::LeadingEdit::None,
-                crate::shaping::TrailingEdit::None,
-                &mut clusters,
-                &mut glyphs,
-            );
-            let [only] = clusters.as_slice() else {
-                continue;
-            };
-            let usable = only.atom_range == self.ast.clusters[c].atom_range
-                && only.glyph_range == (0..glyphs.len())
-                && glyphs.iter().all(|g| {
-                    g.x_advance.is_finite() && g.x_offset.is_finite() && g.y_offset.is_finite()
-                })
-                && only.natural_width.is_finite()
-                && only.natural_width >= 0.0;
-            if usable {
-                let advance: f32 = glyphs.iter().map(|g| g.x_advance).sum();
-                let width = (advance + self.ast.runs[run].letter_spacing).max(0.0);
-                if self
-                    .reshaped
-                    .insert(c, Reshaped { glyphs, width })
-                    .is_none()
-                {
-                    added.push(c);
-                }
+                cluster.byte_range,
+                cluster.atom_range.clone(),
+            ) && self
+                .reshaped
+                .insert(c, Reshaped { glyphs, width })
+                .is_none()
+            {
+                added.push(c);
             }
         }
         added
@@ -772,14 +749,15 @@ impl<'i, 'a> Layout<'i, 'a> {
 
     /// Where the content of a line from `start` ends when it stops before
     /// token `end`, measured as [`fit`](Self::fit) measures it.
-    fn content_end(&self, start: usize, end: usize, post: f32, origin: f32) -> f32 {
+    fn content_end(&self, start: usize, end: usize, post: f32, slot: InlineSlotConstraint) -> f32 {
+        let origin = slot.start();
         let mut pen = post;
         let mut body = post;
         for token in &self.tokens[start..end] {
             match token {
                 Token::Break(b) => pen += b.no_break,
                 Token::Piece(piece) => {
-                    let (advance, reach) = self.measure(piece, origin + pen);
+                    let (advance, reach) = self.measure(piece, origin + pen, slot);
                     if piece.is_content() {
                         body = pen + reach.max(advance);
                     }
@@ -797,25 +775,17 @@ impl<'i, 'a> Layout<'i, 'a> {
         run: usize,
         cluster: usize,
     ) -> Result<StrutMetrics, LayoutInputError> {
-        let font = self.ast.clusters[cluster].font;
-        let key = (font.font_id.0, font.scale.to_bits(), run);
-        if let Some(found) = self.line_boxes.get(&key) {
-            return Ok(*found);
-        }
-        let r = &self.ast.runs[run];
-        let instance = FontInstanceRef {
-            font,
-            font_size: r.font_size,
-            variations: r.features.variations(),
-        };
-        let line_box = checked_line_box(
-            self.shaper,
-            instance,
-            self.options.line_height,
+        let metrics = self.cluster_metrics(run, cluster)?;
+        let line_box = self.options.line_height.resolve_strut(
+            &metrics,
+            self.ast.runs[run].font_size,
             self.ast.writing_mode,
-        )?;
-        self.line_boxes.insert(key, line_box);
-        Ok(line_box)
+        );
+        if line_box.is_valid() {
+            Ok(line_box)
+        } else {
+            Err(LayoutInputError::InvalidFontMetrics)
+        }
     }
 
     /// A cluster's font metrics, through the shaper gate (spec G2).
@@ -830,31 +800,31 @@ impl<'i, 'a> Layout<'i, 'a> {
             return Ok(*found);
         }
         let r = &self.ast.runs[run];
-        let metrics = self.shaper.font_metrics(FontInstanceRef {
-            font,
-            font_size: r.font_size,
-            variations: r.features.variations(),
-        });
-        if !metrics.is_valid() {
-            return Err(LayoutInputError::InvalidFontMetrics);
-        }
+        let metrics = checked_font_metrics(
+            self.shaper,
+            FontInstanceRef {
+                font,
+                font_size: r.font_size,
+                variations: r.features.variations(),
+            },
+        )?;
         self.metrics.insert(key, metrics);
         Ok(metrics)
     }
 
     /// Places the line `(start, end]` in the first slot of `geometry`.
+    #[expect(clippy::too_many_arguments, reason = "one line's placement state")]
     fn place(
         &mut self,
         index: usize,
         start: usize,
         post: f32,
         byte_start: usize,
+        block_top: f32,
         end: LineEnd,
         geometry: &LineGeometry,
     ) -> Result<PositionedLine, LayoutInputError> {
         let slot = geometry.slots[0];
-        self.reference = slot.width();
-        self.slot_end = slot.end();
         let (last_piece, end_break, byte_end) = match end {
             LineEnd::At(t) => {
                 let Token::Break(b) = &self.tokens[t] else {
@@ -866,52 +836,55 @@ impl<'i, 'a> Layout<'i, 'a> {
         };
         let soft_wrap = end_break.as_ref().is_none_or(|b| !b.mandatory);
         let pre = end_break.as_ref().map_or(0.0, |b| b.pre);
-        // The line's pieces, logical order, with their no-break gaps.
-        let mut pieces: Vec<(Piece, f32)> = Vec::new();
+        // The line's pieces, logical order, with their no-break gaps and L1 levels.
+        let mut placed: Vec<PlacedPiece> = Vec::new();
         let mut gap = 0.0;
         for token in &self.tokens[start..last_piece] {
             match token {
                 Token::Piece(p) => {
-                    pieces.push((*p, gap));
+                    placed.push(PlacedPiece {
+                        piece: *p,
+                        level: p.level,
+                        gap,
+                        x: 0.0,
+                        width: 0.0,
+                        y_shift: 0.0,
+                    });
                     gap = 0.0;
                 }
                 Token::Break(b) => gap += b.no_break,
             }
         }
-        let body_len = pieces
+        let body_len = placed
             .iter()
-            .rposition(|(p, _)| p.is_content())
+            .rposition(|p| p.piece.is_content())
             .map_or(0, |k| k + 1);
         let base_level = self.base.base_level();
         // UAX #9 L1: trailing whitespace, tabs and the whitespace before a
         // tab take the paragraph level.
-        let mut levels: Vec<BidiLevel> = pieces.iter().map(|(p, _)| p.level).collect();
-        for k in (0..pieces.len()).rev() {
+        for k in (0..placed.len()).rev() {
             let resets = k >= body_len
-                || matches!(pieces[k].0.kind, PieceKind::Tab)
-                || (matches!(pieces[k].0.kind, PieceKind::Glue)
-                    && pieces[k + 1..]
+                || matches!(placed[k].piece.kind, PieceKind::Tab)
+                || (matches!(placed[k].piece.kind, PieceKind::Glue)
+                    && placed[k + 1..]
                         .iter()
-                        .take_while(|(p, _)| matches!(p.kind, PieceKind::Glue | PieceKind::Tab))
-                        .any(|(p, _)| matches!(p.kind, PieceKind::Tab)));
+                        .take_while(|p| matches!(p.piece.kind, PieceKind::Glue | PieceKind::Tab))
+                        .any(|p| matches!(p.piece.kind, PieceKind::Tab)));
             if resets {
-                levels[k] = base_level;
+                placed[k].level = base_level;
             }
         }
-        let order = visual_order(&levels[..body_len]);
+        let order = visual_order(&placed[..body_len]);
         let rtl = self.base.is_rtl();
         // Relative placement of the body, left to right.
         let (left_pad, right_pad) = if rtl { (pre, post) } else { (post, pre) };
         let origin = slot.start();
         let mut x = left_pad;
-        let mut starts = vec![0.0_f32; pieces.len()];
-        let mut widths = vec![0.0_f32; pieces.len()];
         for &k in &order {
-            let (piece, gap) = pieces[k];
-            x += gap;
-            let (advance, _) = self.measure(&piece, origin + x);
-            starts[k] = x;
-            widths[k] = advance;
+            x += placed[k].gap;
+            let (advance, _) = self.measure(&placed[k].piece, origin + x, slot);
+            placed[k].x = x;
+            placed[k].width = advance;
             x += advance;
         }
         let body_end = x + right_pad;
@@ -920,102 +893,63 @@ impl<'i, 'a> Layout<'i, 'a> {
         let trailing_width = |w: f32| if collapsible { 0.0 } else { w };
         if rtl {
             let mut tx = 0.0;
-            for k in body_len..pieces.len() {
-                let w = trailing_width(pieces[k].0.width);
+            for p in &mut placed[body_len..] {
+                let w = trailing_width(p.piece.width);
                 tx -= w;
-                starts[k] = tx;
-                widths[k] = w;
+                p.x = tx;
+                p.width = w;
             }
         } else {
             let mut tx = body_end;
-            for k in body_len..pieces.len() {
-                let w = trailing_width(pieces[k].0.width);
-                starts[k] = tx;
-                widths[k] = w;
+            for p in &mut placed[body_len..] {
+                let w = trailing_width(p.piece.width);
+                p.x = tx;
+                p.width = w;
                 tx += w;
             }
         }
-        let placed = self.build_line(
+        self.build_line(
             index,
-            &pieces,
-            &levels,
+            &mut placed,
             &order,
-            &starts,
-            &widths,
             body_len,
             soft_wrap,
             TextRange::new(byte_start, byte_end),
             (left_pad, body_end),
             end_break.as_ref(),
             post,
-        )?;
-        let Placed {
-            mut line,
-            content_lo,
-            content_width,
-        } = placed;
-        // Alignment: the line start of the base direction.
-        let content_start = if rtl && slot.end().is_finite() && content_width <= slot.width() {
-            slot.end() - content_width
-        } else {
-            slot.start()
-        };
-        let shift = content_start - content_lo;
-        shift_line(&mut line, shift);
-        let mut slots: SmallVec<[PositionedSlot; 1]> = geometry
-            .slots
-            .iter()
-            .map(|&constraint| PositionedSlot {
-                constraint,
-                content_start: constraint.start(),
-                visual_width: 0.0,
-            })
-            .collect();
-        slots[0].content_start = content_start;
-        slots[0].visual_width = content_width;
-        line.slots = slots;
-        Ok(line)
+            block_top,
+            geometry,
+        )
     }
 
     #[expect(clippy::too_many_arguments, reason = "one line's placement state")]
     fn build_line(
         &mut self,
         index: usize,
-        pieces: &[(Piece, f32)],
-        levels: &[BidiLevel],
+        placed: &mut [PlacedPiece],
         order: &[usize],
-        starts: &[f32],
-        widths: &[f32],
         body_len: usize,
         soft_wrap: bool,
         byte_range: TextRange,
         (body_lo, body_hi): (f32, f32),
         end_break: Option<&Break>,
         post: f32,
-    ) -> Result<Placed, LayoutInputError> {
+        block_top: f32,
+        geometry: &LineGeometry,
+    ) -> Result<PositionedLine, LayoutInputError> {
         let ast = self.ast;
-        let mut visual_runs: Vec<VisualGlyphRun> = Vec::new();
-        let mut visual_boxes: Vec<PositionedInlineBox> = Vec::new();
-        let mut tabs: Vec<PositionedTab> = Vec::new();
-        let mut decorations: Vec<DecorationLine> = Vec::new();
+        let slot = geometry.slots[0];
         // Line box.
         let normal = matches!(self.options.line_height, LineHeight::Normal);
         let half = |m: StrutMetrics| (m.ascent + m.line_gap / 2.0, m.descent + m.line_gap / 2.0);
         let (mut above, mut below) = half(self.strut);
-        let mut visible_end = byte_range.start();
-        // Extents of the content, for the content block (SLT-3).
-        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        let mut extend = |a: f32, b: f32| {
-            lo = lo.min(a.min(b));
-            hi = hi.max(a.max(b));
-        };
         // Baseline alignment (§5 Stage 4): every item's shift towards
         // line-over. Named baselines and offsets are known before the line
         // box; line-top and line-bottom items are placed against it after.
-        let mut shifts = vec![0.0_f32; pieces.len()];
         let mut line_relative: Vec<(usize, bool, f32, f32)> = Vec::new();
         for &k in order {
-            let (piece, _) = pieces[k];
+            let piece = placed[k].piece;
             let (align, a, d) = match piece.kind {
                 PieceKind::Cluster { run, cluster } => {
                     let (a, d) = if normal || is_line_relative(ast.runs[run].baseline_align) {
@@ -1031,7 +965,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     else {
                         unreachable!("an object piece names an object item")
                     };
-                    let (_, a, d) = self.fitted_object(item);
+                    let (_, a, d) = self.fitted_object(item, slot);
                     (*baseline_align, a, d)
                 }
                 _ => continue,
@@ -1049,7 +983,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                         }
                         _ => object_shift(align, &self.ast.strut_metrics),
                     };
-                    shifts[k] = shift;
+                    placed[k].y_shift = shift;
                     if normal || is_object {
                         above = above.max(a + shift);
                         below = below.max(d - shift);
@@ -1084,75 +1018,138 @@ impl<'i, 'a> Layout<'i, 'a> {
             LineHeight::Normal => (above, below, above + below),
         };
         for &(k, top, a, d) in &line_relative {
-            shifts[k] = if top { ascent - a } else { d - descent };
+            placed[k].y_shift = if top { ascent - a } else { d - descent };
         }
+        // Compute content bounds (SLT-3) and alignment shift before building
+        // any positioned output entities.
+        let mut visible_end = byte_range.start();
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        let mut extend = |a: f32, b: f32| {
+            lo = lo.min(a.min(b));
+            hi = hi.max(a.max(b));
+        };
         for &k in order {
-            let (piece, _) = pieces[k];
-            let x = starts[k];
-            match piece.kind {
-                PieceKind::Cluster { run, cluster } => {
-                    let r = &ast.runs[run];
-                    let c = &ast.clusters[cluster];
-                    let shift = shifts[k];
-                    let (mut glyphs, _) = self.cluster_glyphs(cluster, run);
+            let p = placed[k];
+            match p.piece.kind {
+                PieceKind::Cluster { cluster, .. } => {
+                    let (glyphs, _) = self.cluster_glyphs(cluster);
                     if glyphs.is_empty() {
                         continue;
                     }
-                    if levels[k].direction().is_rtl() {
-                        glyphs.reverse();
-                    }
-                    let mut pen = x;
-                    let positioned: Vec<PositionedGlyph> = glyphs
-                        .iter()
-                        .map(|g| {
-                            let glyph = PositionedGlyph {
-                                glyph_id: g.glyph_id,
-                                x: pen,
-                                x_offset: g.x_offset,
-                                y_offset: g.y_offset + shift,
-                                advance: g.x_advance,
-                                byte_range: if g.is_synthesized {
-                                    None
-                                } else {
-                                    Some(c.byte_range)
-                                },
-                                is_hanging: false,
-                            };
-                            pen += g.x_advance;
-                            glyph
-                        })
-                        .collect();
-                    if k < body_len {
-                        for g in positioned.iter().filter(|g| g.advance != 0.0) {
-                            extend(g.x, g.x + g.advance);
+                    let mut pen = p.x;
+                    let mut track_pen = |g: &RawShapedGlyph| {
+                        if g.x_advance != 0.0 {
+                            extend(pen, pen + g.x_advance);
                         }
-                        if !positioned.iter().all(PositionedGlyph::is_synthesized) {
-                            visible_end = visible_end.max(c.byte_range.end());
-                        }
-                    }
-                    let same_run = visual_runs.last().is_some_and(|v| {
-                        v.font == c.font
-                            && v.bidi_level == c.bidi_level
-                            && v.font_size == r.font_size
-                            && v.orientation == c.orientation
-                            && v.variations.as_slice() == r.features.variations()
-                    });
-                    if same_run {
-                        let v = visual_runs.last_mut().expect("checked above");
-                        v.byte_range = v.byte_range.cover(c.byte_range);
-                        v.glyphs.extend(positioned);
+                        pen += g.x_advance;
+                    };
+                    if p.level.direction().is_rtl() {
+                        glyphs.iter().rev().for_each(&mut track_pen);
                     } else {
-                        visual_runs.push(VisualGlyphRun {
-                            orientation: c.orientation,
-                            font_size: r.font_size,
-                            variations: r.features.variations().iter().copied().collect(),
-                            font: c.font,
-                            bidi_level: c.bidi_level,
-                            byte_range: c.byte_range,
-                            glyphs: positioned,
-                        });
+                        glyphs.iter().for_each(&mut track_pen);
+                    }
+                    if !glyphs.iter().all(|g| g.is_synthesized) {
+                        visible_end = visible_end.max(p.piece.bytes.end());
                     }
                 }
+                PieceKind::Object { .. } | PieceKind::Tab => {
+                    extend(p.x, p.x + p.width);
+                    visible_end = visible_end.max(p.piece.bytes.end());
+                }
+                PieceKind::Glue | PieceKind::SpanEdge { .. } => {}
+            }
+        }
+        self.for_each_span_group(
+            placed,
+            order,
+            (body_lo, body_hi),
+            end_break,
+            post,
+            byte_range,
+            0.0,
+            |_, x, width, _| extend(x, x + width),
+        );
+        let has_content = lo <= hi;
+        let rtl = self.base.is_rtl();
+        let (content_lo_rel, content_width) = if !has_content {
+            (if rtl { body_hi } else { 0.0 }, 0.0)
+        } else if rtl {
+            (lo, hi.max(body_hi) - lo)
+        } else {
+            (0.0, hi)
+        };
+        // Alignment: the line start of the base direction.
+        let content_start = if rtl && slot.end().is_finite() && content_width <= slot.width() {
+            slot.end() - content_width
+        } else {
+            slot.start()
+        };
+        let align_shift = content_start - content_lo_rel;
+        for p in placed.iter_mut() {
+            p.x += align_shift;
+        }
+        let (body_lo, body_hi) = (body_lo + align_shift, body_hi + align_shift);
+
+        let mut visual_runs: Vec<VisualGlyphRun> = Vec::new();
+        for &k in order {
+            let p = placed[k];
+            let PieceKind::Cluster { run, cluster } = p.piece.kind else {
+                continue;
+            };
+            let r = &ast.runs[run];
+            let c = &ast.clusters[cluster];
+            let (glyphs, _) = self.cluster_glyphs(cluster);
+            if glyphs.is_empty() {
+                continue;
+            }
+            let mut pen = p.x;
+            let mut make_glyph = |g: &RawShapedGlyph| {
+                let glyph = PositionedGlyph {
+                    glyph_id: g.glyph_id,
+                    x: pen,
+                    x_offset: g.x_offset,
+                    y_offset: g.y_offset + p.y_shift,
+                    advance: g.x_advance,
+                    byte_range: (!g.is_synthesized).then_some(c.byte_range),
+                    is_hanging: false,
+                };
+                pen += g.x_advance;
+                glyph
+            };
+            let positioned: Vec<PositionedGlyph> = if p.level.direction().is_rtl() {
+                glyphs.iter().rev().map(&mut make_glyph).collect()
+            } else {
+                glyphs.iter().map(&mut make_glyph).collect()
+            };
+            let level = p.level;
+            let same_run = visual_runs.last().is_some_and(|v| {
+                v.font == c.font
+                    && v.bidi_level == level
+                    && v.font_size == r.font_size
+                    && v.orientation == c.orientation
+                    && v.variations.as_slice() == r.features.variations()
+            });
+            if same_run {
+                let v = visual_runs.last_mut().expect("checked above");
+                v.byte_range = v.byte_range.cover(c.byte_range);
+                v.glyphs.extend(positioned);
+            } else {
+                visual_runs.push(VisualGlyphRun {
+                    orientation: c.orientation,
+                    font_size: r.font_size,
+                    variations: r.features.variations().iter().copied().collect(),
+                    font: c.font,
+                    bidi_level: level,
+                    byte_range: c.byte_range,
+                    glyphs: positioned,
+                });
+            }
+        }
+        // Boxes and tabs are built in logical order directly.
+        let mut visual_boxes: Vec<PositionedInlineBox> = Vec::new();
+        let mut tabs: Vec<PositionedTab> = Vec::new();
+        for p in placed.iter() {
+            match p.piece.kind {
                 PieceKind::Object { item } => {
                     let WordNode::Box(BoxNode::InlineObject {
                         baseline_align,
@@ -1165,134 +1162,116 @@ impl<'i, 'a> Layout<'i, 'a> {
                     else {
                         unreachable!("an object piece names an object item")
                     };
-                    let shift = shifts[k];
-                    let (w, a, d) = self.fitted_object(item);
+                    let (w, a, d) = self.fitted_object(item, slot);
                     visual_boxes.push(PositionedInlineBox {
                         baseline_align: *baseline_align,
                         box_id: *box_id,
                         byte_range: *byte_range,
-                        x,
-                        y: -shift,
+                        x: p.x,
+                        y: -p.y_shift,
                         width: w,
                         ascent: a,
                         descent: d,
                         overflow_policy: *overflow_policy,
                         bidi_level: *bidi_level,
                     });
-                    extend(x, x + w);
-                    visible_end = visible_end.max(byte_range.end());
                 }
                 PieceKind::Tab => {
                     tabs.push(PositionedTab {
-                        byte_range: piece.bytes,
-                        x,
-                        width: widths[k],
+                        byte_range: p.piece.bytes,
+                        x: p.x,
+                        width: p.width,
                     });
-                    extend(x, x + widths[k]);
-                    visible_end = visible_end.max(piece.bytes.end());
                 }
-                PieceKind::Glue | PieceKind::SpanEdge { .. } => {}
+                PieceKind::Cluster { .. } | PieceKind::Glue | PieceKind::SpanEdge { .. } => {}
             }
         }
-        // Boxes and tabs are stored in logical order.
-        visual_boxes.sort_by_key(|b| b.byte_range.start());
-        tabs.sort_by_key(|t| t.byte_range.start());
         let span_fragments = self.span_fragments(
-            pieces,
+            placed,
             order,
-            starts,
-            widths,
-            body_len,
             (body_lo, body_hi),
             end_break,
             post,
             byte_range,
+            align_shift,
         );
-        for f in &span_fragments {
-            extend(f.x, f.x + f.width);
-        }
-        let has_content = lo <= hi;
-        let rtl = self.base.is_rtl();
-        let (content_lo, content_width) = if !has_content {
-            (if rtl { body_hi } else { 0.0 }, 0.0)
-        } else if rtl {
-            (lo, hi.max(body_hi) - lo)
-        } else {
-            (0.0, hi)
-        };
         // Decorations (Stage 5).
+        let mut decorations: Vec<DecorationLine> = Vec::new();
         for kind in [DecorationKind::Underline, DecorationKind::Strikethrough] {
-            self.decorations(
-                kind,
-                pieces,
-                order,
-                (starts, widths, &shifts),
-                body_len,
-                &mut decorations,
-            )?;
+            self.decorations(kind, placed, order, &mut decorations)?;
         }
-        let atomic_fragments = self.atomic_fragments(pieces, order, starts, widths, byte_range);
+        let atomic_fragments = self.atomic_fragments(placed, order, byte_range);
         let caret_stops = self.caret_stops(
             index,
-            pieces,
-            levels,
+            placed,
             order,
-            starts,
-            widths,
             body_len,
             soft_wrap,
             byte_range,
             visible_end,
-            content_lo,
+            content_start,
+            end_break,
             &visual_runs,
             &visual_boxes,
             &tabs,
         );
-        Ok(Placed {
-            line: PositionedLine {
-                slots: SmallVec::new(),
-                is_ellipsized: false,
-                annotations: Vec::new(),
-                atomic_fragments,
-                byte_range,
-                visible_byte_end: visible_end,
-                baseline_y: 0.0,
-                ascent,
-                descent,
-                line_height,
-                is_justified: false,
-                visual_runs,
-                visual_boxes,
-                tabs,
-                span_fragments,
-                caret_stops,
-                decorations,
-            },
-            content_lo,
-            content_width,
+        let mut slots: SmallVec<[PositionedSlot; 1]> = geometry
+            .slots
+            .iter()
+            .map(|&constraint| PositionedSlot {
+                constraint,
+                content_start: constraint.start(),
+                visual_width: 0.0,
+            })
+            .collect();
+        slots[0].content_start = content_start;
+        slots[0].visual_width = content_width;
+        let baseline_y = block_top
+            + if ast.writing_mode == WritingMode::VerticalLr {
+                descent
+            } else {
+                ascent
+            };
+        Ok(PositionedLine {
+            slots,
+            is_ellipsized: false,
+            annotations: Vec::new(),
+            atomic_fragments,
+            byte_range,
+            visible_byte_end: visible_end,
+            baseline_y,
+            ascent,
+            descent,
+            line_height,
+            is_justified: false,
+            visual_runs,
+            visual_boxes,
+            tabs,
+            span_fragments,
+            caret_stops,
+            decorations,
         })
     }
 
-    /// One fragment per visual group of each decoration span on the line
-    /// (spec ST2-3, FRG-1), padding included; a span cloned across this
-    /// line's breaks reaches the line's edge.
+    /// Walks each visual group of each decoration span on the line (spec ST2-3,
+    /// FRG-1), calling `emit(span, x, width, bytes)`.
     #[expect(clippy::too_many_arguments, reason = "one line's placement state")]
-    fn span_fragments(
+    fn for_each_span_group(
         &self,
-        pieces: &[(Piece, f32)],
+        placed: &[PlacedPiece],
         order: &[usize],
-        starts: &[f32],
-        widths: &[f32],
-        body_len: usize,
         (body_lo, body_hi): (f32, f32),
         end_break: Option<&Break>,
         post: f32,
         line_bytes: TextRange,
-    ) -> Vec<PositionedSpanFragment> {
-        let mut fragments = Vec::new();
-        let (ascent, descent) = (self.strut.ascent.max(0.0), self.strut.descent.max(0.0));
+        align_shift: f32,
+        mut emit: impl FnMut(&InlineDecorationSpan, f32, f32, TextRange),
+    ) {
         for span in &self.ast.decoration_spans {
             let range = span.byte_range;
+            if range.end() < line_bytes.start() || range.start() > line_bytes.end() {
+                continue;
+            }
             let member = |p: &Piece| match p.kind {
                 PieceKind::SpanEdge { span_id } => span_id == span.span_id,
                 _ => {
@@ -1308,30 +1287,22 @@ impl<'i, 'a> Layout<'i, 'a> {
             let mut group: Option<(f32, f32, TextRange)> = None;
             let mut flush = |group: &mut Option<(f32, f32, TextRange)>| {
                 if let Some((a, b, bytes)) = group.take() {
-                    fragments.push(PositionedSpanFragment {
-                        span_id: span.span_id,
-                        span_range: range,
-                        byte_range: bytes,
-                        x: a,
-                        width: (b - a).max(0.0),
-                        ascent,
-                        descent,
-                        bidi_level: self.base.base_level(),
-                    });
+                    emit(span, a, (b - a).max(0.0), bytes);
                 }
             };
-            for &k in order.iter().filter(|&&k| k < body_len) {
-                let (p, _) = pieces[k];
+            for &k in order {
+                let p = placed[k];
                 // Another span's edge neither joins nor splits this span's
                 // fragment: a nested span's padding lies inside it.
-                if matches!(p.kind, PieceKind::SpanEdge { span_id } if span_id != span.span_id) {
+                if matches!(p.piece.kind, PieceKind::SpanEdge { span_id } if span_id != span.span_id)
+                {
                     continue;
                 }
-                if member(&p) {
-                    let (a, b) = (starts[k], starts[k] + widths[k]);
+                if member(&p.piece) {
+                    let (a, b) = (p.x, p.x + p.width);
                     group = Some(match group {
-                        Some((ga, gb, bytes)) => (ga.min(a), gb.max(b), bytes.cover(p.bytes)),
-                        None => (a, b, p.bytes),
+                        Some((ga, gb, bytes)) => (ga.min(a), gb.max(b), bytes.cover(p.piece.bytes)),
+                        None => (a, b, p.piece.bytes),
                     });
                 } else {
                     flush(&mut group);
@@ -1342,7 +1313,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     *b = b.max(body_hi);
                 }
                 if cloned_at_start {
-                    *a = a.min(body_lo - post).max(0.0_f32.min(*a));
+                    *a = a.min(body_lo - post).max(align_shift.min(*a));
                 }
                 // A fragment's bytes stay inside the span and the line.
                 let start = bytes.start().max(range.start()).max(line_bytes.start());
@@ -1355,6 +1326,45 @@ impl<'i, 'a> Layout<'i, 'a> {
             }
             flush(&mut group);
         }
+    }
+
+    /// One fragment per visual group of each decoration span on the line
+    /// (spec ST2-3, FRG-1), padding included; a span cloned across this
+    /// line's breaks reaches the line's edge.
+    #[expect(clippy::too_many_arguments, reason = "one line's placement state")]
+    fn span_fragments(
+        &self,
+        placed: &[PlacedPiece],
+        order: &[usize],
+        (body_lo, body_hi): (f32, f32),
+        end_break: Option<&Break>,
+        post: f32,
+        line_bytes: TextRange,
+        align_shift: f32,
+    ) -> Vec<PositionedSpanFragment> {
+        let mut fragments = Vec::new();
+        let (ascent, descent) = (self.strut.ascent.max(0.0), self.strut.descent.max(0.0));
+        self.for_each_span_group(
+            placed,
+            order,
+            (body_lo, body_hi),
+            end_break,
+            post,
+            line_bytes,
+            align_shift,
+            |span, x, width, byte_range| {
+                fragments.push(PositionedSpanFragment {
+                    span_id: span.span_id,
+                    span_range: span.byte_range,
+                    byte_range,
+                    x,
+                    width,
+                    ascent,
+                    descent,
+                    bidi_level: self.base.base_level(),
+                });
+            },
+        );
         fragments
     }
 
@@ -1362,10 +1372,8 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// FRG-3), together covering exactly the part of the span on the line.
     fn atomic_fragments(
         &self,
-        pieces: &[(Piece, f32)],
+        placed: &[PlacedPiece],
         order: &[usize],
-        starts: &[f32],
-        widths: &[f32],
         line_bytes: TextRange,
     ) -> Vec<AtomicFragment> {
         let mut out = Vec::new();
@@ -1379,17 +1387,17 @@ impl<'i, 'a> Layout<'i, 'a> {
             let mut groups: Vec<(f32, f32, TextRange)> = Vec::new();
             let mut open = false;
             for &k in order {
-                let (p, _) = pieces[k];
-                let inside = !p.bytes.is_empty()
-                    && p.bytes.start() < full.end()
-                    && p.bytes.end() > full.start();
+                let p = placed[k];
+                let inside = !p.piece.bytes.is_empty()
+                    && p.piece.bytes.start() < full.end()
+                    && p.piece.bytes.end() > full.start();
                 if inside {
-                    let (a, b) = (starts[k], starts[k] + widths[k]);
+                    let (a, b) = (p.x, p.x + p.width);
                     if open {
                         let g = groups.last_mut().expect("open group");
-                        *g = (g.0.min(a), g.1.max(b), g.2.cover(p.bytes));
+                        *g = (g.0.min(a), g.1.max(b), g.2.cover(p.piece.bytes));
                     } else {
-                        groups.push((a, b, p.bytes));
+                        groups.push((a, b, p.piece.bytes));
                         open = true;
                     }
                 } else {
@@ -1430,16 +1438,15 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn decorations(
         &mut self,
         kind: DecorationKind,
-        pieces: &[(Piece, f32)],
+        placed: &[PlacedPiece],
         order: &[usize],
-        (starts, widths, shifts): (&[f32], &[f32], &[f32]),
-        body_len: usize,
         out: &mut Vec<DecorationLine>,
     ) -> Result<(), LayoutInputError> {
         let mut open: Option<DecorationLine> = None;
         let mut pending_glue: Option<(f32, TextRange)> = None;
-        for &k in order.iter().filter(|&&k| k < body_len) {
-            let (p, _) = pieces[k];
+        for &k in order {
+            let placed_piece = placed[k];
+            let p = placed_piece.piece;
             let decorated = match p.kind {
                 PieceKind::Cluster { run, .. } => {
                     let d = self.ast.runs[run].decoration;
@@ -1450,7 +1457,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 PieceKind::Glue => {
                     if open.is_some() {
-                        let end = starts[k] + widths[k];
+                        let end = placed_piece.x + placed_piece.width;
                         pending_glue = Some(match pending_glue {
                             Some((_, bytes)) => (end, bytes.cover(p.bytes)),
                             None => (end, p.bytes),
@@ -1469,12 +1476,12 @@ impl<'i, 'a> Layout<'i, 'a> {
                 unreachable!("only clusters are decorated")
             };
             let m = self.cluster_metrics(run, cluster)?;
-            let shift = shifts[k];
+            let shift = placed_piece.y_shift;
             let (position, thickness) = match kind {
                 DecorationKind::Underline => (m.underline_position, m.underline_thickness),
                 DecorationKind::Strikethrough => (m.strikeout_position, m.underline_thickness),
             };
-            let (a, b) = (starts[k], starts[k] + widths[k]);
+            let (a, b) = (placed_piece.x, placed_piece.x + placed_piece.width);
             match open.as_mut() {
                 Some(line) => {
                     if let Some((_, bytes)) = pending_glue.take() {
@@ -1510,16 +1517,14 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn caret_stops(
         &self,
         index: usize,
-        pieces: &[(Piece, f32)],
-        levels: &[BidiLevel],
+        placed: &[PlacedPiece],
         order: &[usize],
-        starts: &[f32],
-        widths: &[f32],
         body_len: usize,
         soft_wrap: bool,
         byte_range: TextRange,
         visible_end: usize,
-        content_lo: f32,
+        content_start: f32,
+        end_break: Option<&Break>,
         runs: &[VisualGlyphRun],
         boxes: &[PositionedInlineBox],
         tabs: &[PositionedTab],
@@ -1550,14 +1555,15 @@ impl<'i, 'a> Layout<'i, 'a> {
         };
         let mut raw: Vec<(f32, usize)> = Vec::new();
         let collapsible = self.options.whitespace == HangingWhitespaceMode::Collapsible;
-        if byte_range.is_empty() || body_len == 0 && (pieces.is_empty() || collapsible && soft_wrap)
+        if byte_range.is_empty() || body_len == 0 && (placed.is_empty() || collapsible && soft_wrap)
         {
-            raw.push((content_lo, byte_range.start()));
+            raw.push((content_start, byte_range.start()));
         }
         let push_piece = |k: usize, raw: &mut Vec<(f32, usize)>| {
-            let (p, _) = pieces[k];
-            let (a, b) = (starts[k], starts[k] + widths[k]);
-            let rtl = levels[k].direction().is_rtl();
+            let placed_piece = placed[k];
+            let p = placed_piece.piece;
+            let (a, b) = (placed_piece.x, placed_piece.x + placed_piece.width);
+            let rtl = placed_piece.level.direction().is_rtl();
             let (left, right) = if rtl {
                 (p.bytes.end(), p.bytes.start())
             } else {
@@ -1569,11 +1575,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                 let k_atoms = c.atom_count();
                 if k_atoms > 1 && !c.flags.contains(AtomFlags::IS_EMOJI_SEQUENCE) {
                     let atoms = &self.inputs.run_atoms(run)[c.atom_range.clone()];
-                    let first_glyph = self
-                        .inputs
-                        .cluster_glyphs(c)
-                        .first()
-                        .map_or(0, |g| g.glyph_id);
+                    let (glyphs, width) = self.cluster_glyphs(cluster);
+                    let first_glyph = glyphs.first().map_or(0, |g| g.glyph_id);
                     let carets = self.shaper.ligature_carets(
                         FontInstanceRef {
                             font: c.font,
@@ -1581,22 +1584,18 @@ impl<'i, 'a> Layout<'i, 'a> {
                             variations: self.ast.runs[run].features.variations(),
                         },
                         first_glyph,
-                        levels[k].direction(),
+                        placed_piece.level.direction(),
                     );
-                    let width = c.natural_width;
                     let positions = resolve_ligature_carets(width, k_atoms, &carets);
-                    let mut inner: Vec<(f32, usize)> = positions
-                        .iter()
-                        .zip(atoms.iter().skip(1))
-                        .map(|(&pos, atom)| {
-                            let x = if rtl { a + width - pos } else { a + pos };
-                            (x, atom.byte_range.start())
-                        })
-                        .collect();
+                    let pairs = positions.iter().zip(&atoms[1..]).map(|(&pos, atom)| {
+                        let x = if rtl { a + width - pos } else { a + pos };
+                        (x, atom.byte_range.start())
+                    });
                     if rtl {
-                        inner.reverse();
+                        raw.extend(pairs.rev());
+                    } else {
+                        raw.extend(pairs);
                     }
-                    raw.extend(inner);
                 }
             }
             raw.push((b, right));
@@ -1605,17 +1604,16 @@ impl<'i, 'a> Layout<'i, 'a> {
             push_piece(k, &mut raw);
         }
         let trailing_stops = !collapsible || !soft_wrap;
-        if trailing_stops && body_len < pieces.len() {
+        if trailing_stops && body_len < placed.len() {
             // Beyond the far edge of the base direction (HNG-3, INT-6). Under
             // `Collapsible` they all sit at the edge, so that the end of a
             // hard-broken line or of the paragraph stays reachable.
-            let trailing: Vec<usize> = (body_len..pieces.len()).collect();
             if self.base.is_rtl() {
-                for &k in trailing.iter().rev() {
+                for k in (body_len..placed.len()).rev() {
                     push_piece(k, &mut raw);
                 }
             } else {
-                for &k in &trailing {
+                for k in body_len..placed.len() {
                     push_piece(k, &mut raw);
                 }
             }
@@ -1638,9 +1636,11 @@ impl<'i, 'a> Layout<'i, 'a> {
             if collapsible && soft_wrap && offset > visible_end && offset != byte_range.start() {
                 continue;
             }
-            let duplicate = stops.iter().rev().take(4).any(|s| {
-                s.offset == offset && (s.x - x).abs() <= super::tolerance::tolerance(s.x, x)
-            });
+            let duplicate = stops
+                .iter()
+                .rev()
+                .take(4)
+                .any(|s| s.offset == offset && approx_eq(s.x, x));
             if duplicate {
                 continue;
             }
@@ -1655,7 +1655,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         // A hard break's own bytes start the next line.
         if !soft_wrap && !byte_range.is_empty() {
             let hard_end = byte_range.end();
-            let is_terminated = self.text[byte_range.as_range()].ends_with('\u{2028}');
+            let is_terminated = end_break.is_some_and(|b| b.mandatory && !b.bytes.is_empty());
             if is_terminated {
                 stops.retain(|s| s.offset != hard_end);
             }
@@ -1672,14 +1672,14 @@ impl<'i, 'a> Layout<'i, 'a> {
 /// Visual indices of a line's pieces from their levels (UAX #9 L2): from
 /// the highest level to the lowest odd one, every maximal sequence at that
 /// level or above is reversed.
-fn visual_order(levels: &[BidiLevel]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..levels.len()).collect();
-    let Some(highest) = levels.iter().map(|l| l.get()).max() else {
+fn visual_order(placed: &[PlacedPiece]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..placed.len()).collect();
+    let Some(highest) = placed.iter().map(|p| p.level.get()).max() else {
         return order;
     };
-    let lowest_odd = levels
+    let lowest_odd = placed
         .iter()
-        .map(|l| l.get())
+        .map(|p| p.level.get())
         .filter(|l| l % 2 == 1)
         .min()
         .unwrap_or(highest + 1);
@@ -1687,9 +1687,9 @@ fn visual_order(levels: &[BidiLevel]) -> Vec<usize> {
     while level >= lowest_odd && level > 0 {
         let mut i = 0;
         while i < order.len() {
-            if levels[order[i]].get() >= level {
+            if placed[order[i]].level.get() >= level {
                 let mut j = i;
-                while j < order.len() && levels[order[j]].get() >= level {
+                while j < order.len() && placed[order[j]].level.get() >= level {
                     j += 1;
                 }
                 order[i..j].reverse();
@@ -1744,33 +1744,6 @@ fn object_shift(align: BaselineAlignment, strut: &FontMetrics) -> f32 {
     match align {
         BaselineAlignment::Offset(offset) => offset,
         _ => baseline_offset(align, strut).unwrap_or(0.0),
-    }
-}
-
-/// Moves every inline coordinate of a line by `dx`.
-fn shift_line(line: &mut PositionedLine, dx: f32) {
-    for run in &mut line.visual_runs {
-        for g in &mut run.glyphs {
-            g.x += dx;
-        }
-    }
-    for b in &mut line.visual_boxes {
-        b.x += dx;
-    }
-    for t in &mut line.tabs {
-        t.x += dx;
-    }
-    for f in &mut line.span_fragments {
-        f.x += dx;
-    }
-    for f in &mut line.atomic_fragments {
-        f.x += dx;
-    }
-    for c in &mut line.caret_stops {
-        c.x += dx;
-    }
-    for d in &mut line.decorations {
-        d.x += dx;
     }
 }
 
@@ -1887,10 +1860,26 @@ mod tests {
 
     #[test]
     fn levels_reverse_from_the_highest_to_the_lowest_odd_one() {
-        let l = |v: u8| BidiLevel::new(v).unwrap();
-        assert_eq!(visual_order(&[l(0), l(0)]), [0, 1]);
-        assert_eq!(visual_order(&[l(1), l(1), l(1)]), [2, 1, 0]);
-        assert_eq!(visual_order(&[l(0), l(1), l(1), l(0)]), [0, 2, 1, 3]);
-        assert_eq!(visual_order(&[l(1), l(2), l(2), l(1)]), [3, 1, 2, 0]);
+        let piece = |v: u8| PlacedPiece {
+            piece: Piece {
+                kind: PieceKind::Tab,
+                bytes: TextRange::empty_at(0),
+                level: BidiLevel::new(v).unwrap(),
+                width: 0.0,
+            },
+            level: BidiLevel::new(v).unwrap(),
+            gap: 0.0,
+            x: 0.0,
+            width: 0.0,
+            y_shift: 0.0,
+        };
+        let order = |levels: &[u8]| {
+            let pieces: Vec<PlacedPiece> = levels.iter().copied().map(piece).collect();
+            visual_order(&pieces)
+        };
+        assert_eq!(order(&[0, 0]), [0, 1]);
+        assert_eq!(order(&[1, 1, 1]), [2, 1, 0]);
+        assert_eq!(order(&[0, 1, 1, 0]), [0, 2, 1, 3]);
+        assert_eq!(order(&[1, 2, 2, 1]), [3, 1, 2, 0]);
     }
 }
