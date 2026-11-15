@@ -199,6 +199,36 @@ fn a_han_run_skips_a_latin_face_that_shares_its_punctuation() {
     }
 }
 
+/// SHP-25: ASCII atoms keep stack order inside a Han run. FE-13 folds the
+/// digits of 2026年 into the `Hani` run, yet they come from Noto Serif first
+/// in the stack, while 年 and the shared quotes skip it for Noto Sans SC.
+#[test]
+fn ascii_in_a_han_run_keeps_the_leading_latin_face() {
+    let text = "2026年“東京”";
+    let style = cjk_style(&["Noto Serif", "Noto Sans SC"], Some("zh-CN"));
+    let options = FrontendOptions {
+        quote_policy: QuotePolicy::CjkAware,
+        ..FrontendOptions::default()
+    };
+    let ast = compile_with(text, &style, &[], &options);
+    assert!(
+        ast.runs.iter().all(|run| run.script == ScriptTag::HAN),
+        "{:?}",
+        ast.runs.iter().map(|r| r.script).collect::<Vec<_>>()
+    );
+    for cluster in &ast.clusters {
+        let piece = cluster_text(text, cluster);
+        let want = if piece.is_ascii() { SERIF } else { SC };
+        assert_eq!(cluster.font.font_id, want, "{piece:?}");
+    }
+    let digits = ast
+        .clusters
+        .iter()
+        .filter(|c| cluster_text(text, c).is_ascii())
+        .count();
+    assert_eq!(digits, 4);
+}
+
 /// SHP-12 with the regional faces: in `zh-CN`, Noto Sans first in the stack
 /// no longer serves the shared punctuation, which takes Noto Sans SC's full
 /// width forms.

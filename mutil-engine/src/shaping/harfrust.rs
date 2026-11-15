@@ -346,8 +346,9 @@ impl HarfRustShaper {
     /// The face that shapes `atom` of `run`, keyed by the run's script and
     /// locale (spec SHP-12, SHP-25).
     ///
-    /// In a CJK run (`Hani`, `Hira`, `Kana`, `Hang`, `Bopo`) the CJK faces
-    /// come first: the first candidate whose region the run prefers and
+    /// In a CJK run (`Hani`, `Hira`, `Kana`, `Hang`, `Bopo`) an atom whose
+    /// first code point is ASCII keeps stack order; for any other atom the
+    /// CJK faces come first: the first candidate whose region the run prefers and
     /// whose character map covers the whole atom, else the first CJK
     /// candidate that covers it; a face that is not CJK is reached only when
     /// no CJK face covers the atom. Every run then falls back to the first
@@ -372,7 +373,11 @@ impl HarfRustShaper {
         let covers_atom = |id: FontId| chars().all(|c| covers(id, c));
         let profile = |id: FontId| self.registry.profile(id).unwrap_or_default();
         let first = |pass: &dyn Fn(FontId) -> bool| candidates.iter().copied().find(|&id| pass(id));
-        if !is_cjk_script(run.script) {
+        // ASCII keeps stack order even in a CJK run: FE-13 folds digits and
+        // ASCII punctuation into a neighbouring Han run, and they belong to
+        // the stack's leading Latin face.
+        let ascii = chars().next().is_some_and(|c| c.is_ascii());
+        if !is_cjk_script(run.script) || ascii {
             return first(&covers_atom)
                 .or_else(|| {
                     let lead = chars().next()?;
