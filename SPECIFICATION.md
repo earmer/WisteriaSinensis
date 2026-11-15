@@ -1454,17 +1454,18 @@ This section binds any renderer that draws validated output. It states only what
 pub struct FontBytes(..);               // shared font file bytes, never copied
 pub struct FontFace { .. }              // bytes and face index, private fields
 pub trait FontSource: Send + Sync { fn resolve_font(&self, font: FontId) -> Option<FontFace>; }
-pub struct PlacedRun<'a> { .. }         // one visual glyph run with its line
+pub struct PlacedRun<'a> { .. }         // one body or annotation glyph run with its line
+pub enum PlacedRunSource<'a> { Body(&'a VisualGlyphRun), Annotation(&'a PositionedAnnotationRun) }
 pub struct PlacedGlyph { pub glyph_id: u32, pub origin: Point }
 ```
 
-**[HST-1] Fonts.** A renderer resolves each run's `FontId` through the `FontSource` that covers the issuing shaper's id space (FNT-3), with `FontSource::resolve_font`, and draws the face `FontFace::face_index` of `FontFace::bytes`. Variation coordinates come only from `VisualGlyphRun::variations`. `FontBytes::from_static`, `FontBytes::new` and `FontBytes::from_shared` wrap static data, an owned buffer and a shared buffer without copying their bytes (`FontBytes::as_bytes`).
+**[HST-1] Fonts.** A renderer resolves each run's `FontId` (`PlacedRun::font`) through the `FontSource` that covers the issuing shaper's id space (FNT-3), with `FontSource::resolve_font`, and draws the face `FontFace::face_index` of `FontFace::bytes`. Variation coordinates come only from `PlacedRun::variations`. `FontBytes::from_static`, `FontBytes::new` and `FontBytes::from_shared` wrap static data, an owned buffer and a shared buffer without copying their bytes (`FontBytes::as_bytes`).
 
 **[HST-2] Font lifetime.** A `FontSource` never reuses an id, and keeps a face resolvable while any output that names its id may still be drawn. Never unloading a face within a session is the simplest way to satisfy this; a host that tracks its cached output MAY unload a face no output names.
 
-**[HST-3] No re-shaping.** A renderer draws the glyph ids of the output, run by run, at the origins `ValidatedLayout::glyph_runs` gives (`PlacedRun::line`, `PlacedRun::run`, `PlacedRun::glyphs`). It never re-shapes, re-positions, substitutes or merges glyphs.
+**[HST-3] No re-shaping.** A renderer draws the glyph ids of the output, run by run, at the origins `ValidatedLayout::glyph_runs` gives. It yields every glyph of the paragraph: each line's visual runs, then its annotation runs (`PlacedRun::source`, `PlacedRunSource::Body`, `PlacedRunSource::Annotation`), with `PlacedRun::line`, `PlacedRun::font`, `PlacedRun::font_size`, `PlacedRun::orientation` and `PlacedRun::glyphs`. It never re-shapes, re-positions, substitutes or merges glyphs.
 
-**[HST-4] Placement and orientation.** A `PlacedGlyph`'s `origin` is the paragraph-local physical point where the glyph outline's own origin is drawn: OUT-1's drawing origin mapped by the writing mode (ORI-1). `Horizontal` and `VerticalUpright` glyphs are drawn unrotated there; a `VerticalSideways` glyph is rotated 90° clockwise about it, with `y` growing downwards. Vertical-origin and baseline adjustments are already in the origin (SHP-19), so a renderer never reads a font's vertical metrics or vertical-origin table to correct a position.
+**[HST-4] Placement and orientation.** A `PlacedGlyph`'s `origin` is the paragraph-local physical point where the glyph outline's own origin is drawn: OUT-1's drawing origin mapped by the writing mode (ORI-1). An annotation glyph's baseline is the line's moved towards line-over by its run's `baseline_offset` (ANO-3, ORI-2), and its offsets are applied from there. The output gate checks that every origin is finite (AX-3), so `PlacedRun::glyphs` never yields a non-finite one. `Horizontal` and `VerticalUpright` glyphs are drawn unrotated there; a `VerticalSideways` glyph is rotated 90° clockwise about it, with `y` growing downwards. Vertical-origin and baseline adjustments are already in the origin (SHP-19), so a renderer never reads a font's vertical metrics or vertical-origin table to correct a position.
 
 **[HST-5] Locked geometry.** A renderer keeps every glyph origin and advance exactly, on both axes, under any scale, and never changes a variation coordinate, `opsz` included. How it rasterises an outline (bitmap atlas, distance field, path rendering) is its own choice.
 
@@ -1472,4 +1473,4 @@ pub struct PlacedGlyph { pub glyph_id: u32, pub origin: Point }
 
 **[HST-7] Colour glyphs.** The text colour applies to monochrome glyphs and to COLR layers that reference the foreground colour (palette index 0xFFFF). It never recolours COLR/CPAL palette colours, sbix or CBDT bitmaps.
 
-**[HST-8] Query geometry.** The rectangles of the §6 queries are in the same paragraph-local physical space as `PlacedGlyph::origin`; a range that wraps gives several. A host maps them to the screen by the paragraph's position in its container and then its own view transform.
+**[HST-8] Query geometry.** The rectangles of the §6 queries (*future*, INT-18) are in the same paragraph-local physical space as `PlacedGlyph::origin`; a range that wraps gives several. A host maps them to the screen by the paragraph's position in its container and then its own view transform.

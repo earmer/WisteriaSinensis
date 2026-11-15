@@ -134,6 +134,13 @@ pub trait TextShaper: Send + Sync {
     /// settings from `run` but ignore `run.atom_range` and `run.cluster_range`,
     /// which locate the slices in the AST and are not meaningful to a shaper.
     ///
+    /// **Offset axes.** Glyph offsets are flow-relative (spec SHP-19):
+    /// `x_offset` along the inline axis, `y_offset` towards line-over. For a
+    /// `VerticalUpright` run the implementation converts the backend's
+    /// vertical-shaping offsets, given in the font's up-and-right frame, as
+    /// `x_offset = -dy` and `y_offset = dx`, with any vertical-origin
+    /// adjustment folded in. Layout and placement read the offsets as given.
+    ///
     /// **Tate-chu-yoko.** For a run whose `orientation` is
     /// [`GlyphOrientation::HorizontalInVertical`](crate::types::GlyphOrientation::HorizontalInVertical), the backend returns exactly
     /// one cluster covering all of the run's atoms (`atom_range ==

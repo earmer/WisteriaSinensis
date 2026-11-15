@@ -16,11 +16,15 @@ use smallvec::SmallVec;
 
 /// One glyph placed on a line (spec §2.6).
 ///
-/// `x` is **line-local**: measured from the line's left edge, so a line can be
-/// moved without touching its glyphs. **[Design decision]** (spec silent).
-/// It is the strict **pen advance position**, the cumulative advance along the
-/// line, and not the drawing origin: the rasteriser draws the glyph at
-/// `(line_origin_x + x + x_offset, baseline_y - y_offset)` (spec §2.6, geometry conventions). A
+/// `x` is **line-local** (spec OUT-1): measured from the inline start of the
+/// line's envelope, `0` for every line (spec SLT-1, GEO-3), so it is also the
+/// paragraph's flow-space inline coordinate. It is the strict **pen advance
+/// position**, the cumulative advance along the line, and not the drawing
+/// origin. The offsets are flow-relative (spec SHP-19): the flow-space
+/// drawing origin is `x + x_offset` and `baseline_y + over_to_block(y_offset)`,
+/// which is `baseline_y - y_offset` except in `VerticalLr` (spec OUT-1,
+/// ORI-2). Renderers take the physical origin from
+/// [`PlacedRun::glyphs`](super::PlacedRun::glyphs) instead (spec HST-4). A
 /// zero-advance combining mark with a negative `x_offset` at the start of a
 /// line therefore sits at the content start of its slot. `x` may lie left of
 /// that start for hanging punctuation placed outside the edge (§5 Stage 1.3),
@@ -33,10 +37,12 @@ pub struct PositionedGlyph {
     /// Pen advance position from the line's left edge (**not** the drawing
     /// origin; see the type documentation).
     pub x: f32,
-    /// Horizontal ink offset from the shaper. The drawing origin is
-    /// `x + x_offset`.
+    /// Inline offset from the pen position, positive towards the inline end
+    /// (spec SHP-19). The inline drawing origin is `x + x_offset`.
     pub x_offset: f32,
-    /// Shaper offset from the baseline, preserved unclamped.
+    /// Offset from the baseline towards line-over, preserved unclamped
+    /// (spec SHP-19); its block direction depends on the writing mode
+    /// (spec ORI-2).
     pub y_offset: f32,
     /// Advance width.
     pub advance: f32,

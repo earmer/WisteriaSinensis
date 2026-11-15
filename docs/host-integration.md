@@ -17,8 +17,10 @@ Load large fonts by memory-mapping the file and wrapping the map with
 Embedded fonts use `FontBytes::from_static`.
 
 A long-running host that opens and closes documents with embedded fonts can
-unload a face once none of its cached output names it (HST-2). A host that does
-not track its output can simply keep every face for the session.
+unload a face once no output that may still be drawn names it (HST-2): cached
+paragraphs, layouts in flight between threads and any not yet drawn. A host
+that does not track all of its output can simply keep every face for the
+session.
 
 ## Drawing order
 
@@ -37,8 +39,10 @@ practice within one paragraph, which hosts adjust to their own styling:
 A `PositionedParagraph` is immutable and self-contained, with paragraph-local
 coordinates, so it is a natural unit to cache. A host that pans or zooms large
 amounts of text can keep each unchanged paragraph as a retained draw object and
-move it by transform, re-laying out a paragraph only when its text, style or
-width changes. Versioning, spatial indexing and viewport culling belong to the
+move it by transform, re-laying out a paragraph only when one of its layout
+inputs changes: its text, style or options, its constraints, or what its
+geometry provider answers (an obstacle that moves changes the slots without
+touching the text). Versioning, spatial indexing and viewport culling belong to the
 host. A headless rasteriser or an exporter can draw each paragraph once.
 
 ## Continuous zoom
@@ -53,8 +57,9 @@ fields for arbitrary user fonts at run time.
 
 ## Input methods and accessibility
 
-The §6 queries return rectangles in paragraph-local physical coordinates
-(HST-8). A host passes the platform the rectangle after applying, in order, the
+The §6 rectangle queries (`range_rects`, `rect_for_offset`) are not
+implemented yet (INT-18). Once they are, they return rectangles in
+paragraph-local physical coordinates (HST-8). A host passes the platform the rectangle after applying, in order, the
 paragraph's position in its container and the view transform. Some platform
 APIs accept the transform itself (for example an editable region's size and
 transform), and take the local rectangles directly. A composition range that

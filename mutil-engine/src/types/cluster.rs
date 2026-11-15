@@ -22,9 +22,13 @@ pub struct RawShapedGlyph {
     pub glyph_id: u32,
     /// Advance along the active shaping axis (internal horizontal advance for TCY).
     pub x_advance: f32,
-    /// Horizontal offset from the pen position (marks, kerning).
+    /// Inline offset from the pen position (marks, kerning), positive
+    /// towards the inline end. A shaper converts a backend's vertical-shaping
+    /// offsets for an upright glyph into this axis (spec SHP-19).
     pub x_offset: f32,
-    /// Vertical offset from the baseline.
+    /// Offset from the baseline towards line-over. A shaper converts a
+    /// backend's vertical-shaping offsets for an upright glyph into this axis
+    /// (spec SHP-19).
     pub y_offset: f32,
     /// `true` for a glyph the engine generated rather than the source text
     /// (the hyphen appended by `TrailingEdit`). A raw glyph has no source range

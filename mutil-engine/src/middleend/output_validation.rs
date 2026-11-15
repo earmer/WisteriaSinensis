@@ -1621,6 +1621,12 @@ impl PositionedParagraph {
         for (i, line) in self.lines.iter().enumerate() {
             let ctx = self.policy.line_context(self.base_direction, i);
             line.validate(&ctx).map_err(|e| (i, e))?;
+            super::validated::check_drawing_origins(
+                line,
+                self.policy.writing_mode,
+                self.total_block_size,
+            )
+            .map_err(|e| (i, e))?;
             if let Some(standard) = self.policy.slot_source.standard_slot(i, ctx.wrap_width) {
                 if !matches!(line.slots.as_slice(), [slot] if slot.constraint == standard) {
                     return invalid(i, R::NotStandardSlots);
