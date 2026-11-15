@@ -60,10 +60,9 @@ pub struct ConformanceReport {
 }
 
 /// Reports installed components rather than claiming target-version
-/// conformance: graphemes, line-break opportunities, scripts and the word
-/// boundaries of the word motions use ICU4X data of
-/// [`UNICODE_DATA_VERSION`]; bidi resolution and emoji properties are not
-/// wired in yet.
+/// conformance: graphemes, line-break opportunities, scripts, emoji
+/// sequences and the word boundaries of the word motions use ICU4X data of
+/// [`UNICODE_DATA_VERSION`]; bidi resolution is not wired in yet.
 pub fn conformance_report() -> ConformanceReport {
     ConformanceReport {
         grapheme: Some(UNICODE_DATA_VERSION),
@@ -71,6 +70,6 @@ pub fn conformance_report() -> ConformanceReport {
         line_break: Some(UNICODE_DATA_VERSION),
         word: Some(UNICODE_DATA_VERSION),
         script: Some(UNICODE_DATA_VERSION),
-        emoji: None,
+        emoji: Some(UNICODE_DATA_VERSION),
     }
 }

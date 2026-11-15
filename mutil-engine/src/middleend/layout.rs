@@ -952,6 +952,83 @@ impl<'i, 'a> Layout<'i, 'a> {
             lo = lo.min(a.min(b));
             hi = hi.max(a.max(b));
         };
+        // Baseline alignment (§5 Stage 4): every item's shift towards
+        // line-over. Named baselines and offsets are known before the line
+        // box; line-top and line-bottom items are placed against it after.
+        let mut shifts = vec![0.0_f32; pieces.len()];
+        let mut line_relative: Vec<(usize, bool, f32, f32)> = Vec::new();
+        for &k in order {
+            let (piece, _) = pieces[k];
+            let (align, a, d) = match piece.kind {
+                PieceKind::Cluster { run, cluster } => {
+                    let (a, d) = if normal || is_line_relative(ast.runs[run].baseline_align) {
+                        half(self.cluster_box(run, cluster)?)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    (ast.runs[run].baseline_align, a, d)
+                }
+                PieceKind::Object { item } => {
+                    let WordNode::Box(BoxNode::InlineObject { baseline_align, .. }) =
+                        &ast.items[item]
+                    else {
+                        unreachable!("an object piece names an object item")
+                    };
+                    let (_, a, d) = self.fitted_object(item);
+                    (*baseline_align, a, d)
+                }
+                _ => continue,
+            };
+            let is_object = matches!(piece.kind, PieceKind::Object { .. });
+            match align {
+                BaselineAlignment::LineTop | BaselineAlignment::LineBottom => {
+                    line_relative.push((k, align == BaselineAlignment::LineTop, a, d));
+                }
+                _ => {
+                    let shift = match piece.kind {
+                        PieceKind::Cluster { run, cluster } => {
+                            let own = self.cluster_metrics(run, cluster)?;
+                            run_shift(align, &self.ast.strut_metrics, &own)
+                        }
+                        _ => object_shift(align, &self.ast.strut_metrics),
+                    };
+                    shifts[k] = shift;
+                    if normal || is_object {
+                        above = above.max(a + shift);
+                        below = below.max(d - shift);
+                    }
+                }
+            }
+        }
+        // A line-relative item taller than the line deepens it on its free
+        // side under `Normal` (spec BAS-1).
+        if normal {
+            for &(_, top, a, d) in &line_relative {
+                let room = above + below;
+                if a + d > room {
+                    if top {
+                        below += a + d - room;
+                    } else {
+                        above += a + d - room;
+                    }
+                }
+            }
+        }
+        let (ascent, descent, line_height) = match self.options.line_height {
+            LineHeight::Fixed(_) => (
+                self.strut.ascent,
+                self.strut.descent,
+                self.strut.line_height(),
+            ),
+            LineHeight::Normal if byte_range.is_empty() => {
+                let (a, d) = half(self.strut);
+                (a, d, self.strut.line_height())
+            }
+            LineHeight::Normal => (above, below, above + below),
+        };
+        for &(k, top, a, d) in &line_relative {
+            shifts[k] = if top { ascent - a } else { d - descent };
+        }
         for &k in order {
             let (piece, _) = pieces[k];
             let x = starts[k];
@@ -959,13 +1036,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 PieceKind::Cluster { run, cluster } => {
                     let r = &ast.runs[run];
                     let c = &ast.clusters[cluster];
-                    let shift = baseline_shift(r.baseline_align);
-                    if normal {
-                        let b = self.cluster_box(run, cluster)?;
-                        let (a, d) = half(b);
-                        above = above.max(a + shift);
-                        below = below.max(d - shift);
-                    }
+                    let shift = shifts[k];
                     let (mut glyphs, _) = self.cluster_glyphs(cluster, run);
                     if glyphs.is_empty() {
                         continue;
@@ -1037,10 +1108,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                     else {
                         unreachable!("an object piece names an object item")
                     };
-                    let shift = baseline_shift(*baseline_align);
+                    let shift = shifts[k];
                     let (w, a, d) = self.fitted_object(item);
-                    above = above.max(a + shift);
-                    below = below.max(d - shift);
                     visual_boxes.push(PositionedInlineBox {
                         baseline_align: *baseline_align,
                         box_id: *box_id,
@@ -1100,25 +1169,12 @@ impl<'i, 'a> Layout<'i, 'a> {
                 kind,
                 pieces,
                 order,
-                starts,
-                widths,
+                (starts, widths, &shifts),
                 body_len,
                 &mut decorations,
             )?;
         }
         let atomic_fragments = self.atomic_fragments(pieces, order, starts, widths, byte_range);
-        let (ascent, descent, line_height) = match self.options.line_height {
-            LineHeight::Fixed(_) => (
-                self.strut.ascent,
-                self.strut.descent,
-                self.strut.line_height(),
-            ),
-            LineHeight::Normal if byte_range.is_empty() => {
-                let (a, d) = half(self.strut);
-                (a, d, self.strut.line_height())
-            }
-            LineHeight::Normal => (above, below, above + below),
-        };
         let caret_stops = self.caret_stops(
             index,
             pieces,
@@ -1209,6 +1265,11 @@ impl<'i, 'a> Layout<'i, 'a> {
             };
             for &k in order.iter().filter(|&&k| k < body_len) {
                 let (p, _) = pieces[k];
+                // Another span's edge neither joins nor splits this span's
+                // fragment: a nested span's padding lies inside it.
+                if matches!(p.kind, PieceKind::SpanEdge { span_id } if span_id != span.span_id) {
+                    continue;
+                }
                 if member(&p) {
                     let (a, b) = (starts[k], starts[k] + widths[k]);
                     group = Some(match group {
@@ -1309,14 +1370,12 @@ impl<'i, 'a> Layout<'i, 'a> {
 
     /// Underline or strike-through segments merged across adjacent decorated
     /// clusters and the glue between them (spec ST5-1).
-    #[expect(clippy::too_many_arguments, reason = "one line's placement state")]
     fn decorations(
         &mut self,
         kind: DecorationKind,
         pieces: &[(Piece, f32)],
         order: &[usize],
-        starts: &[f32],
-        widths: &[f32],
+        (starts, widths, shifts): (&[f32], &[f32], &[f32]),
         body_len: usize,
         out: &mut Vec<DecorationLine>,
     ) -> Result<(), LayoutInputError> {
@@ -1353,7 +1412,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 unreachable!("only clusters are decorated")
             };
             let m = self.cluster_metrics(run, cluster)?;
-            let shift = baseline_shift(self.ast.runs[run].baseline_align);
+            let shift = shifts[k];
             let (position, thickness) = match kind {
                 DecorationKind::Underline => (m.underline_position, m.underline_thickness),
                 DecorationKind::Strikethrough => (m.strikeout_position, m.underline_thickness),
@@ -1587,12 +1646,47 @@ fn visual_order(levels: &[BidiLevel]) -> Vec<usize> {
     order
 }
 
-/// The shift of a baseline alignment towards line-over: an explicit offset;
-/// Phase 1 places every other alignment on the alphabetic baseline.
-fn baseline_shift(align: BaselineAlignment) -> f32 {
+/// Whether an alignment is placed against the finished line box.
+fn is_line_relative(align: BaselineAlignment) -> bool {
+    matches!(
+        align,
+        BaselineAlignment::LineTop | BaselineAlignment::LineBottom
+    )
+}
+
+/// A font's offset of a named baseline from its alphabetic one, positive
+/// towards line-over (FNT-4); `None` for the other alignments.
+fn baseline_offset(align: BaselineAlignment, m: &FontMetrics) -> Option<f32> {
+    match align {
+        BaselineAlignment::Auto | BaselineAlignment::Alphabetic => Some(0.0),
+        BaselineAlignment::Ideographic => Some(m.ideographic_baseline_offset),
+        BaselineAlignment::Central => Some(m.central_baseline_offset),
+        BaselineAlignment::Hanging => Some(m.hanging_baseline_offset),
+        BaselineAlignment::Mathematical => Some(m.mathematical_baseline_offset),
+        BaselineAlignment::LineTop
+        | BaselineAlignment::LineBottom
+        | BaselineAlignment::Offset(_) => None,
+    }
+}
+
+/// The shift of a run towards line-over (spec BAS-1): its font's named
+/// baseline onto the strut's, or an explicit offset.
+fn run_shift(align: BaselineAlignment, strut: &FontMetrics, own: &FontMetrics) -> f32 {
     match align {
         BaselineAlignment::Offset(offset) => offset,
-        _ => 0.0,
+        _ => match (baseline_offset(align, strut), baseline_offset(align, own)) {
+            (Some(s), Some(o)) => s - o,
+            _ => 0.0,
+        },
+    }
+}
+
+/// The shift of an object's baseline towards line-over (spec BAS-1): to
+/// the strut's named baseline, or an explicit offset.
+fn object_shift(align: BaselineAlignment, strut: &FontMetrics) -> f32 {
+    match align {
+        BaselineAlignment::Offset(offset) => offset,
+        _ => baseline_offset(align, strut).unwrap_or(0.0),
     }
 }
 

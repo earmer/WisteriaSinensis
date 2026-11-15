@@ -10,11 +10,13 @@ mod ast;
 mod compile;
 #[cfg(test)]
 mod conformance;
+mod emoji;
 mod input;
 mod options;
 mod script;
 mod segment;
 mod span;
+mod url;
 
 use crate::types::TextRange;
 // The run and the hyphenation opportunity are defined in `types`, below the

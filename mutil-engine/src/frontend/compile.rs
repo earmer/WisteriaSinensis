@@ -3,14 +3,15 @@
 //! The Phase 1 analysis pass: horizontal, unidirectional text (spec RM-11).
 
 use super::{
-    BoxNode, DiscretionaryNode, FrontendOptions, GlueKind, GlueNode, InlineObjectInput,
-    ParagraphAst, ParagraphInput, TextStyle, WordNode, is_paragraph_separator, is_word_space,
-    script, segment,
+    BoxDecorationBreak, BoxNode, DiscretionaryNode, FrontendOptions, GlueKind, GlueNode,
+    InlineDecorationSpan, InlineObjectInput, MAX_DECORATION_NESTING_DEPTH, ParagraphAst,
+    ParagraphInput, SpanEdge, TextStyle, WordNode, emoji, is_paragraph_separator, is_word_space,
+    script, segment, url,
 };
 use crate::shaping::{LeadingEdit, TextShaper, TrailingEdit};
 use crate::types::{
-    AtomFlags, BaselineAlignment, BidiClass, BidiDirection, BidiLevel, ByteIndex, FontInstanceRef,
-    FontRef, GlyphOrientation, GraphemeAtom, LineBreakClass, LocaleTag, RawShapedGlyph, ScriptTag,
+    AtomFlags, BidiClass, BidiDirection, BidiLevel, ByteIndex, FontInstanceRef, FontRef,
+    GlyphOrientation, GraphemeAtom, LineBreakClass, LocaleTag, RawShapedGlyph, ScriptTag,
     ShapedCluster, ShapingRun, TextRange, WritingMode, is_extent, is_measurement,
 };
 use core::fmt;
@@ -48,6 +49,21 @@ pub enum FrontendError {
     InvalidInlineObject {
         /// Index into `ParagraphInput::inline_objects`.
         object: usize,
+    },
+    /// A decoration span is out of order, overlaps without nesting, nests
+    /// deeper than `MAX_DECORATION_NESTING_DEPTH`, repeats an id, is empty or
+    /// outside the text, has an invalid padding, or has an edge off a
+    /// grapheme boundary or inside an inline object (spec AST-7).
+    InvalidDecorationSpan {
+        /// Index into `ParagraphInput::decoration_spans`.
+        span: usize,
+    },
+    /// An atomic span is out of order, overlaps its predecessor, repeats an
+    /// id, is empty or outside the text, has an edge that is not the start
+    /// or end of a text atom or inline object, or holds neither (spec AST-9).
+    InvalidAtomicSpan {
+        /// Index into `ParagraphInput::atomic_spans`.
+        span: usize,
     },
     /// The input asks for something this implementation does not compile yet.
     Unsupported {
@@ -117,6 +133,8 @@ impl fmt::Display for FrontendError {
             Self::InvalidInlineObject { object } => {
                 write!(f, "inline object {object} is invalid")
             }
+            Self::InvalidDecorationSpan { span } => write!(f, "decoration span {span} is invalid"),
+            Self::InvalidAtomicSpan { span } => write!(f, "atomic span {span} is invalid"),
             Self::Unsupported { feature } => write!(f, "not supported yet: {feature}"),
             Self::ShaperContract { run } => {
                 write!(f, "the shaper's clusters do not partition run {run}")
@@ -185,12 +203,8 @@ fn check_input(input: &ParagraphInput<'_>, options: &FrontendOptions) -> Result<
     if text.chars().any(segment::is_bidi_significant) {
         return Err(unsupported(FrontendFeature::BidiText));
     }
+    check_decoration_spans(input)?;
     for (empty, feature) in [
-        (
-            input.decoration_spans.is_empty(),
-            FrontendFeature::DecorationSpans,
-        ),
-        (input.atomic_spans.is_empty(), FrontendFeature::AtomicSpans),
         (input.bidi_spans.is_empty(), FrontendFeature::BidiSpans),
         (input.annotations.is_empty(), FrontendFeature::Annotations),
     ] {
@@ -220,14 +234,54 @@ fn check_input(input: &ParagraphInput<'_>, options: &FrontendOptions) -> Result<
         let well_formed = r.start() < r.end()
             && r.end() <= text.len()
             && r.start() >= previous_end
-            && sizes.iter().all(|&v| is_extent(v));
+            && sizes.iter().all(|&v| is_extent(v))
+            && object.baseline_align.is_valid();
         if !well_formed {
             return Err(FrontendError::InvalidInlineObject { object: index });
         }
-        if !is_supported_alignment(object.baseline_align) {
-            return Err(unsupported(FrontendFeature::BaselineAlignment));
-        }
         previous_end = r.end();
+    }
+    Ok(())
+}
+
+/// AST-7 without segmentation: order, nesting, ids, paddings and ranges on
+/// character boundaries. Grapheme and object edges are checked once units
+/// exist.
+fn check_decoration_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendError> {
+    let text = input.text;
+    let mut ids = std::collections::HashSet::new();
+    let mut stack: Vec<TextRange> = Vec::new();
+    for (index, span) in input.decoration_spans.iter().enumerate() {
+        let r = span.byte_range;
+        let invalid = Err(FrontendError::InvalidDecorationSpan { span: index });
+        if index > 0 {
+            let prev = input.decoration_spans[index - 1].byte_range;
+            if r.start() < prev.start() || (r.start() == prev.start() && r.end() > prev.end()) {
+                return invalid;
+            }
+        }
+        while stack.last().is_some_and(|top| top.end() <= r.start()) {
+            stack.pop();
+        }
+        if !ids.insert(span.span_id)
+            || !span.is_valid()
+            || r.end() > text.len()
+            || !text.is_char_boundary(r.start())
+            || !text.is_char_boundary(r.end())
+            || stack.last().is_some_and(|top| !top.contains_range(r))
+            || stack.len() >= MAX_DECORATION_NESTING_DEPTH
+        {
+            return invalid;
+        }
+        stack.push(r);
+    }
+    let mut ids = std::collections::HashSet::new();
+    for (index, span) in input.atomic_spans.iter().enumerate() {
+        let r = span.byte_range;
+        let ordered = index == 0 || input.atomic_spans[index - 1].byte_range.end() <= r.start();
+        if !ids.insert(span.span_id) || r.is_empty() || r.end() > text.len() || !ordered {
+            return Err(FrontendError::InvalidAtomicSpan { span: index });
+        }
     }
     Ok(())
 }
@@ -242,19 +296,7 @@ fn check_style(style: &TextStyle, span: Option<usize>) -> Result<(), FrontendErr
     if !valid {
         return Err(FrontendError::InvalidStyle { span });
     }
-    if !is_supported_alignment(style.baseline_align) {
-        return Err(unsupported(FrontendFeature::BaselineAlignment));
-    }
     Ok(())
-}
-
-/// The alignments Phase 1 places: the alphabetic baseline and an explicit
-/// offset from it.
-fn is_supported_alignment(align: BaselineAlignment) -> bool {
-    matches!(
-        align,
-        BaselineAlignment::Auto | BaselineAlignment::Alphabetic | BaselineAlignment::Offset(_)
-    )
 }
 
 /// One source unit, in text order.
@@ -328,6 +370,7 @@ impl<'a> Compiler<'a> {
         let text = self.text;
         let graphemes = segment::grapheme_boundaries(text);
         self.build_units(&graphemes)?;
+        self.check_span_edges()?;
         self.resolve_scripts();
         let opportunities = segment::line_opportunities(
             text,
@@ -335,14 +378,47 @@ impl<'a> Compiler<'a> {
             self.options.word_break_option,
             &graphemes,
         );
-        // The discretionary after unit `i`, if any (FE-19, WN-2, WN-3).
-        let breaks_after: Vec<bool> = (0..self.units.len())
+        // The penalty of the discretionary after unit `i`, if any (FE-19,
+        // WN-2, WN-3), with URL tailoring (FE-22), unbreakable dash runs
+        // (FE-15) and the no-line-end words (FE-23).
+        let urls = url::url_ranges(text);
+        let mut added: Vec<(usize, i32)> = urls
+            .iter()
+            .flat_map(|&u| url::url_opportunities(text, u, &graphemes))
+            .collect();
+        added.sort_unstable();
+        let in_url = |at: usize| {
+            let k = urls.partition_point(|u| u.end() <= at);
+            urls.get(k).is_some_and(|u| u.start() < at && at < u.end())
+        };
+        let script_atoms = self.script_atoms();
+        let breaks_after: Vec<Option<i32>> = (0..self.units.len())
             .map(|i| {
                 let unit = self.units[i];
                 let end = unit.range(&self.atoms, self.input.inline_objects).end();
-                end < text.len()
-                    && !matches!(unit, Unit::HardBreak(_))
-                    && opportunities.binary_search(&end).is_ok()
+                if end >= text.len() || matches!(unit, Unit::HardBreak(_)) {
+                    return None;
+                }
+                if let (Unit::Atom(a), Some(Unit::Atom(b))) = (unit, self.units.get(i + 1))
+                    && *b == a + 1
+                    && script::binds_to_next(&script_atoms, a)
+                {
+                    return None;
+                }
+                if self.binds_one_letter_word(i) {
+                    return None;
+                }
+                let natural = opportunities.binary_search(&end).is_ok();
+                let tailored = added
+                    .binary_search_by_key(&end, |&(at, _)| at)
+                    .ok()
+                    .map(|k| added[k].1);
+                match (natural, tailored) {
+                    (_, Some(p)) => Some(p),
+                    (true, None) if in_url(end) => Some(DiscretionaryNode::URL_PENALTY_MIN),
+                    (true, None) => Some(DiscretionaryNode::NATURAL_PENALTY),
+                    (false, None) => None,
+                }
             })
             .collect();
         // Atom indices that start a text box: after any other unit, after a
@@ -351,12 +427,15 @@ impl<'a> Compiler<'a> {
         let mut previous: Option<(Unit, bool)> = None;
         for (i, unit) in self.units.iter().enumerate() {
             if let Unit::Atom(a) = *unit {
+                let at = self.atoms[a].byte_range.start();
                 box_starts[a] = match previous {
-                    Some((Unit::Atom(p), broke)) => broke || !self.same_run(p, a),
+                    Some((Unit::Atom(p), broke)) => {
+                        broke || !self.same_run(p, a) || self.is_decoration_edge(at)
+                    }
                     _ => true,
                 };
             }
-            previous = Some((*unit, breaks_after[i]));
+            previous = Some((*unit, breaks_after[i].is_some()));
         }
         let runs = self.build_runs();
         let mut ast = self.empty_ast()?;
@@ -415,6 +494,19 @@ impl<'a> Compiler<'a> {
                             matches!(c, '\u{FE0E}' | '\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
                         }),
                     );
+                    flags.set(
+                        AtomFlags::IS_EMOJI_SEQUENCE,
+                        emoji::is_emoji_sequence(grapheme),
+                    );
+                    flags.set(AtomFlags::IS_APOSTROPHE, script::is_apostrophe(text, range));
+                    flags.set(
+                        AtomFlags::IS_CJK_IDEOGRAPH,
+                        script::is_wide(first)
+                            && matches!(
+                                &script::char_script(first).as_bytes(),
+                                b"Hani" | b"Hira" | b"Kana"
+                            ),
+                    );
                     self.atoms.push(GraphemeAtom {
                         orientation: GlyphOrientation::Horizontal,
                         byte_range: range,
@@ -432,19 +524,147 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    /// Step 3: a style's script stands; otherwise FE-13's Phase 1 subset.
-    fn resolve_scripts(&mut self) {
-        let own: Vec<Option<ScriptTag>> = self
-            .atoms
+    /// The atoms as script resolution and FE-15 see them.
+    fn script_atoms(&self) -> Vec<script::ScriptAtom<'a>> {
+        let text = self.text;
+        self.atoms
             .iter()
-            .map(|atom| script::atom_script(&self.text[atom.byte_range.as_range()]))
-            .collect();
-        let resolved = script::resolve_common(&own);
-        for (index, atom) in self.atoms.iter_mut().enumerate() {
-            atom.script = self.styles[self.atom_styles[index]]
-                .script
-                .unwrap_or(resolved[index]);
+            .enumerate()
+            .map(|(index, atom)| script::ScriptAtom {
+                text: &text[atom.byte_range.as_range()],
+                explicit: self.styles[self.atom_styles[index]].script,
+                is_emoji: atom.flags.contains(AtomFlags::IS_EMOJI_SEQUENCE),
+                is_apostrophe: atom.flags.contains(AtomFlags::IS_APOSTROPHE),
+                after_space: text[..atom.byte_range.start()].ends_with(' '),
+            })
+            .collect()
+    }
+
+    /// Step 3 (FE-6, FE-11, FE-13 to FE-15): a style's script stands.
+    fn resolve_scripts(&mut self) {
+        let resolved = script::resolve(&self.script_atoms(), self.options.quote_policy);
+        for (atom, script) in self.atoms.iter_mut().zip(resolved) {
+            atom.script = script;
         }
+    }
+
+    /// Whether a decoration span starts or ends at `offset`.
+    fn is_decoration_edge(&self, offset: usize) -> bool {
+        self.input
+            .decoration_spans
+            .iter()
+            .any(|s| s.byte_range.start() == offset || s.byte_range.end() == offset)
+    }
+
+    /// The edge checks of AST-7 and AST-9 that need units: a decoration
+    /// edge lies between units, an atomic edge at the start or end of a text
+    /// atom or object, and an atomic span holds one.
+    fn check_span_edges(&self) -> Result<(), FrontendError> {
+        let objects = self.input.inline_objects;
+        let ranges: Vec<(TextRange, bool)> = self
+            .units
+            .iter()
+            .map(|u| {
+                let content = matches!(u, Unit::Atom(_) | Unit::Object(_));
+                (u.range(&self.atoms, objects), content)
+            })
+            .collect();
+        let between_units = |at: usize| at == 0 || ranges.iter().any(|(r, _)| r.end() == at);
+        for (index, span) in self.input.decoration_spans.iter().enumerate() {
+            let r = span.byte_range;
+            if !between_units(r.start()) || !between_units(r.end()) {
+                return Err(FrontendError::InvalidDecorationSpan { span: index });
+            }
+        }
+        for (index, span) in self.input.atomic_spans.iter().enumerate() {
+            let r = span.byte_range;
+            let starts = ranges.iter().any(|(u, c)| *c && u.start() == r.start());
+            let ends = ranges.iter().any(|(u, c)| *c && u.end() == r.end());
+            let holds = ranges.iter().any(|(u, c)| *c && r.contains_range(*u));
+            if !(starts && ends && holds) {
+                return Err(FrontendError::InvalidAtomicSpan { span: index });
+            }
+        }
+        Ok(())
+    }
+
+    /// The `SpanBoundary` items at `offset` of one edge (WN-8, AST-8): the
+    /// trailing ones inner first, the leading ones outer first.
+    fn boundaries_at(&self, offset: usize, edge: SpanEdge) -> Vec<WordNode> {
+        let spans = self.input.decoration_spans;
+        let node = |s: &InlineDecorationSpan| {
+            WordNode::Box(BoxNode::SpanBoundary {
+                byte_range: TextRange::empty_at(offset),
+                span_id: s.span_id,
+                edge,
+                width: match edge {
+                    SpanEdge::Leading => s.start_padding,
+                    SpanEdge::Trailing => s.end_padding,
+                },
+                bidi_level: BidiLevel::LTR,
+            })
+        };
+        match edge {
+            SpanEdge::Leading => spans
+                .iter()
+                .filter(|s| s.byte_range.start() == offset)
+                .map(node)
+                .collect(),
+            SpanEdge::Trailing => spans
+                .iter()
+                .rev()
+                .filter(|s| s.byte_range.end() == offset)
+                .map(node)
+                .collect(),
+        }
+    }
+
+    /// WN-21: every discretionary but the sentinel lists the `Clone` spans
+    /// that hold it strictly inside, with their padding in its widths and,
+    /// unless mandatory, `CLONED_SPAN_PENALTY` each in its penalty.
+    fn clone_padding(&self, items: &mut [WordNode]) {
+        for item in items {
+            let WordNode::Discretionary(d) = item else {
+                continue;
+            };
+            if d.is_paragraph_end() {
+                continue;
+            }
+            let offset = d.byte_offset();
+            for span in self.input.decoration_spans {
+                let r = span.byte_range;
+                if span.break_mode == BoxDecorationBreak::Clone
+                    && r.start() < offset
+                    && offset < r.end()
+                {
+                    d.cloned_spans.push(span.span_id);
+                    d.pre_break_width += span.end_padding;
+                    d.post_break_width += span.start_padding;
+                    if !d.is_mandatory() {
+                        d.penalty += DiscretionaryNode::CLONED_SPAN_PENALTY;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether unit `i` is the word space after a listed one-letter word of
+    /// its locale, which binds the word to the next (FE-23).
+    fn binds_one_letter_word(&self, i: usize) -> bool {
+        let (Some(Unit::Glue(..)), Some(&Unit::Atom(a))) = (
+            self.units.get(i),
+            i.checked_sub(1).and_then(|p| self.units.get(p)),
+        ) else {
+            return false;
+        };
+        let word_start = i < 2 || !matches!(self.units[i - 2], Unit::Atom(_));
+        let letter = &self.text[self.atoms[a].byte_range.as_range()];
+        let locale = self.locale_of(self.atom_styles[a]);
+        let language = locale.as_str().split('-').next().unwrap_or_default();
+        let mut chars = letter.chars();
+        word_start
+            && matches!((chars.next(), chars.next()), (Some(c), None)
+                if url::no_line_end_words(language).contains(c))
     }
 
     fn locale_of(&self, style: usize) -> LocaleTag {
@@ -620,7 +840,12 @@ impl<'a> Compiler<'a> {
     }
 
     /// Step 6: the item sequence (FE-19, FE-27, WN-17).
-    fn assemble_items(&self, box_starts: &[bool], breaks_after: &[bool], ast: &mut ParagraphAst) {
+    fn assemble_items(
+        &self,
+        box_starts: &[bool],
+        breaks_after: &[Option<i32>],
+        ast: &mut ParagraphAst,
+    ) {
         let objects = self.input.inline_objects;
         // The paragraph-level cluster of every atom start, and the run of
         // every atom.
@@ -666,6 +891,7 @@ impl<'a> Compiler<'a> {
             }
         };
         let mut atom_end = 0;
+        items.extend(self.boundaries_at(0, SpanEdge::Leading));
         for (i, unit) in self.units.iter().enumerate() {
             match *unit {
                 Unit::Atom(a) => {
@@ -713,17 +939,32 @@ impl<'a> Compiler<'a> {
                     });
                 }
             }
-            if breaks_after[i] {
+            let end = unit.range(&self.atoms, objects).end();
+            let trailing = self.boundaries_at(end, SpanEdge::Trailing);
+            let leading = if end < self.text.len() {
+                self.boundaries_at(end, SpanEdge::Leading)
+            } else {
+                Vec::new()
+            };
+            if breaks_after[i].is_some() || !trailing.is_empty() || !leading.is_empty() {
                 close(&mut open, atom_end, &mut items, ast);
-                let end = unit.range(&self.atoms, objects).end();
-                items.push(WordNode::Discretionary(DiscretionaryNode::direct(end)));
             }
+            items.extend(trailing);
+            if let Some(penalty) = breaks_after[i] {
+                let mut node = DiscretionaryNode::direct(end);
+                node.penalty = penalty;
+                items.push(WordNode::Discretionary(node));
+            }
+            items.extend(leading);
         }
         close(&mut open, atom_end, &mut items, ast);
         items.push(WordNode::Discretionary(DiscretionaryNode::paragraph_end(
             self.text.len(),
         )));
+        self.clone_padding(&mut items);
         ast.items = items;
+        ast.decoration_spans = self.input.decoration_spans.to_vec();
+        ast.atomic_spans = self.input.atomic_spans.to_vec();
     }
 
     /// `max(0, space advance + word_spacing)` for the primary font of a

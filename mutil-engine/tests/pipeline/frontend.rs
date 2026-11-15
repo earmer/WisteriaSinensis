@@ -5,7 +5,7 @@ use crate::common::*;
 use mutil_engine::*;
 
 #[track_caller]
-fn passes_the_input_gate(ast: &ParagraphAst, text: &str) {
+pub(crate) fn passes_the_input_gate(ast: &ParagraphAst, text: &str) {
     for wrap_width in [1.0, 37.5, f32::INFINITY] {
         for options in [
             LayoutOptions::default(),
@@ -184,24 +184,6 @@ fn what_phase_1_does_not_compile_is_refused() {
     assert_eq!(
         refused(&input("a", &base), &vertical),
         unsupported(FrontendFeature::VerticalWritingMode)
-    );
-    let spans = [AtomicEditSpan {
-        span_id: 1,
-        byte_range: TextRange::new(0, 1),
-    }];
-    let with_span = ParagraphInput {
-        atomic_spans: &spans,
-        ..input("a", &base)
-    };
-    assert_eq!(
-        refused(&with_span, &options),
-        unsupported(FrontendFeature::AtomicSpans)
-    );
-    let mut hanging = style(10.0);
-    hanging.baseline_align = BaselineAlignment::Hanging;
-    assert_eq!(
-        refused(&input("a", &hanging), &options),
-        unsupported(FrontendFeature::BaselineAlignment)
     );
 }
 
