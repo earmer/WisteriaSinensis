@@ -752,10 +752,14 @@ impl ValidatedLayout<'_> {
         let (mut above, mut below) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
         let inside = |x: f32| x >= x0 - 1e-3 && x <= x1 + 1e-3;
         for run in &l.visual_runs {
+            // A glyph counts when its extent meets the piece and its bytes
+            // meet the selection: part of a ligature selects its font.
             let selected = run.glyphs.iter().any(|g| {
-                inside(g.x)
+                let (lo, hi) = (g.x.min(g.x + g.advance), g.x.max(g.x + g.advance));
+                lo < x1 - 1e-3
+                    && hi > x0 + 1e-3
                     && g.byte_range
-                        .is_some_and(|b| range.start() <= b.start() && b.end() <= range.end())
+                        .is_some_and(|b| b.start() < range.end() && range.start() < b.end())
             });
             if !selected {
                 continue;

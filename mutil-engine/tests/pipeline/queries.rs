@@ -215,6 +215,39 @@ fn a_tight_selection_follows_the_fonts_it_crosses() {
 }
 
 #[test]
+fn a_tight_selection_inside_a_ligature_takes_its_font() {
+    // "office" in Noto Serif over a monospace default (the strut): the
+    // selection covers the second f of "ffi" only, and still takes the
+    // serif face's extent, as the whole ligature does.
+    let text = "office";
+    let base = style(10.0);
+    let spans = [StyleSpan {
+        byte_range: TextRange::new(0, 6),
+        style: script_style(&["Noto Serif"], 10.0),
+    }];
+    let paragraph = ParagraphInput {
+        style_spans: &spans,
+        ..input(text, &base)
+    };
+    let ast = compile_paragraph(&paragraph, &FrontendOptions::default(), &*SCRIPT_SHAPER).unwrap();
+    let (constraints, options) = (column(200.0), LayoutOptions::default());
+    let p = layout_paragraph(&ast, text, &*SCRIPT_SHAPER, &constraints, &options).unwrap();
+    let l = ValidatedLayout::new(&p, text).unwrap();
+    let rect =
+        |r: TextRange| l.selection_geometry(&*SCRIPT_SHAPER, r, BoxHeightStyle::Tight)[0].rect;
+    let part = rect(TextRange::new(2, 3));
+    let whole = rect(TextRange::new(1, 4));
+    let strut =
+        l.selection_geometry(&*SCRIPT_SHAPER, TextRange::new(2, 3), BoxHeightStyle::Strut)[0].rect;
+    assert_close(part.height, whole.height);
+    assert_close(part.y, whole.y);
+    assert!(
+        (part.height - strut.height).abs() > 0.1,
+        "{part:?} {strut:?}"
+    );
+}
+
+#[test]
 fn deletion_removes_marks_alone_and_emoji_objects_and_chips_whole() {
     let text = "e\u{301}\u{1F44B}\u{1F3FD} @al x";
     let base = style(10.0);

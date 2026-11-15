@@ -391,16 +391,13 @@ impl HarfRustShaper {
             flags |= BufferFlags::END_OF_TEXT;
         }
         buffer.set_flags(flags);
-        let features: Vec<Feature> = run
-            .features
-            .as_slice()
-            .iter()
-            .map(|f| Feature::new(Tag::new(&f.tag), f.value, ..))
-            .collect();
+        let features = run_features(run);
         let shaper_font = ShaperFont::new(&parsed);
         let options = ShapeOptions::new()
             .features(&features)
             .point_size(Some(run.font_size));
+        // A fresh buffer with its direction set and no cached plan: none of
+        // `ShapeError`'s misuse cases can arise.
         if harfrust::shape(&shaper_font, &mut buffer, options).is_err() {
             for (index, atom) in atoms.iter().enumerate().take(range.end).skip(range.start) {
                 output_clusters.push(empty_cluster(run, atom, index, font_id));
@@ -478,8 +475,16 @@ impl HarfRustShaper {
             harfrust::Direction::LeftToRight
         });
         buffer.set_script(Script::from_iso15924_tag(Tag::new(&run.script.as_bytes())));
+        // The replacement takes the kept text's language, features and size.
+        if run.locale.as_str() != "und" {
+            buffer.set_language(Language::new(run.locale.as_str()));
+        }
+        let features = run_features(run);
         let shaper_font = ShaperFont::new(&parsed);
-        if harfrust::shape(&shaper_font, &mut buffer, ShapeOptions::new()).is_err() {
+        let options = ShapeOptions::new()
+            .features(&features)
+            .point_size(Some(run.font_size));
+        if harfrust::shape(&shaper_font, &mut buffer, options).is_err() {
             return Vec::new();
         }
         let k = run.font_size / units.units_per_em;
@@ -522,6 +527,15 @@ fn context_after(text: &str, at: usize) -> &str {
         end -= 1;
     }
     &text[at..end]
+}
+
+/// The OpenType features of `run`, for HarfRust.
+fn run_features(run: &ShapingRun) -> Vec<Feature> {
+    run.features
+        .as_slice()
+        .iter()
+        .map(|f| Feature::new(Tag::new(&f.tag), f.value, ..))
+        .collect()
 }
 
 /// The maximal byte-contiguous stretches of `atoms[range]`.

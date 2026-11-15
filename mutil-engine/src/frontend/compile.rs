@@ -194,15 +194,6 @@ fn check_input(input: &ParagraphInput<'_>, options: &FrontendOptions) -> Result<
     if options.base_direction == Some(BidiDirection::Rtl) {
         return Err(unsupported(FrontendFeature::RtlBaseDirection));
     }
-    if options.base_direction.is_none()
-        && text.chars().find_map(segment::strong_direction) == Some(true)
-    {
-        // UAX #9 P2 and P3 would make the paragraph right-to-left.
-        return Err(unsupported(FrontendFeature::RtlBaseDirection));
-    }
-    if text.chars().any(segment::is_bidi_significant) {
-        return Err(unsupported(FrontendFeature::BidiText));
-    }
     check_decoration_spans(input)?;
     for (empty, feature) in [
         (input.bidi_spans.is_empty(), FrontendFeature::BidiSpans),
@@ -240,6 +231,25 @@ fn check_input(input: &ParagraphInput<'_>, options: &FrontendOptions) -> Result<
             return Err(FrontendError::InvalidInlineObject { object: index });
         }
         previous_end = r.end();
+    }
+    // An object's bytes are neither atoms nor shaped (FE-27): they take no
+    // part in direction.
+    let objects = input.inline_objects;
+    let outside_objects = text.char_indices().filter_map(|(i, c)| {
+        let after = objects.partition_point(|o| o.byte_range.start() <= i);
+        let inside = after
+            .checked_sub(1)
+            .is_some_and(|k| i < objects[k].byte_range.end());
+        (!inside).then_some(c)
+    });
+    if options.base_direction.is_none()
+        && outside_objects.clone().find_map(segment::strong_direction) == Some(true)
+    {
+        // UAX #9 P2 and P3 would make the paragraph right-to-left.
+        return Err(unsupported(FrontendFeature::RtlBaseDirection));
+    }
+    if outside_objects.clone().any(segment::is_bidi_significant) {
+        return Err(unsupported(FrontendFeature::BidiText));
     }
     Ok(())
 }

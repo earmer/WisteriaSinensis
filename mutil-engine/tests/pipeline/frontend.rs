@@ -158,6 +158,38 @@ fn inline_objects_own_their_bytes() {
 }
 
 #[test]
+fn an_objects_bytes_take_no_part_in_direction() {
+    // The object owns a Hebrew letter: its bytes are neither atoms nor
+    // shaped (FE-27), so the paragraph stays left-to-right.
+    let text = "a\u{5D0}b";
+    let base = style(10.0);
+    let objects = [InlineObjectInput {
+        byte_range: TextRange::new(1, 3),
+        box_id: 7,
+        width: 12.0,
+        ascent: 9.0,
+        descent: 1.0,
+        baseline_align: BaselineAlignment::Auto,
+        overflow_policy: BoxOverflowPolicy::Clip,
+    }];
+    let input = ParagraphInput {
+        inline_objects: &objects,
+        ..input(text, &base)
+    };
+    let ast = compile_paragraph(&input, &FrontendOptions::default(), &*SHAPER).unwrap();
+    // A letter, not U+FFFC, so UAX #14 puts no break beside it.
+    assert_eq!(shape_of(&ast, text), "[a]O[b]$");
+    passes_the_input_gate(&ast, text);
+    // Outside an object the same letter is still refused.
+    let plain = compile_paragraph(
+        &super::common::input(text, &base),
+        &FrontendOptions::default(),
+        &*SHAPER,
+    );
+    assert!(plain.is_err());
+}
+
+#[test]
 fn what_phase_1_does_not_compile_is_refused() {
     let base = style(10.0);
     let options = FrontendOptions::default();

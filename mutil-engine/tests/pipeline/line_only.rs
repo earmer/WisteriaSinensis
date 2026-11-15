@@ -259,3 +259,23 @@ fn a_window_takes_its_edits_as_synthesized_glyphs() {
     assert!(glyphs.last().expect("glyphs").is_synthesized);
     assert_eq!(glyphs.iter().filter(|g| g.is_synthesized).count(), 1);
 }
+
+#[test]
+fn word_spaces_are_sized_by_the_frontend_not_by_a_cluster() {
+    // The line backend shapes the whole run, spaces included; a space's
+    // glyph belongs to no atom, so no cluster may carry its advance.
+    for (text, family) in [
+        ("office fit", "Noto Serif"),
+        ("a b\tc", "Noto Serif"),
+        ("日本 語", "Noto Sans JP"),
+    ] {
+        let lines = compile_lines(text, &[family]);
+        let full = compile_in(text, &[family]);
+        assert_eq!(lines.clusters.len(), full.clusters.len(), "{text:?}");
+        for (a, b) in lines.clusters.iter().zip(&full.clusters) {
+            let s = &text[a.byte_range.as_range()];
+            assert_close(a.natural_width, b.natural_width);
+            assert_eq!(a.glyph_range.len(), b.glyph_range.len(), "{text:?}: {s:?}");
+        }
+    }
+}

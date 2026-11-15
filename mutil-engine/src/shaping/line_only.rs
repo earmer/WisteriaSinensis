@@ -145,10 +145,32 @@ impl<B: LineShaper> LineOnlyShaper<B> {
                     + atoms[range.clone()]
                         .partition_point(|a| a.byte_range.start() <= byte)
                         .saturating_sub(1);
+                // A glyph of a gap between atoms (a word space, a tab, an
+                // object's bytes) belongs to no cluster: the frontend sizes
+                // the gap itself (SHP-5, WN-10).
+                let bytes = atoms[atom].byte_range;
+                if byte < bytes.start() || byte >= bytes.end() {
+                    continue;
+                }
                 kept.push((atom, g.font, raw(g, false)));
             }
         }
-        let fallback = glyphs.first().map_or(FontId::default(), |g| g.font);
+        // With no glyph to name it, a cluster takes the run's primary face.
+        let fallback = glyphs.first().map_or_else(
+            || {
+                self.backend
+                    .resolve_primary_font_metrics(
+                        &run.families,
+                        run.style,
+                        run.script,
+                        &run.locale,
+                        run.font_size,
+                        run.features.variations(),
+                    )
+                    .0
+            },
+            |g| g.font,
+        );
         if range.is_empty() {
             return (leading, trailing, fallback);
         }
