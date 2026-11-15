@@ -24,7 +24,7 @@ pub use badness::{
 pub use input_validation::{LayoutInputError, check_layout_inputs};
 pub use interaction::{
     BoxHeightStyle, CaretVisual, CursorMove, CursorPosition, FlowMotion, HitResult, Motion,
-    ParagraphEdge, Selection, SelectionRect, resolve_ligature_carets,
+    ParagraphEdge, Selection, SelectionRect, resolve_ligature_carets, utf8_to_utf16, utf16_to_utf8,
 };
 pub use layout::layout_paragraph;
 pub use options::{

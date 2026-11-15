@@ -1470,6 +1470,7 @@ impl ValidatedLayout<'_> {
 impl ValidatedInputs<'_> {
     fn delete_backward_range(&self, offset: ByteIndex) -> TextRange;
     fn delete_forward_range(&self, offset: ByteIndex) -> TextRange;
+    fn copied_text(&self, range: TextRange) -> String;
 }
 pub fn utf8_to_utf16(text: &str, offset: ByteIndex) -> Option<usize>;
 pub fn utf16_to_utf8(text: &str, offset: usize) -> Option<ByteIndex>;
@@ -1477,7 +1478,7 @@ pub fn utf16_to_utf8(text: &str, offset: usize) -> Option<ByteIndex>;
 
 The receivers are the gate types (AX-3), which carry the text the data was validated against, so no query takes it again (AX-2). Visual queries read the caret-stop table of the validated output. Word motions segment the receiver's text. `BoxHeightStyle::Tight` asks the shaper, through the shaper gate, for the metrics of each run's font instance (`VisualGlyphRun::font`, `font_size`, `variations`). Deletion ranges read atoms, flags and atomic spans from the validated AST and code points from its text. `hit_test_on_line` places the caret on one line, by index, at a position along the inline axis in flow space; it is how a caller re-enters a paragraph on its first or last line (INT-15).
 
-The data types and three pure helpers (`AtomicFragment::hit_test`, `Motion::flow_direction`, `resolve_ligature_carets`) exist, and so do `hit_test`, `hit_test_on_line`, `caret_geometry`, `rect_for_offset` and `move_cursor` (INT-20); `selection_geometry`, `range_rects`, the deletion ranges and the UTF-16 conversions are *future*.
+The data types and three pure helpers (`AtomicFragment::hit_test`, `Motion::flow_direction`, `resolve_ligature_carets`) exist, and so does every query of the block (INT-20, INT-21).
 
 ### 6.1 Caret representation
 
@@ -1527,13 +1528,15 @@ The data types and three pure helpers (`AtomicFragment::hit_test`, `Motion::flow
 
 ### 6.7 Platform interfaces
 
-**[INT-18]** `rect_for_offset` is the primary caret rectangle of the offset, downstream. *Future:* `range_rects(range)` (IME candidate placement), `offset_for_point` (`hit_test`), UTF-16 conversion that rejects offsets inside a code point (`utf8_to_utf16`, `utf16_to_utf8`), a `CompositionSpan` that never changes segmentation (SPN-5), and per-line accessibility exports of character lengths, positions and widths and word starts.
+**[INT-18]** `rect_for_offset` is the primary caret rectangle of the offset, downstream. `range_rects(range)` places an IME candidate window, and `utf8_to_utf16` and `utf16_to_utf8` convert offsets, rejecting one inside a code point or past the text. *Future:* `offset_for_point` (`hit_test`), a `CompositionSpan` that never changes segmentation (SPN-5), and per-line accessibility exports of character lengths, positions and widths and word starts.
 
 ### 6.8 Writing modes, slots and truncation
 
 **[INT-19]** Physical arrows resolve once, at the interaction boundary, through `Motion::flow_direction(mode)` to `FlowMotion`; logical and word motions resolve to `None` there. Queries transform at their physical boundary (§2.7) and then work in flow space. A hit on an obstacle between slots snaps to the nearer caret stop, ties towards positive inline. Selections split by slot. Ruby hits map to the base text; an annotation is never a caret target. Ellipsis hits, and caret requests into the hidden tail, map upstream to `truncated_range.start()`. Tate-chu-yoko text is atomic for editing only under an `AtomicEditSpan`.
 
 **[INT-20] Phase 1 queries.** A line's caret stops are the visual edges of its pieces (clusters, objects, tabs, word spaces and span edges), with the INT-5 sub-slots inside a ligature, one stop per distinct offset and position, none strictly inside an atomic span. A soft-wrapped line's last logical stop is upstream; under `Collapsible` it has no stop past its visible end, whose offsets belong to the next line's start. A line that ends at a hard break or the paragraph end keeps stops on its trailing word spaces, on the far edge of the base direction: with their widths under `Preserved`, all at the edge under `Collapsible`, so the end of the text stays reachable; no stop lies after a U+2028, whose end starts the next line. `hit_test` places the point on the first line whose box ends below it, the last one past them; on a line, a point inside an atomic fragment snaps by INT-10, one beyond an edge by INT-8, and any other point takes the nearer of the two stops around it, the right one at the midpoint. `caret_geometry` finds the stop with the position's offset and affinity, else its offset, else the nearest offset before it on its line, and returns zero-width rectangles over the line box. `Previous` and `Next` move to the neighbouring caret offset of the paragraph, downstream; the word motions to the neighbouring caret offset that is also a UAX #29 word boundary, `WordLeft` and `WordRight` resolved through the base direction.
+
+**[INT-21] Phase 1 selection, deletion and copying.** `selection_geometry` walks each line's caret stops in visual order; the stretch between two neighbouring stops is selected when the bytes between their offsets lie inside the range, and selected stretches merge until an unselected one; a stretch whose stops share an offset neither joins nor breaks a merge. No line-end extension is drawn. A `Tight` piece spans the ascents and descents, without half-leading, of the font instances of the selected glyph runs it crosses, asked through the shaper gate, and of the inline boxes it holds, else the strut; `Max` spans the line box and `Strut` the resolved strut. `range_rects` returns the same pieces over the line box. `delete_backward_range` first moves an offset past the text or off a character boundary back to one; at 0 it is empty; when the byte before the offset lies in an atomic span it is the span, in an inline object the object, at the end of an atom flagged `IS_EMOJI_SEQUENCE` or `HAS_VARIATION_SELECTOR` the atom, and otherwise the last code point before the offset. `delete_forward_range` is empty at the end of the text and otherwise the atomic span or object holding the byte after the offset, else the atom starting there, else the next code point. `copied_text` returns the source bytes of the range, clamped to character boundaries, dropping U+00AD under `SoftHyphenPolicy::Strip` (INT-17).
 
 ---
 

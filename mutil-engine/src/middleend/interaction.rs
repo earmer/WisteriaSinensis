@@ -1,14 +1,14 @@
 //! Interactive types: caret, hit-test, movement and selection data (spec §6).
 //!
 //! The data types, and the queries on validated output: `hit_test`,
-//! `hit_test_on_line`, `caret_geometry`, `rect_for_offset` and `move_cursor`.
-//! Selection geometry, range rectangles and deletion ranges are not
-//! implemented yet.
+//! `hit_test_on_line`, `caret_geometry`, `rect_for_offset`, `move_cursor`,
+//! `selection_geometry` and `range_rects`; on validated inputs, the
+//! deletion ranges and the copied text; and the UTF-16 conversions.
 
-use super::ValidatedLayout;
 use super::output::{AtomicFragment, CaretAffinity, CaretStop, HangSide, PositionedParagraph};
 use super::tolerance::approx_eq;
-use crate::types::{BidiLevel, ByteIndex, Point, Rect, WritingMode};
+use super::{ValidatedInputs, ValidatedLayout};
+use crate::types::{AtomFlags, BidiLevel, ByteIndex, Point, Rect, TextRange, WritingMode};
 
 /// A caret location: offset plus affinity (spec §6.1).
 ///
@@ -616,4 +616,299 @@ fn line_block(paragraph: &PositionedParagraph, line: usize) -> (f32, f32) {
     };
     let top = l.baseline_y - above;
     (top, top + l.line_height)
+}
+
+/// A visual slot of a line: the stretch between two neighbouring caret
+/// stops, with the bytes between their offsets.
+struct Slot {
+    x0: f32,
+    x1: f32,
+    lo: ByteIndex,
+    hi: ByteIndex,
+    level: BidiLevel,
+}
+
+fn slots(stops: &[CaretStop]) -> impl Iterator<Item = Slot> + '_ {
+    stops.windows(2).map(|w| Slot {
+        x0: w[0].x.min(w[1].x),
+        x1: w[0].x.max(w[1].x),
+        lo: w[0].offset.min(w[1].offset),
+        hi: w[0].offset.max(w[1].offset),
+        level: w[0].level,
+    })
+}
+
+/// The inline intervals of line `line` that `range` selects (spec INT-16):
+/// visually adjacent selected slots merge, a zero-width slot between two
+/// selected ones bridges them, and an unselected slot breaks the merge.
+fn selected_intervals(
+    paragraph: &PositionedParagraph,
+    line: usize,
+    range: TextRange,
+) -> Vec<(f32, f32, BidiLevel)> {
+    let mut out = Vec::new();
+    let mut open: Option<(f32, f32, BidiLevel)> = None;
+    for slot in slots(&paragraph.lines[line].caret_stops) {
+        if slot.lo == slot.hi {
+            continue;
+        }
+        if range.start() <= slot.lo && slot.hi <= range.end() {
+            open = Some(match open {
+                Some((a, b, level)) => (a.min(slot.x0), b.max(slot.x1), level),
+                None => (slot.x0, slot.x1, slot.level),
+            });
+        } else if let Some(done) = open.take() {
+            out.push(done);
+        }
+    }
+    out.extend(open);
+    out
+}
+
+impl ValidatedLayout<'_> {
+    /// The selection rectangles of `range` (spec INT-16), physical and
+    /// paragraph-local, line by line in visual order. `Tight` spans the
+    /// ascent and descent of the font instances and inline boxes the piece
+    /// crosses, asked of `shaper` through the shaper gate; `Max` the line
+    /// box, which holds the line gap and the tallest inline box; `Strut` the
+    /// resolved strut. An empty range gives none, and no line-end extension
+    /// is drawn.
+    #[must_use]
+    pub fn selection_geometry(
+        &self,
+        shaper: &dyn crate::shaping::TextShaper,
+        range: TextRange,
+        height: BoxHeightStyle,
+    ) -> Vec<SelectionRect> {
+        let p = self.paragraph();
+        if range.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (index, line) in p.lines.iter().enumerate() {
+            if line.byte_range.end() <= range.start() && !line.byte_range.is_empty() {
+                continue;
+            }
+            if line.byte_range.start() >= range.end() {
+                break;
+            }
+            for (x0, x1, level) in selected_intervals(p, index, range) {
+                let (top, bottom) = match height {
+                    BoxHeightStyle::Max => line_block(p, index),
+                    BoxHeightStyle::Strut => (
+                        line.baseline_y - p.policy.strut.ascent,
+                        line.baseline_y + p.policy.strut.descent,
+                    ),
+                    BoxHeightStyle::Tight => self.tight_block(shaper, index, x0, x1, range),
+                };
+                out.push(SelectionRect {
+                    rect: p.policy.writing_mode.flow_to_physical_rect(
+                        Rect::new(x0, top, x1 - x0, (bottom - top).max(0.0)),
+                        p.total_block_size,
+                    ),
+                    line: index,
+                    level,
+                    is_line_end_extension: false,
+                });
+            }
+        }
+        out
+    }
+
+    /// The rectangles of `range` over full line boxes, for placing an IME
+    /// candidate window (spec INT-18).
+    #[must_use]
+    pub fn range_rects(&self, range: TextRange) -> Vec<Rect> {
+        let p = self.paragraph();
+        let mut out = Vec::new();
+        if range.is_empty() {
+            return out;
+        }
+        for index in 0..p.lines.len() {
+            let (top, bottom) = line_block(p, index);
+            for (x0, x1, _) in selected_intervals(p, index, range) {
+                out.push(p.policy.writing_mode.flow_to_physical_rect(
+                    Rect::new(x0, top, x1 - x0, bottom - top),
+                    p.total_block_size,
+                ));
+            }
+        }
+        out
+    }
+
+    /// The block interval of a `Tight` piece `[x0, x1]` of line `line`: the
+    /// union of the ascents and descents of the selected glyph runs' font
+    /// instances (through the shaper gate) and inline boxes, else the strut.
+    fn tight_block(
+        &self,
+        shaper: &dyn crate::shaping::TextShaper,
+        line: usize,
+        x0: f32,
+        x1: f32,
+        range: TextRange,
+    ) -> (f32, f32) {
+        let p = self.paragraph();
+        let l = &p.lines[line];
+        let (mut above, mut below) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let inside = |x: f32| x >= x0 - 1e-3 && x <= x1 + 1e-3;
+        for run in &l.visual_runs {
+            let selected = run.glyphs.iter().any(|g| {
+                inside(g.x)
+                    && g.byte_range
+                        .is_some_and(|b| range.start() <= b.start() && b.end() <= range.end())
+            });
+            if !selected {
+                continue;
+            }
+            let Ok(line_box) = super::shaper_gate::checked_line_box(
+                shaper,
+                crate::types::FontInstanceRef {
+                    font: run.font,
+                    font_size: run.font_size,
+                    variations: &run.variations,
+                },
+                super::LineHeight::Normal,
+                p.policy.writing_mode,
+            ) else {
+                continue;
+            };
+            // The instance's own extents, without its half-leading.
+            let gap = line_box.line_gap / 2.0;
+            above = above.max(line_box.ascent - gap);
+            below = below.max(line_box.descent - gap);
+        }
+        for b in &l.visual_boxes {
+            if inside(b.x) && range.contains_range(b.byte_range) {
+                above = above.max(b.ascent - b.y);
+                below = below.max(b.descent + b.y);
+            }
+        }
+        if !above.is_finite() || !below.is_finite() {
+            above = p.policy.strut.ascent;
+            below = p.policy.strut.descent;
+        }
+        (l.baseline_y - above, l.baseline_y + below)
+    }
+}
+
+impl ValidatedInputs<'_> {
+    /// The range Backspace deletes before `offset` (spec INT-12): a whole
+    /// atomic span when the unit before the offset lies in one; else a whole
+    /// emoji sequence, an atom with a variation selector or an inline object;
+    /// else the last code point before the offset. Empty at the start of
+    /// the text; an offset past the text or off a character boundary is
+    /// first moved back to one.
+    #[must_use]
+    pub fn delete_backward_range(&self, offset: ByteIndex) -> TextRange {
+        let text = self.text();
+        let ast = self.ast();
+        let offset = floor_boundary(text, offset);
+        if offset == 0 {
+            return TextRange::empty_at(0);
+        }
+        if let Some(span) = ast.atomic_span_containing(offset - 1) {
+            return span.byte_range;
+        }
+        if let Some(object) = object_holding(ast, offset - 1) {
+            return object;
+        }
+        let k = ast.atoms.partition_point(|a| a.byte_range.end() < offset);
+        if let Some(atom) = ast.atoms.get(k).filter(|a| a.byte_range.end() == offset)
+            && atom
+                .flags
+                .intersects(AtomFlags::IS_EMOJI_SEQUENCE.union(AtomFlags::HAS_VARIATION_SELECTOR))
+        {
+            return atom.byte_range;
+        }
+        let last = text[..offset].chars().next_back().map_or(1, char::len_utf8);
+        TextRange::new(offset - last, offset)
+    }
+
+    /// The range Delete removes after `offset` (spec INT-12): a whole atomic
+    /// span when the unit after the offset lies in one; else the whole atom
+    /// or inline object after it; else the next code point. Empty at the end
+    /// of the text.
+    #[must_use]
+    pub fn delete_forward_range(&self, offset: ByteIndex) -> TextRange {
+        let text = self.text();
+        let ast = self.ast();
+        let offset = floor_boundary(text, offset);
+        if offset >= text.len() {
+            return TextRange::empty_at(text.len());
+        }
+        if let Some(span) = ast.atomic_span_containing(offset) {
+            return span.byte_range;
+        }
+        if let Some(object) = object_holding(ast, offset) {
+            return object;
+        }
+        let k = ast.atoms.partition_point(|a| a.byte_range.start() < offset);
+        if let Some(atom) = ast.atoms.get(k).filter(|a| a.byte_range.start() == offset) {
+            return atom.byte_range;
+        }
+        let next = text[offset..].chars().next().map_or(1, char::len_utf8);
+        TextRange::new(offset, offset + next)
+    }
+
+    /// The text a copy of `range` puts on the clipboard (spec INT-17): the
+    /// source bytes, so no synthesized glyph is copied, with U+00AD dropped
+    /// under `SoftHyphenPolicy::Strip`. The range is clamped to the text and
+    /// to character boundaries.
+    #[must_use]
+    pub fn copied_text(&self, range: TextRange) -> String {
+        let text = self.text();
+        let start = floor_boundary(text, range.start());
+        let end = floor_boundary(text, range.end()).max(start);
+        let source = &text[start..end];
+        match self.options().soft_hyphen {
+            super::SoftHyphenPolicy::Keep => source.to_owned(),
+            super::SoftHyphenPolicy::Strip => source.replace('\u{AD}', ""),
+        }
+    }
+}
+
+/// The range of the inline object holding `byte`, if any.
+fn object_holding(ast: &crate::frontend::ParagraphAst, byte: ByteIndex) -> Option<TextRange> {
+    ast.items.iter().find_map(|item| match item {
+        crate::frontend::WordNode::Box(crate::frontend::BoxNode::InlineObject {
+            byte_range,
+            ..
+        }) if byte_range.start() <= byte && byte < byte_range.end() => Some(*byte_range),
+        _ => None,
+    })
+}
+
+/// `offset` clamped to `text` and moved back to a character boundary.
+fn floor_boundary(text: &str, offset: ByteIndex) -> ByteIndex {
+    let mut at = offset.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// The UTF-16 offset of byte `offset` of `text`, or `None` when the offset
+/// lies past the text or inside a code point (spec INT-18).
+#[must_use]
+pub fn utf8_to_utf16(text: &str, offset: ByteIndex) -> Option<usize> {
+    text.get(..offset)
+        .map(|prefix| prefix.chars().map(char::len_utf16).sum())
+}
+
+/// The byte offset of UTF-16 offset `offset` of `text`, or `None` when it
+/// lies past the text or between the two halves of a surrogate pair
+/// (spec INT-18).
+#[must_use]
+pub fn utf16_to_utf8(text: &str, offset: usize) -> Option<ByteIndex> {
+    let mut units = 0;
+    for (byte, c) in text.char_indices() {
+        if units == offset {
+            return Some(byte);
+        }
+        units += c.len_utf16();
+        if units > offset {
+            return None;
+        }
+    }
+    (units == offset).then_some(text.len())
 }

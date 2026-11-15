@@ -164,3 +164,122 @@ fn a_combining_mark_moves_with_its_base() {
     assert_eq!(moved(l.move_cursor(at(0), Motion::Right, None)), 3);
     assert_eq!(moved(l.move_cursor(at(0), Motion::Next, None)), 3);
 }
+
+#[test]
+fn a_selection_is_one_rectangle_per_line_piece() {
+    let text = "ab cd";
+    let p = lay_out(text, &column(20.0), &LayoutOptions::default());
+    let l = ValidatedLayout::new(&p, text).unwrap();
+    assert!(
+        l.selection_geometry(&*SHAPER, TextRange::empty_at(2), BoxHeightStyle::Max)
+            .is_empty()
+    );
+    let rects = l.selection_geometry(&*SHAPER, TextRange::new(1, 4), BoxHeightStyle::Strut);
+    let pieces: Vec<(usize, f32, f32)> = rects
+        .iter()
+        .map(|r| (r.line, r.rect.x, r.rect.width))
+        .collect();
+    // "b" on the first line (the collapsed space has no slot), "c" on the
+    // second.
+    assert_eq!(pieces, [(0, 6.0, 6.0), (1, 0.0, 6.0)]);
+    for r in &rects {
+        // The strut: 10.2 above the baseline and 3.0 below.
+        assert_close(r.rect.height, 13.2);
+        assert!(!r.is_line_end_extension);
+    }
+    let max = l.selection_geometry(&*SHAPER, TextRange::new(0, 2), BoxHeightStyle::Max);
+    let tight = l.selection_geometry(&*SHAPER, TextRange::new(0, 2), BoxHeightStyle::Tight);
+    assert_close(max[0].rect.height, p.lines[0].line_height);
+    // The monospace instance's own ascent and descent: 10.2 + 3.0.
+    assert_close(tight[0].rect.height, 13.2);
+    assert_eq!(l.range_rects(TextRange::new(1, 4)).len(), 2);
+}
+
+#[test]
+fn a_tight_selection_follows_the_fonts_it_crosses() {
+    let text = "ab日本";
+    let p = lay_out_in(
+        text,
+        &[FAMILY, "Noto Sans JP"],
+        &column(200.0),
+        &LayoutOptions::default(),
+    );
+    let l = ValidatedLayout::new(&p, text).unwrap();
+    let latin = l.selection_geometry(&*SCRIPT_SHAPER, TextRange::new(0, 2), BoxHeightStyle::Tight);
+    let both = l.selection_geometry(&*SCRIPT_SHAPER, TextRange::new(0, 8), BoxHeightStyle::Tight);
+    assert_eq!((latin.len(), both.len()), (1, 1));
+    // Noto Sans JP's hhea box (1.16 + 0.288 em) is taller than the
+    // monospace face's (1.02 + 0.3 em).
+    assert!(both[0].rect.height > latin[0].rect.height + 0.1);
+    assert!(both[0].rect.width > latin[0].rect.width);
+}
+
+#[test]
+fn deletion_removes_marks_alone_and_emoji_objects_and_chips_whole() {
+    let text = "e\u{301}\u{1F44B}\u{1F3FD} @al x";
+    let base = style(10.0);
+    let spans = [AtomicEditSpan {
+        span_id: 1,
+        byte_range: TextRange::new(12, 15),
+    }];
+    let paragraph = ParagraphInput {
+        atomic_spans: &spans,
+        ..input(text, &base)
+    };
+    let ast = compile_paragraph(&paragraph, &FrontendOptions::default(), &*SHAPER).unwrap();
+    let (constraints, options) = (column(200.0), LayoutOptions::default());
+    let inputs = ValidatedInputs::new(&ast, text, &constraints, &options).unwrap();
+    // Backspace after "e\u{301}" removes the mark alone; Delete before it
+    // removes the whole atom.
+    assert_eq!(inputs.delete_backward_range(3), TextRange::new(1, 3));
+    assert_eq!(inputs.delete_forward_range(0), TextRange::new(0, 3));
+    // The emoji modifier sequence goes whole either way.
+    assert_eq!(inputs.delete_backward_range(11), TextRange::new(3, 11));
+    assert_eq!(inputs.delete_forward_range(3), TextRange::new(3, 11));
+    // The chip "@al" goes whole from either side and from inside.
+    for (backward, forward) in [(15, 12), (14, 13)] {
+        assert_eq!(inputs.delete_backward_range(backward), spans[0].byte_range);
+        assert_eq!(inputs.delete_forward_range(forward), spans[0].byte_range);
+    }
+    assert_eq!(inputs.delete_backward_range(0), TextRange::empty_at(0));
+    assert_eq!(
+        inputs.delete_forward_range(text.len()),
+        TextRange::empty_at(text.len())
+    );
+    assert_eq!(inputs.copied_text(TextRange::new(12, 15)), "@al");
+}
+
+#[test]
+fn copying_keeps_or_strips_soft_hyphens() {
+    let text = "co\u{AD}op";
+    let ast = compile(text);
+    let constraints = column(200.0);
+    for (policy, expected) in [
+        (SoftHyphenPolicy::Keep, "co\u{AD}op"),
+        (SoftHyphenPolicy::Strip, "coop"),
+    ] {
+        let options = LayoutOptions {
+            soft_hyphen: policy,
+            ..Default::default()
+        };
+        let inputs = ValidatedInputs::new(&ast, text, &constraints, &options).unwrap();
+        assert_eq!(inputs.copied_text(TextRange::new(0, text.len())), expected);
+    }
+}
+
+#[test]
+fn utf16_offsets_convert_and_reject_split_code_points() {
+    let text = "a\u{e9}\u{1F600}b";
+    assert_eq!(utf8_to_utf16(text, 0), Some(0));
+    assert_eq!(utf8_to_utf16(text, 3), Some(2));
+    assert_eq!(utf8_to_utf16(text, 7), Some(4));
+    assert_eq!(utf8_to_utf16(text, 8), Some(5));
+    assert_eq!(utf8_to_utf16(text, 2), None);
+    assert_eq!(utf8_to_utf16(text, 9), None);
+    assert_eq!(utf16_to_utf8(text, 2), Some(3));
+    assert_eq!(utf16_to_utf8(text, 4), Some(7));
+    assert_eq!(utf16_to_utf8(text, 5), Some(8));
+    // Between the surrogates of U+1F600, and past the text.
+    assert_eq!(utf16_to_utf8(text, 3), None);
+    assert_eq!(utf16_to_utf8(text, 6), None);
+}
