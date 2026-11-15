@@ -92,10 +92,9 @@ pub enum LocalePolicy {
     /// Use only explicit tags and the host default locale.
     #[default]
     ExplicitOnly,
-    /// Experimental script-based inference.
-    ///
-    /// **Forward contract.** No locale-resolution pass exists yet, so
-    /// selecting this policy currently has no effect; it is
-    /// reserved for the script-based rules in spec §3 Step 4.
+    /// Experimental script-based inference (spec FE-16): within a UAX #29
+    /// sentence, kana makes untagged Han and kana `ja-JP`, else Hangul makes
+    /// untagged Han and Hangul `ko-KR`, and U+0452 or U+045B makes untagged
+    /// Cyrillic `sr-Cyrl`. Explicit tags always win.
     ExperimentalHeuristics,
 }

@@ -253,6 +253,156 @@ fn dash_and_ellipsis_runs_never_break_inside() {
     assert!(!at.contains(&(ellipsis + 3)), "{at:?}");
 }
 
+fn locale(tag: &str) -> LocaleTag {
+    LocaleTag::try_from_str(tag).expect("a locale")
+}
+
+/// The (text, locale) of each run of `text` compiled with `options`.
+fn run_locales(text: &str, style: &TextStyle, options: &FrontendOptions) -> Vec<(String, String)> {
+    let ast = compile_paragraph(&input(text, style), options, &*SCRIPT_SHAPER)
+        .unwrap_or_else(|e| panic!("{e}"));
+    ast.runs
+        .iter()
+        .map(|r| {
+            (
+                text[r.byte_range.as_range()].to_owned(),
+                r.locale.as_str().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn experimental_locale_heuristics_tag_han_by_its_sentence() {
+    let jp = script_style(&["Noto Sans JP"], 10.0);
+    let explicit = FrontendOptions {
+        default_locale: locale("en-US"),
+        ..Default::default()
+    };
+    let heuristic = FrontendOptions {
+        locale_policy: LocalePolicy::ExperimentalHeuristics,
+        ..explicit.clone()
+    };
+    // Kana in the sentence: the Han, the kana and the punctuation that
+    // joined them take ja-JP and share runs by script alone.
+    let text = "東京へ行く。";
+    assert!(
+        run_locales(text, &jp, &explicit)
+            .iter()
+            .all(|(_, l)| l == "en-US")
+    );
+    let runs = run_locales(text, &jp, &heuristic);
+    assert!(runs.iter().all(|(_, l)| l == "ja-JP"), "{runs:?}");
+    // Han alone keeps the default, and an explicit tag stands.
+    assert!(
+        run_locales("東京", &jp, &heuristic)
+            .iter()
+            .all(|(_, l)| l == "en-US")
+    );
+    let tagged = TextStyle {
+        locale: Some(locale("zh-Hans")),
+        ..jp.clone()
+    };
+    assert!(
+        run_locales(text, &tagged, &heuristic)
+            .iter()
+            .all(|(_, l)| l == "zh-Hans")
+    );
+    // Serbian letters make Cyrillic sr-Cyrl; Latin in the same sentence
+    // keeps the default.
+    let text = "ћирилица and latin";
+    let runs = run_locales(text, &style(10.0), &heuristic);
+    assert_eq!(runs[0], ("ћирилица".to_owned(), "sr-Cyrl".to_owned()));
+    assert!(runs[1..].iter().all(|(_, l)| l == "en-US"), "{runs:?}");
+}
+
+#[test]
+fn table_s_reads_the_override_of_the_stated_locale() {
+    // A German “ closes „ only, so in “…” the closer pairs with nothing
+    // and takes the preceding script; under English it takes the opener's.
+    let text = "α“ab”";
+    let closer_script = |tag: &str| {
+        let style = TextStyle {
+            locale: Some(locale(tag)),
+            ..style(10.0)
+        };
+        let ast = compile_paragraph(&input(text, &style), &FrontendOptions::default(), &*SHAPER)
+            .unwrap_or_else(|e| panic!("{e}"));
+        ast.atoms.last().map(|a| a.script).expect("atoms")
+    };
+    assert_eq!(closer_script("en-GB"), ScriptTag::GREEK);
+    assert_eq!(closer_script("de-DE"), ScriptTag::LATIN);
+}
+
+#[test]
+fn greedy_breaking_prefers_the_lowest_tier_of_the_overflow_ladder() {
+    // 6 units a character. At 156 "https://example.com/abcdef" fits, and
+    // the long piece "abcdefghijklmnop" may break anywhere, but the break at
+    // the slash (URL punctuation, tier 1) wins over one inside the piece
+    // (tier 2).
+    let text = "https://example.com/abcdefghijklmnop";
+    let p = lay_out(text, &column(156.0), &LayoutOptions::default());
+    assert_eq!(line_texts(&p, text)[0], "https://example.com/");
+    // A natural break (tier 0) wins over URL punctuation, and a long piece
+    // breaks inside only when it holds the line alone.
+    let text = "see https://example.com/abcdefghijklmnopqrstuvwxyz";
+    let p = lay_out(text, &column(96.0), &LayoutOptions::default());
+    assert_eq!(
+        line_texts(&p, text),
+        [
+            "see ",
+            "https://example",
+            ".com/",
+            "abcdefghijklmnop",
+            "qrstuvwxyz"
+        ]
+    );
+}
+
+#[test]
+fn a_dash_run_too_wide_for_an_empty_line_splits_one_cluster_at_a_time() {
+    // JetBrains Mono at 10 px: every cluster is 6 wide, so "……" is 12 and
+    // "————" 24. In a column of 5 no run fits an empty line: ST1-5 splits it,
+    // one overflowing cluster per line (SLT-5), and the output gate (G4)
+    // accepts every line.
+    for text in ["……", "————", "a……", "ab——cd"] {
+        for width in [5.0, 7.0, 11.0, 15.0] {
+            let p = lay_out(text, &column(width), &LayoutOptions::default());
+            for line in &p.lines {
+                let s = &text[line.byte_range.as_range()];
+                let units = s.chars().count();
+                let end = line.caret_stops.iter().map(|c| c.x).fold(0.0, f32::max);
+                assert!(
+                    end <= width + 1e-3 || units == 1,
+                    "{text:?} at {width}: {s:?} ends at {end}"
+                );
+            }
+        }
+    }
+    // With room for two ellipses after "a", the run moves whole: "a" alone,
+    // then "……".
+    let p = lay_out("a……", &column(15.0), &LayoutOptions::default());
+    assert_eq!(line_texts(&p, "a……"), ["a", "……"]);
+    // A run that starts the line keeps as many clusters as fit.
+    let p = lay_out("————", &column(15.0), &LayoutOptions::default());
+    assert_eq!(line_texts(&p, "————"), ["——", "——"]);
+    // Full-width ellipses in Noto Sans JP, 10 each: "……" is 20 against a
+    // slot of 15, so each line holds one, and the output gate accepts it.
+    for text in ["……", "東……京"] {
+        let p = lay_out_in(
+            text,
+            &["Noto Sans JP"],
+            &column(15.0),
+            &LayoutOptions::default(),
+        );
+        assert!(
+            line_texts(&p, text).iter().all(|s| s.chars().count() == 1),
+            "{:?}",
+            line_texts(&p, text)
+        );
+    }
+}
+
 /// The vertical offset of the first glyph of the cluster at `byte`.
 fn glyph_y(p: &PositionedParagraph, byte: usize) -> f32 {
     p.lines[0]

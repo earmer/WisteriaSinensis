@@ -12,6 +12,7 @@ mod compile;
 mod conformance;
 mod emoji;
 mod input;
+mod locale;
 mod options;
 mod script;
 mod segment;

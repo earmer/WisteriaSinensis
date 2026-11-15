@@ -66,6 +66,22 @@ const QUOTE_PAIRS: [(char, char); 6] = [
     ('\u{201A}', '\u{2018}'),
 ];
 
+/// Table S's locale-aware override (FE-9), after CLDR's quotation
+/// delimiters, keyed by the primary language subtag: the pairs a locale
+/// opens and closes its own way. A pair whose opener and closer are one
+/// character toggles: it closes when its opener is on the stack, else opens.
+/// The override's role for a character wins over the default table's.
+pub(crate) fn locale_quote_pairs(language: &str) -> &'static [(char, char)] {
+    match language {
+        "de" => &[('\u{201E}', '\u{201C}'), ('\u{201A}', '\u{2018}')],
+        "pl" => &[('\u{201E}', '\u{201D}')],
+        "fr" | "ru" => &[('\u{00AB}', '\u{00BB}')],
+        "ja" | "zh" => &[('\u{300C}', '\u{300D}'), ('\u{300E}', '\u{300F}')],
+        "sv" | "fi" => &[('\u{201D}', '\u{201D}'), ('\u{2019}', '\u{2019}')],
+        _ => &[],
+    }
+}
+
 /// The run characters of FE-15.
 fn is_dash_run_char(c: char) -> bool {
     matches!(c, '\u{2014}' | '\u{2026}' | '\u{00B7}')
@@ -154,23 +170,41 @@ enum Role {
     Opener(char),
     Closer(char),
     /// U+201C and U+2018 open English-style pairs and close German-style
-    /// ones: a closer when the matching opener is on the stack.
+    /// ones, and a toggling pair of the override closes itself: a closer
+    /// when an opener `closes_for` waiting for `closes` is on the stack,
+    /// else an opener waiting for `opens`.
     Either {
         closes: char,
         closes_for: char,
+        opens: char,
     },
     None,
 }
 
-fn role(c: char) -> Role {
+fn role(c: char, overrides: &[(char, char)]) -> Role {
+    if let Some(&(opener, closer)) = overrides.iter().find(|&&(o, k)| o == c || k == c) {
+        return if opener == closer {
+            Role::Either {
+                closes: c,
+                closes_for: c,
+                opens: c,
+            }
+        } else if opener == c {
+            Role::Opener(closer)
+        } else {
+            Role::Closer(c)
+        };
+    }
     match c {
         '\u{201C}' => Role::Either {
             closes: '\u{201C}',
             closes_for: '\u{201E}',
+            opens: '\u{201D}',
         },
         '\u{2018}' => Role::Either {
             closes: '\u{2018}',
             closes_for: '\u{201A}',
+            opens: '\u{2019}',
         },
         _ => {
             if let Some(&(_, closer)) = QUOTE_PAIRS.iter().find(|(o, _)| *o == c) {
@@ -203,6 +237,8 @@ pub(crate) struct ScriptAtom<'a> {
     pub is_apostrophe: bool,
     /// Directly preceded by an ASCII space (FE-14).
     pub after_space: bool,
+    /// The Table S override of the atom's stated locale (FE-9).
+    pub quotes: &'static [(char, char)],
 }
 
 /// Resolves the script of every atom of a paragraph, in order.
@@ -246,20 +282,24 @@ pub(crate) fn resolve(atoms: &[ScriptAtom<'_>], policy: QuotePolicy) -> Vec<Scri
         // Table S pairing.
         let mut is_opener = None;
         if !atom.is_apostrophe {
-            let closes = match role(c) {
+            let closes = match role(c, atom.quotes) {
                 Role::Opener(closer) => {
                     is_opener = Some(closer);
                     None
                 }
                 Role::Closer(closer) => Some(closer),
-                Role::Either { closes, closes_for } => {
+                Role::Either {
+                    closes,
+                    closes_for,
+                    opens,
+                } => {
                     if stack
                         .iter()
                         .any(|&(k, o)| k == closes && atoms[o].text.starts_with(closes_for))
                     {
                         Some(closes)
                     } else {
-                        is_opener = QUOTE_PAIRS.iter().find(|(o, _)| *o == c).map(|&(_, k)| k);
+                        is_opener = Some(opens);
                         None
                     }
                 }
@@ -329,11 +369,12 @@ fn is_cjk(atoms: &[ScriptAtom<'_>], resolved: &[ScriptTag], i: usize) -> bool {
 /// space; it then takes its neighbours' common CJK script, or Han.
 fn cjk_quotes(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag], pairs: &[(usize, usize)]) {
     for &(opener, closer) in pairs {
-        let is_quote = atoms[opener]
-            .text
-            .chars()
-            .next()
-            .is_some_and(|c| QUOTE_PAIRS.iter().any(|(o, _)| *o == c));
+        // A quotation opener of either table; the override's wide corner
+        // brackets are CJK by width already.
+        let is_quote = atoms[opener].text.chars().next().is_some_and(|c| {
+            QUOTE_PAIRS.iter().any(|(o, _)| *o == c)
+                || (!is_wide(c) && atoms[opener].quotes.iter().any(|(o, _)| *o == c))
+        });
         if !is_quote || atoms[opener].explicit.is_some() {
             continue;
         }
@@ -431,8 +472,55 @@ mod tests {
                 is_emoji: false,
                 is_apostrophe: is_apostrophe(text, TextRange::new(i, i + c.len_utf8())),
                 after_space: text[..i].ends_with(' '),
+                quotes: &[],
             })
             .collect()
+    }
+
+    /// [`scripts`] with every atom under `language`'s Table S override.
+    fn scripts_in(text: &str, language: &str) -> String {
+        let atoms: Vec<ScriptAtom<'_>> = atoms(text)
+            .into_iter()
+            .map(|a| ScriptAtom {
+                quotes: locale_quote_pairs(language),
+                ..a
+            })
+            .collect();
+        resolve(&atoms, QuotePolicy::Standard)
+            .iter()
+            .map(|s| char::from(s.as_bytes()[0]))
+            .collect()
+    }
+
+    #[test]
+    fn the_locale_override_decides_which_quotes_pair() {
+        // A quotation opens after Greek and holds Latin: a closer that pairs
+        // takes Greek (G), one that does not takes Latin (L).
+        // German: “ only closes „, so “…” is no pair.
+        assert_eq!(scripts_in("α“ab”", "en"), "GGLLG");
+        assert_eq!(scripts_in("α“ab”", "de"), "GGLLL");
+        assert_eq!(scripts_in("α„ab“", "de"), "GGLLG");
+        assert_eq!(scripts_in("α‚ab‘", "de"), "GGLLG");
+        // Polish: „ closes with ”.
+        assert_eq!(scripts_in("α„ab”", "en"), "GGLLL");
+        assert_eq!(scripts_in("α„ab”", "pl"), "GGLLG");
+        // Swedish and Finnish: ” and ’ close themselves.
+        for language in ["sv", "fi"] {
+            assert_eq!(scripts_in("α”ab”", language), "GGLLG");
+            // After a full stop, so the first ’ is no apostrophe (FE-11).
+            assert_eq!(scripts_in("α.’ab’", language), "GGGLLG");
+        }
+        assert_eq!(scripts_in("α”ab”", "en"), "GGLLL");
+        // French, Russian, Japanese and Chinese name pairs the default
+        // table already makes.
+        for language in ["fr", "ru"] {
+            assert_eq!(scripts_in("α«ab»", language), "GGLLG");
+        }
+        // A wide corner bracket takes Han (FE-13), and its closer with it.
+        for language in ["ja", "zh"] {
+            assert_eq!(scripts_in("α「ab」", language), "GHLLH");
+            assert_eq!(scripts_in("α『ab』", language), "GHLLH");
+        }
     }
 
     fn scripts(text: &str, policy: QuotePolicy) -> String {

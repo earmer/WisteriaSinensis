@@ -6,7 +6,7 @@ use super::{
     BoxDecorationBreak, BoxNode, DiscretionaryNode, FrontendOptions, GlueKind, GlueNode,
     InlineDecorationSpan, InlineObjectInput, MAX_DECORATION_NESTING_DEPTH, ParagraphAst,
     ParagraphInput, SpanEdge, TextStyle, WordNode, emoji, is_paragraph_separator, is_word_space,
-    script, segment, url,
+    locale, script, segment, url,
 };
 use crate::shaping::{LeadingEdit, TextShaper, TrailingEdit};
 use crate::types::{
@@ -332,6 +332,8 @@ struct Compiler<'a> {
     atoms: Vec<GraphemeAtom>,
     /// The style index of each atom.
     atom_styles: Vec<usize>,
+    /// The locale of each atom after Step 4 (FE-16).
+    atom_locales: Vec<LocaleTag>,
     units: Vec<Unit>,
 }
 
@@ -352,6 +354,7 @@ impl<'a> Compiler<'a> {
             styles,
             atoms: Vec::new(),
             atom_styles: Vec::new(),
+            atom_locales: Vec::new(),
             units: Vec::new(),
         }
     }
@@ -372,6 +375,7 @@ impl<'a> Compiler<'a> {
         self.build_units(&graphemes)?;
         self.check_span_edges()?;
         self.resolve_scripts();
+        self.resolve_locales();
         let opportunities = segment::line_opportunities(
             text,
             self.options.line_break_strictness,
@@ -536,6 +540,9 @@ impl<'a> Compiler<'a> {
                 is_emoji: atom.flags.contains(AtomFlags::IS_EMOJI_SEQUENCE),
                 is_apostrophe: atom.flags.contains(AtomFlags::IS_APOSTROPHE),
                 after_space: text[..atom.byte_range.start()].ends_with(' '),
+                quotes: script::locale_quote_pairs(primary_language(
+                    &self.locale_of(self.atom_styles[index]),
+                )),
             })
             .collect()
     }
@@ -546,6 +553,30 @@ impl<'a> Compiler<'a> {
         for (atom, script) in self.atoms.iter_mut().zip(resolved) {
             atom.script = script;
         }
+    }
+
+    /// Step 4 (SCO-5, FE-16): a style's locale stands; untagged atoms take
+    /// `default_locale`, or under `ExperimentalHeuristics` the locale their
+    /// sentence's scripts imply.
+    fn resolve_locales(&mut self) {
+        let text = self.text;
+        let atoms: Vec<locale::LocaleAtom<'_>> = self
+            .atoms
+            .iter()
+            .zip(&self.atom_styles)
+            .map(|(atom, &style)| locale::LocaleAtom {
+                byte_range: atom.byte_range,
+                text: &text[atom.byte_range.as_range()],
+                script: atom.script,
+                explicit: self.styles[style].locale.as_ref(),
+            })
+            .collect();
+        self.atom_locales = locale::resolve(
+            text,
+            &atoms,
+            &self.options.default_locale,
+            self.options.locale_policy,
+        );
     }
 
     /// Whether a decoration span starts or ends at `offset`.
@@ -659,8 +690,7 @@ impl<'a> Compiler<'a> {
         };
         let word_start = i < 2 || !matches!(self.units[i - 2], Unit::Atom(_));
         let letter = &self.text[self.atoms[a].byte_range.as_range()];
-        let locale = self.locale_of(self.atom_styles[a]);
-        let language = locale.as_str().split('-').next().unwrap_or_default();
+        let language = primary_language(&self.atom_locales[a]);
         let mut chars = letter.chars();
         word_start
             && matches!((chars.next(), chars.next()), (Some(c), None)
@@ -679,7 +709,7 @@ impl<'a> Compiler<'a> {
         let (sa, sb) = (self.atom_styles[a], self.atom_styles[b]);
         self.atoms[a].script == self.atoms[b].script
             && (sa == sb || self.styles[sa] == self.styles[sb])
-            && self.locale_of(sa) == self.locale_of(sb)
+            && self.atom_locales[a] == self.atom_locales[b]
     }
 
     /// Step 5: maximal sequences of atoms that agree on style, script and
@@ -709,7 +739,7 @@ impl<'a> Compiler<'a> {
                 font_size: style.font_size,
                 style: style.style,
                 script: self.atoms[start].script,
-                locale: self.locale_of(self.atom_styles[start]),
+                locale: self.atom_locales[start].clone(),
                 bidi_level: BidiLevel::LTR,
                 decoration: style.decoration,
                 atom_range: start..end,
@@ -992,6 +1022,11 @@ impl<'a> Compiler<'a> {
         let width = (advance + s.word_spacing).max(0.0);
         if width.is_finite() { width } else { 0.0 }
     }
+}
+
+/// The primary language subtag of `locale`, in lower case.
+fn primary_language(locale: &LocaleTag) -> &str {
+    locale.as_str().split('-').next().unwrap_or_default()
 }
 
 /// Whether `clusters` partition `atoms` in order and their glyph ranges

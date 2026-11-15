@@ -18,7 +18,9 @@ use super::{
     PositionedParagraph, PositionedSlot, PositionedSpanFragment, PositionedTab, StrutMetrics,
     ValidatedInputs, VisualGlyphRun, resolve_ligature_carets,
 };
-use crate::frontend::{AnnotationSide, BoxNode, BoxOverflowPolicy, ParagraphAst, WordNode};
+use crate::frontend::{
+    AnnotationSide, BoxNode, BoxOverflowPolicy, DiscretionaryNode, ParagraphAst, WordNode,
+};
 use crate::shaping::TextShaper;
 use crate::types::{
     AtomFlags, BaselineAlignment, BidiDirection, BidiLevel, FontInstanceRef, FontMetrics,
@@ -208,6 +210,32 @@ struct Break {
     post: f32,
     no_break: f32,
     cloned: SmallVec<[u64; 2]>,
+    /// The break's tier on the overflow ladder (spec ST1-1): 0 for an
+    /// untailored opportunity, 1 for a URL break at punctuation, 2 for one
+    /// inside a long URL piece.
+    tier: usize,
+}
+
+/// The tier of a discretionary on the overflow ladder (spec ST1-1): its
+/// penalty net of cloned-span penalties (WN-21) in the URL band (WN-19)
+/// below its maximum is tier 1, at the maximum tier 2; any other is tier 0.
+fn ladder_tier(d: &DiscretionaryNode) -> usize {
+    if d.is_mandatory() {
+        return 0;
+    }
+    let clones = i32::try_from(d.cloned_spans.len()).unwrap_or(i32::MAX);
+    let net = d
+        .penalty
+        .saturating_sub(clones.saturating_mul(DiscretionaryNode::CLONED_SPAN_PENALTY));
+    match net {
+        DiscretionaryNode::URL_PENALTY_MAX => 2,
+        n if (DiscretionaryNode::URL_PENALTY_MIN..DiscretionaryNode::URL_PENALTY_MAX)
+            .contains(&n) =>
+        {
+            1
+        }
+        _ => 0,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -329,6 +357,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     post: d.post_break_width,
                     no_break: d.no_break_width,
                     cloned: d.cloned_spans.clone(),
+                    tier: ladder_tier(d),
                 })),
             }
         }
@@ -535,9 +564,9 @@ impl<'i, 'a> Layout<'i, 'a> {
         (self.inputs.cluster_glyphs(c).to_vec(), c.natural_width)
     }
 
-    /// Greedy fitting (spec ST1-1, ST1-5, WN-1): the last break that fits
-    /// before the content overflows, a mandatory break, or an emergency
-    /// cluster break when nothing fits.
+    /// Greedy fitting (spec ST1-1, ST1-5, WN-1): the last break of the
+    /// lowest ladder tier that fits before the content overflows, a
+    /// mandatory break, or an emergency cluster break when nothing fits.
     fn fit(&mut self, start: usize, post: f32, slot: InlineSlotConstraint) -> LineEnd {
         let available = slot.width();
         self.reference = available;
@@ -546,7 +575,9 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut pen = post;
         let mut body = post;
         let mut has_content = false;
-        let mut last_fit: Option<usize> = None;
+        // The last fitting break of each ladder tier.
+        let mut fits: [Option<usize>; 3] = [None; 3];
+        let best = |fits: &[Option<usize>; 3]| fits.iter().find_map(|&b| b);
         let mut t = start;
         loop {
             match &self.tokens[t] {
@@ -555,7 +586,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                         return LineEnd::At(t);
                     }
                     if body + b.pre <= available + FIT_EPSILON {
-                        last_fit = Some(t);
+                        fits[b.tier] = Some(t);
                     }
                     pen += b.no_break;
                 }
@@ -566,7 +597,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     // No reachable stop (spec ST3-1, AX-6): break before the
                     // tab at an earlier opportunity, else consume it with no
                     // advance and end the line right after it.
-                    if has_content && let Some(b) = last_fit {
+                    if has_content && let Some(b) = best(&fits) {
                         return LineEnd::At(b);
                     }
                     return match self.tokens.get(t + 1) {
@@ -580,13 +611,13 @@ impl<'i, 'a> Layout<'i, 'a> {
                     if piece.is_content() {
                         let end = pen + reach.max(advance);
                         if has_content && end > available + FIT_EPSILON {
-                            return match last_fit {
+                            return match best(&fits) {
                                 Some(b) => LineEnd::At(b),
                                 None => self.emergency(start, t, post, origin),
                             };
                         }
                         if !has_content && end > available + FIT_EPSILON {
-                            if let Some(b) = last_fit {
+                            if let Some(b) = best(&fits) {
                                 return LineEnd::At(b);
                             }
                             return self.emergency(start, t, post, origin);
@@ -627,14 +658,14 @@ impl<'i, 'a> Layout<'i, 'a> {
             // piece back and the abandoned re-shape is dropped.
             let mut t = t;
             loop {
-                // A dash, ellipsis or middle-dot run never splits (FE-15):
-                // the seam moves to its start, or past its end when it
-                // starts the line.
-                while t > first + 1 && self.inside_dash_run(t) {
-                    t -= 1;
-                }
-                if self.inside_dash_run(t) {
-                    return LineEnd::Before(self.dash_run_end(t));
+                // A dash, ellipsis or middle-dot run (FE-15) moves whole to
+                // the next line when something precedes it on this one. A
+                // run that starts the line and is still wider than the slot
+                // is split like any other unit (ST1-5): only one cluster may
+                // overflow a slot (SLT-5).
+                let run_start = self.dash_run_start(t);
+                if run_start > first {
+                    t = run_start;
                 }
                 let added = self.repair_seam(t);
                 if t <= first + 1
@@ -651,13 +682,8 @@ impl<'i, 'a> Layout<'i, 'a> {
         if let Some(b) = self.next_break_after(t) {
             return LineEnd::At(b);
         }
-        let next = self.dash_run_end(t + 1);
-        if matches!(self.tokens.get(next), Some(Token::Piece(_))) {
-            self.repair_seam(next);
-            LineEnd::Before(next)
-        } else {
-            LineEnd::Before(next)
-        }
+        self.repair_seam(t + 1);
+        LineEnd::Before(t + 1)
     }
 
     /// Whether the seam before token `t` lies inside a run of one of U+2014,
@@ -674,10 +700,10 @@ impl<'i, 'a> Layout<'i, 'a> {
             .is_some_and(|c| self.text[..at].ends_with(c))
     }
 
-    /// The first token at or after `t` whose seam is not inside such a run.
-    fn dash_run_end(&self, mut t: usize) -> usize {
-        while self.inside_dash_run(t) {
-            t += 1;
+    /// The first token of the run whose seam `t` lies inside, or `t`.
+    fn dash_run_start(&self, mut t: usize) -> usize {
+        while t > 0 && self.inside_dash_run(t) {
+            t -= 1;
         }
         t
     }
@@ -1755,6 +1781,34 @@ mod tests {
     use crate::middleend::{LayoutPolicySnapshot, TabStops};
     use crate::shaping::NoopShaper;
     use crate::types::{BidiDirection, FontMetrics, WritingMode};
+
+    #[test]
+    fn ladder_tiers_read_the_penalty_net_of_cloned_spans() {
+        let with = |penalty: i32, clones: &[u64]| {
+            let mut d = DiscretionaryNode::direct(0);
+            d.penalty = penalty;
+            d.cloned_spans = clones.iter().copied().collect();
+            ladder_tier(&d)
+        };
+        let (min, max, clone) = (
+            DiscretionaryNode::URL_PENALTY_MIN,
+            DiscretionaryNode::URL_PENALTY_MAX,
+            DiscretionaryNode::CLONED_SPAN_PENALTY,
+        );
+        assert_eq!(with(0, &[]), 0);
+        assert_eq!(with(min, &[]), 1);
+        assert_eq!(with(max - 1, &[]), 1);
+        assert_eq!(with(max, &[]), 2);
+        // Hyphenation and math breaks are not tailored.
+        assert_eq!(with(DiscretionaryNode::HYPHEN_PENALTY, &[]), 0);
+        // Inside two Clone spans, a URL punctuation break is still tier 1,
+        // and a natural break with the same total is tier 0.
+        assert_eq!(with(min + 2 * clone, &[1, 2]), 1);
+        assert_eq!(with(max + clone, &[1]), 2);
+        assert_eq!(with(clone, &[1]), 0);
+        let mandatory = DiscretionaryNode::hard_break(TextRange::new(0, 3));
+        assert_eq!(ladder_tier(&mandatory), 0);
+    }
 
     fn constraints() -> LayoutConstraints {
         LayoutConstraints {
