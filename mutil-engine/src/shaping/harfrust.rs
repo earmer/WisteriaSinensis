@@ -727,7 +727,7 @@ const CJK_PROBES: [char; 12] = [
 /// claims both a CJK Unicode range and a CJK code page. Its region comes
 /// from the `GSUB` language systems first (one of `ZHS`, `ZHT`, `ZHH`,
 /// `ZHTM`, `JAN`, `KOR` names it; several make it pan-CJK), else from its
-/// family name (a word `SC`, `TC`, `HK`, `JP`, `KR` or their spelled-out
+/// typographic and legacy family names (a word `SC`, `TC`, `HK`, `JP`, `KR` or their spelled-out
 /// forms), else from its `OS/2` code pages when they name exactly one
 /// region; otherwise it is unknown.
 fn face_profile(font: &Font) -> FaceProfile {
@@ -800,20 +800,30 @@ fn gsub_region(font: &Font) -> Option<CjkRegion> {
 fn name_region(font: &Font) -> Option<CjkRegion> {
     use read_fonts::model::name::NameId;
     let names = font.names();
-    let family = [NameId::TYPOGRAPHIC_FAMILY_NAME, NameId::FAMILY_NAME]
+    // Both the typographic and the legacy family name vote: a generic
+    // typographic name must not hide a regional legacy one.
+    let families: Vec<String> = [NameId::TYPOGRAPHIC_FAMILY_NAME, NameId::FAMILY_NAME]
         .into_iter()
-        .find_map(|id| names.get(id)?.english_or_first())?;
-    let text: String = family.name().chars().collect();
-    let votes = text
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter_map(|word| match word.to_ascii_uppercase().as_str() {
-            "SC" | "CN" | "GB" | "HANS" | "SIMPLIFIED" => Some(CjkRegion::Simplified),
-            "TC" | "TW" | "HANT" | "TRADITIONAL" => Some(CjkRegion::Traditional),
-            "HK" | "HKSCS" => Some(CjkRegion::HongKong),
-            "JP" | "JA" | "JAPANESE" => Some(CjkRegion::Japanese),
-            "KR" | "KO" | "KOREAN" => Some(CjkRegion::Korean),
-            _ => None,
-        });
+        .filter_map(|id| names.get(id)?.english_or_first())
+        .map(|name| name.name().chars().collect())
+        .collect();
+    family_region(families.iter().map(String::as_str))
+}
+
+/// The region the words of `families` agree on, if any (spec SHP-25).
+fn family_region<'a>(families: impl IntoIterator<Item = &'a str>) -> Option<CjkRegion> {
+    let votes = families.into_iter().flat_map(|family| {
+        family
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter_map(|word| match word.to_ascii_uppercase().as_str() {
+                "SC" | "CN" | "GB" | "HANS" | "SIMPLIFIED" => Some(CjkRegion::Simplified),
+                "TC" | "TW" | "HANT" | "TRADITIONAL" => Some(CjkRegion::Traditional),
+                "HK" | "HKSCS" => Some(CjkRegion::HongKong),
+                "JP" | "JA" | "JAPANESE" => Some(CjkRegion::Japanese),
+                "KR" | "KO" | "KOREAN" => Some(CjkRegion::Korean),
+                _ => None,
+            })
+    });
     single_region(votes, None)
 }
 
@@ -1409,6 +1419,17 @@ mod tests {
         );
         assert_eq!(single_region([Japanese, Korean], Some(Pan)), Some(Pan));
         assert_eq!(single_region([Japanese, Korean], None), None);
+        // A generic typographic family name does not hide the legacy one.
+        assert_eq!(
+            family_region(["Foo Sans", "Foo Sans TC"]),
+            Some(Traditional)
+        );
+        assert_eq!(
+            family_region(["Foo Sans JP", "Foo Sans JP Thin"]),
+            Some(Japanese)
+        );
+        assert_eq!(family_region(["Foo Sans SC", "Foo Sans TC"]), None);
+        assert_eq!(family_region(["Foo Sans"]), None);
         // Noto Sans JP sets JIS and GB 2312: code pages alone do not decide.
         assert_eq!(code_page_region(0b11 << 17), None);
         assert_eq!(code_page_region(1 << 20), Some(Traditional));

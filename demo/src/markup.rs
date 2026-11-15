@@ -8,8 +8,10 @@
 //! each tag covered and its locale, read with `LocaleTag::parse_lenient`.
 //!
 //! A tag is markup only when it parses as a locale and is closed by its own
-//! closing tag (`</lang>` for the `lang=` form); anything else, an unclosed
-//! opener or a stray closer included, stays in the text as typed. Nested tags
+//! closing tag (`</lang>` for the `lang=` form), which pairs with the nearest
+//! open opener of its name; a `lang=` value is unquoted or inside one
+//! matching pair of quotes. Anything else, an unclosed opener or a stray
+//! closer included, stays in the text as typed. Nested tags
 //! are flattened: each byte takes its innermost tag, so the spans the engine
 //! receives are disjoint and ascending (spec FE-25).
 
@@ -61,7 +63,13 @@ fn tag_at(source: &str, at: usize) -> Option<(Token, usize)> {
     }
     let (close, value) = match inner.split_once('=') {
         Some((attr, value)) if attr.eq_ignore_ascii_case("lang") => {
-            let value = value.trim_matches(|c| c == '"' || c == '\'');
+            // Unquoted, or inside one matching pair of quotes.
+            let value = match value.as_bytes() {
+                [q @ (b'"' | b'\''), .., last] if last == q && value.len() >= 2 => {
+                    &value[1..value.len() - 1]
+                }
+                _ => value,
+            };
             ("lang".to_owned(), value)
         }
         Some(_) => return None,
@@ -105,70 +113,81 @@ fn tokens(source: &str) -> Vec<Token> {
     out
 }
 
-/// Strips the locale markup from `source` (see the module documentation).
-#[must_use]
-pub fn parse(source: &str) -> Marked {
-    let tokens = tokens(source);
-    // Pair openers with closers; an unpaired tag is literal text.
+/// Pairs each closer with the nearest open opener of its key; openers left
+/// above it on the stack stay unpaired. Each opener is pushed and removed at
+/// most once, so the pass is linear in the number of tokens.
+fn pair(tokens: &[Token]) -> Vec<bool> {
+    use std::collections::HashMap;
     let mut paired = vec![false; tokens.len()];
-    let mut stack: Vec<usize> = Vec::new();
+    // Open openers in order, and for each key the indices into `stack` of
+    // its openers, innermost last.
+    let mut stack: Vec<(usize, &str)> = Vec::new();
+    let mut by_key: HashMap<&str, Vec<usize>> = HashMap::new();
     for (index, token) in tokens.iter().enumerate() {
         match token {
-            Token::Open { .. } => stack.push(index),
+            Token::Open { close, .. } => {
+                by_key.entry(close).or_default().push(stack.len());
+                stack.push((index, close));
+            }
             Token::Close { key, .. } => {
-                let top = stack.last().copied();
-                if let Some(open) = top
-                    && let Token::Open { close, .. } = &tokens[open]
-                    && close == key
-                {
-                    stack.pop();
-                    paired[open] = true;
-                    paired[index] = true;
+                let Some(&at) = by_key.get(key.as_str()).and_then(|v| v.last()) else {
+                    continue;
+                };
+                // Openers above `at` were never closed: they stay literal.
+                while stack.len() > at + 1 {
+                    let (_, dropped) = stack.pop().expect("above at");
+                    by_key.get_mut(dropped).expect("tracked").pop();
                 }
+                let (open, _) = stack.pop().expect("at is open");
+                by_key.get_mut(key.as_str()).expect("tracked").pop();
+                paired[open] = true;
+                paired[index] = true;
             }
             Token::Text(_) => {}
         }
     }
+    paired
+}
+
+/// Strips the locale markup from `source` (see the module documentation).
+#[must_use]
+pub fn parse(source: &str) -> Marked {
+    let tokens = tokens(source);
+    let paired = pair(&tokens);
     let mut text = String::with_capacity(source.len());
-    // (start, end, depth, locale) of each paired tag, in output bytes.
-    let mut tagged: Vec<(usize, usize, usize, LocaleTag)> = Vec::new();
-    let mut open: Vec<(usize, LocaleTag)> = Vec::new();
+    let mut spans: Vec<(TextRange, LocaleTag)> = Vec::new();
+    // The open paired tags, innermost last; the stretch since the last tag
+    // edge takes the innermost one's locale.
+    let mut open: Vec<&LocaleTag> = Vec::new();
+    let mut since = 0;
+    let mut flush = |open: &[&LocaleTag], since: usize, end: usize| {
+        let Some(&locale) = open.last() else { return };
+        if since == end {
+            return;
+        }
+        match spans.last_mut() {
+            Some((range, last)) if range.end() == since && last == locale => {
+                *range = TextRange::new(range.start(), end);
+            }
+            _ => spans.push((TextRange::new(since, end), locale.clone())),
+        }
+    };
     for (index, token) in tokens.iter().enumerate() {
         match token {
             Token::Text(range) => text.push_str(&source[range.clone()]),
             Token::Open { raw, .. } | Token::Close { raw, .. } if !paired[index] => {
                 text.push_str(&source[raw.clone()]);
             }
-            Token::Open { locale, .. } => open.push((text.len(), locale.clone())),
+            Token::Open { locale, .. } => {
+                flush(&open, since, text.len());
+                open.push(locale);
+                since = text.len();
+            }
             Token::Close { .. } => {
-                let depth = open.len();
-                let (start, locale) = open.pop().expect("paired");
-                if start < text.len() {
-                    tagged.push((start, text.len(), depth, locale));
-                }
+                flush(&open, since, text.len());
+                open.pop();
+                since = text.len();
             }
-        }
-    }
-    // Flatten: between consecutive edges, the deepest tag covering the
-    // stretch gives its locale.
-    let mut edges: Vec<usize> = tagged.iter().flat_map(|&(s, e, ..)| [s, e]).collect();
-    edges.sort_unstable();
-    edges.dedup();
-    let mut spans: Vec<(TextRange, LocaleTag)> = Vec::new();
-    for pair in edges.windows(2) {
-        let (start, end) = (pair[0], pair[1]);
-        let Some((.., locale)) = tagged
-            .iter()
-            .filter(|&&(s, e, ..)| s <= start && end <= e)
-            .max_by_key(|&&(_, _, depth, _)| depth)
-        else {
-            continue;
-        };
-        match spans.last_mut() {
-            Some((range, last)) if range.end() == start && last == locale => {
-                *range = TextRange::new(range.start(), end);
-            }
-            _ => spans.push((TextRange::new(start, end), locale.clone())),
         }
     }
     Marked { text, spans }
@@ -238,6 +257,38 @@ mod tests {
                 ("丙".into(), "zh-TW".into()),
             ]
         );
+    }
+
+    #[test]
+    fn a_closer_pairs_with_the_nearest_opener_of_its_key() {
+        let (text, spans) = spans("<zh-TW>甲<ja>乙</zh-TW>丙");
+        assert_eq!(text, "甲<ja>乙丙");
+        assert_eq!(spans, [("甲<ja>乙".into(), "zh-TW".into())]);
+    }
+
+    #[test]
+    fn quotes_must_match() {
+        let (text, spans) = spans("<lang=\"zh-TW\">甲</lang>");
+        assert_eq!((text.as_str(), spans.len()), ("甲", 1));
+        for source in [
+            "<lang=\"zh-TW'>甲</lang>",
+            "<lang=\"zh-TW>甲</lang>",
+            "<lang=\">甲</lang>",
+        ] {
+            let marked = parse(source);
+            assert!(marked.spans.is_empty(), "{source}");
+            assert!(marked.text.starts_with("<lang="), "{source}");
+        }
+    }
+
+    #[test]
+    fn many_tags_parse_in_linear_time() {
+        let source =
+            "<ja>甲</ja>".repeat(50_000) + &"<zh-TW>".repeat(50_000) + &"</ja>".repeat(50_000);
+        let started = std::time::Instant::now();
+        let marked = parse(&source);
+        assert_eq!(marked.spans.len(), 1, "adjacent ja spans merge");
+        assert!(started.elapsed().as_secs() < 5);
     }
 
     #[test]
