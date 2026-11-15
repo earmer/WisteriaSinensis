@@ -423,6 +423,9 @@ impl<'a> Compiler<'a> {
                 breaks_after.push(None);
                 continue;
             }
+            // Only directly adjacent `Atom` units within the same `ShapingRun`
+            // may bind under FE-15 (never across `Glue`, `Tab`, `HardBreak`,
+            // or `Object`).
             if let (Unit::Atom(a), Some(Unit::Atom(b))) = (unit, self.units.get(i + 1).copied())
                 && b == a + 1
                 && self.same_run(a, b)

@@ -5,6 +5,7 @@ use super::{LeadingEdit, TrailingEdit};
 use crate::types::{
     AtomFlags, FontId, FontRef, GraphemeAtom, RawShapedGlyph, ShapedCluster, ShapingRun, TextRange,
 };
+use smallvec::SmallVec;
 
 #[inline]
 pub(crate) fn finite_or_zero(v: f32) -> f32 {
@@ -71,7 +72,7 @@ pub(crate) fn push_clusters(
     // Group glyphs so `atom_range` partitions stay strictly monotonic and
     // non-overlapping (`prev.max_atom < next.min_atom`) with contiguous glyph
     // slices (`prev.glyphs.end == next.glyphs.start`).
-    let mut groups: Vec<Group> = Vec::new();
+    let mut groups: SmallVec<[Group; 8]> = SmallVec::new();
     for (index, (atom, ..)) in glyphs.iter().enumerate() {
         let atom = *atom;
         match groups.last_mut() {

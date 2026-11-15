@@ -147,6 +147,7 @@ mod tests {
         let bytes = FontBytes::from_shared(Arc::clone(&owner));
         assert_eq!(bytes.as_bytes().as_ptr(), address);
         let shared = bytes.shared_arc();
+        assert!(Arc::ptr_eq(&owner, &shared));
         assert_eq!((*shared).as_ref().as_ptr(), address);
         assert_eq!(Arc::strong_count(&owner), 3);
     }

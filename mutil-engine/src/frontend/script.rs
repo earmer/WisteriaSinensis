@@ -485,15 +485,8 @@ pub(crate) fn binds_to_next(text: &str, atoms: &[GraphemeAtom], index: usize) ->
     ) else {
         return false;
     };
-    let mut chars_a = sa.chars();
-    let mut chars_b = sb.chars();
-    match (
-        chars_a.next(),
-        chars_a.next(),
-        chars_b.next(),
-        chars_b.next(),
-    ) {
-        (Some(ch_a), None, Some(ch_b), None) => ch_a == ch_b && is_dash_run_char(ch_a),
+    match (sa.chars().next(), sb.chars().next()) {
+        (Some(ch_a), Some(ch_b)) => ch_a == ch_b && is_dash_run_char(ch_a),
         _ => false,
     }
 }
@@ -656,6 +649,28 @@ mod tests {
             .collect();
         assert!(binds_to_next(text, &g, 1));
         assert!(!binds_to_next(text, &g, 2));
+
+        // Extending marks on a run character keep the FE-15 binding intact.
+        let decorated = "—\u{0300}—";
+        let dg = [
+            GraphemeAtom {
+                orientation: crate::types::GlyphOrientation::Horizontal,
+                byte_range: TextRange::new(0, 5),
+                script: ScriptTag::LATIN,
+                bidi_level: crate::types::BidiLevel::LTR,
+                linebreak_class: crate::types::LineBreakClass::Al,
+                flags: crate::types::AtomFlags::EMPTY,
+            },
+            GraphemeAtom {
+                orientation: crate::types::GlyphOrientation::Horizontal,
+                byte_range: TextRange::new(5, 8),
+                script: ScriptTag::LATIN,
+                bidi_level: crate::types::BidiLevel::LTR,
+                linebreak_class: crate::types::LineBreakClass::Al,
+                flags: crate::types::AtomFlags::EMPTY,
+            },
+        ];
+        assert!(binds_to_next(decorated, &dg, 0));
     }
 
     #[test]
