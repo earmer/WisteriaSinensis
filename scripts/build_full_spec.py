@@ -27,9 +27,11 @@ Standard library only. usage: scripts/build_full_spec.py [-o OUTPUT]
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -197,14 +199,19 @@ def rewrite(text: str, exact: list[tuple[str, str]], loose: list[tuple[str, str]
     return text
 
 
-def load_sources() -> tuple[str, str]:
+def read_sources() -> tuple[str, str]:
+    """The two source files exactly as they are on disk."""
+    return SPEC_PATH.read_text(encoding="utf-8"), RESEARCH_PATH.read_text(encoding="utf-8")
+
+
+def load_sources(raw: tuple[str, str]) -> tuple[str, str]:
     spec = rewrite(
-        SPEC_PATH.read_text(encoding="utf-8"),
+        raw[0],
         exact=[(SPEC_INTRO_OLD, SPEC_INTRO_NEW)],
         loose=[(r"\bRESEARCH §", "the background notes to §")],
     )
     research = rewrite(
-        RESEARCH_PATH.read_text(encoding="utf-8"),
+        raw[1],
         exact=[],
         loose=[(r"\bSPECIFICATION §", "§"), (r"\bthe References section\b", "Appendix C"), (r"flagged in the References\.", "flagged in Appendix C.")],
     )
@@ -216,19 +223,22 @@ def load_sources() -> tuple[str, str]:
 # --------------------------------------------------------------------------
 
 
-def git(*args: str) -> str:
+def git(*args: str) -> str | None:
+    """Output of a git command, or None when it cannot be run or fails."""
     try:
         r = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, check=True)
         return r.stdout.strip()
     except (OSError, subprocess.CalledProcessError):
-        return ""
+        return None
 
 
 def provenance() -> str:
     rev, date = git("rev-parse", "--short", "HEAD"), git("log", "-1", "--format=%cs")
-    dirty = bool(git("status", "--porcelain", "--", "SPECIFICATION.md", "RESEARCH.md"))
+    status = git("status", "--porcelain", "--", "SPECIFICATION.md", "RESEARCH.md")
     where = f"revision `{rev}` ({date})" if rev else "an unknown revision"
-    if dirty:
+    if status is None:
+        where += " (whether the sources had uncommitted changes is unknown)"
+    elif status:
         where += " plus uncommitted changes"
     return (
         f"> Composed from `SPECIFICATION.md` (normative) and `RESEARCH.md` (informative) at {where} "
@@ -468,7 +478,8 @@ def verify(spec_text: str, research_text: str, research: Doc, result: str) -> No
 
 
 def build() -> tuple[str, dict[str, int]]:
-    spec_text, research_text = load_sources()
+    raw = read_sources()
+    spec_text, research_text = load_sources(raw)
     spec, research = parse(spec_text), parse(research_text)
 
     # Pass 1 fixes the heading structure, pass 2 fills the generated parts.
@@ -480,6 +491,8 @@ def build() -> tuple[str, dict[str, int]]:
         raise BuildError("the generated parts changed the heading structure")
 
     verify(spec_text, research_text, research, text)
+    if read_sources() != raw:
+        raise BuildError("a source file changed during the build; run it again")
     stats = {
         "sections": len(spec.sections),
         "requirements": len(re.findall(rf"\*\*\[{REQ_ID}\]", spec_text)),
@@ -488,17 +501,34 @@ def build() -> tuple[str, dict[str, int]]:
     return text, stats
 
 
+def write_atomically(path: Path, text: str) -> None:
+    """Writes beside the target, then renames, so a failed write leaves the old file intact."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("-o", "--output", type=Path, default=DEFAULT_OUT)
     args = ap.parse_args()
+    out = args.output.resolve()
+    for source in (SPEC_PATH, RESEARCH_PATH):
+        if out == source.resolve() or (out.exists() and out.samefile(source)):
+            print(f"error: refusing to overwrite the source file {source.name}", file=sys.stderr)
+            return 1
     try:
         text, stats = build()
     except BuildError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(text, encoding="utf-8", newline="\n")
+    write_atomically(args.output, text)
     print(
         f"wrote {args.output}: {stats['lines']} lines, {stats['sections']} specification sections, "
         f"{stats['requirements']} requirements"
