@@ -9,7 +9,7 @@
 use super::{LineBreakStrictness, WordBreakOption};
 use crate::types::LineBreakClass;
 use icu_properties::PropertyNamesShortBorrowed;
-use icu_properties::props::{BidiClass, LineBreak, Script};
+use icu_properties::props::{LineBreak, Script};
 use icu_properties::{CodePointMapData, CodePointMapDataBorrowed, PropertyNamesShort};
 use icu_segmenter::options::LineBreakWordOption;
 use icu_segmenter::options::WordBreakInvariantOptions;
@@ -27,8 +27,6 @@ pub(crate) static SCRIPT: CodePointMapDataBorrowed<'static, Script> =
     CodePointMapData::<Script>::new();
 pub(crate) static SCRIPT_NAMES: PropertyNamesShortBorrowed<'static, Script> =
     PropertyNamesShort::<Script>::new();
-pub(crate) static BIDI_CLASS: CodePointMapDataBorrowed<'static, BidiClass> =
-    CodePointMapData::<BidiClass>::new();
 
 /// One line segmenter per `(strictness, word option)` pair; `Anywhere` needs
 /// none (see [`line_opportunities`]).
@@ -153,38 +151,6 @@ pub(crate) fn line_break_class(c: char) -> LineBreakClass {
     }
 }
 
-/// Whether `c` takes a non-zero UAX #9 level in a left-to-right paragraph,
-/// or would make the paragraph right-to-left: a strong right-to-left
-/// character, an Arabic number, or an explicit directional formatting
-/// character.
-pub(crate) fn is_bidi_significant(c: char) -> bool {
-    matches!(
-        BIDI_CLASS.get(c),
-        BidiClass::RightToLeft
-            | BidiClass::ArabicLetter
-            | BidiClass::ArabicNumber
-            | BidiClass::LeftToRightEmbedding
-            | BidiClass::RightToLeftEmbedding
-            | BidiClass::LeftToRightOverride
-            | BidiClass::RightToLeftOverride
-            | BidiClass::PopDirectionalFormat
-            | BidiClass::LeftToRightIsolate
-            | BidiClass::RightToLeftIsolate
-            | BidiClass::FirstStrongIsolate
-            | BidiClass::PopDirectionalIsolate
-    )
-}
-
-/// The UAX #9 strong direction of `c`: `Some(true)` for R and AL,
-/// `Some(false)` for L, `None` otherwise.
-pub(crate) fn strong_direction(c: char) -> Option<bool> {
-    match BIDI_CLASS.get(c) {
-        BidiClass::RightToLeft | BidiClass::ArabicLetter => Some(true),
-        BidiClass::LeftToRight => Some(false),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,8 +194,5 @@ mod tests {
         assert_eq!(line_break_class('\u{2028}'), LineBreakClass::Bk);
         assert_eq!(line_break_class('('), LineBreakClass::Op);
         assert_eq!(line_break_class('\u{a0}'), LineBreakClass::Gl);
-        assert!(is_bidi_significant('\u{5d0}'));
-        assert!(!is_bidi_significant('1'));
-        assert_eq!(strong_direction('\u{627}'), Some(true));
     }
 }

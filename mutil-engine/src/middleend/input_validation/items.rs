@@ -9,7 +9,7 @@ use crate::frontend::{
     HyphenOpportunity, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge,
     WordNode, is_word_space,
 };
-use crate::types::{BidiLevel, TextRange, is_extent, is_measurement};
+use crate::types::{BidiClass, BidiLevel, TextRange, is_extent, is_measurement};
 
 /// Monotone progression: each item starts at or after the end of the previous
 /// one (zero-width nodes may share an offset). Among the zero-width nodes at one
@@ -94,6 +94,8 @@ pub(super) struct ItemChecks<'a> {
     runs_in_byte_order: Vec<bool>,
     /// Index of the last discretionary, where the sentinel belongs.
     last_break: Option<usize>,
+    /// The font size of the run of the last text box checked (WN-13).
+    last_text_font_size: Option<f32>,
 }
 
 impl<'a> ItemChecks<'a> {
@@ -107,11 +109,27 @@ impl<'a> ItemChecks<'a> {
                 .map(|run| in_byte_order(ast.run_atoms(run).iter().map(|a| a.byte_range)))
                 .collect(),
             last_break: ast.items.iter().rposition(WordNode::is_break_opportunity),
+            last_text_font_size: None,
         }
     }
 
     /// Checks `items[item]` on its own. Items are checked in order.
     pub(super) fn check(&mut self, item: usize, node: &WordNode) -> Result<(), LayoutInputError> {
+        // UAX #9 never resolves a level below the paragraph's (AST-13).
+        let level = match node {
+            WordNode::Box(BoxNode::Text { run_index, .. }) => {
+                self.last_text_font_size = Some(self.ast.runs[*run_index].font_size);
+                Some(self.ast.runs[*run_index].bidi_level)
+            }
+            WordNode::Box(
+                BoxNode::InlineObject { bidi_level, .. } | BoxNode::SpanBoundary { bidi_level, .. },
+            )
+            | WordNode::Glue(GlueNode { bidi_level, .. }) => Some(*bidi_level),
+            WordNode::Discretionary(_) | WordNode::Tab { .. } => None,
+        };
+        if level.is_some_and(|level| level < self.ast.base_direction.base_level()) {
+            return Err(LayoutInputError::InvalidBidiLevel { item });
+        }
         match node {
             WordNode::Box(BoxNode::Text { .. }) => self.check_text_box(item),
             WordNode::Box(BoxNode::InlineObject {
@@ -183,6 +201,7 @@ impl<'a> ItemChecks<'a> {
             return Err(E::UnknownSpan { item });
         };
         let span = &self.ast.decoration_spans[span_index];
+        let base = self.ast.base_direction.base_level();
         let (first_level, last_level) = self.spans.levels[span_index];
         let (anchor, padding, level) = match edge {
             SpanEdge::Leading => (span.byte_range.start(), span.start_padding, first_level),
@@ -190,32 +209,41 @@ impl<'a> ItemChecks<'a> {
         };
         if byte_range.start() != anchor
             || !approx_eq(width, padding)
-            || level.is_some_and(|level| level != bidi_level)
+            || level.unwrap_or(base) != bidi_level
         {
             return Err(E::InvalidSpanBoundary { item });
         }
         Ok(())
     }
 
-    /// Glue: non-negative measurements (MSR-1); the
-    /// compression pool is shrink only; and the node matches its source. A
-    /// `WordSpace` is collapsible and owns a non-empty run of word-space
-    /// characters (a no-break space is text, WN-12); the synthetic kinds own
-    /// no bytes.
+    /// Glue: non-negative measurements (MSR-1); the compression pool is
+    /// shrink only and shrinks at most half the font size of the run of the
+    /// nearest text box before it (WN-13); every glue is collapsible; and the
+    /// node matches its source and its original class (WN-14). A `WordSpace`
+    /// owns a non-empty run of word-space characters (a no-break space is
+    /// text, WN-12) and is class WS; the synthetic kinds own no bytes and
+    /// are class BN (WN-10).
     fn check_glue(&self, item: usize, glue: &GlueNode) -> Result<(), LayoutInputError> {
         let sizes_are_valid = [glue.natural_width, glue.max_stretch, glue.max_shrink]
             .into_iter()
             .all(is_extent);
-        let pool_is_shrink_only = glue.kind != GlueKind::CjkPunctCompression
-            || (glue.natural_width == 0.0 && glue.max_stretch == 0.0);
+        let pool_is_valid = glue.kind != GlueKind::CjkPunctCompression
+            || (glue.natural_width == 0.0
+                && glue.max_stretch == 0.0
+                && self.last_text_font_size.is_some_and(|size| {
+                    let bound = 0.5 * size;
+                    glue.max_shrink <= bound + tolerance(glue.max_shrink, bound)
+                }));
         let matches_source = if glue.kind.is_synthetic() {
-            glue.byte_range.is_empty()
+            glue.byte_range.is_empty() && glue.original_bidi_class == BidiClass::Bn
         } else {
             // Every item was checked to fit `text` before the item checks.
             let source = &self.text[glue.byte_range.as_range()];
-            glue.is_collapsible && !source.is_empty() && source.chars().all(is_word_space)
+            glue.original_bidi_class == BidiClass::Ws
+                && !source.is_empty()
+                && source.chars().all(is_word_space)
         };
-        if sizes_are_valid && pool_is_shrink_only && matches_source {
+        if sizes_are_valid && pool_is_valid && glue.is_collapsible && matches_source {
             Ok(())
         } else {
             Err(LayoutInputError::InvalidGlue { item })

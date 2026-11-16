@@ -11,6 +11,7 @@ use crate::frontend::{
     is_line_or_paragraph_separator,
 };
 use crate::types::{BidiLevel, GlyphOrientation, TextRange, WritingMode, is_extent};
+use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 
 /// The offsets at which the content of a paragraph starts and ends, for the
@@ -268,7 +269,8 @@ pub(super) struct SpanIndex {
     /// Span indices touching item `i`: `touching_flat[touching_start[i]..touching_start[i + 1]]`.
     touching_flat: Vec<usize>,
     touching_start: Vec<usize>,
-    /// Per span, the bidi levels of the first and of the last atom inside it.
+    /// Per span, the bidi levels of the first and of the last inline entity
+    /// (text atom or inline object) inside it.
     pub(super) levels: Vec<(Option<BidiLevel>, Option<BidiLevel>)>,
 }
 
@@ -295,17 +297,26 @@ impl SpanIndex {
                 }
                 next += 1;
             }
-            if let Some(view) = ast.text_box(item) {
-                for &i in &active {
-                    let span = ast.decoration_spans[i].byte_range;
-                    for atom in view
-                        .atoms
+            // The first and last inline entity inside each span: text
+            // atoms and inline objects (WN-8).
+            let entities: SmallVec<[(TextRange, BidiLevel); 1]> = match node {
+                WordNode::Box(BoxNode::InlineObject {
+                    byte_range,
+                    bidi_level,
+                    ..
+                }) => smallvec::smallvec![(*byte_range, *bidi_level)],
+                _ => ast.text_box(item).map_or_else(SmallVec::new, |view| {
+                    view.atoms
                         .iter()
-                        .filter(|a| span.contains_range(a.byte_range))
-                    {
-                        levels[i].0.get_or_insert(atom.bidi_level);
-                        levels[i].1 = Some(atom.bidi_level);
-                    }
+                        .map(|a| (a.byte_range, a.bidi_level))
+                        .collect()
+                }),
+            };
+            for &i in &active {
+                let span = ast.decoration_spans[i].byte_range;
+                for &(_, level) in entities.iter().filter(|(r, _)| span.contains_range(*r)) {
+                    levels[i].0.get_or_insert(level);
+                    levels[i].1 = Some(level);
                 }
             }
             touching_start.push(touching_flat.len());

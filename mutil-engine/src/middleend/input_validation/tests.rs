@@ -20,7 +20,7 @@ fn ast() -> ParagraphAst {
         annotations: Vec::new(),
         bidi_spans: Vec::new(),
         writing_mode: crate::types::WritingMode::HorizontalTb,
-        base_direction: BidiDirection::Rtl,
+        base_direction: BidiDirection::Ltr,
         strut_metrics: FontMetrics {
             vertical_ascent: 5.0,
             vertical_descent: 5.0,
@@ -601,7 +601,7 @@ fn hyphen_cuts_stay_within_the_same_run_hyphen_chain() {
     assert_eq!(check(&three_part_word(hyphen_at_1(), (0, 3))), bad);
     // Anything but a hyphenation point ends the chain.
     let space = WordNode::Glue(GlueNode {
-        original_bidi_class: crate::types::BidiClass::Ws,
+        original_bidi_class: crate::types::BidiClass::Bn,
         bidi_level: BidiLevel::LTR,
         is_collapsible: true,
 
@@ -1263,7 +1263,7 @@ fn the_tier_follows_the_kind_and_the_compression_pool_is_shrink_only() {
     let o = LayoutOptions::default();
     let pool = |natural, stretch, shrink| {
         WordNode::Glue(GlueNode {
-            original_bidi_class: crate::types::BidiClass::Ws,
+            original_bidi_class: crate::types::BidiClass::Bn,
             bidi_level: BidiLevel::LTR,
             is_collapsible: true,
             byte_range: TextRange::empty_at(1),
@@ -1521,7 +1521,7 @@ fn cjk_autospace_at_a_span_edge_sits_outside_its_boundaries() {
     let o = LayoutOptions::default();
     let autospace = |at: usize| {
         WordNode::Glue(GlueNode {
-            original_bidi_class: crate::types::BidiClass::Ws,
+            original_bidi_class: crate::types::BidiClass::Bn,
             bidi_level: BidiLevel::LTR,
             is_collapsible: true,
 

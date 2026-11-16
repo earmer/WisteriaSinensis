@@ -30,20 +30,20 @@ pub(super) fn ladder_tier(d: &DiscretionaryNode) -> usize {
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
-    /// The next tab stop after the absolute pen position `pen` that lies
-    /// inside `slot`, if any (spec ST3-1): a stop beyond the slot's end is
-    /// not reachable from it.
-    pub(super) fn reachable_stop(&self, pen: f32, slot: InlineSlotConstraint) -> Option<f32> {
-        let slot_end = slot.end();
+    /// The next tab stop after `distance`, measured from the slot's
+    /// line-start edge along the base direction, if it lies inside `slot`
+    /// (spec ST3-1): a stop further than the slot's width is not reachable.
+    pub(super) fn reachable_stop(&self, distance: f32, slot: InlineSlotConstraint) -> Option<f32> {
+        let width = slot.width();
         self.inputs
             .constraints()
             .tab_stops
-            .next_stop(pen)
-            .filter(|&stop| stop <= slot_end + super::super::tolerance::tolerance(stop, slot_end))
+            .next_stop(distance)
+            .filter(|&stop| stop <= width + super::super::tolerance::tolerance(stop, width))
     }
 
-    /// The advance and the reach (rightmost pen end, relative to the start)
-    /// of a piece starting at the absolute pen position `pen` in `slot`.
+    /// The advance and the reach (furthest pen end, relative to the start)
+    /// of a piece whose start lies `pen` from the slot's line-start edge.
     pub(super) fn measure(
         &self,
         piece: &Piece,
@@ -117,7 +117,6 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// mandatory break, or an emergency cluster break when nothing fits.
     pub(super) fn fit(&mut self, start: usize, post: f32, slot: InlineSlotConstraint) -> LineEnd {
         let available = slot.width();
-        let origin = slot.start();
         let mut pen = post;
         let mut body = post;
         let mut has_content = false;
@@ -138,7 +137,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 Token::Piece(piece)
                     if matches!(piece.kind, PieceKind::Tab)
-                        && self.reachable_stop(origin + pen, slot).is_none() =>
+                        && self.reachable_stop(pen, slot).is_none() =>
                 {
                     // No reachable stop (spec ST3-1, AX-6): break before the
                     // tab at an earlier opportunity, else consume it with no
@@ -153,7 +152,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 Token::Piece(piece) => {
                     let piece = *piece;
-                    let (advance, reach) = self.measure(&piece, origin + pen, slot);
+                    let (advance, reach) = self.measure(&piece, pen, slot);
                     if piece.is_content() {
                         let end = pen + reach.max(advance);
                         if end > available + FIT_EPSILON {
@@ -305,14 +304,13 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// Where the content of a line from `start` ends when it stops before
     /// token `end`, measured as [`fit`](Self::fit) measures it.
     fn content_end(&self, start: usize, end: usize, post: f32, slot: InlineSlotConstraint) -> f32 {
-        let origin = slot.start();
         let mut pen = post;
         let mut body = post;
         for token in &self.tokens[start..end] {
             match token {
                 Token::Break(b) => pen += b.no_break,
                 Token::Piece(piece) => {
-                    let (advance, reach) = self.measure(piece, origin + pen, slot);
+                    let (advance, reach) = self.measure(piece, pen, slot);
                     if piece.is_content() {
                         body = pen + reach.max(advance);
                     }

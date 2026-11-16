@@ -271,7 +271,7 @@ fn every_word_node_variant_is_constructible() {
             bidi_level: BidiLevel::RTL,
         }),
         WordNode::Glue(GlueNode {
-            original_bidi_class: BidiClass::Ws,
+            original_bidi_class: BidiClass::Bn,
             bidi_level: BidiLevel::LTR,
             is_collapsible: true,
 

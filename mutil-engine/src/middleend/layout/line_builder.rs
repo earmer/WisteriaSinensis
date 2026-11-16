@@ -8,9 +8,10 @@ use super::super::{
 };
 use super::line_artifacts::{CaretContext, SpanContext};
 use super::{Break, Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Token};
+use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_order};
 use crate::frontend::{BoxNode, WordNode};
 use crate::types::{
-    BaselineAlignment, BidiLevel, FontMetrics, RawShapedGlyph, TextRange, WritingMode,
+    AtomFlags, BaselineAlignment, BidiLevel, FontMetrics, RawShapedGlyph, TextRange, WritingMode,
 };
 use smallvec::SmallVec;
 
@@ -102,20 +103,25 @@ impl<'i, 'a> Layout<'i, 'a> {
             .iter()
             .rposition(|p| p.piece.is_content())
             .map_or(0, |k| k + 1);
-        apply_l1_trailing_levels(&mut placed, body_len, self.base.base_level());
+        self.apply_l1(&mut placed);
         let order = visual_order(&placed[..body_len]);
 
         let rtl = self.base.is_rtl();
         let post = cursor.post_break_width;
         let (left_pad, right_pad) = if rtl { (pre, post) } else { (post, pre) };
-        let origin = slot.start();
+        // Widths in logical order: a tab's depends on its distance from the
+        // line-start edge (spec ST3-1).
+        let mut distance = post;
+        for p in &mut placed[..body_len] {
+            distance += p.gap;
+            p.width = self.measure(&p.piece, distance, slot).0;
+            distance += p.width;
+        }
         let mut x = left_pad;
         for &k in &order {
             x += placed[k].gap;
-            let (advance, _) = self.measure(&placed[k].piece, origin + x, slot);
             placed[k].x = x;
-            placed[k].width = advance;
-            x += advance;
+            x += placed[k].width;
         }
         let body_end = x + right_pad;
         self.place_trailing_whitespace(&mut placed[body_len..], body_end, rtl);
@@ -136,6 +142,59 @@ impl<'i, 'a> Layout<'i, 'a> {
             block_top: cursor.block_top,
             geometry,
         })
+    }
+
+    /// UAX #9 L1 on the line (spec ST2-1): tabs, the whitespace before them
+    /// and the whitespace at the line end take the paragraph level, read
+    /// from glue classes, cluster flags and tabs, never from the text. A span
+    /// boundary is transparent and then takes the level of its span's next
+    /// (leading) or previous (trailing) item on the line.
+    fn apply_l1(&self, placed: &mut [PlacedPiece]) {
+        let class = |p: &PlacedPiece| match p.piece.kind {
+            PieceKind::Tab => LineClass::Separator,
+            PieceKind::Glue | PieceKind::SpanEdge { .. } => LineClass::Whitespace,
+            PieceKind::Cluster { cluster, .. }
+                if self.ast.clusters[cluster]
+                    .flags
+                    .contains(AtomFlags::L1_RESETTABLE) =>
+            {
+                LineClass::Whitespace
+            }
+            PieceKind::Cluster { .. } | PieceKind::Object { .. } => LineClass::Other,
+        };
+        let classes: Vec<LineClass> = placed.iter().map(class).collect();
+        let mut levels: Vec<BidiLevel> = placed.iter().map(|p| p.level).collect();
+        reset_line_levels(classes.into_iter(), &mut levels, self.base.base_level());
+        for (p, level) in placed.iter_mut().zip(&levels) {
+            if !matches!(p.piece.kind, PieceKind::SpanEdge { .. }) {
+                p.level = *level;
+            }
+        }
+        for k in 0..placed.len() {
+            let PieceKind::SpanEdge { span_id } = placed[k].piece.kind else {
+                continue;
+            };
+            let Some(span) = self
+                .ast
+                .decoration_spans
+                .iter()
+                .find(|s| s.span_id == span_id)
+            else {
+                continue;
+            };
+            let at = placed[k].piece.bytes.start();
+            let is_item = |p: &&PlacedPiece| !matches!(p.piece.kind, PieceKind::SpanEdge { .. });
+            let neighbour = if at == span.byte_range.start() {
+                placed[k + 1..].iter().find(is_item)
+            } else {
+                placed[..k].iter().rev().find(is_item)
+            };
+            if let Some(n) = neighbour.filter(|n| {
+                !n.piece.bytes.is_empty() && span.byte_range.contains_range(n.piece.bytes)
+            }) {
+                placed[k].level = n.level;
+            }
+        }
     }
 
     fn collect_placed_pieces(&self, start: usize, last_piece: usize) -> Vec<PlacedPiece> {
@@ -551,63 +610,6 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 }
 
-/// UAX #9 L1: trailing whitespace, tabs and the whitespace before a tab take
-/// the paragraph level.
-fn apply_l1_trailing_levels(placed: &mut [PlacedPiece], body_len: usize, base_level: BidiLevel) {
-    let mut before_tab = false;
-    for k in (0..placed.len()).rev() {
-        let kind = placed[k].piece.kind;
-        let resets = match kind {
-            PieceKind::Tab => {
-                before_tab = true;
-                true
-            }
-            PieceKind::Glue => k >= body_len || before_tab,
-            _ => {
-                before_tab = false;
-                k >= body_len
-            }
-        };
-        if resets {
-            placed[k].level = base_level;
-        }
-    }
-}
-
-/// Visual indices of a line's pieces from their levels (UAX #9 L2): from
-/// the highest level to the lowest odd one, every maximal sequence at that
-/// level or above is reversed.
-pub(super) fn visual_order(placed: &[PlacedPiece]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..placed.len()).collect();
-    let Some(highest) = placed.iter().map(|p| p.level.get()).max() else {
-        return order;
-    };
-    let lowest_odd = placed
-        .iter()
-        .map(|p| p.level.get())
-        .filter(|l| l % 2 == 1)
-        .min()
-        .unwrap_or(highest + 1);
-    let mut level = highest;
-    while level >= lowest_odd && level > 0 {
-        let mut i = 0;
-        while i < order.len() {
-            if placed[order[i]].level.get() >= level {
-                let mut j = i;
-                while j < order.len() && placed[order[j]].level.get() >= level {
-                    j += 1;
-                }
-                order[i..j].reverse();
-                i = j;
-            } else {
-                i += 1;
-            }
-        }
-        level -= 1;
-    }
-    order
-}
-
 /// A font's offset of a named baseline from its alphabetic one, positive
 /// towards line-over (FNT-4); `None` for the other alignments.
 fn baseline_offset(align: BaselineAlignment, m: &FontMetrics) -> Option<f32> {
@@ -641,4 +643,11 @@ fn object_shift(align: BaselineAlignment, strut: &FontMetrics) -> f32 {
         BaselineAlignment::Offset(offset) => offset,
         _ => baseline_offset(align, strut).unwrap_or(0.0),
     }
+}
+
+/// Visual indices of a line's pieces from their levels (UAX #9 L2, spec
+/// ST2-2), through the frontend's shared rule.
+pub(super) fn visual_order(placed: &[PlacedPiece]) -> Vec<usize> {
+    let levels: Vec<BidiLevel> = placed.iter().map(|p| p.level).collect();
+    bidi_order(&levels)
 }

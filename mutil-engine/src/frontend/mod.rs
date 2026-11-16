@@ -7,6 +7,7 @@
 
 mod annotation;
 mod ast;
+pub(crate) mod bidi;
 mod compile;
 #[cfg(test)]
 mod conformance;
