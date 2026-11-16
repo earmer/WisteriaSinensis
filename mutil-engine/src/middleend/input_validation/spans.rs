@@ -351,15 +351,14 @@ pub(super) fn check_span_enclosure(
                 continue;
             }
             let (leading_item, trailing_item) = boundary_positions[span_index];
-            let is_allowed = span_enclosure_is_allowed(
+            if !span_enclosure_is_allowed(
                 node,
                 item_range,
                 span.byte_range,
                 item,
                 leading_item,
                 trailing_item,
-            );
-            if !is_allowed {
+            ) {
                 return Err(LayoutInputError::SpanEnclosure {
                     span: span_index,
                     item,
@@ -382,19 +381,14 @@ fn span_enclosure_is_allowed(
     let is_zero_width = item_range.is_empty();
     let is_cjk_autospace =
         matches!(node, WordNode::Glue(glue) if glue.kind == GlueKind::CjkAutospace);
+    let is_zero_width_break = is_zero_width && (node.is_break_opportunity() || is_cjk_autospace);
     let sits_on_span_edge =
         item_range.start() == span_range.start() || item_range.start() == span_range.end();
 
-    if is_zero_width
-        && (node.is_break_opportunity() || is_cjk_autospace)
-        && item_range.start() == span_range.start()
-    {
+    if is_zero_width_break && item_range.start() == span_range.start() {
         return item < leading_item;
     }
-    if is_zero_width
-        && (node.is_break_opportunity() || is_cjk_autospace)
-        && item_range.start() == span_range.end()
-    {
+    if is_zero_width_break && item_range.start() == span_range.end() {
         return item > trailing_item;
     }
     if is_zero_width && sits_on_span_edge {

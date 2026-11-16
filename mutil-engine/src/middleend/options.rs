@@ -177,8 +177,8 @@ impl StrutMetrics {
     pub fn is_valid(&self) -> bool {
         let height = self.line_height();
         [self.ascent, self.descent, self.line_gap, height]
-            .iter()
-            .all(|v| is_measurement(*v))
+            .into_iter()
+            .all(is_measurement)
             && height > 0.0
     }
 }
@@ -293,18 +293,11 @@ impl TabStops {
             return None;
         }
         let next = ((x / self.step).floor() + 1.0) * self.step;
-        if next.is_finite() && next > x {
-            Some(next)
-        } else {
-            // Precision exhaustion (e.g. x=1e10, step=8 rounds back) or overflow.
-            // Try one ulp step via x+step; if that also fails, signal exhaustion.
-            let stepped = x + self.step;
-            if stepped.is_finite() && stepped > x {
-                Some(stepped)
-            } else {
-                None
-            }
-        }
+        // On precision exhaustion (e.g. x=1e10, step=8 rounds back) or
+        // overflow, fall back to x+step; if that also fails, signal exhaustion.
+        [next, x + self.step]
+            .into_iter()
+            .find(|&stop| stop.is_finite() && stop > x)
     }
 }
 
@@ -417,10 +410,10 @@ impl LayoutConstraints {
             block_start.is_finite() && block_end.is_finite() && block_end > block_start,
             "query_checked_geometry precondition violated (spec GEO-3)"
         );
-        if self.geometry_provider.is_none() {
-            return Ok(self.resolve_line_geometry(line_index, block_start, block_end));
-        }
         let geometry = self.resolve_line_geometry(line_index, block_start, block_end);
+        if self.geometry_provider.is_none() {
+            return Ok(geometry);
+        }
         if !geometry.is_valid(block_start, self.wrap_width) {
             return Err(LayoutInputError::InvalidLineGeometry);
         }

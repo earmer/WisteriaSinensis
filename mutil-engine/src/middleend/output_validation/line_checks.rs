@@ -2,8 +2,8 @@
 
 use super::super::tolerance::{approx_eq, tolerance};
 use super::super::{
-    AnnotationErrorReason, AtomicFragment, LineContext, LineHeight, LineInvariantError,
-    PositionedGlyph, PositionedLine,
+    AnnotationErrorReason, LineContext, LineHeight, LineInvariantError, PositionedGlyph,
+    PositionedLine,
 };
 use super::{RangeIndex, SourcedGlyphs};
 use crate::frontend::AnnotationSide;
@@ -25,7 +25,7 @@ impl PositionedLine {
             self.baseline_y + self.descent,
             self.ascent + self.descent,
         ];
-        if !metrics.iter().all(|v| v.is_finite()) {
+        if !metrics.into_iter().all(f32::is_finite) {
             return Err(E::NonFiniteLineMetrics);
         }
         for (run, r) in self.visual_runs.iter().enumerate() {
@@ -48,8 +48,8 @@ impl PositionedLine {
         }
         for (index, b) in self.visual_boxes.iter().enumerate() {
             let finite = [b.x, b.y, b.width, b.ascent, b.descent, b.x + b.width]
-                .iter()
-                .all(|v| v.is_finite());
+                .into_iter()
+                .all(f32::is_finite);
             if !(finite && b.width >= 0.0 && b.ascent >= 0.0 && b.descent >= 0.0) {
                 return Err(E::InvalidInlineBox { index });
             }
@@ -62,8 +62,8 @@ impl PositionedLine {
         }
         for (index, f) in self.span_fragments.iter().enumerate() {
             let finite = [f.x, f.width, f.ascent, f.descent, f.x + f.width]
-                .iter()
-                .all(|v| v.is_finite());
+                .into_iter()
+                .all(f32::is_finite);
             if !(finite && f.width >= 0.0 && f.ascent >= 0.0 && f.descent >= 0.0) {
                 return Err(E::InvalidSpanFragment { index });
             }
@@ -81,8 +81,8 @@ impl PositionedLine {
         }
         for (index, d) in self.decorations.iter().enumerate() {
             let finite = [d.x, d.width, d.y_offset, d.thickness, d.x + d.width]
-                .iter()
-                .all(|v| v.is_finite());
+                .into_iter()
+                .all(f32::is_finite);
             if !(finite && d.width >= 0.0 && d.thickness >= 0.0) {
                 return Err(E::InvalidDecoration { index });
             }
@@ -230,7 +230,7 @@ impl PositionedLine {
             let full = fragments[span[0]].full_byte_range;
             let mut covered = full.start().max(self.byte_range.start());
             for &index in span {
-                let f: &AtomicFragment = &fragments[index];
+                let f = &fragments[index];
                 if f.full_byte_range != full || f.fragment_byte_range.start() != covered {
                     return invalid(index);
                 }
@@ -437,7 +437,7 @@ impl PositionedLine {
                     g.x + g.advance,
                     g.x + g.x_offset,
                 ];
-                g.byte_range.is_some() || !numbers.iter().all(|v| v.is_finite())
+                g.byte_range.is_some() || !numbers.into_iter().all(f32::is_finite)
             }) {
                 R::InvalidGlyph
             } else {

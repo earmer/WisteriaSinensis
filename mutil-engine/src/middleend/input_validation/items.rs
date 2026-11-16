@@ -17,10 +17,9 @@ use crate::types::{BidiLevel, TextRange, is_extent, is_measurement};
 /// breakable space's glue precedes its discretionary (so the spacing stays on
 /// the line that ends there): `[Glue(CjkAutospace), Discretionary]`.
 pub(super) fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
-    for (i, w) in ast.items.windows(2).enumerate() {
-        if w[0].byte_span().end > w[1].byte_span().start {
-            return Err(LayoutInputError::ItemsOutOfOrder { item: i + 1 });
-        }
+    let out_of_order = |w: &[WordNode]| w[0].byte_span().end > w[1].byte_span().start;
+    if let Some(i) = ast.items.windows(2).position(out_of_order) {
+        return Err(LayoutInputError::ItemsOutOfOrder { item: i + 1 });
     }
     // Offset of the break opportunity seen in the current run of zero-width
     // nodes, if any.
@@ -284,12 +283,15 @@ impl<'a> ItemChecks<'a> {
         // listed span's `end_padding`, line `k + 1` its `start_padding`.
         let (mut clone_pre, mut clone_post) = (0.0_f64, 0.0_f64);
         for id in &d.cloned_spans {
-            let Some(span) = self.spans.by_id.get(id).map(|&i| &spans[i]) else {
+            let Some(span) = self
+                .spans
+                .by_id
+                .get(id)
+                .map(|&i| &spans[i])
+                .filter(|s| is_cut(s))
+            else {
                 return Err(E::UnknownSpan { item });
             };
-            if !is_cut(span) {
-                return Err(E::UnknownSpan { item });
-            }
             clone_pre += f64::from(span.end_padding);
             clone_post += f64::from(span.start_padding);
         }

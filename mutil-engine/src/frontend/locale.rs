@@ -69,12 +69,9 @@ pub(crate) fn resolve(
                 ScriptTag::HANGUL => has_hangul = true,
                 _ => {}
             }
-            if !serbian
-                && a.text
-                    .contains(['\u{0402}', '\u{040B}', '\u{0452}', '\u{045B}'])
-            {
-                serbian = true;
-            }
+            serbian = serbian
+                || a.text
+                    .contains(['\u{0402}', '\u{040B}', '\u{0452}', '\u{045B}']);
         }
         if has_kana || has_hangul || serbian {
             for (k, atom) in sentence.iter().enumerate() {

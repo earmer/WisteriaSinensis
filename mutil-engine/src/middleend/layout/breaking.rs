@@ -1,6 +1,6 @@
 //! Line-breaking and measurement helpers for [`Layout`] (spec §5 Stage 1).
 
-use super::super::shaper_gate::{checked_font_metrics, checked_reshape_window};
+use super::super::shaper_gate::{checked_font_metrics, checked_reshape_window, resolved_line_box};
 use super::super::{InlineSlotConstraint, LayoutInputError, StrutMetrics};
 use super::{FIT_EPSILON, Layout, LineEnd, Piece, PieceKind, Reshaped, Token};
 use crate::frontend::{BoxNode, BoxOverflowPolicy, DiscretionaryNode, WordNode};
@@ -279,13 +279,10 @@ impl<'i, 'a> Layout<'i, 'a> {
             return added;
         }
         let run_clusters = &self.ast.runs[run].cluster_range;
-        let mut sides = vec![after];
-        if after > run_clusters.start {
-            sides.push(after - 1);
-        }
+        let before = (after > run_clusters.start).then(|| after - 1);
         let atoms = self.inputs.run_atoms(run);
         let text = self.inputs.text();
-        for c in sides {
+        for c in std::iter::once(after).chain(before) {
             let cluster = &self.ast.clusters[c];
             if let Some((glyphs, width)) = checked_reshape_window(
                 self.shaper,
@@ -334,16 +331,12 @@ impl<'i, 'a> Layout<'i, 'a> {
         cluster: usize,
     ) -> Result<StrutMetrics, LayoutInputError> {
         let metrics = self.cluster_metrics(run, cluster)?;
-        let line_box = self.options.line_height.resolve_strut(
+        resolved_line_box(
             &metrics,
             self.ast.runs[run].font_size,
+            self.options.line_height,
             self.ast.writing_mode,
-        );
-        if line_box.is_valid() {
-            Ok(line_box)
-        } else {
-            Err(LayoutInputError::InvalidFontMetrics)
-        }
+        )
     }
 
     /// A cluster's font metrics, through the shaper gate (spec G2).

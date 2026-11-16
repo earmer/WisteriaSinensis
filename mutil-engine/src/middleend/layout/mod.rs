@@ -288,23 +288,19 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut tokens = Vec::with_capacity(ast.items.len() + ast.clusters.len());
         for (index, item) in ast.items.iter().enumerate() {
             match item {
-                WordNode::Box(BoxNode::Text { .. }) => {
+                WordNode::Box(BoxNode::Text { cluster_range, .. }) => {
                     let view = inputs
                         .text_box(index)
                         .expect("the input gate resolved every text box");
-                    let first = match item {
-                        WordNode::Box(BoxNode::Text { cluster_range, .. }) => cluster_range.start,
-                        _ => unreachable!("matched above"),
-                    };
-                    for (k, cluster) in view.clusters.iter().enumerate() {
+                    for (cluster, info) in cluster_range.clone().zip(view.clusters) {
                         tokens.push(Token::Piece(Piece {
                             kind: PieceKind::Cluster {
                                 run: view.run_index,
-                                cluster: first + k,
+                                cluster,
                             },
-                            bytes: cluster.byte_range,
-                            level: cluster.bidi_level,
-                            width: cluster.natural_width,
+                            bytes: info.byte_range,
+                            level: info.bidi_level,
+                            width: info.natural_width,
                         }));
                     }
                 }
@@ -379,7 +375,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             let (line, end) = self.place_next_line(lines.len(), &mut cursor)?;
             cursor.block_top += line.line_height;
             lines.push(line);
-            let finished = match end {
+            match end {
                 LineEnd::At(token_idx) => {
                     let Token::Break(brk) = &self.tokens[token_idx] else {
                         unreachable!("a line ends at a break token")
@@ -387,17 +383,15 @@ impl<'i, 'a> Layout<'i, 'a> {
                     cursor.post_break_width = brk.post;
                     cursor.byte_start = brk.bytes.end();
                     cursor.token_start = token_idx + 1;
-                    cursor.token_start >= self.tokens.len()
+                    if cursor.token_start >= self.tokens.len() {
+                        break;
+                    }
                 }
                 LineEnd::Before(token_idx) => {
                     cursor.post_break_width = 0.0;
                     cursor.byte_start = self.piece(token_idx).bytes.start();
                     cursor.token_start = token_idx;
-                    false
                 }
-            };
-            if finished {
-                break;
             }
         }
         Ok(PositionedParagraph {

@@ -340,7 +340,7 @@ impl FontMetrics {
             self.x_height,
             self.cap_height,
         ];
-        nonnegative.iter().all(|v| super::is_extent(*v))
+        nonnegative.into_iter().all(super::is_extent)
             && [
                 self.underline_position,
                 self.strikeout_position,
@@ -349,8 +349,8 @@ impl FontMetrics {
                 self.hanging_baseline_offset,
                 self.mathematical_baseline_offset,
             ]
-            .iter()
-            .all(|v| super::is_measurement(*v))
+            .into_iter()
+            .all(super::is_measurement)
             && self.ascent + self.descent > 0.0
             && self.vertical_ascent + self.vertical_descent > 0.0
     }

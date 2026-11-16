@@ -213,12 +213,7 @@ impl LocaleTag {
         {
             return Self::try_from_str(canonical);
         }
-        if trimmed.contains('_') {
-            let normalized = trimmed.replace('_', "-");
-            Self::try_from_str(&normalized)
-        } else {
-            Self::try_from_str(trimmed)
-        }
+        Self::try_from_str(&trimmed.replace('_', "-"))
     }
 
     /// The undetermined locale, `und` (no explicit tag; spec §1.2 fallback

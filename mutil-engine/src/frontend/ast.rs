@@ -351,12 +351,8 @@ impl DiscretionaryNode {
         Self {
             byte_range: newline,
             penalty: Self::MANDATORY_BREAK_PENALTY,
-            flagged: false,
-            pre_break_width: 0.0,
-            post_break_width: 0.0,
-            no_break_width: 0.0,
             action: BreakAction::HardBreak,
-            cloned_spans: SmallVec::new(),
+            ..Self::direct(newline.start())
         }
     }
 
@@ -691,14 +687,13 @@ impl ParagraphAst {
     pub fn is_self_contained(&self, item: usize) -> bool {
         match self.items.get(item) {
             Some(WordNode::Box(BoxNode::Text {
+                run_index,
                 atom_range,
                 cluster_range,
                 ..
             })) => {
-                let Some(view) = self.text_box(item) else {
-                    return false;
-                };
-                let Some(run) = self.runs.get(view.run_index) else {
+                let (Some(view), Some(run)) = (self.text_box(item), self.runs.get(*run_index))
+                else {
                     return false;
                 };
                 let inside_run = run.atom_range.start <= atom_range.start

@@ -312,14 +312,10 @@ pub(crate) fn resolve(atoms: &[ScriptAtom<'_>], policy: QuotePolicy) -> Vec<Scri
                 continue;
             }
         }
-        let set = {
-            let set = extensions(c);
-            if set.is_empty() && is_wide(c) {
-                SmallVec::from_slice(&HAN_LIST)
-            } else {
-                set
-            }
-        };
+        let mut set = extensions(c);
+        if set.is_empty() && is_wide(c) {
+            set = SmallVec::from_slice(&HAN_LIST);
+        }
         if set.is_empty() {
             match strong {
                 Some(s) => scripts[index] = Some(s),
@@ -426,16 +422,8 @@ fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
             end += 1;
         }
         if next_anchor.is_none_or(|k| k < end) {
-            next_scanned = next_scanned.max(end);
-            next_anchor = None;
-            while next_scanned < atoms.len() {
-                let k = next_scanned;
-                next_scanned += 1;
-                if anchor(k) {
-                    next_anchor = Some(k);
-                    break;
-                }
-            }
+            next_anchor = (next_scanned.max(end)..atoms.len()).find(|&k| anchor(k));
+            next_scanned = next_anchor.map_or(atoms.len(), |k| k + 1);
         }
         let (left, right) = (last_anchor, next_anchor);
         let cjk = |k: Option<usize>| k.is_some_and(|k| is_cjk(atoms, resolved, k));
@@ -449,14 +437,8 @@ fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
                 _ => host,
             },
         };
-        for s in &mut resolved[i..end] {
-            *s = script;
-        }
-        for k in i..end {
-            if anchor(k) {
-                last_anchor = Some(k);
-            }
-        }
+        resolved[i..end].fill(script);
+        last_anchor = (i..end).rev().find(|&k| anchor(k)).or(last_anchor);
         i = end;
     }
 }
@@ -485,10 +467,8 @@ pub(crate) fn binds_to_next(text: &str, atoms: &[GraphemeAtom], index: usize) ->
     ) else {
         return false;
     };
-    match (sa.chars().next(), sb.chars().next()) {
-        (Some(ch_a), Some(ch_b)) => ch_a == ch_b && is_dash_run_char(ch_a),
-        _ => false,
-    }
+    matches!((sa.chars().next(), sb.chars().next()),
+        (Some(ch_a), Some(ch_b)) if ch_a == ch_b && is_dash_run_char(ch_a))
 }
 
 #[cfg(test)]

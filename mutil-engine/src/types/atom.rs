@@ -325,18 +325,12 @@ impl fmt::Debug for AtomFlags {
         if self.is_empty() {
             return f.write_str("AtomFlags(EMPTY)");
         }
-        f.write_str("AtomFlags(")?;
-        let mut first = true;
-        for (flag, name) in Self::NAMES {
-            if self.contains(flag) {
-                if !first {
-                    f.write_str(" | ")?;
-                }
-                f.write_str(name)?;
-                first = false;
-            }
-        }
-        f.write_str(")")
+        let names: Vec<&str> = Self::NAMES
+            .iter()
+            .filter(|&&(flag, _)| self.contains(flag))
+            .map(|&(_, name)| name)
+            .collect();
+        write!(f, "AtomFlags({})", names.join(" | "))
     }
 }
 

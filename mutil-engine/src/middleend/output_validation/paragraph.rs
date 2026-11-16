@@ -171,7 +171,7 @@ impl PositionedParagraph {
             seen.has_last |= fragment.is_last_fragment();
         }
         // Report the earliest offending line, whatever the map's order.
-        match spans
+        spans
             .values()
             .filter(|seen| {
                 let ends_in_tail = seen.span_range.end() > rendered_end;
@@ -179,10 +179,7 @@ impl PositionedParagraph {
             })
             .map(|seen| seen.line)
             .min()
-        {
-            Some(line) => invalid(line),
-            None => Ok(()),
-        }
+            .map_or(Ok(()), invalid)
     }
 
     /// Across the lines, the fragments of one atomic span carry one
@@ -225,7 +222,7 @@ impl PositionedParagraph {
             seen.line = line;
             seen.bytes += fragment.fragment_byte_range.len();
         }
-        match spans
+        spans
             .values()
             .filter(|seen| {
                 seen.bytes
@@ -237,9 +234,6 @@ impl PositionedParagraph {
             })
             .map(|seen| seen.line)
             .min()
-        {
-            Some(line) => invalid(line),
-            None => Ok(()),
-        }
+            .map_or(Ok(()), invalid)
     }
 }

@@ -9,7 +9,9 @@ use super::super::{
 use super::line_artifacts::{CaretContext, SpanContext};
 use super::{Break, Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Token};
 use crate::frontend::{BoxNode, WordNode};
-use crate::types::{BaselineAlignment, FontMetrics, RawShapedGlyph, TextRange, WritingMode};
+use crate::types::{
+    BaselineAlignment, BidiLevel, FontMetrics, RawShapedGlyph, TextRange, WritingMode,
+};
 use smallvec::SmallVec;
 
 /// Horizontal extent of the line's body (excluding trailing whitespace) in the
@@ -24,6 +26,18 @@ pub(super) struct LineBounds {
 enum LineRelativeEdge {
     Top,
     Bottom,
+}
+
+impl LineRelativeEdge {
+    /// The line-box edge an alignment is placed against, if it is placed
+    /// against the finished line box at all.
+    fn of(align: BaselineAlignment) -> Option<Self> {
+        match align {
+            BaselineAlignment::LineTop => Some(Self::Top),
+            BaselineAlignment::LineBottom => Some(Self::Bottom),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -207,7 +221,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             end_break: state.end_break,
             runs: &visual_runs,
             boxes: &visual_boxes,
-            tabs: &tabs,
         });
 
         let mut slots: SmallVec<[PositionedSlot; 1]> = state
@@ -266,12 +279,13 @@ impl<'i, 'a> Layout<'i, 'a> {
             let piece = placed[k].piece;
             let (align, item_above, item_below) = match piece.kind {
                 PieceKind::Cluster { run, cluster } => {
-                    let (a, d) = if normal || is_line_relative(self.ast.runs[run].baseline_align) {
+                    let align = self.ast.runs[run].baseline_align;
+                    let (a, d) = if normal || LineRelativeEdge::of(align).is_some() {
                         half(self.cluster_box(run, cluster)?)
                     } else {
                         (0.0, 0.0)
                     };
-                    (self.ast.runs[run].baseline_align, a, d)
+                    (align, a, d)
                 }
                 PieceKind::Object { item } => {
                     let WordNode::Box(BoxNode::InlineObject { baseline_align, .. }) =
@@ -285,20 +299,14 @@ impl<'i, 'a> Layout<'i, 'a> {
                 _ => continue,
             };
             let is_object = matches!(piece.kind, PieceKind::Object { .. });
-            match align {
-                BaselineAlignment::LineTop => line_relative.push(LineRelativeItem {
+            match LineRelativeEdge::of(align) {
+                Some(edge) => line_relative.push(LineRelativeItem {
                     piece_index: k,
-                    edge: LineRelativeEdge::Top,
+                    edge,
                     above: item_above,
                     below: item_below,
                 }),
-                BaselineAlignment::LineBottom => line_relative.push(LineRelativeItem {
-                    piece_index: k,
-                    edge: LineRelativeEdge::Bottom,
-                    above: item_above,
-                    below: item_below,
-                }),
-                _ => {
+                None => {
                     let shift = match piece.kind {
                         PieceKind::Cluster { run, cluster } => {
                             let own = self.cluster_metrics(run, cluster)?;
@@ -470,15 +478,14 @@ impl<'i, 'a> Layout<'i, 'a> {
                 glyphs.iter().map(&mut make_glyph).collect()
             };
             let level = p.level;
-            let same_run = visual_runs.last().is_some_and(|v| {
+            let same_run = visual_runs.last_mut().filter(|v| {
                 v.font == c.font
                     && v.bidi_level == level
                     && v.font_size == r.font_size
                     && v.orientation == c.orientation
                     && v.variations.as_slice() == r.features.variations()
             });
-            if same_run {
-                let v = visual_runs.last_mut().expect("checked above");
+            if let Some(v) = same_run {
                 v.byte_range = v.byte_range.cover(c.byte_range);
                 v.glyphs.extend(positioned);
             } else {
@@ -504,7 +511,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     ) -> (Vec<PositionedInlineBox>, Vec<PositionedTab>) {
         let mut visual_boxes: Vec<PositionedInlineBox> = Vec::new();
         let mut tabs: Vec<PositionedTab> = Vec::new();
-        for p in placed.iter() {
+        for p in placed {
             match p.piece.kind {
                 PieceKind::Object { item } => {
                     let WordNode::Box(BoxNode::InlineObject {
@@ -532,13 +539,11 @@ impl<'i, 'a> Layout<'i, 'a> {
                         bidi_level: *bidi_level,
                     });
                 }
-                PieceKind::Tab => {
-                    tabs.push(PositionedTab {
-                        byte_range: p.piece.bytes,
-                        x: p.x,
-                        width: p.width,
-                    });
-                }
+                PieceKind::Tab => tabs.push(PositionedTab {
+                    byte_range: p.piece.bytes,
+                    x: p.x,
+                    width: p.width,
+                }),
                 PieceKind::Cluster { .. } | PieceKind::Glue | PieceKind::SpanEdge { .. } => {}
             }
         }
@@ -548,11 +553,7 @@ impl<'i, 'a> Layout<'i, 'a> {
 
 /// UAX #9 L1: trailing whitespace, tabs and the whitespace before a tab take
 /// the paragraph level.
-fn apply_l1_trailing_levels(
-    placed: &mut [PlacedPiece],
-    body_len: usize,
-    base_level: crate::types::BidiLevel,
-) {
+fn apply_l1_trailing_levels(placed: &mut [PlacedPiece], body_len: usize, base_level: BidiLevel) {
     let mut before_tab = false;
     for k in (0..placed.len()).rev() {
         let kind = placed[k].piece.kind;
@@ -607,14 +608,6 @@ pub(super) fn visual_order(placed: &[PlacedPiece]) -> Vec<usize> {
     order
 }
 
-/// Whether an alignment is placed against the finished line box.
-fn is_line_relative(align: BaselineAlignment) -> bool {
-    matches!(
-        align,
-        BaselineAlignment::LineTop | BaselineAlignment::LineBottom
-    )
-}
-
 /// A font's offset of a named baseline from its alphabetic one, positive
 /// towards line-over (FNT-4); `None` for the other alignments.
 fn baseline_offset(align: BaselineAlignment, m: &FontMetrics) -> Option<f32> {
@@ -635,10 +628,9 @@ fn baseline_offset(align: BaselineAlignment, m: &FontMetrics) -> Option<f32> {
 fn run_shift(align: BaselineAlignment, strut: &FontMetrics, own: &FontMetrics) -> f32 {
     match align {
         BaselineAlignment::Offset(offset) => offset,
-        _ => match (baseline_offset(align, strut), baseline_offset(align, own)) {
-            (Some(s), Some(o)) => s - o,
-            _ => 0.0,
-        },
+        _ => baseline_offset(align, strut)
+            .zip(baseline_offset(align, own))
+            .map_or(0.0, |(s, o)| s - o),
     }
 }
 

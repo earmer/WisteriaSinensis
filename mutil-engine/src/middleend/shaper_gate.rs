@@ -45,7 +45,21 @@ pub(crate) fn checked_line_box(
 ) -> Result<StrutMetrics, LayoutInputError> {
     let font_size = instance.font_size;
     let metrics = checked_font_metrics(shaper, instance)?;
-    let line_box = line_height.resolve_strut(&metrics, font_size, mode);
+    resolved_line_box(&metrics, font_size, line_height, mode)
+}
+
+/// The line box `line_height` resolves from already checked `metrics`, like
+/// the paragraph strut, checked again as a strut.
+///
+/// # Errors
+/// `InvalidFontMetrics` when the metrics resolve to an invalid line box.
+pub(crate) fn resolved_line_box(
+    metrics: &FontMetrics,
+    font_size: f32,
+    line_height: LineHeight,
+    mode: WritingMode,
+) -> Result<StrutMetrics, LayoutInputError> {
+    let line_box = line_height.resolve_strut(metrics, font_size, mode);
     if line_box.is_valid() {
         Ok(line_box)
     } else {

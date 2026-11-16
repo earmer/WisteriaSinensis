@@ -15,7 +15,10 @@ use crate::types::{
     ShapingRun, TextRange,
 };
 use core::fmt;
-use harfrust::{Buffer, BufferFlags, Feature, Language, Script, ShapeOptions, ShaperFont, Tag};
+use harfrust::{
+    Buffer, BufferFlags, Feature, GlyphInfo, GlyphPosition, Language, Script, ShapeOptions,
+    ShaperFont, Tag,
+};
 use read_fonts::model::Font;
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -255,11 +258,6 @@ impl HarfRustShaper {
         }
         buffer.set_pre_context(context_before(text, bytes.start()));
         buffer.set_post_context(context_after(text, bytes.end()));
-        buffer.set_direction(harfrust_direction(vertical, rtl));
-        buffer.set_script(Script::from_iso15924_tag(Tag::new(&run.script.as_bytes())));
-        if run.locale.as_str() != "und" {
-            buffer.set_language(Language::new(run.locale.as_str()));
-        }
         let mut flags = BufferFlags::PRODUCE_UNSAFE_TO_CONCAT;
         if bytes.start() == 0 {
             flags |= BufferFlags::BEGINNING_OF_TEXT;
@@ -268,14 +266,9 @@ impl HarfRustShaper {
             flags |= BufferFlags::END_OF_TEXT;
         }
         buffer.set_flags(flags);
-        let features = run_features(run);
-        let shaper_font = ShaperFont::new(&parsed);
-        let options = ShapeOptions::new()
-            .features(&features)
-            .point_size(Some(run.font_size));
         // A fresh buffer with its direction set and no cached plan: none of
         // `ShapeError`'s misuse cases can arise.
-        if harfrust::shape(&shaper_font, &mut buffer, options).is_err() {
+        if !shape_buffer(run, &parsed, &mut buffer, vertical, rtl) {
             push_empty_clusters(run, atoms, range, font_id, output_clusters, output_glyphs);
             return;
         }
@@ -291,21 +284,7 @@ impl HarfRustShaper {
                     + atoms[range.clone()]
                         .partition_point(|a| a.byte_range.start() <= byte)
                         .saturating_sub(1);
-                let (advance, x_offset, y_offset) = flow_offsets(
-                    pos.x_advance as f32,
-                    pos.y_advance as f32,
-                    pos.x_offset as f32,
-                    pos.y_offset as f32,
-                    k,
-                    vertical,
-                );
-                let glyph = RawShapedGlyph {
-                    glyph_id: info.glyph_id,
-                    x_advance: advance,
-                    x_offset,
-                    y_offset,
-                    is_synthesized: false,
-                };
+                let glyph = raw_glyph(info, pos, k, vertical, false);
                 (atom, glyph, info.unsafe_to_break(), info.unsafe_to_concat())
             })
             .collect();
@@ -339,18 +318,8 @@ impl HarfRustShaper {
         let rtl = run.bidi_level.direction().is_rtl();
         let mut buffer = Buffer::new();
         buffer.push_str(replacement);
-        buffer.set_direction(harfrust_direction(vertical, rtl));
-        buffer.set_script(Script::from_iso15924_tag(Tag::new(&run.script.as_bytes())));
         // The replacement takes the kept text's language, features and size.
-        if run.locale.as_str() != "und" {
-            buffer.set_language(Language::new(run.locale.as_str()));
-        }
-        let features = run_features(run);
-        let shaper_font = ShaperFont::new(&parsed);
-        let options = ShapeOptions::new()
-            .features(&features)
-            .point_size(Some(run.font_size));
-        if harfrust::shape(&shaper_font, &mut buffer, options).is_err() {
+        if !shape_buffer(run, &parsed, &mut buffer, vertical, rtl) {
             return Vec::new();
         }
         let k = run.font_size / units.units_per_em;
@@ -358,23 +327,7 @@ impl HarfRustShaper {
             .glyph_infos()
             .iter()
             .zip(buffer.glyph_positions())
-            .map(|(info, pos)| {
-                let (x_advance, x_offset, y_offset) = flow_offsets(
-                    pos.x_advance as f32,
-                    pos.y_advance as f32,
-                    pos.x_offset as f32,
-                    pos.y_offset as f32,
-                    k,
-                    vertical,
-                );
-                RawShapedGlyph {
-                    glyph_id: info.glyph_id,
-                    x_advance,
-                    x_offset,
-                    y_offset,
-                    is_synthesized: true,
-                }
-            })
+            .map(|(info, pos)| raw_glyph(info, pos, k, vertical, true))
             .collect();
         if rtl && !vertical {
             glyphs.reverse();
@@ -393,18 +346,54 @@ fn harfrust_direction(vertical: bool, rtl: bool) -> harfrust::Direction {
     }
 }
 
-fn flow_offsets(
-    x_advance: f32,
-    y_advance: f32,
-    x_offset: f32,
-    y_offset: f32,
+/// Sets the run's direction, script and language on `buffer` and shapes it
+/// with `font` under the run's features and size; `false` when HarfRust
+/// reports an error.
+fn shape_buffer(
+    run: &ShapingRun,
+    font: &Font,
+    buffer: &mut Buffer,
+    vertical: bool,
+    rtl: bool,
+) -> bool {
+    buffer.set_direction(harfrust_direction(vertical, rtl));
+    buffer.set_script(Script::from_iso15924_tag(Tag::new(&run.script.as_bytes())));
+    if run.locale.as_str() != "und" {
+        buffer.set_language(Language::new(run.locale.as_str()));
+    }
+    let features = run_features(run);
+    let options = ShapeOptions::new()
+        .features(&features)
+        .point_size(Some(run.font_size));
+    harfrust::shape(&ShaperFont::new(font), buffer, options).is_ok()
+}
+
+/// One shaped glyph in flow space, scaled from font units by `k`.
+fn raw_glyph(
+    info: &GlyphInfo,
+    pos: &GlyphPosition,
     k: f32,
     vertical: bool,
-) -> (f32, f32, f32) {
+    is_synthesized: bool,
+) -> RawShapedGlyph {
+    let (x_advance, x_offset, y_offset) = flow_offsets(pos, k, vertical);
+    RawShapedGlyph {
+        glyph_id: info.glyph_id,
+        x_advance,
+        x_offset,
+        y_offset,
+        is_synthesized,
+    }
+}
+
+/// A glyph position's advance and offsets along the flow, scaled by `k`.
+fn flow_offsets(pos: &GlyphPosition, k: f32, vertical: bool) -> (f32, f32, f32) {
+    let [x_advance, y_advance, x_offset, y_offset] =
+        [pos.x_advance, pos.y_advance, pos.x_offset, pos.y_offset].map(|v| v as f32 * k);
     if vertical {
-        (-y_advance * k, -y_offset * k, x_offset * k)
+        (-y_advance, -y_offset, x_offset)
     } else {
-        (x_advance * k, x_offset * k, y_offset * k)
+        (x_advance, x_offset, y_offset)
     }
 }
 

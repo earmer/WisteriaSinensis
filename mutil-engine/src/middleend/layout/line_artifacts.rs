@@ -4,7 +4,7 @@ use super::super::tolerance::approx_eq;
 use super::super::{
     AtomicFragment, CaretAffinity, CaretStop, DecorationKind, DecorationLine,
     HangingWhitespaceMode, LayoutInputError, PositionedInlineBox, PositionedSpanFragment,
-    PositionedTab, VisualGlyphRun, resolve_ligature_carets,
+    VisualGlyphRun, resolve_ligature_carets,
 };
 use super::line_builder::LineBounds;
 use super::{Break, Layout, Piece, PieceKind, PlacedPiece};
@@ -33,7 +33,6 @@ pub(super) struct CaretContext<'a> {
     pub(super) end_break: Option<&'a Break>,
     pub(super) runs: &'a [VisualGlyphRun],
     pub(super) boxes: &'a [PositionedInlineBox],
-    pub(super) tabs: &'a [PositionedTab],
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
@@ -150,20 +149,17 @@ impl<'i, 'a> Layout<'i, 'a> {
             let mut open = false;
             for &k in order {
                 let p = placed[k];
-                let inside = !p.piece.bytes.is_empty()
+                let was_open = open;
+                open = !p.piece.bytes.is_empty()
                     && p.piece.bytes.start() < full.end()
                     && p.piece.bytes.end() > full.start();
-                if inside {
-                    let (a, b) = (p.x, p.x + p.width);
-                    if open {
-                        let g = groups.last_mut().expect("open group");
-                        *g = (g.0.min(a), g.1.max(b), g.2.cover(p.piece.bytes));
-                    } else {
-                        groups.push((a, b, p.piece.bytes));
-                        open = true;
-                    }
-                } else {
-                    open = false;
+                if !open {
+                    continue;
+                }
+                let (a, b) = (p.x, p.x + p.width);
+                match groups.last_mut().filter(|_| was_open) {
+                    Some(g) => *g = (g.0.min(a), g.1.max(b), g.2.cover(p.piece.bytes)),
+                    None => groups.push((a, b, p.piece.bytes)),
                 }
             }
             if groups.is_empty() {
@@ -209,14 +205,15 @@ impl<'i, 'a> Layout<'i, 'a> {
         for &k in order {
             let placed_piece = placed[k];
             let p = placed_piece.piece;
-            let decorated = match p.kind {
-                PieceKind::Cluster { run, .. } => {
-                    let d = self.ast.runs[run].decoration;
-                    match kind {
-                        DecorationKind::Underline => d.underline,
-                        DecorationKind::Strikethrough => d.strikethrough,
-                    }
+            let decorated = |run: usize| {
+                let d = self.ast.runs[run].decoration;
+                match kind {
+                    DecorationKind::Underline => d.underline,
+                    DecorationKind::Strikethrough => d.strikethrough,
                 }
+            };
+            let (run, cluster) = match p.kind {
+                PieceKind::Cluster { run, cluster } if decorated(run) => (run, cluster),
                 PieceKind::Glue => {
                     if open.is_some() {
                         let end = placed_piece.x + placed_piece.width;
@@ -227,15 +224,11 @@ impl<'i, 'a> Layout<'i, 'a> {
                     }
                     continue;
                 }
-                _ => false,
-            };
-            if !decorated {
-                out.extend(open.take());
-                pending_glue = None;
-                continue;
-            }
-            let PieceKind::Cluster { run, cluster } = p.kind else {
-                unreachable!("only clusters are decorated")
+                _ => {
+                    out.extend(open.take());
+                    pending_glue = None;
+                    continue;
+                }
             };
             let m = self.cluster_metrics(run, cluster)?;
             let shift = placed_piece.y_shift;
@@ -279,26 +272,16 @@ impl<'i, 'a> Layout<'i, 'a> {
         let base_level = self.base.base_level();
         // The level of an entity touching `offset`, else the paragraph's.
         let level_at = |offset: usize| -> BidiLevel {
+            let touches = |r: TextRange| r.start() <= offset && offset <= r.end();
             ctx.runs
                 .iter()
-                .find(|r| {
-                    r.glyphs.iter().any(|g| {
-                        g.byte_range
-                            .is_some_and(|b| b.start() <= offset && offset <= b.end())
-                    })
-                })
+                .find(|r| r.glyphs.iter().any(|g| g.byte_range.is_some_and(touches)))
                 .map(|r| r.bidi_level)
                 .or_else(|| {
                     ctx.boxes
                         .iter()
-                        .find(|b| b.byte_range.start() <= offset && offset <= b.byte_range.end())
+                        .find(|b| touches(b.byte_range))
                         .map(|b| b.bidi_level)
-                })
-                .or_else(|| {
-                    ctx.tabs
-                        .iter()
-                        .any(|t| t.byte_range.start() <= offset && offset <= t.byte_range.end())
-                        .then_some(base_level)
                 })
                 .unwrap_or(base_level)
         };
@@ -371,7 +354,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         // Visual order, one stop per distinct (x, offset).
         let mut stops: Vec<CaretStop> = Vec::new();
         for (x, offset) in raw {
-            if !(ctx.byte_range.start() <= offset && offset <= ctx.byte_range.end()) {
+            if offset < ctx.byte_range.start() || offset > ctx.byte_range.end() {
                 continue;
             }
             if self
@@ -390,12 +373,12 @@ impl<'i, 'a> Layout<'i, 'a> {
             {
                 continue;
             }
-            let duplicate = stops
+            if stops
                 .iter()
                 .rev()
                 .take(4)
-                .any(|s| s.offset == offset && approx_eq(s.x, x));
-            if duplicate {
+                .any(|s| s.offset == offset && approx_eq(s.x, x))
+            {
                 continue;
             }
             stops.push(CaretStop {
@@ -407,14 +390,11 @@ impl<'i, 'a> Layout<'i, 'a> {
             });
         }
         // A hard break's own bytes start the next line.
-        if !ctx.soft_wrap && !ctx.byte_range.is_empty() {
-            let hard_end = ctx.byte_range.end();
-            let is_terminated = ctx
-                .end_break
-                .is_some_and(|b| b.mandatory && !b.bytes.is_empty());
-            if is_terminated {
-                stops.retain(|s| s.offset != hard_end);
-            }
+        let is_terminated = ctx
+            .end_break
+            .is_some_and(|b| b.mandatory && !b.bytes.is_empty());
+        if !ctx.soft_wrap && !ctx.byte_range.is_empty() && is_terminated {
+            stops.retain(|s| s.offset != ctx.byte_range.end());
         }
         stops.sort_by(|a, b| a.x.total_cmp(&b.x));
         // At a soft wrap the line's last logical stop is upstream (INT-1, INT-9).
