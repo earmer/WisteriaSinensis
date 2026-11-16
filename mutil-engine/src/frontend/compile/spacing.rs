@@ -148,10 +148,12 @@ impl Compiler<'_> {
                 .runs
                 .partition_point(|r| r.atom_range.end <= global_atom)];
             let local = global_atom - run.atom_range.start;
+            // Clusters ascend by atoms, and the seam cut the box there.
             let clusters = &ast.clusters[run.cluster_range.clone()];
+            let at = clusters.partition_point(|c| c.atom_range.end <= local);
             clusters
-                .iter()
-                .find(|c| {
+                .get(at)
+                .filter(|c| {
                     if ending {
                         c.atom_range.end == local + 1
                     } else {

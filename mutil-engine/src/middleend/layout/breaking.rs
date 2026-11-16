@@ -138,6 +138,9 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut pen = post;
         let mut body = post;
         let mut has_content = false;
+        // Whether a piece other than a zero-width span boundary has been
+        // seen: the start mark is the first such piece (ST1-3).
+        let mut has_visible = false;
         // The shrink of the glue since the last tab, and of the visible part.
         let (mut shrink, mut visible_shrink) = (0.0_f32, 0.0_f32);
         // The protruding half of the last visible piece, if it may hang.
@@ -189,14 +192,17 @@ impl<'i, 'a> Layout<'i, 'a> {
                         _ => {}
                     }
                     if piece.is_content() {
-                        if !has_content && post == 0.0 {
+                        let is_bare_edge =
+                            matches!(piece.kind, PieceKind::SpanEdge { .. }) && piece.width == 0.0;
+                        if !has_visible && !is_bare_edge && post == 0.0 {
                             pen -= self
                                 .hang_half(&piece, piece.level, LineEdge::Start, first_line)
                                 .unwrap_or(0.0);
                         }
+                        has_visible |= !is_bare_edge;
                         visible_shrink = shrink;
                         end_hang = match piece.kind {
-                            PieceKind::SpanEdge { .. } if piece.width == 0.0 => end_hang,
+                            _ if is_bare_edge => end_hang,
                             _ => self
                                 .hang_half(&piece, piece.level, LineEdge::End, first_line)
                                 .unwrap_or(0.0),

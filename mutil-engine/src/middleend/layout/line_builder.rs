@@ -121,7 +121,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             p.width = self.measure(&p.piece, distance, slot).0;
             distance += p.width;
         }
-        let shrink = if self.options.justify {
+        // Only a soft-wrapped line is compressed (ST3-2).
+        let shrink = if self.options.justify && soft_wrap {
             self.shrink_capacity(&mut placed[..body_len])
         } else {
             0.0
@@ -142,7 +143,14 @@ impl<'i, 'a> Layout<'i, 'a> {
             x += placed[k].width;
         }
         let body_end = x + right_pad;
-        self.place_trailing_whitespace(&mut placed[body_len..], body_end, rtl);
+        // In RTL the trailing whitespace lies left of everything on the line,
+        // a hanging mark's protrusion included (HNG-3).
+        let far_edge = if rtl {
+            -hangs.physical(rtl).0
+        } else {
+            body_end
+        };
+        self.place_trailing_whitespace(&mut placed[body_len..], far_edge, rtl);
 
         self.build_line(LineBuildState {
             index,
@@ -231,9 +239,9 @@ impl<'i, 'a> Layout<'i, 'a> {
         placed
     }
 
-    /// Trailing whitespace beyond the far edge (UAX #9 L1, HNG-3); synthetic
+    /// Trailing whitespace beyond the far edge `far_edge` (UAX #9 L1, HNG-3); synthetic
     /// glue collapses there under both modes (WN-10, ST1-12).
-    fn place_trailing_whitespace(&self, trailing: &mut [PlacedPiece], body_end: f32, rtl: bool) {
+    fn place_trailing_whitespace(&self, trailing: &mut [PlacedPiece], far_edge: f32, rtl: bool) {
         let collapsible = self.options.whitespace == HangingWhitespaceMode::Collapsible;
         let trailing_width = |p: &PlacedPiece| match p.piece.kind {
             PieceKind::Glue { item } if self.glue(item).kind.is_synthetic() => 0.0,
@@ -241,7 +249,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             _ => p.piece.width,
         };
         if rtl {
-            let mut tx = 0.0;
+            let mut tx = far_edge;
             for p in trailing {
                 let w = trailing_width(p);
                 tx -= w;
@@ -249,7 +257,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 p.width = w;
             }
         } else {
-            let mut tx = body_end;
+            let mut tx = far_edge;
             for p in trailing {
                 let w = trailing_width(p);
                 p.x = tx;
