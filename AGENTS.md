@@ -22,6 +22,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+cargo +1.88 check --all-targets
 
 # From repository root
 python3 scripts/check_spec.py

@@ -553,14 +553,20 @@ fn apply_l1_trailing_levels(
     body_len: usize,
     base_level: crate::types::BidiLevel,
 ) {
+    let mut before_tab = false;
     for k in (0..placed.len()).rev() {
-        let resets = k >= body_len
-            || matches!(placed[k].piece.kind, PieceKind::Tab)
-            || (matches!(placed[k].piece.kind, PieceKind::Glue)
-                && placed[k + 1..]
-                    .iter()
-                    .take_while(|p| matches!(p.piece.kind, PieceKind::Glue | PieceKind::Tab))
-                    .any(|p| matches!(p.piece.kind, PieceKind::Tab)));
+        let kind = placed[k].piece.kind;
+        let resets = match kind {
+            PieceKind::Tab => {
+                before_tab = true;
+                true
+            }
+            PieceKind::Glue => k >= body_len || before_tab,
+            _ => {
+                before_tab = false;
+                k >= body_len
+            }
+        };
         if resets {
             placed[k].level = base_level;
         }

@@ -6,7 +6,8 @@ use super::storage::check_text_payload;
 use super::{LayoutInputError, in_byte_order, is_atom_boundary};
 use crate::frontend::{
     BoxDecorationBreak, BoxNode, BreakAction, DiscretionaryNode, GlueKind, GlueNode,
-    HyphenOpportunity, InlineDecorationSpan, ParagraphAst, SpanEdge, WordNode, is_word_space,
+    HyphenOpportunity, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge,
+    WordNode, is_word_space,
 };
 use crate::types::{BidiLevel, TextRange, is_extent, is_measurement};
 
@@ -245,11 +246,11 @@ impl<'a> ItemChecks<'a> {
         } else {
             d.byte_range.is_empty()
         };
-        let clones_are_unique = d
-            .cloned_spans
-            .iter()
-            .enumerate()
-            .all(|(i, id)| !d.cloned_spans[..i].contains(id));
+        let clones_are_unique = d.cloned_spans.len() <= MAX_DECORATION_NESTING_DEPTH
+            && d.cloned_spans
+                .iter()
+                .enumerate()
+                .all(|(i, id)| !d.cloned_spans[..i].contains(id));
         if !(widths_are_finite
             && d.penalty >= DiscretionaryNode::MANDATORY_BREAK_PENALTY
             && d.penalty < DiscretionaryNode::FORBIDDEN_BREAK_PENALTY

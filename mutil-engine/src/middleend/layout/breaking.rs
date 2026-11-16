@@ -224,6 +224,9 @@ impl<'i, 'a> Layout<'i, 'a> {
                     self.reshaped.remove(&c);
                 }
                 t -= 1;
+                while t > first + 1 && matches!(self.tokens[t], Token::Break(_)) {
+                    t -= 1;
+                }
             }
         }
         if let Some(b) = self.next_break_after(t) {
