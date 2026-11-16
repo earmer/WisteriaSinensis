@@ -69,10 +69,30 @@ const fontNote = $('font-note');
 const samples = $('samples');
 
 let textTimer = 0;
+let localeTimer = 0;
 let frame = 0;
 
+function applySample(key) {
+  const preset = PRESETS[key];
+  textarea.value = SAMPLES[key] ?? '';
+  if (preset) {
+    localeInput.value = preset.locale;
+    quotesInput.value = preset.quotes;
+    faceInput.value = preset.face;
+  }
+  syncLocalePresets();
+}
+
+function syncLocalePresets() {
+  const current = localeInput.value.trim().toLowerCase() || 'und';
+  for (const button of localePresets.querySelectorAll('button[data-locale]')) {
+    const active = button.dataset.locale.toLowerCase() === current;
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+}
+
 async function boot() {
-  textarea.value = SAMPLES.mixed;
+  applySample(samples.value);
   hint.hidden = false;
   hint.textContent = 'Loading engine and fonts…';
   renderEngineStatus(null);
@@ -198,7 +218,7 @@ function relayout() {
       gateChip.textContent = 'engine rejected the input';
       gateChip.className = 'chip bad';
       stats.innerHTML = '';
-      drawPlaceholder(settings.width, 'The engine rejected this paragraph — see the message above.');
+      drawPlaceholder(settings.width, 'Layout rejected — see message above.');
       return;
     }
     results.push(result);
@@ -425,7 +445,16 @@ for (const input of [widthInput, sizeInput, lineHeightInput, quotesInput, faceIn
   });
 }
 
-localeInput.addEventListener('change', relayout);
+localeInput.addEventListener('input', () => {
+  syncLocalePresets();
+  clearTimeout(localeTimer);
+  localeTimer = setTimeout(relayout, 200);
+});
+localeInput.addEventListener('change', () => {
+  clearTimeout(localeTimer);
+  syncLocalePresets();
+  relayout();
+});
 
 // Each preset only fills the locale field; the engine reads it with
 // `LocaleTag::parse_lenient`, so shorthand such as `jp` or `zh-tc` works too.
@@ -434,7 +463,9 @@ localePresets.addEventListener('click', (event) => {
   if (!button) {
     return;
   }
+  clearTimeout(localeTimer);
   localeInput.value = button.dataset.locale === 'und' ? '' : button.dataset.locale;
+  syncLocalePresets();
   relayout();
 });
 
@@ -461,13 +492,7 @@ const PRESETS = {
 };
 
 samples.addEventListener('change', () => {
-  const preset = PRESETS[samples.value];
-  textarea.value = SAMPLES[samples.value] ?? '';
-  if (preset) {
-    localeInput.value = preset.locale;
-    quotesInput.value = preset.quotes;
-    faceInput.value = preset.face;
-  }
+  applySample(samples.value);
   relayout();
 });
 

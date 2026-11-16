@@ -43,10 +43,11 @@
         </label>
 
         <label class="field grow">
-          <span class="field-label">Text <span class="field-hint">one paragraph per line;
-            <code>&lt;zh-TW&gt;…&lt;/zh-TW&gt;</code>, <code>&lt;ja&gt;…&lt;/ja&gt;</code> or
-            <code>&lt;lang=zh-Hant&gt;…&lt;/lang&gt;</code> tag a locale</span></span>
+          <span class="field-label">Text</span>
           <textarea id="text" spellcheck="false" autocomplete="off"></textarea>
+          <span class="field-hint">One paragraph per line. Tag inline locales with
+            <code>&lt;zh-TW&gt;…&lt;/zh-TW&gt;</code>, <code>&lt;ja&gt;…&lt;/ja&gt;</code> or
+            <code>&lt;lang=zh-Hant&gt;…&lt;/lang&gt;</code>.</span>
         </label>
 
         <div class="two-up">
@@ -192,9 +193,10 @@
                 breaks greedily today.
               </li>
               <li>
-                Cursor and hit-test rectangles (<code>range_rects</code>,
-                <code>rect_for_offset</code>) are not implemented; only the
-                emitted caret stops are shown.
+                Interactive hit-testing and selection queries (<code>hit_test</code>,
+                <code>range_rects</code>, <code>rect_for_offset</code>) exist in
+                the engine but are not wired into this canvas; only the emitted
+                caret stops are shown.
               </li>
               <li>
                 Colour glyphs (COLR, sbix, CBDT) are not painted, and no emoji
@@ -211,9 +213,9 @@
         </div>
         <p class="scope-foot">
           This list tracks the crate's Phase 1 scope
-          (<code>mutil-engine/src/middleend/layout.rs</code> and
-          <code>src/lib.rs</code>). If the engine gains a stage, this page should
-          change with it, not before it.
+          (<code>mutil-engine/src/middleend/layout/mod.rs</code> and
+          <code>mutil-engine/src/lib.rs</code>). If the engine gains a stage,
+          this page should change with it, not before it.
         </p>
       </section>
     </main>

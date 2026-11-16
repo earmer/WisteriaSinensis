@@ -119,7 +119,9 @@ h1 {
 }
 
 .field-hint {
-  font-weight: 400;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
 }
 
 textarea,
@@ -403,7 +405,8 @@ code {
 }
 
 .presets button:hover,
-.presets button:focus-visible {
+.presets button:focus-visible,
+.presets button[aria-pressed="true"] {
   border-color: var(--accent);
   color: var(--accent);
 }
