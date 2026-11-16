@@ -111,32 +111,23 @@ async function boot() {
 }
 
 async function loadFonts() {
-  fontNote.textContent = `loading ${FONTS.length} faces…`;
-  const fetched = await Promise.all(
-    FONTS.map(async ([family, file]) => {
-      try {
-        const url = new URL(`../fonts/${encodeURIComponent(file)}`, import.meta.url);
-        const response = await fetch(url);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        return { family, bytes: new Uint8Array(await response.arrayBuffer()) };
-      } catch (error) {
-        return { family, error: error.message };
+  for (const [index, [family, file]] of FONTS.entries()) {
+    fontNote.textContent = `loading face ${index + 1} of ${FONTS.length}…`;
+    try {
+      const url = new URL(`../fonts/${encodeURIComponent(file)}`, import.meta.url);
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
       }
-    }),
-  );
-  for (const entry of fetched) {
-    if (entry.error) {
-      state.missing.push(`${entry.family} (${entry.error})`);
-      continue;
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const info = state.engine.addFont(family, bytes);
+      if (!info || info.id === null) {
+        throw new Error('not a readable font');
+      }
+      state.fonts.set(info.id, { upem: info.upem, family });
+    } catch (error) {
+      state.missing.push(`${family} (${error.message})`);
     }
-    const info = state.engine.addFont(entry.family, entry.bytes);
-    if (!info || info.id === null) {
-      state.missing.push(`${entry.family} (not a readable font)`);
-      continue;
-    }
-    state.fonts.set(info.id, { upem: info.upem, family: entry.family });
   }
   const loaded = state.fonts.size;
   fontChip.textContent = `${loaded} of ${FONTS.length} faces`;
