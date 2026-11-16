@@ -418,7 +418,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let strut_height = self.strut.line_height();
         let has_provider = self.inputs.constraints().geometry_provider.is_some();
         let mut obstructed = 0;
-        loop {
+        'place: loop {
             let mut envelope = strut_height;
             let mut geometry = self.inputs.line_geometry(
                 index,
@@ -458,15 +458,11 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 if expanded.slots.is_empty() {
                     cursor.block_top = advance_clearance(&mut obstructed, &expanded)?;
-                    break;
+                    continue 'place;
                 }
                 geometry = expanded;
             }
-            if !geometry.slots.is_empty() && envelope > strut_height {
-                // Only reached if all `MAX_ENVELOPE_REFITS` iterations were
-                // exhausted without returning or breaking on obstruction.
-                return Err(LayoutInputError::InvalidLineGeometry);
-            }
+            return Err(LayoutInputError::InvalidLineGeometry);
         }
     }
 
