@@ -3,6 +3,9 @@
 //! the vendored test font (`tests/assets/README.md`).
 
 mod acceptance;
+mod acceptance_phase2;
+mod bidi_frontend;
+mod bidi_queries;
 mod cjk_routing;
 mod common;
 mod fonts;

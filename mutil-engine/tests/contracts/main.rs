@@ -6,6 +6,7 @@
 mod annotations;
 mod api;
 mod badness;
+mod bidi_gates;
 mod common;
 mod data_versions;
 mod error_messages;
