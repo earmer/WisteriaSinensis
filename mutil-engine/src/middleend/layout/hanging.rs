@@ -2,7 +2,7 @@
 //! each edge of a line, by half its advance.
 
 use super::super::tolerance::tolerance;
-use super::super::{HangEndMode, HangSide, VisualGlyphRun};
+use super::super::{DecorationLine, HangEndMode, HangSide, PositionedSpanFragment, VisualGlyphRun};
 use super::{Layout, Piece, PieceKind, PlacedPiece};
 use crate::types::{AtomFlags, BidiLevel};
 
@@ -135,5 +135,32 @@ pub(super) fn mark_hanging(
                 g.is_hanging = true;
             }
         }
+    }
+}
+
+/// Stops span fragments and decorations at the content edge on each side
+/// where a mark hangs, so that only the mark protrudes (ST1-3, ST5-1).
+pub(super) fn clip_to_content(
+    (hang_left, hang_right): (f32, f32),
+    (left, right): (f32, f32),
+    fragments: &mut [PositionedSpanFragment],
+    decorations: &mut [DecorationLine],
+) {
+    let clip = |x: &mut f32, width: &mut f32| {
+        let (mut lo, mut hi) = (*x, *x + *width);
+        if hang_left > 0.0 {
+            lo = lo.max(left);
+        }
+        if hang_right > 0.0 {
+            hi = hi.min(right);
+        }
+        *x = lo;
+        *width = (hi - lo).max(0.0);
+    };
+    for f in fragments {
+        clip(&mut f.x, &mut f.width);
+    }
+    for d in decorations {
+        clip(&mut d.x, &mut d.width);
     }
 }

@@ -6,7 +6,7 @@ use super::super::{
     LineGeometry, LineHeight, PositionedGlyph, PositionedInlineBox, PositionedLine, PositionedSlot,
     PositionedTab, StrutMetrics, VisualGlyphRun,
 };
-use super::hanging::{LineHangs, mark_hanging};
+use super::hanging::{LineHangs, clip_to_content, mark_hanging};
 use super::line_artifacts::{CaretContext, SpanContext};
 use super::{Break, FIT_EPSILON, Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Token};
 use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_order};
@@ -276,15 +276,11 @@ impl<'i, 'a> Layout<'i, 'a> {
         let alignment = self.align_line_content(&mut state, slot);
 
         let mut visual_runs = self.build_visual_runs(state.placed, state.order);
-        mark_hanging(
-            &mut visual_runs,
-            state.placed,
-            state.hangs,
-            (
-                alignment.content_start,
-                alignment.content_start + alignment.content_width,
-            ),
+        let content_edges = (
+            alignment.content_start,
+            alignment.content_start + alignment.content_width,
         );
+        mark_hanging(&mut visual_runs, state.placed, state.hangs, content_edges);
         let (visual_boxes, tabs) = self.build_boxes_and_tabs(state.placed, slot);
         let span_ctx = SpanContext {
             placed: state.placed,
@@ -294,13 +290,19 @@ impl<'i, 'a> Layout<'i, 'a> {
             post: state.post,
             line_bytes: state.byte_range,
         };
-        let span_fragments = self.span_fragments(&span_ctx);
+        let mut span_fragments = self.span_fragments(&span_ctx);
 
         let mut decorations: Vec<DecorationLine> = Vec::new();
         for kind in [DecorationKind::Underline, DecorationKind::Strikethrough] {
             self.decorations(kind, state.placed, state.order, &mut decorations)?;
         }
         let atomic_fragments = self.atomic_fragments(state.placed, state.order, state.byte_range);
+        clip_to_content(
+            state.hangs.physical(self.base.is_rtl()),
+            content_edges,
+            &mut span_fragments,
+            &mut decorations,
+        );
         let caret_stops = self.caret_stops(&CaretContext {
             index: state.index,
             placed: state.placed,

@@ -516,7 +516,15 @@ impl PositionedLine {
             {
                 return Err(E::TooManyHangingGlyphs { side });
             }
-            if glyphs().any(|(_, _, g)| !g.is_hanging && reach(g) > reach(mark) + eps) {
+            // Every other body glyph counts, zero-advance ones included; the
+            // mark's own glyphs do not.
+            let other_reaches_further = self.visual_runs.iter().flat_map(|r| &r.glyphs).any(|g| {
+                !g.is_hanging
+                    && g.byte_range != mark.byte_range
+                    && !self.is_trailing_whitespace(g)
+                    && reach(g) > reach(mark) + eps
+            });
+            if other_reaches_further {
                 return Err(E::HangingGlyphNotOutermost { run, glyph });
             }
         }
