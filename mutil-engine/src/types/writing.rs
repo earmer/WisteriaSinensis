@@ -45,38 +45,12 @@ impl WritingMode {
 
     /// Transforms an axis-aligned flow rectangle, normalizing its corners.
     pub fn flow_to_physical_rect(self, r: Rect, total_block_size: f32) -> Rect {
-        let a = self.flow_to_physical_point(Point { x: r.x, y: r.y }, total_block_size);
-        let b = self.flow_to_physical_point(
-            Point {
-                x: r.right(),
-                y: r.bottom(),
-            },
-            total_block_size,
-        );
-        Rect::new(
-            a.x.min(b.x),
-            a.y.min(b.y),
-            (a.x - b.x).abs(),
-            (a.y - b.y).abs(),
-        )
+        map_corners(r, |p| self.flow_to_physical_point(p, total_block_size))
     }
 
     /// Inverse of `flow_to_physical_rect` for a physical rectangle.
     pub fn physical_to_flow_rect(self, r: Rect, total_block_size: f32) -> Rect {
-        let a = self.physical_to_flow_point(Point { x: r.x, y: r.y }, total_block_size);
-        let b = self.physical_to_flow_point(
-            Point {
-                x: r.right(),
-                y: r.bottom(),
-            },
-            total_block_size,
-        );
-        Rect::new(
-            a.x.min(b.x),
-            a.y.min(b.y),
-            (a.x - b.x).abs(),
-            (a.y - b.y).abs(),
-        )
+        map_corners(r, |p| self.physical_to_flow_point(p, total_block_size))
     }
 
     /// Converts a positive line-over offset into a signed block-axis offset.
@@ -94,6 +68,21 @@ impl WritingMode {
             _ => (baseline - ascent, baseline + descent),
         }
     }
+}
+
+/// The rectangle spanned by two opposite corners of `r` after `map`.
+fn map_corners(r: Rect, map: impl Fn(Point) -> Point) -> Rect {
+    let a = map(Point { x: r.x, y: r.y });
+    let b = map(Point {
+        x: r.right(),
+        y: r.bottom(),
+    });
+    Rect::new(
+        a.x.min(b.x),
+        a.y.min(b.y),
+        (a.x - b.x).abs(),
+        (a.y - b.y).abs(),
+    )
 }
 
 /// Frontend policy for resolving vertical orientation.

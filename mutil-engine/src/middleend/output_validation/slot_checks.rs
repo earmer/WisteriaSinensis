@@ -101,7 +101,7 @@ impl PositionedLine {
                     if collapsible && g.advance != 0.0 {
                         return Err(E::TrailingWhitespaceNotCollapsed { run, glyph });
                     }
-                    if !collapsible && g.advance != 0.0 && !is_on_far_edge(lo, hi) {
+                    if g.advance != 0.0 && !is_on_far_edge(lo, hi) {
                         return Err(E::TrailingWhitespaceOnWrongSide { run, glyph });
                     }
                 } else if g.advance == 0.0 {
@@ -163,7 +163,7 @@ impl PositionedLine {
                 if collapsible && t.width != 0.0 {
                     return Err(E::TrailingTabNotCollapsed { index });
                 }
-                if !collapsible && t.width != 0.0 && !is_on_far_edge(t.x, t.x + t.width) {
+                if t.width != 0.0 && !is_on_far_edge(t.x, t.x + t.width) {
                     return Err(E::TrailingTabOnWrongSide { index });
                 }
             } else if !inside(t.x, t.x + t.width) {
@@ -323,12 +323,12 @@ impl PositionedLine {
             }
         };
         for g in self.visual_runs.iter().flat_map(|r| &r.glyphs) {
-            let (lo, hi) = g.pen_interval();
             if self.is_trailing_whitespace(g) || g.advance == 0.0 {
                 continue;
             }
+            let (lo, hi) = g.pen_interval();
             if g.is_hanging {
-                for s in slots.iter() {
+                for s in slots {
                     let (lo, hi) = (lo.max(s.content_start), hi.min(s.content_end()));
                     if lo < hi {
                         place(lo, hi);
@@ -395,7 +395,7 @@ impl PositionedLine {
             return false;
         }
         // (byte_range, start_x, end_x, entity_width)
-        let entity = match self.visual_boxes.as_slice() {
+        let (range, start, end, width) = match self.visual_boxes.as_slice() {
             [b] => {
                 if !(self.visual_runs.is_empty()
                     && b.overflow_policy == BoxOverflowPolicy::AllowOverflow)
@@ -441,7 +441,6 @@ impl PositionedLine {
             }
             _ => return false,
         };
-        let (range, start, end, width) = entity;
         if self.span_fragments.is_empty() {
             return approx_eq(start, origin) && approx_eq(width, vw);
         }

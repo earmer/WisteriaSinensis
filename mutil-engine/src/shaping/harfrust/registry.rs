@@ -8,6 +8,7 @@ use crate::types::{
 use core::fmt;
 use read_fonts::TableProvider;
 use read_fonts::model::Font;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// The regional design a CJK face is built for (spec SHP-25).
@@ -188,18 +189,12 @@ impl FontRegistry {
                 .map(|(index, face)| (style_distance(face.style, style), id_of(index)))
                 .collect();
             members.sort_by_key(|&(distance, id)| (distance, id.0));
-            for (_, id) in members {
-                if !order.contains(&id) {
-                    order.push(id);
-                }
-            }
+            order.extend(members.into_iter().map(|(_, id)| id));
         }
-        for index in 0..self.faces.len() {
-            let id = id_of(index);
-            if !order.contains(&id) {
-                order.push(id);
-            }
-        }
+        order.extend((0..self.faces.len()).map(id_of));
+        // Each face keeps its first position.
+        let mut seen = HashSet::new();
+        order.retain(|&id| seen.insert(id));
         order
     }
 }
@@ -297,18 +292,13 @@ pub(super) fn locale_region(locale: &LocaleTag) -> Option<CjkRegion> {
     } else if language.eq_ignore_ascii_case("ko") {
         Some(CjkRegion::Korean)
     } else if language.eq_ignore_ascii_case("und") {
-        if eq(script, "hani") {
-            Some(CjkRegion::Pan)
-        } else if eq(script, "hans") {
-            Some(CjkRegion::Simplified)
-        } else if eq(script, "hant") {
-            Some(CjkRegion::Traditional)
-        } else if eq(script, "jpan") || eq(script, "hira") || eq(script, "kana") {
-            Some(CjkRegion::Japanese)
-        } else if eq(script, "kore") || eq(script, "hang") {
-            Some(CjkRegion::Korean)
-        } else {
-            None
+        match script?.to_ascii_lowercase().as_str() {
+            "hani" => Some(CjkRegion::Pan),
+            "hans" => Some(CjkRegion::Simplified),
+            "hant" => Some(CjkRegion::Traditional),
+            "jpan" | "hira" | "kana" => Some(CjkRegion::Japanese),
+            "kore" | "hang" => Some(CjkRegion::Korean),
+            _ => None,
         }
     } else {
         None
@@ -457,33 +447,13 @@ pub(super) fn scan_chars_region(
 }
 
 pub(super) fn word_region(word: &str) -> Option<CjkRegion> {
-    if word.eq_ignore_ascii_case("SC")
-        || word.eq_ignore_ascii_case("CN")
-        || word.eq_ignore_ascii_case("GB")
-        || word.eq_ignore_ascii_case("HANS")
-        || word.eq_ignore_ascii_case("SIMPLIFIED")
-    {
-        Some(CjkRegion::Simplified)
-    } else if word.eq_ignore_ascii_case("TC")
-        || word.eq_ignore_ascii_case("TW")
-        || word.eq_ignore_ascii_case("HANT")
-        || word.eq_ignore_ascii_case("TRADITIONAL")
-    {
-        Some(CjkRegion::Traditional)
-    } else if word.eq_ignore_ascii_case("HK") || word.eq_ignore_ascii_case("HKSCS") {
-        Some(CjkRegion::HongKong)
-    } else if word.eq_ignore_ascii_case("JP")
-        || word.eq_ignore_ascii_case("JA")
-        || word.eq_ignore_ascii_case("JAPANESE")
-    {
-        Some(CjkRegion::Japanese)
-    } else if word.eq_ignore_ascii_case("KR")
-        || word.eq_ignore_ascii_case("KO")
-        || word.eq_ignore_ascii_case("KOREAN")
-    {
-        Some(CjkRegion::Korean)
-    } else {
-        None
+    match word.to_ascii_uppercase().as_str() {
+        "SC" | "CN" | "GB" | "HANS" | "SIMPLIFIED" => Some(CjkRegion::Simplified),
+        "TC" | "TW" | "HANT" | "TRADITIONAL" => Some(CjkRegion::Traditional),
+        "HK" | "HKSCS" => Some(CjkRegion::HongKong),
+        "JP" | "JA" | "JAPANESE" => Some(CjkRegion::Japanese),
+        "KR" | "KO" | "KOREAN" => Some(CjkRegion::Korean),
+        _ => None,
     }
 }
 

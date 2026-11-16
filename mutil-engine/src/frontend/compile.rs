@@ -220,7 +220,7 @@ fn check_input(input: &ParagraphInput<'_>, options: &FrontendOptions) -> Result<
         let well_formed = r.start() < r.end()
             && r.end() <= text.len()
             && r.start() >= previous_end
-            && sizes.iter().all(|&v| is_extent(v))
+            && sizes.into_iter().all(is_extent)
             && object.baseline_align.is_valid();
         if !well_formed {
             return Err(FrontendError::InvalidInlineObject { object: index });
@@ -513,7 +513,7 @@ impl<'a> Compiler<'a> {
             previous = Some((*unit, breaks_after[i].is_some()));
         }
         let runs = self.build_runs();
-        let mut ast = self.empty_ast()?;
+        let mut ast = self.empty_ast();
         self.shape_runs(&runs, &box_starts, &mut ast)?;
         self.assemble_items(&box_starts, &breaks_after, &mut ast);
         ast.atoms = core::mem::take(&mut self.atoms);
@@ -812,7 +812,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// The AST with its strut and nothing else (FE-25, AST-6).
-    fn empty_ast(&self) -> Result<ParagraphAst, FrontendError> {
+    fn empty_ast(&self) -> ParagraphAst {
         let style = &self.styles[0];
         let script = style
             .script
@@ -826,7 +826,7 @@ impl<'a> Compiler<'a> {
             style.font_size,
             style.features.variations(),
         );
-        Ok(ParagraphAst {
+        ParagraphAst {
             writing_mode: WritingMode::HorizontalTb,
             bidi_spans: Vec::new(),
             annotations: Vec::new(),
@@ -840,7 +840,7 @@ impl<'a> Compiler<'a> {
             items: Vec::new(),
             decoration_spans: Vec::new(),
             atomic_spans: Vec::new(),
-        })
+        }
     }
 
     /// Shapes every run, splits clusters that straddle a text box boundary
@@ -924,10 +924,10 @@ impl<'a> Compiler<'a> {
                     k += 1;
                 }
             }
-            let mut stored = run.clone();
-            stored.atom_range = run.atom_range.clone();
-            stored.cluster_range = cluster_start..ast.clusters.len();
-            ast.runs.push(stored);
+            ast.runs.push(ShapingRun {
+                cluster_range: cluster_start..ast.clusters.len(),
+                ..run.clone()
+            });
         }
         Ok(())
     }
@@ -1137,10 +1137,11 @@ impl<'s> BoundarySweep<'s> {
 
     /// Emits the spans starting at `offset`, outer first.
     fn emit_leading(&mut self, offset: usize, items: &mut Vec<WordNode>) {
-        while let Some(span) = self.spans.get(self.next) {
-            if span.byte_range.start() != offset {
-                break;
-            }
+        while let Some(span) = self
+            .spans
+            .get(self.next)
+            .filter(|s| s.byte_range.start() == offset)
+        {
             items.push(Self::node(span, offset, SpanEdge::Leading));
             self.open.push(span);
             self.next += 1;
@@ -1149,10 +1150,7 @@ impl<'s> BoundarySweep<'s> {
 
     /// Emits the spans ending at `offset`, inner first.
     fn emit_trailing(&mut self, offset: usize, items: &mut Vec<WordNode>) {
-        while let Some(span) = self.open.last() {
-            if span.byte_range.end() != offset {
-                break;
-            }
+        while let Some(&span) = self.open.last().filter(|s| s.byte_range.end() == offset) {
             items.push(Self::node(span, offset, SpanEdge::Trailing));
             self.open.pop();
         }

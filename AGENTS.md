@@ -48,3 +48,16 @@ python3 scripts/check_spec.py
 2. **Trust gates uniformly; keep errors specific.**
    - Code behind a trust gate (`G1`–`G4`) must rely on the gate's postconditions uniformly—do not mix `.expect(...)`, `.ok_or(...)`, and redundant `.filter(...)` checks for the same invariant, and share a single helper/constant when multiple loops enforce the same bound.
    - Do not overload an error type or variant across unrelated failure causes (e.g., input validation vs. shaper/provider contract breach vs. clearance/refit exhaustion); give distinct root causes distinct variants.
+
+3. **Do not hand-roll what the language, `std`, or this crate already provides.**
+   - Before writing a loop, check for an existing helper: search the crate (`grep`) for the same computation, and prefer `std`/iterator methods—`find`, `position`, `any`/`all`, `min_by`/`max_by` (first/last of ties), `fill`, `map_or`, `zip`, `chunk_by`, `windows`, `retain`, `concat`—over manual index/flag loops.
+   - Reuse domain helpers instead of restating them inline: `TextRange::{contains, contains_range, cover}`, `is_extent`/`is_measurement` (pass them directly: `.into_iter().all(is_extent)`), the shaper-gate `checked_*`/`resolved_line_box` helpers, `single_region`, and the existing `*_position`/`adjacent_*` helpers in `interaction.rs`.
+   - When two functions share setup, a call sequence, or a conversion (e.g. buffer configuration, glyph scaling, rectangle corner normalisation), extract one private helper; do not copy-paste and tweak.
+   - Use string `match` tables (on `to_ascii_lowercase()`/`to_ascii_uppercase()` when case-insensitive) instead of long `eq_ignore_ascii_case` / `==` chains.
+
+4. **Remove noise; let control flow carry the meaning.**
+   - Bind fields in the first `match`/`let … else`; never re-match the same value afterwards with an `unreachable!` arm, and never `if x.is_some() { x.unwrap()/expect() }`—use `if let`, `let … else`, or `Option::filter` (e.g. `last_mut().filter(..)`).
+   - Avoid single-use temporaries and flags (`let finished = …; if finished { break }`, `let ok = …; if ok { Ok(()) } else { Err(..) }` where a direct `break`/`map_or` is clearer), redundant conjuncts already implied by an earlier early-return, and annotations the compiler infers.
+   - Do not keep dead code: a branch whose result equals the fallback, a field nobody reads, or a `Result`/`Option` return that can never fail. Delete it rather than leaving it "for later".
+   - Build similar struct values with update syntax (`..Self::direct(at)`, `..run.clone()`) instead of repeating every field.
+   - Simplification must preserve behaviour and readability: if a rewrite is not shorter **and** at least as clear (e.g. it needs extra intermediate collections to satisfy the borrow checker), keep the original.

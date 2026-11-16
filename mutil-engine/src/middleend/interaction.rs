@@ -152,12 +152,9 @@ impl AtomicFragment {
     /// Even level: left half → start/Downstream, right half → end/Upstream.
     /// Odd level: halves swap. Midpoint itself counts as right half.
     pub fn hit_test(&self, x: f32) -> CursorPosition {
-        let midpoint = self.x + 0.5 * self.width;
-        let is_in_left_half = x < midpoint;
-        let is_even_level = !self.bidi_level.direction().is_rtl();
+        let is_in_left_half = x < self.x + 0.5 * self.width;
         // Even levels map the left half to the start; odd levels swap halves.
-        let snaps_to_start = is_in_left_half == is_even_level;
-        if snaps_to_start {
+        if is_in_left_half != self.bidi_level.direction().is_rtl() {
             CursorPosition {
                 byte_offset: self.full_byte_range.start(),
                 affinity: CaretAffinity::Downstream,
@@ -264,10 +261,8 @@ impl ValidatedLayout<'_> {
         let lines = &p.lines;
         let (top, _) = line_block(p, 0);
         let (_, bottom) = line_block(p, lines.len() - 1);
-        let line = lines
-            .iter()
-            .enumerate()
-            .position(|(i, _)| flow.y < line_block(p, i).1)
+        let line = (0..lines.len())
+            .position(|i| flow.y < line_block(p, i).1)
             .unwrap_or(lines.len() - 1);
         let hit = self.hit_test_on_line(line, flow.x);
         HitResult {
@@ -305,22 +300,18 @@ impl ValidatedLayout<'_> {
                 inside: false,
             };
         };
-        let to_position = |s: &CaretStop| CursorPosition {
-            byte_offset: s.offset,
-            affinity: s.affinity,
-        };
         // Beyond an edge: the extreme stop on that side (INT-8).
         if x < first.x {
             let stop = line.extreme_caret_stop(HangSide::Left).unwrap_or(first);
             return HitResult {
-                position: to_position(stop),
+                position: stop_position(stop),
                 inside: false,
             };
         }
         if x > last.x {
             let stop = line.extreme_caret_stop(HangSide::Right).unwrap_or(last);
             return HitResult {
-                position: to_position(stop),
+                position: stop_position(stop),
                 inside: false,
             };
         }
@@ -339,7 +330,7 @@ impl ValidatedLayout<'_> {
             &stops[at.saturating_sub(1)]
         };
         HitResult {
-            position: to_position(stop),
+            position: stop_position(stop),
             inside: true,
         }
     }
@@ -401,21 +392,13 @@ impl ValidatedLayout<'_> {
                 FlowMotion::BlockPrev | FlowMotion::BlockNext => {
                     let inline =
                         preferred_inline.unwrap_or_else(|| p.lines[line].caret_stops[index].x);
-                    let target = if flow == FlowMotion::BlockPrev {
-                        line.checked_sub(1)
-                    } else {
-                        Some(line + 1).filter(|&l| l < p.lines.len())
-                    };
-                    match target {
+                    let forward = flow == FlowMotion::BlockNext;
+                    match adjacent_line(line, p.lines.len(), forward) {
                         Some(target) => {
                             CursorMove::Moved(self.hit_test_on_line(target, inline).position)
                         }
                         None => CursorMove::Exited {
-                            edge: if flow == FlowMotion::BlockPrev {
-                                ParagraphEdge::Start
-                            } else {
-                                ParagraphEdge::End
-                            },
+                            edge: ParagraphEdge::ahead(forward),
                             inline_position: Some(inline),
                         },
                     }
@@ -423,16 +406,10 @@ impl ValidatedLayout<'_> {
             };
         }
         let l = &p.lines[line];
-        let to_position = |s: &CaretStop| CursorPosition {
-            byte_offset: s.offset,
-            affinity: s.affinity,
-        };
         match motion {
             Motion::LineStart | Motion::LineEnd => {
-                let start_side = if rtl { HangSide::Right } else { HangSide::Left };
-                let side = if motion == Motion::LineStart {
-                    start_side
-                } else if rtl {
+                // The line start is on the left in LTR text, on the right in RTL.
+                let side = if (motion == Motion::LineStart) != rtl {
                     HangSide::Left
                 } else {
                     HangSide::Right
@@ -440,7 +417,7 @@ impl ValidatedLayout<'_> {
                 let stop = l
                     .extreme_caret_stop(side)
                     .expect("a validated line has caret stops");
-                CursorMove::Moved(to_position(stop))
+                CursorMove::Moved(stop_position(stop))
             }
             Motion::Previous | Motion::Next => {
                 self.move_logical(position.byte_offset, motion == Motion::Next, None)
@@ -504,10 +481,6 @@ impl ValidatedLayout<'_> {
         let p = self.paragraph();
         let lines = &p.lines;
         let current = lines[line].caret_stops[index];
-        let to_position = |s: &CaretStop| CursorPosition {
-            byte_offset: s.offset,
-            affinity: s.affinity,
-        };
         let stops = &lines[line].caret_stops;
         let mut k = index;
         loop {
@@ -518,24 +491,15 @@ impl ValidatedLayout<'_> {
             };
             match next {
                 Some(n) if stops[n].offset == current.offset => k = n,
-                Some(n) => return CursorMove::Moved(to_position(&stops[n])),
+                Some(n) => return CursorMove::Moved(stop_position(&stops[n])),
                 None => break,
             }
         }
         // Past the edge: rightwards is forward in LTR, backward in RTL.
         let forward = rightwards != p.base_direction.is_rtl();
-        let target = if forward {
-            Some(line + 1).filter(|&l| l < lines.len())
-        } else {
-            line.checked_sub(1)
-        };
-        let Some(target) = target else {
+        let Some(target) = adjacent_line(line, lines.len(), forward) else {
             return CursorMove::Exited {
-                edge: if forward {
-                    ParagraphEdge::End
-                } else {
-                    ParagraphEdge::Start
-                },
+                edge: ParagraphEdge::ahead(forward),
                 inline_position: None,
             };
         };
@@ -549,7 +513,7 @@ impl ValidatedLayout<'_> {
             .extreme_caret_stop(side)
             .expect("a validated line has caret stops");
         if entry.offset != current.offset {
-            return CursorMove::Moved(to_position(entry));
+            return CursorMove::Moved(stop_position(entry));
         }
         // The same offset on both sides of a wrap: one more step.
         let at = target_stops
@@ -561,7 +525,7 @@ impl ValidatedLayout<'_> {
         } else {
             at.checked_sub(1).and_then(|n| target_stops.get(n))
         };
-        CursorMove::Moved(to_position(next.unwrap_or(entry)))
+        CursorMove::Moved(stop_position(next.unwrap_or(entry)))
     }
 
     /// The next or previous caret offset in logical order (spec INT-13),
@@ -576,11 +540,7 @@ impl ValidatedLayout<'_> {
         let text_end = self.text().len();
         if (forward && offset >= text_end) || (!forward && offset == 0) {
             return CursorMove::Exited {
-                edge: if forward {
-                    ParagraphEdge::End
-                } else {
-                    ParagraphEdge::Start
-                },
+                edge: ParagraphEdge::ahead(forward),
                 inline_position: None,
             };
         }
@@ -600,6 +560,30 @@ impl ValidatedLayout<'_> {
             byte_offset: target,
             affinity: CaretAffinity::Downstream,
         })
+    }
+}
+
+/// The caret position a stop shows.
+fn stop_position(stop: &CaretStop) -> CursorPosition {
+    CursorPosition {
+        byte_offset: stop.offset,
+        affinity: stop.affinity,
+    }
+}
+
+/// The line after (`forward`) or before `line` among `line_count` lines.
+fn adjacent_line(line: usize, line_count: usize, forward: bool) -> Option<usize> {
+    if forward {
+        Some(line + 1).filter(|&l| l < line_count)
+    } else {
+        line.checked_sub(1)
+    }
+}
+
+impl ParagraphEdge {
+    /// The edge a motion meets going forwards or backwards in logical order.
+    const fn ahead(forward: bool) -> Self {
+        if forward { Self::End } else { Self::Start }
     }
 }
 
@@ -878,7 +862,7 @@ fn object_holding(ast: &crate::frontend::ParagraphAst, byte: ByteIndex) -> Optio
         crate::frontend::WordNode::Box(crate::frontend::BoxNode::InlineObject {
             byte_range,
             ..
-        }) if byte_range.start() <= byte && byte < byte_range.end() => Some(*byte_range),
+        }) if byte_range.contains(byte) => Some(*byte_range),
         _ => None,
     }
 }

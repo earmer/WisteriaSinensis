@@ -679,15 +679,13 @@ impl PositionedLine {
     /// middle of the line).
     #[must_use]
     pub fn extreme_caret_stop(&self, side: HangSide) -> Option<&CaretStop> {
-        let mut best: Option<&CaretStop> = None;
-        for stop in &self.caret_stops {
-            best = match (best, side) {
-                (None, _) => Some(stop),
-                (Some(b), HangSide::Left) if stop.x < b.x => Some(stop),
-                (Some(b), HangSide::Right) if stop.x >= b.x => Some(stop),
-                (b, _) => b,
-            };
+        // `min_by` keeps the first of equal stops and `max_by` the last.
+        let by_x = |a: &&CaretStop, b: &&CaretStop| {
+            a.x.partial_cmp(&b.x).unwrap_or(core::cmp::Ordering::Equal)
+        };
+        match side {
+            HangSide::Left => self.caret_stops.iter().min_by(by_x),
+            HangSide::Right => self.caret_stops.iter().max_by(by_x),
         }
-        best
     }
 }

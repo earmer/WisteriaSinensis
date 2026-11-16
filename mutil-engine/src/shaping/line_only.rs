@@ -290,17 +290,12 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
             0..0
         };
         let trailing_str = plan.trailing_text.as_str();
+        let kept_text = &text[kept_bytes.clone()];
         let shaped_input: std::borrow::Cow<'_, str> =
             if plan.leading_text.is_empty() && trailing_str.is_empty() {
-                std::borrow::Cow::Borrowed(&text[kept_bytes.clone()])
+                kept_text.into()
             } else {
-                let mut s = String::with_capacity(
-                    plan.leading_text.len() + kept_bytes.len() + trailing_str.len(),
-                );
-                s.push_str(plan.leading_text);
-                s.push_str(&text[kept_bytes.clone()]);
-                s.push_str(trailing_str);
-                std::borrow::Cow::Owned(s)
+                [plan.leading_text, kept_text, trailing_str].concat().into()
             };
         let first_cluster = output_clusters.len();
         // Emit any cut leading atoms directly with a placeholder face, then
@@ -324,11 +319,9 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
             output_clusters,
             output_glyphs,
         );
-        if plan.first < plan.kept_start {
-            let lead_count = plan.kept_start - plan.first;
-            for cluster in &mut output_clusters[first_cluster..first_cluster + lead_count] {
-                cluster.font = FontRef::unscaled(font);
-            }
+        let lead_count = plan.kept_start - plan.first;
+        for cluster in &mut output_clusters[first_cluster..first_cluster + lead_count] {
+            cluster.font = FontRef::unscaled(font);
         }
         push_empty_clusters(
             run,
@@ -338,13 +331,11 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
             output_clusters,
             output_glyphs,
         );
-        let appended = output_clusters.len();
-        if appended == first_cluster {
+        let Some(head) = output_clusters.get_mut(first_cluster) else {
             return;
-        }
-        output_clusters[first_cluster].safe_to_concat_before = false;
-        output_clusters[first_cluster].safe_to_break_before =
-            output_clusters[first_cluster].safe_to_break_before && plan.leading_text.is_empty();
+        };
+        head.safe_to_concat_before = false;
+        head.safe_to_break_before &= plan.leading_text.is_empty();
         attach_synthesized(
             &mut output_clusters[first_cluster..],
             output_glyphs,

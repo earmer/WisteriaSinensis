@@ -79,12 +79,7 @@ pub(crate) fn push_clusters(
             Some(last) if atom >= last.min_atom && atom <= last.max_atom => {
                 last.glyphs.end = index + 1;
             }
-            Some(last) if atom > last.max_atom => groups.push(Group {
-                min_atom: atom,
-                max_atom: atom,
-                glyphs: index..index + 1,
-            }),
-            Some(_) => {
+            Some(last) if atom < last.min_atom => {
                 let mut min_atom = atom;
                 let mut max_atom = atom;
                 let mut members_start = index;
@@ -103,7 +98,7 @@ pub(crate) fn push_clusters(
                     glyphs: members_start..index + 1,
                 });
             }
-            None => groups.push(Group {
+            _ => groups.push(Group {
                 min_atom: atom,
                 max_atom: atom,
                 glyphs: index..index + 1,
@@ -262,14 +257,11 @@ pub(crate) fn attach_synthesized(
         let count = leading.len();
         let at = clusters[0].glyph_range.start;
         glyphs.splice(at..at, leading);
-        for (k, cluster) in clusters.iter_mut().enumerate() {
-            if k == 0 {
-                cluster.glyph_range.end += count;
-                cluster.natural_width = (cluster.natural_width + w).max(0.0);
-            } else {
-                cluster.glyph_range =
-                    cluster.glyph_range.start + count..cluster.glyph_range.end + count;
-            }
+        clusters[0].glyph_range.end += count;
+        clusters[0].natural_width = (clusters[0].natural_width + w).max(0.0);
+        for cluster in &mut clusters[1..] {
+            cluster.glyph_range =
+                cluster.glyph_range.start + count..cluster.glyph_range.end + count;
         }
     }
 }

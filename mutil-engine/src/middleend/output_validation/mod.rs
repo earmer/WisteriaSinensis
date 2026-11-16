@@ -588,10 +588,9 @@ impl PositionedLine {
     /// `true` for a glyph of the trailing whitespace: source text at or after
     /// `visible_byte_end`.
     pub(super) fn is_trailing_whitespace(&self, glyph: &PositionedGlyph) -> bool {
-        !glyph.is_synthesized()
-            && glyph
-                .byte_range
-                .is_some_and(|range| range.start() >= self.visible_byte_end)
+        glyph
+            .byte_range
+            .is_some_and(|range| range.start() >= self.visible_byte_end)
     }
 
     /// `true` when `range` is well formed and inside this line's bytes.

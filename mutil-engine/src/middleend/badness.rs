@@ -128,15 +128,16 @@ pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
                 .all(|v| v.is_finite() && *v >= 0.0),
         "line_fit precondition violated (spec ST1-8)"
     );
+    let fit = |ratio: f64, badness: f64| LineFit {
+        ratio: ratio as f32,
+        badness: badness as f32,
+        overfull: false,
+        excess_slack_bits: 0,
+    };
     // An unbounded line (`wrap_width == +inf`, spec GEO-2) is an exact fit:
     // widening the envelope never makes a line worse (spec AX-6).
     if slack == f32::INFINITY {
-        return LineFit {
-            ratio: 0.0,
-            badness: 0.0,
-            overfull: false,
-            excess_slack_bits: 0,
-        };
+        return fit(0.0, 0.0);
     }
     // The sums run in f64, so capacities near `f32::MAX` cannot overflow to
     // infinity before the ratios are formed.
@@ -156,18 +157,6 @@ pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
     };
     let y01 = seam(stretch[0] + stretch[1]);
     let y_total = seam(stretch[0] + stretch[1] + stretch[2]);
-    let fit = |ratio: f64, badness: f64| LineFit {
-        ratio: ratio as f32,
-        badness: badness as f32,
-        overfull: false,
-        excess_slack_bits: 0,
-    };
-    let fit_excess = |ratio: f64, badness: f64, excess: f64| LineFit {
-        ratio: ratio as f32,
-        badness: badness as f32,
-        overfull: false,
-        excess_slack_bits: excess.max(0.0).to_bits(),
-    };
     if slack.abs() <= f64::from(FIT_EPSILON) {
         return fit(0.0, 0.0);
     }
@@ -200,10 +189,13 @@ pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
         } else {
             0.0
         };
-        let r_excess = (slack - y_total) / f64::from(font_size).max(1.0);
         let excess = slack - y_total;
+        let r_excess = excess / f64::from(font_size).max(1.0);
         let bad = (base + 400.0 * r_excess.powi(3)).min(f64::from(MAX_BADNESS));
-        fit_excess(2.0 + r_excess, bad, excess)
+        LineFit {
+            excess_slack_bits: excess.max(0.0).to_bits(),
+            ..fit(2.0 + r_excess, bad)
+        }
     }
 }
 

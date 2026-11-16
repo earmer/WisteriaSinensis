@@ -169,7 +169,7 @@ impl std::error::Error for InvalidLocaleTag {}
 ///
 /// **Well formed by construction.** [`LocaleTag::try_from_str`] accepts exactly
 /// the `Language-Tag` grammar of RFC 5646 §2.1 (a `langtag`, a private-use tag
-/// or a grandfathered tag) and stores the tag in the letter case RFC 5646
+/// or a grandfathered tag) up to 128 bytes long, and stores the tag in the letter case RFC 5646
 /// §2.1.1 recommends (`ja-JP`, `sr-Cyrl`, `zh-Hant-TW`), so equal tags compare
 /// and hash equal. That is the RFC's "well-formed" class: no subtag is looked
 /// up in the IANA registry, and repeated variants or extension singletons are
@@ -186,8 +186,12 @@ impl LocaleTag {
     /// Parses a BCP 47 tag in any letter case.
     ///
     /// # Errors
-    /// `tag` does not match the RFC 5646 `Language-Tag` grammar.
+    /// `tag` is longer than 128 bytes (rejected before anything is allocated,
+    /// spec TYP-4) or does not match the RFC 5646 `Language-Tag` grammar.
     pub fn try_from_str(tag: &str) -> Result<Self, InvalidLocaleTag> {
+        if tag.len() > MAX_LOCALE_TAG_LEN {
+            return Err(InvalidLocaleTag);
+        }
         canonical_language_tag(tag)
             .map(|canonical| Self(canonical.into()))
             .ok_or(InvalidLocaleTag)
@@ -203,19 +207,23 @@ impl LocaleTag {
     /// [`LocaleTag::try_from_str`].
     ///
     /// # Errors
-    /// The input, after the mapping, does not match the RFC 5646
-    /// `Language-Tag` grammar.
+    /// The trimmed input is longer than 128 bytes (rejected before anything
+    /// is allocated), or the input, after the mapping, does not match the
+    /// RFC 5646 `Language-Tag` grammar.
     pub fn parse_lenient(tag: &str) -> Result<Self, InvalidLocaleTag> {
         let trimmed = tag.trim();
+        if trimmed.len() > MAX_LOCALE_TAG_LEN {
+            return Err(InvalidLocaleTag);
+        }
         if let Some(&(_, canonical)) = SHORTHANDS
             .iter()
             .find(|&&(short, _)| eq_shorthand(trimmed, short))
         {
             return Self::try_from_str(canonical);
         }
+        // Only a tag spelled with `_` needs a rewritten copy.
         if trimmed.contains('_') {
-            let normalized = trimmed.replace('_', "-");
-            Self::try_from_str(&normalized)
+            Self::try_from_str(&trimmed.replace('_', "-"))
         } else {
             Self::try_from_str(trimmed)
         }
@@ -256,6 +264,10 @@ impl fmt::Display for LocaleTag {
         f.write_str(&self.0)
     }
 }
+
+/// The longest locale tag accepted, in bytes (spec TYP-4). RFC 5646 sets no
+/// maximum; the cap bounds the memory an untrusted host string can claim.
+const MAX_LOCALE_TAG_LEN: usize = 128;
 
 const SHORTHANDS: [(&str, &str); 12] = [
     ("jp", "ja-JP"),

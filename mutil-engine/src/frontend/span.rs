@@ -52,8 +52,8 @@ impl InlineDecorationSpan {
     #[must_use]
     pub fn is_valid(&self) -> bool {
         [self.start_padding, self.end_padding]
-            .iter()
-            .all(|v| crate::types::is_extent(*v))
+            .into_iter()
+            .all(crate::types::is_extent)
             && !self.byte_range.is_empty()
     }
 

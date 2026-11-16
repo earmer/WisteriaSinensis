@@ -73,25 +73,14 @@ pub(crate) fn url_ranges(text: &str) -> Vec<TextRange> {
             }
         }
         while let Some(c) = text[start..end].chars().next_back() {
-            if !matches!(
-                c,
-                '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | ')' | ']'
-            ) {
-                break;
-            }
-            // A closing bracket stays when the URL opened it.
-            let opened = match c {
-                ')' => paren >= 0,
-                ']' => square >= 0,
-                _ => false,
-            };
-            if opened {
-                break;
-            }
             match c {
+                // A closing bracket stays when the URL opened it.
+                ')' if paren >= 0 => break,
+                ']' if square >= 0 => break,
                 ')' => paren += 1,
                 ']' => square += 1,
-                _ => {}
+                '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' => {}
+                _ => break,
             }
             end -= c.len_utf8();
         }
