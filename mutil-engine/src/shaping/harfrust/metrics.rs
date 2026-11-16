@@ -1,0 +1,233 @@
+//! Font-unit metrics, GDEF ligature carets, and BASE table offsets.
+
+use super::super::clusters::finite_or_zero;
+use crate::types::FontMetrics;
+use harfrust::Tag;
+use read_fonts::TableProvider;
+use read_fonts::model::Font;
+use read_fonts::types::GlyphId;
+use smallvec::SmallVec;
+
+/// [`FontMetrics`] in font units, before a size is applied.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct UnitMetrics {
+    pub(super) units_per_em: f32,
+    metrics: FontMetrics,
+}
+
+impl UnitMetrics {
+    /// The metrics of an instance `font_size · scale` layout units per em.
+    pub(super) fn scaled(&self, size: f32) -> FontMetrics {
+        let k = size / self.units_per_em;
+        let m = &self.metrics;
+        FontMetrics {
+            vertical_ascent: m.vertical_ascent * k,
+            vertical_descent: m.vertical_descent * k,
+            vertical_line_gap: m.vertical_line_gap * k,
+            ideographic_baseline_offset: m.ideographic_baseline_offset * k,
+            central_baseline_offset: m.central_baseline_offset * k,
+            hanging_baseline_offset: m.hanging_baseline_offset * k,
+            mathematical_baseline_offset: m.mathematical_baseline_offset * k,
+            ascent: m.ascent * k,
+            descent: m.descent * k,
+            line_gap: m.line_gap * k,
+            underline_position: m.underline_position * k,
+            underline_thickness: m.underline_thickness * k,
+            strikeout_position: m.strikeout_position * k,
+            x_height: m.x_height * k,
+            cap_height: m.cap_height * k,
+            use_typo_metrics: m.use_typo_metrics,
+        }
+    }
+}
+
+/// The font's [`FontMetrics`] in font units, with the documented fallbacks
+/// for whatever its tables leave out (spec FNT-4, SHP-17). Every offset is
+/// positive towards line-over: `post` and `OS/2` already store the
+/// underline and strike-out positions that way.
+pub(super) fn unit_metrics(font: &Font) -> UnitMetrics {
+    let metrics = font.metrics();
+    let upem = f32::from(metrics.units_per_em.max(1));
+    let f = |v: read_fonts::types::F48Dot16| v.to_f32();
+    let nonzero = |line: &Option<read_fonts::model::metrics::LineBox>| {
+        line.filter(|l| l.ascender.to_f32() - l.descender.to_f32() > 0.0)
+    };
+    let typo = nonzero(&metrics.typo_line);
+    let hhea = nonzero(&metrics.hhea_line);
+    let chosen = if metrics.use_typo_metrics {
+        typo.or(hhea)
+    } else {
+        hhea.or(typo)
+    };
+    let (ascent, descent, line_gap) = match (chosen, metrics.win_line) {
+        (Some(line), _) => (
+            f(line.ascender),
+            -f(line.descender),
+            f(line.line_gap).max(0.0),
+        ),
+        (None, Some(win)) if f(win.ascender) - f(win.descender) > 0.0 => {
+            (f(win.ascender), -f(win.descender), 0.0)
+        }
+        _ => (0.8 * upem, 0.2 * upem, 0.0),
+    };
+    let (ascent, descent) = (ascent.max(0.0), descent.max(0.0));
+    let ink_top = |c: char, default: f32| metrics_value(font, c).unwrap_or(default);
+    let x_height = metrics
+        .x_height
+        .map(f)
+        .filter(|v| *v > 0.0)
+        .unwrap_or_else(|| ink_top('x', 0.5 * upem));
+    let cap_height = metrics
+        .cap_height
+        .map(f)
+        .filter(|v| *v > 0.0)
+        .unwrap_or_else(|| ink_top('H', 0.7 * upem));
+    let style = font.style_metrics();
+    let (underline_position, underline_thickness) = style
+        .underline
+        .map(|d| (f(d.position), f(d.thickness).abs()))
+        .unwrap_or((-0.1 * upem, 0.05 * upem));
+    let strikeout_position = style
+        .strike_through
+        .map(|d| f(d.position))
+        .unwrap_or(x_height / 2.0);
+    let (vertical_ascent, vertical_descent, vertical_line_gap) = nonzero(&metrics.vhea_line)
+        .map(|l| {
+            (
+                f(l.ascender).max(0.0),
+                (-f(l.descender)).max(0.0),
+                f(l.line_gap).max(0.0),
+            )
+        })
+        .unwrap_or((0.5 * upem, 0.5 * upem, 0.0));
+    let base = base_offsets(font);
+    let ideographic = base.ideo.unwrap_or(-descent);
+    let central = match (base.ideo, base.idtp) {
+        (Some(bottom), Some(top)) => (bottom + top) / 2.0,
+        _ => ideographic + 0.5 * upem,
+    };
+    UnitMetrics {
+        units_per_em: upem,
+        metrics: FontMetrics {
+            vertical_ascent: finite_or_zero(vertical_ascent),
+            vertical_descent: finite_or_zero(vertical_descent),
+            vertical_line_gap: finite_or_zero(vertical_line_gap),
+            ideographic_baseline_offset: finite_or_zero(ideographic),
+            central_baseline_offset: finite_or_zero(central),
+            hanging_baseline_offset: finite_or_zero(base.hang.unwrap_or(0.8 * ascent)),
+            mathematical_baseline_offset: finite_or_zero(base.math.unwrap_or(0.5 * x_height)),
+            ascent: finite_or_zero(ascent),
+            descent: finite_or_zero(descent),
+            line_gap: finite_or_zero(line_gap),
+            underline_position: finite_or_zero(underline_position),
+            underline_thickness: finite_or_zero(underline_thickness),
+            strikeout_position: finite_or_zero(strikeout_position),
+            x_height: finite_or_zero(x_height.max(0.0)),
+            cap_height: finite_or_zero(cap_height.max(0.0)),
+            use_typo_metrics: metrics.use_typo_metrics,
+        },
+    }
+}
+
+/// The top of the ink of `c`'s glyph, in font units.
+pub(super) fn metrics_value(font: &Font, c: char) -> Option<f32> {
+    let glyph: GlyphId = font.charmap().map_unicode(c)?;
+    let extents = font.glyph_metrics().extents(glyph)?;
+    Some(extents.y_bearing).filter(|v| *v > 0.0)
+}
+
+/// The GDEF ligature caret coordinates of `glyph_id` in font units, at the
+/// font's variation location (spec SHP-7). A caret given as a contour point
+/// (format 2) needs the outline, which the backend does not load, so a glyph
+/// with one answers none and takes the equal-slot fallback (INT-5); device
+/// tables only adjust hinted sizes and are ignored.
+pub(super) fn gdef_carets(font: &Font, glyph_id: u32) -> SmallVec<[f32; 4]> {
+    use read_fonts::tables::gdef::CaretValue;
+    use read_fonts::tables::layout::DeviceOrVariationIndex;
+    use read_fonts::tables::variations::DeltaSetIndex;
+    let read = || -> Option<SmallVec<[f32; 4]>> {
+        let tables = font.tables();
+        let gdef = tables.gdef().ok()?;
+        let list = gdef.lig_caret_list()?.ok()?;
+        let index = list.coverage().ok()?.get(GlyphId::new(glyph_id))?;
+        let glyph = list.lig_glyphs().get(usize::try_from(index).ok()?).ok()?;
+        let coords = font.normalized_coords();
+        let store = || gdef.item_var_store()?.ok();
+        glyph
+            .caret_values()
+            .iter()
+            .map(|caret| match caret.ok()? {
+                CaretValue::Format1(c) => Some(f32::from(c.coordinate())),
+                CaretValue::Format2(_) => None,
+                CaretValue::Format3(c) => {
+                    let base = f32::from(c.coordinate());
+                    let delta = match c.device() {
+                        Ok(DeviceOrVariationIndex::VariationIndex(v))
+                            if coords.iter().any(|c| c.to_bits() != 0) =>
+                        {
+                            let index = DeltaSetIndex {
+                                outer: v.delta_set_outer_index(),
+                                inner: v.delta_set_inner_index(),
+                            };
+                            store()?.compute_delta(index, coords)?.to_f32()
+                        }
+                        _ => 0.0,
+                    };
+                    Some(base + delta)
+                }
+            })
+            .collect()
+    };
+    read().unwrap_or_default()
+}
+
+#[derive(Default)]
+struct BaseOffsets {
+    ideo: Option<f32>,
+    idtp: Option<f32>,
+    hang: Option<f32>,
+    math: Option<f32>,
+}
+
+/// Baseline offsets read from the horizontal axis of `BASE`, relative to the
+/// alphabetic (`romn`) baseline when the font gives one.
+fn base_offsets(font: &Font) -> BaseOffsets {
+    let read = || -> Option<BaseOffsets> {
+        let tables = font.tables();
+        let base = tables.base().ok()?;
+        let axis = base.horiz_axis()?.ok()?;
+        let tag_list = axis.base_tag_list()?.ok()?;
+        let tags = tag_list.baseline_tags();
+        let list = axis.base_script_list().ok()?;
+        let records = list.base_script_records();
+        let record = records
+            .iter()
+            .find(|r| r.base_script_tag() == Tag::new(b"DFLT"))
+            .or_else(|| {
+                records
+                    .iter()
+                    .find(|r| r.base_script_tag() == Tag::new(b"latn"))
+            })
+            .or_else(|| records.first())?;
+        let values = record
+            .base_script(list.offset_data())
+            .ok()?
+            .base_values()?
+            .ok()?;
+        let coords = values.base_coords();
+        let coordinate = |tag: &[u8; 4]| -> Option<f32> {
+            let index = tags.iter().position(|t| t.get() == Tag::new(tag))?;
+            let coord = coords.get(index).ok()?;
+            Some(f32::from(coord.coordinate()))
+        };
+        let romn = coordinate(b"romn").unwrap_or(0.0);
+        let relative = |tag: &[u8; 4]| coordinate(tag).map(|v| v - romn);
+        Some(BaseOffsets {
+            ideo: relative(b"ideo"),
+            idtp: relative(b"idtp"),
+            hang: relative(b"hang"),
+            math: relative(b"math"),
+        })
+    };
+    read().unwrap_or_default()
+}
