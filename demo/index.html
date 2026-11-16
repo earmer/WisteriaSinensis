@@ -38,7 +38,8 @@
             <option value="zhHans">简体中文</option>
             <option value="regional">简 · 繁 · 日 · inline locale tags</option>
             <option value="indic">Indic &amp; Southeast Asian</option>
-            <option value="rtl">Arabic · rejected today</option>
+            <option value="rtl">Arabic &amp; Hebrew · bidi</option>
+            <option value="cjkJustify">CJK autospace &amp; justification</option>
           </select>
         </label>
 
@@ -111,6 +112,57 @@
           </select>
         </label>
 
+        <div class="two-up">
+          <label class="field">
+            <span class="field-label">Base direction</span>
+            <select id="direction">
+              <option value="auto">from the text (P2, P3)</option>
+              <option value="ltr">left to right</option>
+              <option value="rtl">right to left</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Autospace</span>
+            <select id="autospace">
+              <option value="jlreq">JLReq (¼ em, FE-20)</option>
+              <option value="css">CSS compatible (⅛ em)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="two-up">
+          <label class="field">
+            <span class="field-label">Hang at line start</span>
+            <select id="hang-start">
+              <option value="none">none</option>
+              <option value="first">first line</option>
+              <option value="all">all lines</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Hang at line end</span>
+            <select id="hang-end">
+              <option value="none">none</option>
+              <option value="allow">allow (ST1-3)</option>
+              <option value="force">force</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="two-up">
+          <label class="field">
+            <span class="field-label">Trailing whitespace</span>
+            <select id="whitespace">
+              <option value="collapsible">collapsible</option>
+              <option value="preserved">preserved</option>
+            </select>
+          </label>
+          <label class="field check-field">
+            <span class="field-label">Justification</span>
+            <span><input id="justify" type="checkbox" /> justify (ST3-2)</span>
+          </label>
+        </div>
+
         <fieldset class="overlays">
           <legend class="field-label">Overlays</legend>
           <label><input id="show-boxes" type="checkbox" /> line boxes &amp; slots</label>
@@ -155,9 +207,10 @@
               </li>
               <li>
                 HarfRust shaping of the engine's runs, with per-atom font
-                fallback over the eleven faces registered here (Latin sans,
+                fallback over the thirteen faces registered here (Latin sans,
                 serif and mono; Simplified Chinese, Traditional Chinese and
-                Japanese; Devanagari, Thai, Lao, Khmer, Myanmar), keyed by
+                Japanese; Devanagari, Thai, Lao, Khmer, Myanmar; Hebrew and
+                Arabic), keyed by
                 script and locale (SHP-12, SHP-25): a CJK run skips the Latin
                 faces that merely share its punctuation and takes the CJK face
                 of its locale from one fixed stack.
@@ -167,26 +220,32 @@
                 cluster break, tabs, hard breaks and blank lines.
               </li>
               <li>
+                The Unicode Bidirectional Algorithm (UAX #9): paragraph levels,
+                bracket pairs, and each line reordered after breaking, so Arabic
+                and Hebrew read right to left with embedded Latin and digits.
+              </li>
+              <li>
+                CJK autospace by profile, punctuation compression, justification
+                through the priority ladder (word spaces, autospace, CJK gaps,
+                letter gaps) and hanging punctuation by the chosen hang mode.
+              </li>
+              <li>
                 Strut-derived line boxes, caret stops in the output, and the
                 output gate every paragraph passes before it is drawn.
               </li>
             </ul>
           </div>
           <div>
-            <h3><span class="dot off"></span>Not in Phase 1</h3>
+            <h3><span class="dot off"></span>Not yet implemented</h3>
             <ul>
               <li>
-                Bidi and RTL text. Arabic or Hebrew characters are rejected by the
-                frontend; pick the Arabic sample to see the engine's own refusal
-                instead of text in the wrong order.
+                Vertical writing modes and annotations/ruby: rejected by the
+                frontend. Decoration and explicit bidi spans exist in the
+                engine but this page offers no way to mark them.
               </li>
               <li>
-                Vertical writing modes, annotations/ruby and decoration spans:
-                also rejected by the frontend.
-              </li>
-              <li>
-                Justification, hanging punctuation, hyphenation and clamping:
-                accepted as options but not applied.
+                Kashida: Arabic lines justify at word spaces only. Hyphenation
+                and clamping are not applied.
               </li>
               <li>
                 Balanced and Publication line-breaking strategies: every strategy
@@ -212,7 +271,7 @@
           </div>
         </div>
         <p class="scope-foot">
-          This list tracks the crate's Phase 1 scope
+          This list tracks the crate's Phase 2 scope
           (<code>mutil-engine/src/middleend/layout/mod.rs</code> and
           <code>mutil-engine/src/lib.rs</code>). If the engine gains a stage,
           this page should change with it, not before it.

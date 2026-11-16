@@ -23,10 +23,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use mutil_engine::{
-    BaselineAlignment, FontBytes, FontFace, FontFamily, FontFeatures, FontRegistry, FontStyle,
-    FontVariation, FrontendOptions, HarfRustShaper, LayoutConstraints, LayoutOptions, LineHeight,
-    LocalePolicy, LocaleTag, ParagraphInput, QuotePolicy, StyleSpan, TextDecoration, TextStyle,
-    ValidatedLayout, compile_paragraph, conformance_report, layout_paragraph,
+    AutospaceProfile, BaselineAlignment, BidiDirection, FontBytes, FontFace, FontFamily,
+    FontFeatures, FontRegistry, FontStyle, FontVariation, FrontendOptions, HangEndMode, HangMode,
+    HangStartMode, HangingWhitespaceMode, HarfRustShaper, LayoutConstraints, LayoutOptions,
+    LineHeight, LocalePolicy, LocaleTag, ParagraphInput, QuotePolicy, StyleSpan, TextDecoration,
+    TextStyle, ValidatedLayout, compile_paragraph, conformance_report, layout_paragraph,
 };
 use skrifa::outline::DrawSettings;
 use skrifa::prelude::{LocationRef, Size};
@@ -36,7 +37,7 @@ use json::{conformance_json, error_json, font_json, layout_json};
 
 /// The registered families in the order every paragraph's stack lists them
 /// after the chosen face.
-const FIXED_STACK: [&str; 11] = [
+const FIXED_STACK: [&str; 13] = [
     "Noto Sans",
     "Noto Serif",
     "JetBrains Mono",
@@ -48,6 +49,8 @@ const FIXED_STACK: [&str; 11] = [
     "Noto Sans Lao",
     "Noto Sans Khmer",
     "Noto Sans Myanmar",
+    "Noto Sans Hebrew",
+    "Noto Naskh Arabic",
 ];
 
 /// The harness asks for Regular. Noto Sans JP's variable font defaults to
@@ -148,6 +151,57 @@ struct LayoutRequest<'a> {
     cjk_quotes: bool,
     primary: Option<&'a str>,
     heuristics: bool,
+    phase2: Phase2,
+}
+
+/// The Phase 2 options the page sets, packed into one `u32` across the C
+/// ABI: bits 0-1 the base direction (0 from the text, 1 LTR, 2 RTL), bit 2
+/// `justify`, bits 3-4 the start hang (0 none, 1 first line, 2 all lines),
+/// bits 5-6 the end hang (0 none, 1 allow, 2 force), bit 7 the `CssCompat`
+/// autospace profile and bit 8 preserved trailing whitespace.
+#[derive(Clone, Copy, Default)]
+struct Phase2 {
+    base_direction: Option<BidiDirection>,
+    justify: bool,
+    hang_mode: HangMode,
+    autospace: AutospaceProfile,
+    whitespace: HangingWhitespaceMode,
+}
+
+impl Phase2 {
+    fn from_bits(bits: u32) -> Self {
+        let field = |shift: u32| (bits >> shift) & 0b11;
+        Self {
+            base_direction: match field(0) {
+                1 => Some(BidiDirection::Ltr),
+                2 => Some(BidiDirection::Rtl),
+                _ => None,
+            },
+            justify: bits & (1 << 2) != 0,
+            hang_mode: HangMode {
+                start: match field(3) {
+                    1 => HangStartMode::FirstLine,
+                    2 => HangStartMode::AllLines,
+                    _ => HangStartMode::None,
+                },
+                end: match field(5) {
+                    1 => HangEndMode::Allow,
+                    2 => HangEndMode::Force,
+                    _ => HangEndMode::None,
+                },
+            },
+            autospace: if bits & (1 << 7) != 0 {
+                AutospaceProfile::CssCompat
+            } else {
+                AutospaceProfile::Jlreq
+            },
+            whitespace: if bits & (1 << 8) != 0 {
+                HangingWhitespaceMode::Preserved
+            } else {
+                HangingWhitespaceMode::Collapsible
+            },
+        }
+    }
 }
 
 impl Demo {
@@ -221,6 +275,9 @@ impl Demo {
             } else {
                 LineHeight::Normal
             },
+            justify: req.phase2.justify,
+            hang_mode: req.phase2.hang_mode,
+            whitespace: req.phase2.whitespace,
             ..LayoutOptions::default()
         };
         let frontend = FrontendOptions {
@@ -235,6 +292,8 @@ impl Demo {
             } else {
                 LocalePolicy::ExplicitOnly
             },
+            base_direction: req.phase2.base_direction,
+            autospace_profile: req.phase2.autospace,
             ..FrontendOptions::default()
         };
         let ast = match compile_paragraph(&input, &frontend, self.shaper()) {
@@ -418,7 +477,8 @@ pub unsafe extern "C" fn demo_add_font(
     leak(font_json(result).into_bytes())
 }
 
-/// Lays out one paragraph. `line_height` 0 means normal.
+/// Lays out one paragraph. `line_height` 0 means normal; `phase2` packs the
+/// bidi, justification, hanging and autospace options ([`Phase2`]).
 ///
 /// # Safety
 /// `text_ptr` must point to `text_len` bytes that stay readable for the
@@ -436,6 +496,7 @@ pub unsafe extern "C" fn demo_layout(
     primary_ptr: *const u8,
     primary_len: u32,
     heuristics: u32,
+    phase2: u32,
 ) -> u64 {
     let Some(text) = read_str(text_ptr, text_len) else {
         return leak(error_json("input", "text is not UTF-8", None).into_bytes());
@@ -457,6 +518,7 @@ pub unsafe extern "C" fn demo_layout(
         cjk_quotes: cjk_quotes != 0,
         primary,
         heuristics: heuristics != 0,
+        phase2: Phase2::from_bits(phase2),
     };
     let result = with_demo(|demo| demo.layout(&req));
     let json =
@@ -504,6 +566,7 @@ mod tests {
             cjk_quotes: false,
             primary: None,
             heuristics: false,
+            phase2: Phase2::default(),
         }
     }
 
@@ -570,6 +633,7 @@ mod tests {
         let ok = demo.layout(&LayoutRequest {
             locale: Some("jp"),
             heuristics: true,
+            phase2: Phase2::default(),
             ..req("abc", 200.0)
         });
         assert!(ok.starts_with("{\"ok\":true"), "{ok}");

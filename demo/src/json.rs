@@ -145,6 +145,11 @@ pub fn layout_json(layout: &ValidatedLayout<'_>, font_size: f32, width: f32) -> 
     out.uint(paragraph.lines.len());
     out.raw(",\"lineHeight\":");
     out.number(paragraph.lines.first().map_or(0.0, |line| line.line_height));
+    out.raw(if paragraph.base_direction.is_rtl() {
+        ",\"direction\":\"rtl\""
+    } else {
+        ",\"direction\":\"ltr\""
+    });
     out.raw(",\"lines\":[");
     for (index, line) in paragraph.lines.iter().enumerate() {
         if index > 0 {
@@ -169,6 +174,16 @@ fn write_line<'a>(out: &mut Out, line: &PositionedLine, runs: impl Iterator<Item
     out.number(line.line_height);
     out.raw(",\"visibleEnd\":");
     out.uint(line.visible_byte_end);
+    out.raw(if line.is_justified {
+        ",\"justified\":true"
+    } else {
+        ",\"justified\":false"
+    });
+    out.raw(",\"hang\":[");
+    out.number(line.hanging_left());
+    out.raw(",");
+    out.number(line.hanging_right());
+    out.raw("]");
     out.raw(",\"slots\":[");
     for (slot_index, slot) in line.slots.iter().enumerate() {
         if slot_index > 0 {
