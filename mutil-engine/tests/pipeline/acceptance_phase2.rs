@@ -1,7 +1,7 @@
-//! The Phase 2 acceptance criteria (spec RM-6, RM-14), bidi clauses, over
-//! the vendored Hebrew and Arabic subsets (`tests/assets/README.md`). The
-//! autospace, justification, tolerance and cursive letter-spacing clauses
-//! belong to the second half of Phase 2 and are not tested here yet.
+//! The Phase 2 acceptance criteria (spec RM-6, RM-14): the bidi clauses over
+//! the vendored Hebrew and Arabic subsets, and the autospace, justification,
+//! tolerance and cursive letter-spacing clauses over Noto Sans JP, Noto
+//! Serif and the Arabic and Hebrew subsets (`tests/assets/README.md`).
 
 use crate::common::*;
 use mutil_engine::*;
@@ -509,4 +509,133 @@ fn rm6_clicks_above_and_below_the_text_clamp_to_the_first_and_last_lines() {
     assert!(on.inside);
     // The left quarter of ה is its trailing side in RTL: offset 11.
     assert_eq!(on.position.byte_offset, 11);
+}
+
+#[test]
+fn rm6_mixed_cjk_and_latin_autospaces_by_profile_and_justifies_flush_through_the_ladder() {
+    use crate::justification::{CJK_GAP, ladder};
+    // "漢字abc漢字": a gap of 1/4 em (JLReq) or 1/8 em (CSS) opens at each
+    // CJK-Latin seam of an unjustified line (FE-20).
+    let text = "漢字abc漢字";
+    let style = script_style(&[SERIF, JAPANESE], 10.0);
+    for (profile, gap) in [
+        (AutospaceProfile::Jlreq, 2.5),
+        (AutospaceProfile::CssCompat, 1.25),
+    ] {
+        let options = FrontendOptions {
+            autospace_profile: profile,
+            ..Default::default()
+        };
+        let ast = compile_bidi_input(&input(text, &style), &options);
+        let p = lay_out_bidi_ast(&ast, text, &column(200.0), &LayoutOptions::default());
+        let line = &p.lines[0];
+        let after = |offset: usize| {
+            let g = glyph_at(line, offset);
+            g.x + g.advance
+        };
+        assert_close(x_of(line, 6) - after(3), gap);
+        assert_close(x_of(line, 9) - after(8), gap);
+        assert_close(x_of(line, 3) - after(0), 0.0);
+        assert_close(
+            line.visual_width(),
+            width_of(&ast, TextRange::new(0, 15)) + 2.0 * gap,
+        );
+    }
+    // Justified, the ladder spends the word space, then the autospace (none
+    // under CSS, which is rigid), then the CJK gaps, and the line is flush.
+    let probe = ladder(AutospaceProfile::Jlreq, 0.0);
+    let (s0, s1) = (probe.word_stretch, probe.autospace_stretch);
+    ladder(AutospaceProfile::Jlreq, s0 + s1 + 2.0 * CJK_GAP).assert_levels(
+        s0,
+        s1,
+        2.0 * CJK_GAP / 3.0,
+    );
+    let probe = ladder(AutospaceProfile::CssCompat, 0.0);
+    let s0 = probe.word_stretch;
+    ladder(AutospaceProfile::CssCompat, s0 + 3.0 * CJK_GAP).assert_levels(s0, 0.0, CJK_GAP);
+}
+
+#[test]
+fn rm6_over_loose_lines_follow_the_tolerance_rule() {
+    use crate::justification::{CJK_GAP, ladder};
+    let probe = ladder(AutospaceProfile::Jlreq, 0.0);
+    let total = probe.word_stretch + probe.autospace_stretch + 3.0 * CJK_GAP;
+    // Beyond Tiers 0 to 2 by less than one 0.125 em Level 3 gap: Level 3
+    // covers it and the line is flush (ST3-4).
+    let l = ladder(AutospaceProfile::Jlreq, total + 1.0);
+    let line = &l.justified.lines[0];
+    assert!(line.is_justified);
+    assert_close(line.visual_width(), l.natural + total + 1.0);
+    // Far beyond: every level spends its cap and the rest stays ragged at
+    // the line end.
+    let l = ladder(AutospaceProfile::Jlreq, total + 30.0);
+    let line = &l.justified.lines[0];
+    assert!(!line.is_justified);
+    assert!(line.visual_width() > l.natural + total);
+    assert!(line.visual_width() < l.natural + total + 30.0 - 1.0);
+    assert_close(line.slots[0].content_start, 0.0);
+    // The last line is never justified, loose or not.
+    assert!(!l.justified.lines[1].is_justified);
+}
+
+#[test]
+fn rm6_cursive_scripts_get_no_letter_spacing() {
+    // An Arabic paragraph asking for 1.5 units of letter spacing, wrapped and
+    // justified: its runs take none, and its glyphs keep the advances of an
+    // unspaced paragraph. A Hebrew one takes it.
+    let text = "سلام عليكم يا صديقي العزيز";
+    let spaced = TextStyle {
+        letter_spacing: 1.5,
+        ..script_style(&[ARABIC], 10.0)
+    };
+    let ast = compile_bidi_input(&input(text, &spaced), &FrontendOptions::default());
+    let plain = compile_bidi(text, &[ARABIC]);
+    assert!(ast.runs.iter().all(|r| r.letter_spacing == 0.0));
+    assert!(
+        ast.atoms
+            .iter()
+            .all(|a| a.flags.contains(AtomFlags::NO_LETTER_SPACING))
+    );
+    for (c, p) in ast.clusters.iter().zip(&plain.clusters) {
+        assert_close(c.natural_width, p.natural_width);
+    }
+    let total: f32 = ast.clusters.iter().map(|c| c.natural_width).sum();
+    let options = LayoutOptions {
+        justify: true,
+        ..Default::default()
+    };
+    let p = lay_out_bidi_ast(&ast, text, &column(total / 2.5), &options);
+    assert!(p.lines.len() >= 3);
+    for line in &p.lines {
+        for g in glyphs(line) {
+            let offset = g.byte_range.unwrap().start();
+            let cluster = plain
+                .clusters
+                .iter()
+                .find(|c| c.byte_range.start() == offset)
+                .unwrap();
+            let natural: f32 = plain
+                .cluster_glyphs(cluster)
+                .iter()
+                .map(|g| g.x_advance)
+                .sum();
+            let drawn: f32 = glyphs(line)
+                .filter(|h| h.byte_range == g.byte_range)
+                .map(|h| h.advance)
+                .sum();
+            assert_close(drawn, natural);
+        }
+    }
+    // Hebrew is not cursive: every cluster gains the spacing.
+    let text = "אבג דהו";
+    let spaced = TextStyle {
+        letter_spacing: 1.5,
+        ..script_style(&[HEBREW], 10.0)
+    };
+    let ast = compile_bidi_input(&input(text, &spaced), &FrontendOptions::default());
+    let plain = compile_bidi(text, &[HEBREW]);
+    assert!(ast.runs.iter().all(|r| r.letter_spacing == 1.5));
+    for (c, p) in ast.clusters.iter().zip(&plain.clusters) {
+        assert_close(c.natural_width, p.natural_width + 1.5);
+    }
 }

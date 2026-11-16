@@ -315,3 +315,77 @@ pub fn lay_out_bidi(
 ) -> PositionedParagraph {
     lay_out_bidi_ast(&compile_bidi(text, families), text, constraints, options)
 }
+
+/// The Japanese, serif and Thai faces of [`BIDI_SHAPER`], by family name.
+pub const JAPANESE: &str = "Noto Sans JP";
+pub const SERIF: &str = "Noto Serif";
+pub const THAI: &str = "Noto Sans Thai";
+
+/// The regional Chinese faces (`tests/assets/README.md`, *CJK routing
+/// fonts*), registered by [`SPACING_SHAPER`] after the faces of
+/// [`BIDI_SHAPER`]: face `10 + i` is `CHINESE_FONTS[i]`.
+pub static CHINESE_FONTS: &[(&str, &[u8])] = &[
+    (
+        "Noto Sans SC",
+        include_bytes!("../assets/NotoSansSC-Subset.ttf"),
+    ),
+    (
+        "Noto Sans TC",
+        include_bytes!("../assets/NotoSansTC-Subset.ttf"),
+    ),
+];
+
+pub const SIMPLIFIED: &str = "Noto Sans SC";
+pub const TRADITIONAL: &str = "Noto Sans TC";
+
+/// A shaper over the faces of [`BIDI_SHAPER`] (ids 0 to 9) followed by
+/// [`CHINESE_FONTS`] (ids 10 and 11), for the Phase 2 spacing tests.
+/// [`BIDI_SHAPER`] itself is unchanged.
+pub static SPACING_SHAPER: LazyLock<HarfRustShaper> = LazyLock::new(|| {
+    let mut registry = FontRegistry::new();
+    let faces = std::iter::once((FAMILY, FONT_BYTES))
+        .chain(SCRIPT_FONTS.iter().copied())
+        .chain(RTL_FONTS.iter().copied())
+        .chain(CHINESE_FONTS.iter().copied());
+    for (i, (family, bytes)) in faces.enumerate() {
+        let id = registry
+            .add_face(
+                family.into(),
+                FontStyle::default(),
+                FontFace::new(FontBytes::from_static(bytes), 0),
+            )
+            .unwrap_or_else(|| panic!("{family} parses"));
+        assert_eq!(id, FontId(i as u32));
+    }
+    registry.set_generic(GenericFamily::Serif, SERIF.into());
+    HarfRustShaper::new(Arc::new(registry))
+});
+
+/// `families` at `font_size` in `locale`.
+pub fn localized_style(families: &[&str], font_size: f32, locale: &str) -> TextStyle {
+    TextStyle {
+        locale: Some(LocaleTag::parse_lenient(locale).expect("a locale")),
+        ..script_style(families, font_size)
+    }
+}
+
+/// Every glue of `ast` of `kind`, by its offset.
+pub fn glues_of(ast: &ParagraphAst, kind: GlueKind) -> Vec<(usize, &GlueNode)> {
+    ast.items
+        .iter()
+        .filter_map(|item| match item {
+            WordNode::Glue(g) if g.kind == kind => Some((g.byte_range.start(), g)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The flags of the atom that starts at `offset`.
+#[track_caller]
+pub fn flags_at(ast: &ParagraphAst, offset: usize) -> AtomFlags {
+    ast.atoms
+        .iter()
+        .find(|a| a.byte_range.start() == offset)
+        .unwrap_or_else(|| panic!("no atom at {offset}"))
+        .flags
+}
