@@ -59,7 +59,6 @@ struct LineAlignment {
     visible_end: usize,
     content_start: f32,
     content_width: f32,
-    align_shift: f32,
 }
 
 struct LineBuildState<'a> {
@@ -259,7 +258,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             end_break: state.end_break,
             post: state.post,
             line_bytes: state.byte_range,
-            align_shift: alignment.align_shift,
         };
         let span_fragments = self.span_fragments(&span_ctx);
 
@@ -471,9 +469,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             end_break: state.end_break,
             post: state.post,
             line_bytes: state.byte_range,
-            align_shift: 0.0,
         };
-        self.for_each_span_group(&span_ctx, |_, x, width, _| extend(x, x + width));
+        self.span_fragment_extents(&span_ctx, &mut extend);
 
         let has_content = lo <= hi;
         let rtl = self.base.is_rtl();
@@ -500,7 +497,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             visible_end,
             content_start,
             content_width,
-            align_shift,
         }
     }
 

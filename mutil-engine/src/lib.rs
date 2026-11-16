@@ -3,10 +3,10 @@
 //!
 //! The crate contains the data model (§2), the `TextShaper` contract and
 //! backends (`HarfRustShaper`, `LineOnlyShaper`, `NoopShaper`, §4), the
-//! Phase 1 frontend (`compile_paragraph`, §3), input and output validators
-//! (§2.6), greedy line breaking with per-line L1/L2 bidi reordering and
-//! vertical stacking (`layout_paragraph`, §5), and the Phase 1 interaction
-//! queries (§6). Paragraph-level bidi analysis, justification, hyphenation,
+//! frontend (`compile_paragraph`, §3) with the Unicode Bidirectional
+//! Algorithm, input and output validators (§2.6), greedy line breaking with
+//! per-line L1/L2 bidi reordering and vertical stacking (`layout_paragraph`,
+//! §5), and the interaction queries (§6). Justification, hyphenation,
 //! annotations, clamping and the optimising breakers are not implemented yet.
 //!
 //! Layers (dependencies point left or up; the frontend calls the shaping
@@ -60,12 +60,12 @@ pub struct ConformanceReport {
 
 /// Reports installed components rather than claiming target-version
 /// conformance: graphemes, line-break opportunities, scripts, emoji
-/// sequences and the word boundaries of the word motions use ICU4X data of
-/// [`UNICODE_DATA_VERSION`]; bidi resolution is not wired in yet.
+/// sequences, bidi classes and paired brackets, and the word boundaries of
+/// the word motions use ICU4X data of [`UNICODE_DATA_VERSION`].
 pub fn conformance_report() -> ConformanceReport {
     ConformanceReport {
         grapheme: Some(UNICODE_DATA_VERSION),
-        bidi: None,
+        bidi: Some(UNICODE_DATA_VERSION),
         line_break: Some(UNICODE_DATA_VERSION),
         word: Some(UNICODE_DATA_VERSION),
         script: Some(UNICODE_DATA_VERSION),

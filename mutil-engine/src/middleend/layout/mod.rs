@@ -1,14 +1,15 @@
 //! The mid-end entry point (spec §5): the `Greedy` line breaker, line
 //! placement and vertical stacking.
 //!
-//! Phase 1 scope (spec RM-3): natural-width greedy breaking with the overflow
+//! Scope (spec RM-3, ME-3): natural-width greedy breaking with the overflow
 //! ladder of ST1-1 (UAX #14 opportunities, then the emergency cluster break
-//! of ST1-5), tabs, hard breaks and blank lines (MET-3), the strut and line
-//! boxes (Stage 4), decorations (Stage 5), and a geometry provider's first
-//! slot. Lines are reordered by their resolved levels (UAX #9 L1 and L2,
-//! Stage 2), which for Phase 1's single-level text is the identity. Not yet:
-//! justification, hanging punctuation, hyphenation, the optimising
-//! strategies (every strategy breaks greedily), annotations and clamping.
+//! of ST1-5), tabs measured from the line-start edge, hard breaks and blank
+//! lines (MET-3), the strut and line boxes (Stage 4), decorations (Stage 5),
+//! and a geometry provider's first slot. Each line applies UAX #9 L1 and L2
+//! to the frontend's resolved levels (Stage 2) and groups span fragments
+//! visually and logically (ST2-3). Not yet: justification, hanging
+//! punctuation, hyphenation, the optimising strategies (every strategy
+//! breaks greedily), annotations and clamping.
 
 mod breaking;
 mod line_artifacts;

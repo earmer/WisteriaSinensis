@@ -151,12 +151,14 @@ fn locale_heuristics_require_opt_in() {
     );
 }
 #[test]
-fn report_does_not_claim_uninstalled_unicode_components() {
+fn report_names_the_data_of_every_installed_unicode_component() {
     let r = conformance_report();
     let installed = Some(UNICODE_DATA_VERSION);
     assert_eq!(
         (r.grapheme, r.bidi, r.line_break, r.word, r.script, r.emoji),
-        (installed, None, installed, installed, installed, installed)
+        (
+            installed, installed, installed, installed, installed, installed
+        )
     );
 }
 #[test]

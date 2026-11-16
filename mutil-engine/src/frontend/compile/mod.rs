@@ -166,11 +166,12 @@ impl std::error::Error for FrontendError {}
 /// For an accepted input and a shaper that keeps its contract, the result
 /// passes the input gate (spec FE-26).
 ///
-/// Phase 1 compiles horizontal, unidirectional left-to-right text (spec
-/// RM-11): grapheme atoms, script resolution, runs by style, script and
-/// locale, shaping, word spaces, tabs, U+2028 hard breaks, inline objects and
-/// the UAX #14 opportunities of the segmenter. What it does not compile yet is
-/// refused with [`FrontendError::Unsupported`].
+/// It compiles horizontal text in either direction: grapheme atoms, bidi
+/// levels and explicit bidi spans (FE-30), script resolution, runs by style,
+/// script, locale and level, shaping, word spaces, tabs, U+2028 hard breaks,
+/// inline objects and the UAX #14 opportunities of the segmenter. What it
+/// does not compile yet (vertical writing modes and annotations) is refused
+/// with [`FrontendError::Unsupported`].
 ///
 /// # Errors
 /// The first problem found in the input, or a shaper answer that cannot be

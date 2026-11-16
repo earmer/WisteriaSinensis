@@ -74,6 +74,100 @@ struct Status {
     isolate: bool,
 }
 
+/// The directional status stack of X1 with its overflow counters.
+struct StatusStack {
+    entries: Vec<Status>,
+    overflow_isolates: usize,
+    overflow_embeddings: usize,
+    valid_isolates: usize,
+}
+
+impl StatusStack {
+    fn new(paragraph: u8) -> Self {
+        let mut entries = Vec::with_capacity(usize::from(BIDI_MAX_DEPTH) + 2);
+        entries.push(Status {
+            level: paragraph,
+            override_class: None,
+            isolate: false,
+        });
+        Self {
+            entries,
+            overflow_isolates: 0,
+            overflow_embeddings: 0,
+            valid_isolates: 0,
+        }
+    }
+
+    fn top(&self) -> Status {
+        *self.entries.last().expect("the stack keeps its base entry")
+    }
+
+    /// Whether an entry at `level` may be pushed (X2 to X5c).
+    fn admits(&self, level: u8) -> bool {
+        level <= BIDI_MAX_DEPTH && self.overflow_isolates == 0 && self.overflow_embeddings == 0
+    }
+
+    /// X2 to X5: an embedding or override initiator.
+    fn push_embedding(&mut self, class: BidiClass) {
+        let rtl = matches!(class, BidiClass::Rle | BidiClass::Rlo);
+        let level = next_level(self.top().level, rtl);
+        if self.admits(level) {
+            self.entries.push(Status {
+                level,
+                override_class: match class {
+                    BidiClass::Rlo => Some(BidiClass::R),
+                    BidiClass::Lro => Some(BidiClass::L),
+                    _ => None,
+                },
+                isolate: false,
+            });
+        } else if self.overflow_isolates == 0 {
+            self.overflow_embeddings += 1;
+        }
+    }
+
+    /// X5a to X5c: an isolate initiator of direction `rtl`.
+    fn push_isolate(&mut self, rtl: bool) {
+        let level = next_level(self.top().level, rtl);
+        if self.admits(level) {
+            self.valid_isolates += 1;
+            self.entries.push(Status {
+                level,
+                override_class: None,
+                isolate: true,
+            });
+        } else {
+            self.overflow_isolates += 1;
+        }
+    }
+
+    /// X6a: a PDI closes the innermost valid isolate and what it holds.
+    fn pop_isolate(&mut self) {
+        if self.overflow_isolates > 0 {
+            self.overflow_isolates -= 1;
+        } else if self.valid_isolates > 0 {
+            self.overflow_embeddings = 0;
+            while self.entries.last().is_some_and(|s| !s.isolate) {
+                self.entries.pop();
+            }
+            self.entries.pop();
+            self.valid_isolates -= 1;
+        }
+    }
+
+    /// X7: a PDF closes the innermost embedding or override, unless an
+    /// isolate is innermost.
+    fn pop_embedding(&mut self) {
+        if self.overflow_isolates > 0 {
+            // An overflowed isolate holds it: nothing to close.
+        } else if self.overflow_embeddings > 0 {
+            self.overflow_embeddings -= 1;
+        } else if !self.top().isolate && self.entries.len() >= 2 {
+            self.entries.pop();
+        }
+    }
+}
+
 /// The explicit levels of X1 to X8, with the classes an override forces
 /// written back into `classes`. Removed characters (X9) keep the level of
 /// the stack's top at their position; their final level is assigned later
@@ -84,81 +178,34 @@ pub(super) fn explicit_levels(
     paragraph: u8,
 ) -> Vec<u8> {
     let mut levels = vec![paragraph; classes.len()];
-    let mut stack: Vec<Status> = Vec::with_capacity(usize::from(BIDI_MAX_DEPTH) + 2);
-    stack.push(Status {
-        level: paragraph,
-        override_class: None,
-        isolate: false,
-    });
-    let (mut overflow_isolates, mut overflow_embeddings, mut valid_isolates) = (0usize, 0usize, 0);
+    let mut stack = StatusStack::new(paragraph);
     for i in 0..classes.len() {
-        let top = *stack.last().expect("the stack keeps its base entry");
+        let top = stack.top();
         let class = classes[i];
         levels[i] = top.level;
         match class {
             BidiClass::Rle | BidiClass::Lre | BidiClass::Rlo | BidiClass::Lro => {
-                let rtl = matches!(class, BidiClass::Rle | BidiClass::Rlo);
-                let level = next_level(top.level, rtl);
-                if level <= BIDI_MAX_DEPTH && overflow_isolates == 0 && overflow_embeddings == 0 {
-                    stack.push(Status {
-                        level,
-                        override_class: match class {
-                            BidiClass::Rlo => Some(BidiClass::R),
-                            BidiClass::Lro => Some(BidiClass::L),
-                            _ => None,
-                        },
-                        isolate: false,
-                    });
-                } else if overflow_isolates == 0 {
-                    overflow_embeddings += 1;
-                }
+                stack.push_embedding(class);
             }
             BidiClass::Rli | BidiClass::Lri | BidiClass::Fsi => {
                 if let Some(forced) = top.override_class {
                     classes[i] = forced;
                 }
-                let rtl = match class {
+                stack.push_isolate(match class {
                     BidiClass::Rli => true,
                     BidiClass::Lri => false,
                     _ => first_strong(classes, pdis, i + 1, true) == Some(Direction::Rtl),
-                };
-                let level = next_level(top.level, rtl);
-                if level <= BIDI_MAX_DEPTH && overflow_isolates == 0 && overflow_embeddings == 0 {
-                    valid_isolates += 1;
-                    stack.push(Status {
-                        level,
-                        override_class: None,
-                        isolate: true,
-                    });
-                } else {
-                    overflow_isolates += 1;
-                }
+                });
             }
             BidiClass::Pdi => {
-                if overflow_isolates > 0 {
-                    overflow_isolates -= 1;
-                } else if valid_isolates > 0 {
-                    overflow_embeddings = 0;
-                    while stack.last().is_some_and(|s| !s.isolate) {
-                        stack.pop();
-                    }
-                    stack.pop();
-                    valid_isolates -= 1;
-                }
-                let top = *stack.last().expect("the stack keeps its base entry");
+                stack.pop_isolate();
+                let top = stack.top();
                 levels[i] = top.level;
                 if let Some(forced) = top.override_class {
                     classes[i] = forced;
                 }
             }
-            BidiClass::Pdf => {
-                if overflow_isolates > 0 {
-                } else if overflow_embeddings > 0 {
-                    overflow_embeddings -= 1;
-                } else if !top.isolate && stack.len() >= 2 {
-                    stack.pop();
-                }
-            }
+            BidiClass::Pdf => stack.pop_embedding(),
             BidiClass::B => levels[i] = paragraph,
             BidiClass::Bn => {}
             _ => {
