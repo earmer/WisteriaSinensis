@@ -146,10 +146,46 @@ proportional ones (about 474 and 561). Their `GSUB` language systems are
 `ZHS`, `ZHT` and `JAN` alone; Noto Sans CJK SC lists `JAN`, `KOR`, `ZHH` and
 `ZHT`, whose `locl` lookups change 令 and 骨. Only the SC subset maps 们.
 
+## Right-to-left fonts
+
+Two subsets give the Phase 2 tests (spec RM-6, RM-14) a Hebrew and an
+Arabic face: `NotoSansHebrew-Subset.ttf` and `NotoNaskhArabic-Subset.ttf`.
+
+- **Source:** the variable fonts of the Google Fonts repository,
+  `https://raw.githubusercontent.com/google/fonts/main/ofl/<dir>/<file>`,
+  fetched on 2026-11-16, with these SHA-256 hashes:
+
+  | Subset | Source file (`<dir>/<file>`) | SHA-256 of the source |
+  | --- | --- | --- |
+  | `NotoSansHebrew-Subset.ttf` | `notosanshebrew/NotoSansHebrew[wdth,wght].ttf` | `7ef36a2c3593758cdb622e1bdef4f84523e92fbc3ccc667438dd80ff54c2de88` |
+  | `NotoNaskhArabic-Subset.ttf` | `notonaskharabic/NotoNaskhArabic[wght].ttf` | `67b5a525a661b607971fbd3f96a81b89d3a768e74534fca84f18ac97e6fab72f` |
+
+- **Licence:** SIL Open Font License 1.1, in `OFL-NotoSansHebrew.txt` and
+  `OFL-NotoNaskhArabic.txt`, copied from the same directories. Neither
+  declares a Reserved Font Name.
+- **Subset:** fontTools 4.68.0, the same two steps as the script fonts: a
+  static Regular instance with its names updated
+  (`wght=400`, plus `wdth=100` for Hebrew, `--update-name-table`), then
+  `pyftsubset` with `--layout-features='*'`, `--no-hinting`,
+  `--name-IDs='*'` and `--drop-tables+=DSIG`:
+
+  | Subset | `RANGES` | SHA-256 of the result |
+  | --- | --- | --- |
+  | `NotoSansHebrew-Subset.ttf` | `U+0020-007E,U+00A0,U+00AB,U+00BB,U+0591-05F4,U+200E-200F,U+25CC,U+FB1D-FB4F` | `82df632084ba813106f74205c8bc445a1fed981a94479ce112dabaee90c0ed8b` |
+  | `NotoNaskhArabic-Subset.ttf` | `U+0020-007E,U+00A0,U+00AB,U+00BB,U+0600-06FF,U+0750-077F,U+200C-200F,U+25CC,U+FB50-FDFF,U+FE70-FEFF` | `2a80ab7f21a8aa8cfd01cb089188b58bee58286af2c63c8eb648a14642824adf` |
+
+What the tests rely on: both faces have 1000 units per em and map the ASCII
+brackets, digits, `.`, `,`, « and ». Noto Sans Hebrew's space advances 270
+units and א 632. Noto Naskh Arabic's space advances 221 units; it joins
+Arabic letters through `init`, `medi` and `fina`. Its only GDEF caret list
+entry is U+FDF2, the ligature `liga` forms for الله, 1190 units wide with
+carets at 453, 692 and 960, which are not evenly spaced.
+
 ## Unicode conformance data (`ucd/`)
 
-`GraphemeBreakTest.txt`, `WordBreakTest.txt` and `LineBreakTest.txt` of
-Unicode 18.0.0, for the RM-1 suites in `src/frontend/conformance.rs`.
+`GraphemeBreakTest.txt`, `WordBreakTest.txt`, `LineBreakTest.txt`,
+`BidiTest.txt` and `BidiCharacterTest.txt` of Unicode 18.0.0, for the RM-1
+suites in `src/frontend/conformance.rs`.
 
 - **Source:** `https://www.unicode.org/Public/18.0.0/ucd/auxiliary/<file>`,
   fetched on 2026-11-15, under the Unicode terms of use
@@ -160,6 +196,11 @@ Unicode 18.0.0, for the RM-1 suites in `src/frontend/conformance.rs`.
   `3dd70c071781276067c680d87303f60434adce7b067bd063194af374edad86a5`,
   `LineBreakTest.txt`
   `fd9ff9eca411080085b41471bba79ae19d9db2e16924f9770b8509f1affd3f95`.
+  `BidiTest.txt` and `BidiCharacterTest.txt` come from
+  `https://www.unicode.org/Public/18.0.0/ucd/<file>`, fetched on
+  2026-11-16, with SHA-256 hashes
+  `9af2f882a4ab50912e388f069a673b94eacd82fa6d07d20a3ff7f3c759e905aa` and
+  `045b24d2c8ab066951bd32fe8c6b4de34647f72b5b1c7df0265f24ab53573e01`.
 - **Form:** each file keeps its first line, which names the version, and its
   test lines without their trailing comments; comment-only and blank lines
   are dropped:
@@ -173,7 +214,11 @@ Unicode 18.0.0, for the RM-1 suites in `src/frontend/conformance.rs`.
   `WordBreakTest.txt`
   `fc15cceefbccdbdc05a56fbf0f2e3068c6c7020c3c3d32504ee4c48127ce9ef7`,
   `LineBreakTest.txt`
-  `fcbe49dbcc8caac9319e62d6657d49a9ed86ccb5ee4407bd2c797464639a3dc8`.
+  `fcbe49dbcc8caac9319e62d6657d49a9ed86ccb5ee4407bd2c797464639a3dc8`,
+  `BidiTest.txt`
+  `da141dc8c4d12332e9fb339b90eb7773a790cdb4c5e0eac6765314325a2bfb84`,
+  `BidiCharacterTest.txt`
+  `f064875576804aa4cfa28b281c2b08544301e97548b51c0faad6ba89188937ac`.
 - **`known-differences.txt`** lists, by line number in these files, the cases
   where ICU4X 2.4's stable rule tables, which predate Unicode 18.0.0, break
   differently: 10 grapheme cases (the 18.0 form of GB9c) and 328 line-break
