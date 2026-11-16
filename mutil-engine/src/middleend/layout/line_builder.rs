@@ -9,7 +9,7 @@ use super::super::{
 use super::line_artifacts::{CaretContext, SpanContext};
 use super::{Break, Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Token};
 use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_order};
-use crate::frontend::{BoxNode, WordNode};
+use crate::frontend::{BoxNode, SpanEdge, WordNode};
 use crate::types::{
     AtomFlags, BaselineAlignment, BidiLevel, FontMetrics, RawShapedGlyph, TextRange, WritingMode,
 };
@@ -170,23 +170,14 @@ impl<'i, 'a> Layout<'i, 'a> {
             }
         }
         for k in 0..placed.len() {
-            let PieceKind::SpanEdge { span_id } = placed[k].piece.kind else {
+            let PieceKind::SpanEdge { span, edge } = placed[k].piece.kind else {
                 continue;
             };
-            let Some(span) = self
-                .ast
-                .decoration_spans
-                .iter()
-                .find(|s| s.span_id == span_id)
-            else {
-                continue;
-            };
-            let at = placed[k].piece.bytes.start();
+            let span = &self.ast.decoration_spans[span];
             let is_item = |p: &&PlacedPiece| !matches!(p.piece.kind, PieceKind::SpanEdge { .. });
-            let neighbour = if at == span.byte_range.start() {
-                placed[k + 1..].iter().find(is_item)
-            } else {
-                placed[..k].iter().rev().find(is_item)
+            let neighbour = match edge {
+                SpanEdge::Leading => placed[k + 1..].iter().find(is_item),
+                SpanEdge::Trailing => placed[..k].iter().rev().find(is_item),
             };
             if let Some(n) = neighbour.filter(|n| {
                 !n.piece.bytes.is_empty() && span.byte_range.contains_range(n.piece.bytes)

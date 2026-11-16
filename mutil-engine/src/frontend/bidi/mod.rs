@@ -124,20 +124,22 @@ pub(crate) fn resolve(
 /// A paragraph's levels by source position (spec FE-30).
 pub(crate) struct TextLevels {
     pub(crate) direction: Direction,
-    /// The byte offset each resolved position starts at, ascending.
-    starts: Vec<usize>,
-    levels: Vec<BidiLevel>,
+    /// Each resolved position's starting byte offset, ascending, and level.
+    positions: Vec<(usize, BidiLevel)>,
 }
 
 impl TextLevels {
     /// The level of the code point or inline object starting at `byte`.
     pub(crate) fn at(&self, byte: usize) -> BidiLevel {
-        let at = self.starts.partition_point(|&s| s < byte);
-        debug_assert_eq!(self.starts.get(at), Some(&byte), "a unit starts at {byte}");
-        self.levels
+        let at = self.positions.partition_point(|&(s, _)| s < byte);
+        debug_assert_eq!(
+            self.positions.get(at).map(|p| p.0),
+            Some(byte),
+            "a unit starts at {byte}"
+        );
+        self.positions
             .get(at)
-            .copied()
-            .unwrap_or(self.direction.base_level())
+            .map_or(self.direction.base_level(), |p| p.1)
     }
 }
 
@@ -227,16 +229,15 @@ pub(crate) fn resolve_text(
     }
     builder.edges_at(text.len());
     let resolution = resolve(&builder.classes, &builder.brackets, base);
-    let (starts, levels) = builder
+    let positions = builder
         .starts
         .iter()
         .zip(resolution.levels)
         .filter_map(|(start, level)| Some(((*start)?, level)))
-        .unzip();
+        .collect();
     TextLevels {
         direction: resolution.direction,
-        starts,
-        levels,
+        positions,
     }
 }
 

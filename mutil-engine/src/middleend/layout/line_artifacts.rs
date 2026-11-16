@@ -1,6 +1,6 @@
 //! Line-level fragments, decorations, and caret stops (spec §5 Stage 5, §6.1).
 
-use super::super::tolerance::approx_eq;
+use super::super::tolerance::{approx_eq, tolerance};
 use super::super::{
     AtomicFragment, CaretAffinity, CaretStop, DecorationKind, DecorationLine,
     HangingWhitespaceMode, LayoutInputError, PositionedInlineBox, PositionedSpanFragment,
@@ -104,7 +104,8 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// Walks each fragment of each decoration span on the line, left to
     /// right (spec ST2-3, FRG-1), calling `emit(span, group)`. Groups of bare
     /// zero-width boundaries are dropped beside any other group, and cloned
-    /// padding extends the group at its physical line edge.
+    /// padding extends the group at its physical line edge, or stands alone
+    /// when other content lies between them.
     fn for_each_span_group(
         &self,
         ctx: &SpanContext<'_>,
@@ -112,18 +113,30 @@ impl<'i, 'a> Layout<'i, 'a> {
     ) {
         let rtl = self.base.is_rtl();
         let pre = ctx.end_break.map_or(0.0, |b| b.pre);
-        let line_lo = ctx.bounds.body_lo - if rtl { pre } else { ctx.post };
-        for span in &self.ast.decoration_spans {
+        // The cloned padding on each physical side: the line end is on the
+        // right in LTR and on the left in RTL (ST2-3).
+        let (left_pad, right_pad) = if rtl {
+            (pre, ctx.post)
+        } else {
+            (ctx.post, pre)
+        };
+        let line_lo = ctx.bounds.body_lo - left_pad;
+        let line_hi = ctx.bounds.body_hi;
+        for (index, span) in self.ast.decoration_spans.iter().enumerate() {
             let range = span.byte_range;
             if range.end() < ctx.line_bytes.start() || range.start() > ctx.line_bytes.end() {
                 continue;
             }
-            let mut groups = visual_groups(ctx.placed, ctx.order, |p| match p.kind {
-                PieceKind::SpanEdge { span_id } => span_id == span.span_id,
+            let is_member = |p: &Piece| match p.kind {
+                PieceKind::SpanEdge { span, .. } => span == index,
                 _ => !p.bytes.is_empty() && range.contains_range(p.bytes),
-            });
+            };
+            let mut groups = visual_groups(ctx.placed, ctx.order, is_member);
             if groups.iter().any(|g| !g.is_bare_boundary) {
                 groups.retain(|g| !g.is_bare_boundary);
+            }
+            if groups.is_empty() {
+                continue;
             }
             let cloned_at_end = ctx
                 .end_break
@@ -136,11 +149,45 @@ impl<'i, 'a> Layout<'i, 'a> {
             } else {
                 (cloned_at_start, cloned_at_end)
             };
-            if at_left && let Some(g) = groups.first_mut() {
-                g.lo = g.lo.min(line_lo);
+            // Padding joins the outermost group only if nothing else lies
+            // between them; otherwise it is a fragment of its own, at the
+            // line's edge offset on that side (AX-5).
+            let outside = |at: f32, leftwards: bool| {
+                ctx.order.iter().map(|&k| &ctx.placed[k]).any(|p| {
+                    p.width > 0.0
+                        && !is_member(&p.piece)
+                        && if leftwards {
+                            p.x < at - tolerance(p.x, at)
+                        } else {
+                            p.x + p.width > at + tolerance(p.x + p.width, at)
+                        }
+                })
+            };
+            let padding = |lo: f32, hi: f32, at_end: bool| VisualGroup {
+                lo,
+                hi,
+                bytes: TextRange::empty_at(if at_end {
+                    ctx.line_bytes.end()
+                } else {
+                    ctx.line_bytes.start()
+                }),
+                level: self.base.base_level(),
+                is_bare_boundary: false,
+            };
+            if at_left {
+                if outside(groups[0].lo, true) {
+                    groups.insert(0, padding(line_lo, line_lo + left_pad, rtl));
+                } else {
+                    groups[0].lo = groups[0].lo.min(line_lo);
+                }
             }
-            if at_right && let Some(g) = groups.last_mut() {
-                g.hi = g.hi.max(ctx.bounds.body_hi);
+            if at_right {
+                let last = groups.len() - 1;
+                if outside(groups[last].hi, false) {
+                    groups.push(padding(line_hi - right_pad, line_hi, !rtl));
+                } else {
+                    groups[last].hi = groups[last].hi.max(line_hi);
+                }
             }
             for g in &mut groups {
                 // A fragment's bytes stay inside the span and the line.

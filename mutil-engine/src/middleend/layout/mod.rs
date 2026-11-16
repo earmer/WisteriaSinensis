@@ -20,7 +20,9 @@ use super::{
     LayoutConstraints, LayoutInputError, LayoutOptions, LineGeometry, LineHeight, PositionedLine,
     PositionedParagraph, StrutMetrics, ValidatedInputs,
 };
-use crate::frontend::{AnnotationSide, BoxNode, ParagraphAst, WordNode};
+use crate::frontend::{
+    AnnotationSide, BoxNode, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge, WordNode,
+};
 use crate::shaping::TextShaper;
 use crate::types::{
     BidiDirection, BidiLevel, FontInstanceRef, FontMetrics, RawShapedGlyph, TextRange,
@@ -194,7 +196,9 @@ pub(super) enum PieceKind {
     Glue,
     /// A decoration span edge: its padding is advance no glyph covers.
     SpanEdge {
-        span_id: u64,
+        /// Index into `ParagraphAst::decoration_spans`.
+        span: usize,
+        edge: SpanEdge,
     },
 }
 
@@ -287,6 +291,10 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn new(inputs: &'i ValidatedInputs<'a>, shaper: &'i dyn TextShaper) -> Self {
         let ast = inputs.ast();
         let mut tokens = Vec::with_capacity(ast.items.len() + ast.clusters.len());
+        // Boundaries open in span order and close LIFO (AST-8), so the sweep
+        // names each one's span without a lookup.
+        let mut next_span = 0;
+        let mut open_spans: SmallVec<[usize; MAX_DECORATION_NESTING_DEPTH]> = SmallVec::new();
         for (index, item) in ast.items.iter().enumerate() {
             match item {
                 WordNode::Box(BoxNode::Text { cluster_range, .. }) => {
@@ -318,16 +326,28 @@ impl<'i, 'a> Layout<'i, 'a> {
                 })),
                 WordNode::Box(BoxNode::SpanBoundary {
                     byte_range,
-                    span_id,
+                    edge,
                     width,
                     bidi_level,
                     ..
-                }) => tokens.push(Token::Piece(Piece {
-                    kind: PieceKind::SpanEdge { span_id: *span_id },
-                    bytes: *byte_range,
-                    level: *bidi_level,
-                    width: *width,
-                })),
+                }) => {
+                    let span = match edge {
+                        SpanEdge::Leading => {
+                            open_spans.push(next_span);
+                            next_span += 1;
+                            next_span - 1
+                        }
+                        SpanEdge::Trailing => open_spans
+                            .pop()
+                            .expect("the input gate pairs every trailing boundary"),
+                    };
+                    tokens.push(Token::Piece(Piece {
+                        kind: PieceKind::SpanEdge { span, edge: *edge },
+                        bytes: *byte_range,
+                        level: *bidi_level,
+                        width: *width,
+                    }));
+                }
                 WordNode::Glue(glue) => tokens.push(Token::Piece(Piece {
                     kind: PieceKind::Glue,
                     bytes: glue.byte_range,
