@@ -17,6 +17,7 @@ mod locale;
 mod options;
 mod script;
 mod segment;
+mod spacing;
 mod span;
 mod url;
 

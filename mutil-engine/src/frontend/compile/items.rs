@@ -1,4 +1,5 @@
-//! The item sequence (spec §3 Step 6, FE-19, FE-27, WN-17, WN-21, AST-8).
+//! The item sequence (spec §3 Step 6, FE-19, FE-27, FE-31, WN-17, WN-21,
+//! AST-8).
 
 use super::super::{
     BoxDecorationBreak, BoxNode, DiscretionaryNode, GlueKind, GlueNode, InlineDecorationSpan,
@@ -82,6 +83,7 @@ impl Compiler<'_> {
             cluster: 0,
         };
         let mut atom_end = 0;
+        let mut seams = self.seams.iter().copied().peekable();
         let mut boundaries =
             BoundarySweep::new(self.input.decoration_spans, self.span_edge_levels());
         boundaries.emit_leading(0, &mut items);
@@ -111,11 +113,17 @@ impl Compiler<'_> {
             let end = unit.range(&self.atoms, self.input.inline_objects).end();
             let has_trailing = boundaries.has_trailing_at(end);
             let has_leading = end < self.text.len() && boundaries.has_leading_at(end);
-            if breaks_after[i].is_some() || has_trailing || has_leading {
+            let seam = seams.next_if(|seam| matches!(unit, Unit::Atom(a) if a == seam.after));
+            if breaks_after[i].is_some() || has_trailing || has_leading || seam.is_some() {
                 boxes.close(atom_end, &mut items);
             }
             if has_trailing {
                 boundaries.emit_trailing(end, &mut items);
+            }
+            // Synthetic glue follows the trailing boundaries and precedes the
+            // discretionary and the leading ones (FE-31, AST-8).
+            if let Some(seam) = seam {
+                items.push(self.seam_node(seam));
             }
             if let Some(penalty) = breaks_after[i] {
                 let mut node = DiscretionaryNode::direct(end);

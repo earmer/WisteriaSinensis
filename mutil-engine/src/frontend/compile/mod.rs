@@ -16,6 +16,7 @@ mod breaks;
 mod checks;
 mod items;
 mod shape;
+mod spacing;
 
 use checks::check_input;
 
@@ -223,6 +224,8 @@ struct Compiler<'a> {
     units: Vec<Unit>,
     /// The paragraph's resolved bidi levels (Step 2, FE-30).
     levels: bidi::TextLevels,
+    /// Where synthetic glue goes, ascending (FE-20, FE-31).
+    seams: Vec<spacing::Seam>,
 }
 
 impl<'a> Compiler<'a> {
@@ -257,6 +260,7 @@ impl<'a> Compiler<'a> {
             atom_styles: Vec::new(),
             atom_locales: Vec::new(),
             units: Vec::new(),
+            seams: Vec::new(),
         }
     }
 
@@ -278,11 +282,13 @@ impl<'a> Compiler<'a> {
         self.resolve_levels();
         self.resolve_scripts();
         self.resolve_locales();
+        self.resolve_spacing();
         let breaks_after = self.breaks_after(&graphemes);
         let box_starts = self.box_starts(&breaks_after);
         let runs = self.build_runs();
         let mut ast = self.empty_ast();
         self.shape_runs(&runs, &box_starts, &mut ast)?;
+        self.confirm_compression(&ast);
         self.assemble_items(&box_starts, &breaks_after, &mut ast);
         ast.atoms = core::mem::take(&mut self.atoms);
         Ok(ast)
@@ -489,9 +495,13 @@ impl<'a> Compiler<'a> {
                 continue;
             }
             let style = &self.styles[self.atom_styles[start]];
+            // A cursive run takes no letter spacing (FE-27).
+            let cursive = self.atoms[start]
+                .flags
+                .contains(AtomFlags::NO_LETTER_SPACING);
             runs.push(ShapingRun {
                 baseline_align: style.baseline_align,
-                letter_spacing: style.letter_spacing,
+                letter_spacing: if cursive { 0.0 } else { style.letter_spacing },
                 word_spacing: style.word_spacing,
                 orientation: GlyphOrientation::Horizontal,
                 features: style.features.clone(),

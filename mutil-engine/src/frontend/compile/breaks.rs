@@ -137,13 +137,19 @@ impl Compiler<'_> {
     }
 
     /// Offsets where a text box must start besides the run and decoration
-    /// edges, ascending: the edges of explicit bidi spans (FE-30).
+    /// edges, ascending: the edges of explicit bidi spans (FE-30) and the
+    /// seams of synthetic glue, compression candidates included (FE-31).
     fn box_cuts(&self) -> Vec<usize> {
         let mut cuts: Vec<usize> = self
             .input
             .bidi_spans
             .iter()
             .flat_map(|span| [span.byte_range.start(), span.byte_range.end()])
+            .chain(
+                self.seams
+                    .iter()
+                    .map(|seam| self.atoms[seam.after].byte_range.end()),
+            )
             .collect();
         cuts.sort_unstable();
         cuts.dedup();
