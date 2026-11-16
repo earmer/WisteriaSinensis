@@ -11,7 +11,10 @@
 //! sides. The backend sees no locale, so `locl` is not honoured, and the
 //! adapter has no ligature carets: a ligature takes INT-5's equal slots.
 
-use super::clusters::{empty_cluster, push_clusters};
+use super::clusters::{
+    attach_synthesized, finite_nonnegative, finite_or_zero, plan_window, push_clusters,
+    push_empty_clusters,
+};
 use super::{LeadingEdit, ShaperProfile, TextShaper, TrailingEdit};
 use crate::types::{
     Direction, FontFamily, FontFeatures, FontId, FontInstanceRef, FontMetrics, FontRef, FontStyle,
@@ -125,9 +128,9 @@ impl<B: LineShaper> LineOnlyShaper<B> {
         let kept_end = string.len() - trail;
         let raw = |g: &LineGlyph, synthesized: bool| RawShapedGlyph {
             glyph_id: g.glyph_id,
-            x_advance: finite(g.x_advance),
-            x_offset: finite(g.x_offset),
-            y_offset: finite(g.y_offset),
+            x_advance: finite_or_zero(g.x_advance),
+            x_offset: finite_or_zero(g.x_offset),
+            y_offset: finite_or_zero(g.y_offset),
             is_synthesized: synthesized,
         };
         let mut leading = Vec::new();
@@ -175,17 +178,13 @@ impl<B: LineShaper> LineOnlyShaper<B> {
             return (leading, trailing, fallback);
         }
         if kept.is_empty() {
-            for index in range {
-                let mut cluster = empty_cluster(run, &atoms[index], index, fallback);
-                cluster.glyph_range = output_glyphs.len()..output_glyphs.len();
-                output_clusters.push(cluster);
-            }
+            push_empty_clusters(run, atoms, range, fallback, output_clusters, output_glyphs);
             return (leading, trailing, fallback);
         }
         // A seam is unambiguous at the start of the shaped text and after
         // white space; every other seam is reported unsafe (SHP-18).
         let safe_before = |atom: usize| {
-            atom == range.start
+            (atom == range.start && lead == 0)
                 || text[..atoms[atom].byte_range.start()]
                     .chars()
                     .next_back()
@@ -193,7 +192,8 @@ impl<B: LineShaper> LineOnlyShaper<B> {
         };
         // Split by face at atom boundaries: a face change inside an atom
         // keeps the atom's first face (the backend contract forbids one).
-        let mut segments: Vec<(usize, FontId, usize)> = Vec::new(); // (first atom, font, first glyph)
+        // Entries store `(first atom, font, first glyph)`.
+        let mut segments: Vec<(usize, FontId, usize)> = Vec::new();
         for (i, (atom, font, _)) in kept.iter().enumerate() {
             match segments.last() {
                 Some((_, last_font, _)) if last_font == font => {}
@@ -225,10 +225,6 @@ impl<B: LineShaper> LineOnlyShaper<B> {
         }
         (leading, trailing, fallback)
     }
-}
-
-fn finite(v: f32) -> f32 {
-    if v.is_finite() { v } else { 0.0 }
 }
 
 impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
@@ -285,81 +281,71 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
         output_clusters: &mut Vec<ShapedCluster>,
         output_glyphs: &mut Vec<RawShapedGlyph>,
     ) {
-        let first = atoms.partition_point(|a| a.byte_range.start() < window.start());
-        let end = atoms.partition_point(|a| a.byte_range.end() <= window.end());
-        if first >= end {
+        let Some(plan) = plan_window(atoms, window, &leading_edit, &trailing_edit) else {
             return;
-        }
-        let (leading_cut, leading_text) = match &leading_edit {
-            LeadingEdit::None => (0, String::new()),
-            LeadingEdit::ReplaceSuffix {
-                replacement,
-                cut_bytes,
-            } => (*cut_bytes as usize, replacement.to_string()),
         };
-        let (trailing_cut, trailing_text) = match &trailing_edit {
-            TrailingEdit::None => (0, String::new()),
-            TrailingEdit::AppendHyphen { hyphen } => (0, hyphen.to_string()),
-            TrailingEdit::ReplacePrefix {
-                replacement,
-                cut_bytes,
-                hyphen,
-            } => (*cut_bytes as usize, format!("{replacement}{hyphen}")),
-        };
-        let kept_start = atoms
-            .partition_point(|a| a.byte_range.start() < window.start() + leading_cut)
-            .clamp(first, end);
-        let kept_end = atoms
-            .partition_point(|a| a.byte_range.end() <= window.end().saturating_sub(trailing_cut))
-            .clamp(kept_start, end);
-        let kept_bytes = if kept_start < kept_end {
-            atoms[kept_start].byte_range.start()..atoms[kept_end - 1].byte_range.end()
+        let kept_bytes = if plan.kept_start < plan.kept_end {
+            atoms[plan.kept_start].byte_range.start()..atoms[plan.kept_end - 1].byte_range.end()
         } else {
             0..0
         };
-        let string = format!("{leading_text}{}{trailing_text}", &text[kept_bytes.clone()]);
+        let trailing_str = plan.trailing_text.as_str();
+        let shaped_input: std::borrow::Cow<'_, str> =
+            if plan.leading_text.is_empty() && trailing_str.is_empty() {
+                std::borrow::Cow::Borrowed(&text[kept_bytes.clone()])
+            } else {
+                let mut s = String::with_capacity(
+                    plan.leading_text.len() + kept_bytes.len() + trailing_str.len(),
+                );
+                s.push_str(plan.leading_text);
+                s.push_str(&text[kept_bytes.clone()]);
+                s.push_str(trailing_str);
+                std::borrow::Cow::Owned(s)
+            };
         let first_cluster = output_clusters.len();
-        // Shape the kept atoms aside first: the cut atoms before them take
-        // empty clusters in the face the backend chose (SHP-6 keeps the
-        // window's atoms partitioned).
-        let mut clusters = Vec::new();
-        let mut glyphs = Vec::new();
+        // Emit any cut leading atoms directly with a placeholder face, then
+        // patch them once `shape_atoms` reports the backend's chosen face.
+        push_empty_clusters(
+            run,
+            atoms,
+            plan.first..plan.kept_start,
+            FontId::default(),
+            output_clusters,
+            output_glyphs,
+        );
         let (leading, trailing, font) = self.shape_atoms(
-            &string,
-            (leading_text.len(), trailing_text.len()),
+            &shaped_input,
+            (plan.leading_text.len(), trailing_str.len()),
             kept_bytes.start,
             run,
             atoms,
-            kept_start..kept_end,
+            plan.kept_start..plan.kept_end,
             text,
-            &mut clusters,
-            &mut glyphs,
+            output_clusters,
+            output_glyphs,
         );
-        let blank = |index: usize, out: &mut Vec<ShapedCluster>, at: usize| {
-            let mut cluster = empty_cluster(run, &atoms[index], index, font);
-            cluster.glyph_range = at..at;
-            out.push(cluster);
-        };
-        for index in first..kept_start {
-            blank(index, output_clusters, output_glyphs.len());
+        if plan.first < plan.kept_start {
+            let lead_count = plan.kept_start - plan.first;
+            for cluster in &mut output_clusters[first_cluster..first_cluster + lead_count] {
+                cluster.font = FontRef::unscaled(font);
+            }
         }
-        let offset = output_glyphs.len();
-        output_glyphs.extend(glyphs);
-        output_clusters.extend(clusters.into_iter().map(|mut c| {
-            c.glyph_range = c.glyph_range.start + offset..c.glyph_range.end + offset;
-            c
-        }));
-        for index in kept_end..end {
-            blank(index, output_clusters, output_glyphs.len());
-        }
+        push_empty_clusters(
+            run,
+            atoms,
+            plan.kept_end..plan.end,
+            font,
+            output_clusters,
+            output_glyphs,
+        );
         let appended = output_clusters.len();
         if appended == first_cluster {
             return;
         }
         output_clusters[first_cluster].safe_to_concat_before = false;
         output_clusters[first_cluster].safe_to_break_before =
-            output_clusters[first_cluster].safe_to_break_before && leading_text.is_empty();
-        attach(
+            output_clusters[first_cluster].safe_to_break_before && plan.leading_text.is_empty();
+        attach_synthesized(
             &mut output_clusters[first_cluster..],
             output_glyphs,
             leading,
@@ -377,44 +363,6 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
     }
 
     fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32 {
-        let advance = self.backend.space_advance(instance, orientation);
-        if advance.is_finite() {
-            advance.max(0.0)
-        } else {
-            0.0
-        }
-    }
-}
-
-/// Puts `leading` glyphs before the first of `clusters` and `trailing`
-/// glyphs after the last one's (SHP-6), shifting the glyph ranges between.
-fn attach(
-    clusters: &mut [ShapedCluster],
-    glyphs: &mut Vec<RawShapedGlyph>,
-    leading: Vec<RawShapedGlyph>,
-    trailing: Vec<RawShapedGlyph>,
-) {
-    let width = |g: &[RawShapedGlyph]| g.iter().map(|g| g.x_advance).sum::<f32>();
-    if !trailing.is_empty() {
-        let w = width(&trailing);
-        glyphs.extend(trailing);
-        let last = clusters.last_mut().expect("a cluster was appended");
-        last.glyph_range.end = glyphs.len();
-        last.natural_width = (last.natural_width + w).max(0.0);
-    }
-    if !leading.is_empty() {
-        let w = width(&leading);
-        let count = leading.len();
-        let at = clusters[0].glyph_range.start;
-        glyphs.splice(at..at, leading);
-        for (k, cluster) in clusters.iter_mut().enumerate() {
-            if k == 0 {
-                cluster.glyph_range.end += count;
-                cluster.natural_width = (cluster.natural_width + w).max(0.0);
-            } else {
-                cluster.glyph_range =
-                    cluster.glyph_range.start + count..cluster.glyph_range.end + count;
-            }
-        }
+        finite_nonnegative(self.backend.space_advance(instance, orientation))
     }
 }

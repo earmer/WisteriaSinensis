@@ -260,7 +260,7 @@ pub enum SoftHyphenPolicy {
 /// flow-space origin, whatever the line's indent or slot (spec OPT-1, ST3-1).
 /// A uniform step is the minimal configuration.
 ///
-/// Parsed, not validated (spec §1.5, A3): [`new`](Self::new) refuses a step
+/// Parsed, not validated (spec §1.5, AX-3): [`new`](Self::new) refuses a step
 /// that is not finite and positive, so a `TabStops` that exists is usable.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabStops {
@@ -424,10 +424,9 @@ impl LayoutConstraints {
         if !geometry.is_valid(block_start, self.wrap_width) {
             return Err(LayoutInputError::InvalidLineGeometry);
         }
-        // A fully obstructed answer to an unexpanded query must point at least
-        // `MIN_CLEARANCE_STEP` ahead, so layout always progresses (spec GEO-4).
-        let stalls = previous.is_none()
-            && geometry.slots.is_empty()
+        // Any fully obstructed answer must point at least `MIN_CLEARANCE_STEP`
+        // ahead, so layout always progresses (spec GEO-4, G3).
+        let stalls = geometry.slots.is_empty()
             && geometry
                 .next_feature_block_offset
                 .is_none_or(|next| next - block_start < MIN_CLEARANCE_STEP);
@@ -508,7 +507,7 @@ impl LineClampPolicy {
 
 /// One available inline interval; only its end may be positive infinity.
 ///
-/// Parsed, not validated (spec §1.5, A3): [`new`](Self::new) accepts only a
+/// Parsed, not validated (spec §1.5, AX-3): [`new`](Self::new) accepts only a
 /// finite start, an end strictly beyond it and a finite width (or an end of
 /// positive infinity), so a constraint that exists is well formed. Whether it
 /// suits a particular line, inside that line's inline envelope, depends on

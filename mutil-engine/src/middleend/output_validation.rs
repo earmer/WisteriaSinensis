@@ -392,13 +392,6 @@ pub enum ParagraphErrorReason {
     InconsistentAtomicFragments,
 }
 
-/// The pen interval of a glyph, normalised so that `lo <= hi` (an advance may
-/// be negative).
-fn pen_interval(glyph: &PositionedGlyph) -> (f32, f32) {
-    let end = glyph.x + glyph.advance;
-    (glyph.x.min(end), glyph.x.max(end))
-}
-
 /// Whether `[lo, hi]` lies in the content block of `slot`. The one rule that
 /// decides both whether content belongs to a slot and whether the slot counts
 /// as occupied.
@@ -536,24 +529,23 @@ impl PositionedLine {
     /// occupied slot's content.
     #[must_use]
     pub fn hanging_left(&self) -> f32 {
-        self.hanging_extents().0
+        self.occupied_slots()
+            .map_or(0.0, |o| self.hanging_extents(&o).0)
     }
 
     /// Overflow of hanging punctuation beyond the right edge of the last
     /// occupied slot's content.
     #[must_use]
     pub fn hanging_right(&self) -> f32 {
-        self.hanging_extents().1
+        self.occupied_slots()
+            .map_or(0.0, |o| self.hanging_extents(&o).1)
     }
 
     /// `(left, right)` hanging overflow: the largest overflow of an
     /// `is_hanging` glyph's pen interval beyond the body edges, from the left
     /// edge of the first occupied slot's content to the right edge of the
-    /// last one's. Zero on a line with no occupied slot.
-    fn hanging_extents(&self) -> (f32, f32) {
-        let Some((first, last)) = self.occupied_slots() else {
-            return (0.0, 0.0);
-        };
+    /// last one's.
+    fn hanging_extents(&self, &(first, last): &(usize, usize)) -> (f32, f32) {
         let (left, right) = (
             self.slots[first].content_start,
             self.slots[last].content_end(),
@@ -563,7 +555,7 @@ impl PositionedLine {
             .flat_map(|r| &r.glyphs)
             .filter(|g| g.is_hanging && g.advance != 0.0 && !self.is_trailing_whitespace(g))
             .fold((0.0_f32, 0.0_f32), |(l, r), g| {
-                let (lo, hi) = pen_interval(g);
+                let (lo, hi) = g.pen_interval();
                 (l.max(left - lo), r.max(hi - right))
             })
     }
@@ -574,7 +566,7 @@ impl PositionedLine {
         let is_occupied = |slot: &PositionedSlot| {
             slot.visual_width > 0.0
                 || self.visual_runs.iter().flat_map(|r| &r.glyphs).any(|g| {
-                    let (lo, hi) = pen_interval(g);
+                    let (lo, hi) = g.pen_interval();
                     !g.is_hanging
                         && g.byte_range
                             .is_some_and(|r| r.start() < self.visible_byte_end)
@@ -1123,7 +1115,7 @@ impl PositionedLine {
     ) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
         let slots = &self.slots;
-        let Some((first_index, last_index)) = self.occupied_slots() else {
+        let Some(occupied) = self.occupied_slots() else {
             let has_nothing = self.visual_runs.iter().all(|r| r.glyphs.is_empty())
                 && self.visual_boxes.is_empty()
                 && self.tabs.is_empty()
@@ -1138,6 +1130,7 @@ impl PositionedLine {
                 })
             };
         };
+        let (first_index, last_index) = occupied;
         let (first, last) = (&slots[first_index], &slots[last_index]);
         // The body: from the left edge of the first occupied slot's content to
         // the right edge of the last one's.
@@ -1161,7 +1154,7 @@ impl PositionedLine {
         let collapsible = ctx.whitespace == HangingWhitespaceMode::Collapsible;
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
-                let (lo, hi) = pen_interval(g);
+                let (lo, hi) = g.pen_interval();
                 if self.is_trailing_whitespace(g) {
                     if g.is_hanging {
                         return Err(E::TrailingWhitespaceMarkedHanging { run, glyph });
@@ -1192,7 +1185,7 @@ impl PositionedLine {
                 }
             }
         }
-        let (hanging_left, hanging_right) = self.hanging_extents();
+        let (hanging_left, hanging_right) = self.hanging_extents(&occupied);
         for (side, expected, slot) in [
             (HangSide::Left, hanging_left, first),
             (HangSide::Right, hanging_right, last),
@@ -1276,7 +1269,7 @@ impl PositionedLine {
                 if !ann.base_byte_range.contains_range(*range) {
                     return invalid(R::GlyphStraddlesBase);
                 }
-                let (lo, hi) = pen_interval(glyph);
+                let (lo, hi) = glyph.pen_interval();
                 (base_lo, base_hi) = (base_lo.min(lo), base_hi.max(hi));
             }
             if base_lo > base_hi {
@@ -1292,7 +1285,7 @@ impl PositionedLine {
             if ann
                 .glyphs
                 .iter()
-                .map(pen_interval)
+                .map(PositionedGlyph::pen_interval)
                 .any(|(glyph_lo, glyph_hi)| glyph_lo < lo - eps || glyph_hi > hi + eps)
             {
                 return invalid(R::OutsideOverhang);
@@ -1391,7 +1384,7 @@ impl PositionedLine {
             }
         };
         for g in self.visual_runs.iter().flat_map(|r| &r.glyphs) {
-            let (lo, hi) = pen_interval(g);
+            let (lo, hi) = g.pen_interval();
             if self.is_trailing_whitespace(g) || g.advance == 0.0 {
                 continue;
             }
@@ -1511,7 +1504,7 @@ impl PositionedLine {
         };
         let (range, start, end, width) = entity;
         if self.span_fragments.is_empty() {
-            return (start - origin).abs() <= tolerance(width, vw) && approx_eq(width, vw);
+            return approx_eq(start, origin) && approx_eq(width, vw);
         }
         let left = self
             .span_fragments
@@ -1529,7 +1522,7 @@ impl PositionedLine {
             && range.end() >= self.visible_byte_end
             && start >= origin - tolerance(width, vw)
             && end <= origin + vw + tolerance(width, vw)
-            && (left - origin).abs() <= tolerance(width, vw)
+            && approx_eq(left, origin)
             && approx_eq(right - origin, vw)
     }
 
@@ -1558,7 +1551,7 @@ impl PositionedLine {
                 if g.is_hanging || self.is_trailing_whitespace(g) {
                     continue;
                 }
-                let (lo, hi) = pen_interval(g);
+                let (lo, hi) = g.pen_interval();
                 if let Some(span_id) = self.uncovered_span(range, lo, hi) {
                     return Err(E::GlyphOutsideSpanFragment {
                         span_id,
@@ -1682,11 +1675,7 @@ impl PositionedParagraph {
         let mut rendered_end = 0;
         let mut annotation_ids = HashSet::new();
         for (i, line) in self.lines.iter().enumerate() {
-            if line.byte_range.start() != rendered_end
-                || line.byte_range.end() > text.len()
-                || !text.is_char_boundary(line.byte_range.start())
-                || !text.is_char_boundary(line.byte_range.end())
-            {
+            if line.byte_range.start() != rendered_end || line.byte_range.slice(text).is_none() {
                 return invalid(i, R::SourceNotCovered);
             }
             if line.is_ellipsized && i != last {

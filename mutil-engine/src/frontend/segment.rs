@@ -60,21 +60,13 @@ static WORDS: LazyLock<WordSegmenterBorrowed<'static>> =
 /// The UAX #29 word boundaries of `text`, ascending, `0` and `text.len()`
 /// included.
 pub(crate) fn word_boundaries(text: &str) -> Vec<usize> {
-    let mut boundaries: Vec<usize> = WORDS.segment_str(text).collect();
-    if boundaries.first() != Some(&0) {
-        boundaries.insert(0, 0);
-    }
-    boundaries
+    WORDS.segment_str(text).collect()
 }
 
 /// The extended grapheme cluster boundaries of `text` (UAX #29, GB9c
 /// included), ascending, from `0` to `text.len()` inclusive.
 pub(crate) fn grapheme_boundaries(text: &str) -> Vec<usize> {
-    let mut boundaries: Vec<usize> = GRAPHEMES.segment_str(text).collect();
-    if boundaries.first() != Some(&0) {
-        boundaries.insert(0, 0);
-    }
-    boundaries
+    GRAPHEMES.segment_str(text).collect()
 }
 
 /// The UAX #14 break opportunities of `text` under the given options,
@@ -91,7 +83,7 @@ pub(crate) fn line_opportunities(
         LineBreakStrictness::Normal => 1,
         LineBreakStrictness::Strict => 2,
         LineBreakStrictness::Anywhere => {
-            return graphemes.iter().copied().filter(|&b| b > 0).collect();
+            return graphemes.get(1..).unwrap_or_default().to_vec();
         }
     };
     let w = match word_option {

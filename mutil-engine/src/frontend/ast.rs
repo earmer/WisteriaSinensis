@@ -143,7 +143,7 @@ pub enum BoxNode {
         /// **run-local** (see [`ShapedCluster`]).
         cluster_range: Range<usize>,
         /// Sum of the clusters' `natural_width`s: a validated cache (spec §1.5,
-        /// A2), because the line fitter reads it for every candidate;
+        /// AX-2), because the line fitter reads it for every candidate;
         /// `check_layout_inputs` requires exact agreement with the clusters.
         natural_width: f32,
     },
@@ -196,7 +196,7 @@ pub enum BreakAction {
     ///
     /// The node's `byte_range` says which of the two it is
     /// ([`DiscretionaryNode::is_paragraph_end`]), so the action stores
-    /// nothing (spec §1.5, A2):
+    /// nothing (spec §1.5, AX-2):
     ///
     /// * a **non-empty** range is an explicit line terminator present in the
     ///   text. Inside one paragraph that is **U+2028 only**: `\n`, `\r\n` and
@@ -284,7 +284,7 @@ pub struct DiscretionaryNode {
     ///
     /// Both widths are the only home of the shaping deltas of `Hyphenate` and
     /// `CjkPunctAdjust`. The padding and the repeated advance folded into them
-    /// are a validated cache (spec §1.5, A2): the breaker reads them for every
+    /// are a validated cache (spec §1.5, AX-2): the breaker reads them for every
     /// candidate, and `check_layout_inputs` requires exact agreement with the
     /// spans and the action.
     pub post_break_width: f32,
@@ -419,7 +419,7 @@ pub enum WordNode {
         ///
         /// A tab stores no bidi level: it is a segment separator, which UAX #9
         /// rule L1 resets to the paragraph level,
-        /// `ParagraphAst::base_direction.base_level()` (spec §1.5, A2).
+        /// `ParagraphAst::base_direction.base_level()` (spec §1.5, AX-2).
         byte_range: TextRange,
     },
 }

@@ -49,7 +49,7 @@ pub struct PositionedGlyph {
     /// Source bytes, non-empty. `None` exactly for a **synthesized** glyph,
     /// one with no source counterpart (an inserted hyphen, a repeated math
     /// operator, an ellipsis), and for annotation glyphs, which never claim
-    /// body bytes (spec §1.5, A1). A glyph replacing source atoms after a
+    /// body bytes (spec §1.5, AX-1). A glyph replacing source atoms after a
     /// boundary re-shape keeps their range; an actual U+00AD in the source
     /// is not synthesized.
     pub byte_range: Option<TextRange>,
@@ -62,11 +62,19 @@ pub struct PositionedGlyph {
 
 impl PositionedGlyph {
     /// `true` for a glyph with no source counterpart: `byte_range` is `None`,
-    /// the only marker of synthesis (spec §1.5, A1). Synthesized glyphs are
+    /// the only marker of synthesis (spec §1.5, AX-1). Synthesized glyphs are
     /// never copied to the clipboard (§6.6).
     #[must_use]
     pub const fn is_synthesized(&self) -> bool {
         self.byte_range.is_none()
+    }
+
+    /// The normalized inline pen interval `(lo, hi)` covered by this glyph
+    /// (`lo <= hi`, accounting for negative advances).
+    #[must_use]
+    pub(crate) fn pen_interval(&self) -> (f32, f32) {
+        let end = self.x + self.advance;
+        (self.x.min(end), self.x.max(end))
     }
 }
 
@@ -168,7 +176,7 @@ pub struct PositionedTab {
     /// except for a trailing tab under `Preserved` (trailing-whitespace rule).
     pub x: f32,
     /// Width (non-negative). A tab stores no bidi level: UAX #9 rule L1 puts
-    /// it at the paragraph level (spec §1.5, A2).
+    /// it at the paragraph level (spec §1.5, AX-2).
     pub width: f32,
 }
 
@@ -180,7 +188,7 @@ pub struct PositionedTab {
 /// range, so [`is_first_fragment`](Self::is_first_fragment) and
 /// [`is_last_fragment`](Self::is_last_fragment) follow from the fragment
 /// alone: a painter that joins borders across fragments reads them from the
-/// two ranges, which no stored flag can contradict (spec §1.5, A2).
+/// two ranges, which no stored flag can contradict (spec §1.5, AX-2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedSpanFragment {
     /// Identifier of the `InlineDecorationSpan`.

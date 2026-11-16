@@ -75,7 +75,7 @@ pub type FamilyStack = Arc<[FontFamily]>;
 
 /// CSS-scale font weight: 1 to 1000, 400 normal, 700 bold.
 ///
-/// Parsed, not validated (spec §1.5, A3): the field is private and
+/// Parsed, not validated (spec §1.5, AX-3): the field is private and
 /// [`new`](Self::new) refuses a value outside the scale, so a weight that
 /// exists is in range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -144,7 +144,7 @@ pub struct FontFeature {
 /// One variable-font axis setting, for example `("wght", 650.0)` (spec §4.2
 /// req. 5: the cache key includes "variation settings").
 ///
-/// Parsed, not validated (spec §1.5, A3): [`new`](Self::new) refuses a
+/// Parsed, not validated (spec §1.5, AX-3): [`new`](Self::new) refuses a
 /// coordinate that is not finite and maps `-0.0` to `0.0`, so equality and
 /// hashing by bit pattern are sound and agree with numeric equality.
 #[derive(Clone, Copy, Debug)]
@@ -157,9 +157,13 @@ impl FontVariation {
     /// The setting of axis `tag` to `value`, with `-0.0` canonicalised to
     /// `0.0`; `None` unless `value` is finite.
     #[must_use]
-    pub fn new(tag: [u8; 4], value: f32) -> Option<Self> {
+    pub const fn new(tag: [u8; 4], value: f32) -> Option<Self> {
         let value = if value == 0.0 { 0.0 } else { value };
-        value.is_finite().then_some(Self { tag, value })
+        if value.is_finite() {
+            Some(Self { tag, value })
+        } else {
+            None
+        }
     }
 
     /// Four-byte axis tag.
@@ -406,6 +410,8 @@ mod tests {
 
     #[test]
     fn a_variation_is_finite_by_construction() {
+        const WEIGHT: Option<FontVariation> = FontVariation::new(*b"wght", 400.0);
+        assert!(WEIGHT.is_some());
         for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             assert_eq!(FontVariation::new(*b"wght", bad), None);
         }

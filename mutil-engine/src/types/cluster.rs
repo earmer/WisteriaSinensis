@@ -101,9 +101,9 @@ pub struct ShapedCluster {
     /// Bidi level; a cluster never straddles two levels (§3 Step 2.3).
     pub bidi_level: BidiLevel,
     /// Per-flag aggregate of the covered atoms' flags, as computed by
-    /// `AtomFlags::for_cluster`: open-punctuation from the first atom,
-    /// `ALLOW_CJK_JUSTIFY_AFTER` and close-punctuation from the last, all other
-    /// flags ORed.
+    /// `AtomFlags::for_cluster`: `FIRST_ATOM_ONLY` (`IS_OPEN_PUNCT` and
+    /// `BINDS_TO_PREVIOUS`) from the first atom, `ALLOW_CJK_JUSTIFY_AFTER` and
+    /// `IS_CLOSE_PUNCT` from the last, all other flags ORed.
     pub flags: AtomFlags,
     /// The cluster's glyphs, as a range of the glyph buffer it is stored
     /// beside (see "Index spaces" above). Glyphs are in **logical** order,

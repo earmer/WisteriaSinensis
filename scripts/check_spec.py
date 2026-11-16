@@ -190,6 +190,71 @@ def parse_members(code: str, types: dict[str, TypeDef]) -> None:
             types[name].members.add(trait)
 
 
+def top_level_pub_fns(code: str) -> set[str]:
+    """Returns `pub fn` names declared at brace depth 0 (outside impls/traits/bodies)."""
+    top: list[str] = []
+    depth, i, n = 0, 0, len(code)
+    while i < n:
+        ch = code[i]
+        if ch == '"':
+            j = i + 1
+            while j < n and code[j] != '"':
+                j += 2 if code[j] == "\\" else 1
+            if depth == 0:
+                top.append('""')
+            i = j + 1
+        elif ch == "'":
+            m = re.match(r"'(\\.|[^\\'])'", code[i : i + 4])
+            if m:
+                if depth == 0:
+                    top.append("''")
+                i += len(m.group(0))
+            else:
+                if depth == 0:
+                    top.append(ch)
+                i += 1
+        elif ch == "{":
+            depth += 1
+            i += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+            i += 1
+        else:
+            if depth == 0:
+                top.append(ch)
+            i += 1
+    return set(
+        re.findall(
+            rf"\bpub\s+(?:const\s+)?(?:unsafe\s+)?fn\s+({IDENT})\b", "".join(top)
+        )
+    )
+
+
+def parse_impl_methods(code: str) -> list[tuple[str, str]]:
+    """Returns `(TargetType, method_name)` pairs written inside `impl` blocks."""
+    out: list[tuple[str, str]] = []
+    for m in re.finditer(
+        rf"\bimpl(?:<[^{{]*?>)?\s+(?:({IDENT})(?:<[^{{]*?>)?\s+for\s+)?({IDENT})\b[^{{;]*\{{",
+        code,
+    ):
+        owner = m.group(2)
+        body = code[m.end() - 1 : matching(code, m.end() - 1)]
+        for fm in re.finditer(rf"\bfn\s+({IDENT})\b", body):
+            out.append((owner, fm.group(1)))
+    return out
+
+
+def parse_traits(code: str, public_only: bool) -> dict[str, set[str]]:
+    """Returns `{TraitName: {method_names...}}` for traits in `code`."""
+    traits: dict[str, set[str]] = {}
+    vis = r"pub\s+" if public_only else r"(?:pub(?:\([^)]*\))?\s+)?"
+    for m in re.finditer(rf"\b{vis}trait\s+({IDENT})\b[^{{;]*\{{", code):
+        name = m.group(1)
+        body = code[m.end() - 1 : matching(code, m.end() - 1)]
+        traits.setdefault(name, set()).update(re.findall(rf"\bfn\s+({IDENT})\b", body))
+    return traits
+
+
 def remove_test_modules(code: str) -> str:
     """Drops every `#[cfg(test)] mod name { .. }`: tests are not public surface."""
     while True:
@@ -199,7 +264,7 @@ def remove_test_modules(code: str) -> str:
         code = code[: m.start()] + code[matching(code, m.end() - 1) :]
 
 
-def crate_types(src: Path) -> dict[str, TypeDef]:
+def crate_types(src: Path) -> tuple[dict[str, TypeDef], set[str], dict[str, set[str]]]:
     code = "\n".join(strip_comments(p.read_text()) for p in sorted(src.rglob("*.rs")))
     code = remove_test_modules(code)
     types = parse_types(code, public_only=True)
@@ -207,7 +272,7 @@ def crate_types(src: Path) -> dict[str, TypeDef]:
     # Type aliases are names too.
     for am in re.finditer(rf"\bpub\s+type\s+({IDENT})\b", code):
         types.setdefault(am.group(1), TypeDef("type", am.group(1), opaque=True))
-    return types
+    return types, top_level_pub_fns(code), parse_traits(code, public_only=True)
 
 
 def spec_blocks(spec: str) -> tuple[list[str], list[str]]:
@@ -219,18 +284,27 @@ def spec_blocks(spec: str) -> tuple[list[str], list[str]]:
 
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "--dump":
-        for name, t in sorted(crate_types(SRC).items()):
+        types, _, _ = crate_types(SRC)
+        for name, t in sorted(types.items()):
             shape = "opaque" if t.opaque else (f"tuple({t.tuple_arity})" if t.tuple_arity is not None else ", ".join(t.fields))
             print(f"{t.kind} {name}: {shape}  || {', '.join(sorted(t.members))}")
         return 0
     spec_path = Path(sys.argv[1]) if len(sys.argv) > 1 else SPEC
     src = Path(sys.argv[2]) if len(sys.argv) > 2 else SRC
     spec = spec_path.read_text()
-    crate = crate_types(src)
+    crate, crate_fns, crate_traits = crate_types(src)
     checked_blocks, planned_blocks = spec_blocks(spec)
     written: dict[str, TypeDef] = {}
+    spec_fns: set[str] = set()
+    spec_impls: list[tuple[str, str]] = []
+    spec_traits: dict[str, set[str]] = {}
     for block in checked_blocks:
-        written.update(parse_types(strip_comments(block), public_only=True))
+        clean = strip_comments(block)
+        written.update(parse_types(clean, public_only=True))
+        spec_fns.update(top_level_pub_fns(clean))
+        spec_impls.extend(parse_impl_methods(clean))
+        for name, methods in parse_traits(clean, public_only=True).items():
+            spec_traits.setdefault(name, set()).update(methods)
     planned: dict[str, TypeDef] = {}
     for block in planned_blocks:
         planned.update(parse_types(strip_comments(block), public_only=True))
@@ -264,6 +338,30 @@ def main() -> int:
                 errors.append(f"`{name}` variants differ: missing in spec {missing}, not in crate {extra}")
         elif c.kind != "type":
             errors.append(f"`{name}` is a {w.kind} in the spec but a {c.kind} in the crate")
+
+    # 1b. Written free functions, impl methods, and traits match the crate.
+    for fn_name in sorted(spec_fns):
+        if fn_name not in crate_fns:
+            errors.append(f"spec function `pub fn {fn_name}` does not exist in the crate (mark its block `rust planned` if it is future work)")
+    for owner, method in spec_impls:
+        c = crate.get(owner)
+        if c is None:
+            errors.append(f"spec impl target `{owner}` does not exist in the crate")
+        elif method not in c.members:
+            errors.append(f"spec method `{owner}::{method}` does not exist in the crate")
+    for name, w_methods in sorted(spec_traits.items()):
+        c_methods = crate_traits.get(name)
+        if c_methods is None:
+            errors.append(f"spec trait `{name}` does not exist in the crate")
+        elif w_methods != c_methods:
+            missing = sorted(c_methods - w_methods)
+            extra = sorted(w_methods - c_methods)
+            errors.append(f"trait `{name}` methods differ: missing in spec {missing}, not in crate {extra}")
+    for name, methods in crate_traits.items():
+        if name not in spec_traits:
+            errors.append(f"crate trait `{name}` is not written in any ```rust block of the spec")
+        else:
+            crate.setdefault(name, TypeDef("trait", name, members=set(methods)))
 
     # 2. Completeness: every public crate type is written.
     for name, c in sorted(crate.items()):

@@ -17,7 +17,7 @@ pub type ByteIndex = usize;
 /// the caller computes; [`try_new`](Self::try_new) returns `None` for offsets
 /// read from outside. Whether a range falls on the code point boundaries of a
 /// particular text depends on that text, so it is checked where the text is
-/// known, not by a constructor (spec §1.5, A3).
+/// known, not by a constructor (spec §1.5, AX-3).
 /// Layout: two `usize`s, 16 bytes on 64-bit targets, no padding.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TextRange {

@@ -22,12 +22,20 @@ pub(crate) fn url_ranges(text: &str) -> Vec<TextRange> {
     let mut out: Vec<TextRange> = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
+        if !bytes[i].eq_ignore_ascii_case(&b'w') && bytes[i] != b':' {
+            i += 1;
+            continue;
+        }
         let at_word_start = i == 0
             || text[..i]
                 .chars()
                 .next_back()
                 .is_some_and(char::is_whitespace);
-        let start = if at_word_start && text[i..].starts_with("www.") {
+        let start = if at_word_start
+            && bytes[i..]
+                .get(..4)
+                .is_some_and(|w| w.eq_ignore_ascii_case(b"www."))
+        {
             Some(i)
         } else if text[i..].starts_with("://") {
             // Walk back over the scheme.
@@ -45,7 +53,7 @@ pub(crate) fn url_ranges(text: &str) -> Vec<TextRange> {
             None
         };
         let Some(start) = start else {
-            i += text[i..].chars().next().map_or(1, char::len_utf8);
+            i += 1;
             continue;
         };
         let mut end = text[start..]
@@ -105,55 +113,53 @@ pub(crate) fn url_opportunities(
     url: TextRange,
     graphemes: &[usize],
 ) -> Vec<(usize, i32)> {
+    let bytes = text.as_bytes();
     let s = &text[url.as_range()];
     let base = url.start();
     let scheme_end = s.find("://").map(|k| base + k + 3);
-    let mut marks: Vec<usize> = Vec::new();
-    for (k, c) in s.char_indices() {
-        let at = base + k;
-        match c {
-            '.' | ',' | '-' | '_' | '?' | '#' | '%' | '~' => marks.push(at),
-            '/' => marks.push(at + 1),
-            '=' | '&' => {
-                marks.push(at);
-                marks.push(at + 1);
-            }
-            _ => {}
-        }
-    }
-    if let Some(e) = scheme_end {
-        marks.retain(|&m| m >= e);
-        marks.push(e);
-    }
+    let scan_start = scheme_end.unwrap_or(url.start());
+    let lo = graphemes.partition_point(|&g| g < scan_start);
+    let hi = graphemes.partition_point(|&g| g < url.end());
+    let slice = &graphemes[lo..hi];
+
     let beside_bracket =
-        |at: usize| text[..at].ends_with(['(', '[']) || text[at..].starts_with(['(', '[']);
-    let inside = |at: usize| at > url.start() && at < url.end();
-    marks.retain(|&m| inside(m) && !beside_bracket(m) && graphemes.binary_search(&m).is_ok());
-    marks.sort_unstable();
-    marks.dedup();
-    let mut out: Vec<(usize, i32)> = marks
-        .iter()
-        .map(|&m| (m, DiscretionaryNode::URL_PENALTY_MIN))
-        .collect();
-    // Long pieces between the marks may break anywhere.
-    let mut edges = vec![scheme_end.unwrap_or(url.start())];
-    edges.extend(marks.iter().copied());
-    edges.push(url.end());
-    for pair in edges.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        if b.saturating_sub(a) < LONG_PIECE {
-            continue;
+        |at: usize| matches!(bytes[at - 1], b'(' | b'[') || matches!(bytes[at], b'(' | b'[');
+    let emit_long_piece = |out: &mut Vec<(usize, i32)>,
+                           candidates: &[usize],
+                           piece_start: usize,
+                           piece_end: usize| {
+        if piece_end.saturating_sub(piece_start) < LONG_PIECE {
+            return;
         }
-        let lo = graphemes.partition_point(|&g| g <= a);
-        let hi = graphemes.partition_point(|&g| g < b);
-        for &g in &graphemes[lo..hi] {
-            if inside(g) && !beside_bracket(g) {
+        for &g in candidates {
+            if g > piece_start && !beside_bracket(g) {
                 out.push((g, DiscretionaryNode::URL_PENALTY_MAX));
             }
         }
+    };
+
+    let mut out = Vec::new();
+    let mut piece_start = scan_start;
+    let mut piece_start_idx = 0usize;
+    for (idx, &g) in slice.iter().enumerate() {
+        if g <= url.start() || beside_bracket(g) {
+            continue;
+        }
+        let is_mark = scheme_end == Some(g)
+            || matches!(
+                bytes[g],
+                b'.' | b',' | b'-' | b'_' | b'?' | b'#' | b'%' | b'~' | b'=' | b'&'
+            )
+            || matches!(bytes[g - 1], b'/' | b'=' | b'&');
+        if !is_mark {
+            continue;
+        }
+        emit_long_piece(&mut out, &slice[piece_start_idx..idx], piece_start, g);
+        out.push((g, DiscretionaryNode::URL_PENALTY_MIN));
+        piece_start = g;
+        piece_start_idx = idx + 1;
     }
-    out.sort_unstable();
-    out.dedup_by_key(|(at, _)| *at);
+    emit_long_piece(&mut out, &slice[piece_start_idx..], piece_start, url.end());
     out
 }
 
