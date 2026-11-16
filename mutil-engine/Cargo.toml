@@ -8,7 +8,8 @@ license = "GPL-3.0-or-later"
 publish = false
 
 [dependencies]
-harfrust = "0.16.0"
+harfrust = { version = "0.16.0", default-features = false, features = ["std", "icu"] }
+icu_normalizer = "2.4.0"
 icu_properties = "2.4.0"
 icu_segmenter = "2.4.0"
 read-fonts = "0.47.0"

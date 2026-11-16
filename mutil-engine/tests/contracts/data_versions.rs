@@ -28,7 +28,11 @@ fn locked_versions(name: &str) -> Vec<&'static str> {
 fn the_locked_icu_data_is_the_reported_unicode_version() {
     // ICU4X 2.4.x data is generated from Unicode 18.0.0.
     assert_eq!(UNICODE_DATA_VERSION, "18.0.0");
-    for data_crate in ["icu_segmenter_data", "icu_properties_data"] {
+    for data_crate in [
+        "icu_segmenter_data",
+        "icu_properties_data",
+        "icu_normalizer_data",
+    ] {
         let versions = locked_versions(data_crate);
         assert_eq!(
             versions.len(),

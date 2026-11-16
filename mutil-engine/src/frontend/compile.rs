@@ -66,6 +66,14 @@ pub enum FrontendError {
         /// Index into `ParagraphInput::atomic_spans`.
         span: usize,
     },
+    /// An explicit bidi span repeats an id, is empty or outside the text, has
+    /// an edge off a grapheme boundary or inside an inline object, is out of
+    /// order, overlaps without nesting, has its predecessor's range, or nests
+    /// deeper than `MAX_BIDI_SPAN_DEPTH` (spec BID-2).
+    InvalidBidiSpan {
+        /// Index into `ParagraphInput::bidi_spans`.
+        span: usize,
+    },
     /// The input asks for something this implementation does not compile yet.
     Unsupported {
         /// What was asked for.
@@ -136,6 +144,7 @@ impl fmt::Display for FrontendError {
             }
             Self::InvalidDecorationSpan { span } => write!(f, "decoration span {span} is invalid"),
             Self::InvalidAtomicSpan { span } => write!(f, "atomic span {span} is invalid"),
+            Self::InvalidBidiSpan { span } => write!(f, "explicit bidi span {span} is invalid"),
             Self::Unsupported { feature } => write!(f, "not supported yet: {feature}"),
             Self::ShaperContract { run } => {
                 write!(f, "the shaper's clusters do not partition run {run}")
