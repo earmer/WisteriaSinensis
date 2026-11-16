@@ -178,8 +178,10 @@ What the tests rely on: both faces have 1000 units per em and map the ASCII
 brackets, digits, `.`, `,`, « and ». Noto Sans Hebrew's space advances 270
 units and א 632. Noto Naskh Arabic's space advances 221 units; it joins
 Arabic letters through `init`, `medi` and `fina`. Its only GDEF caret list
-entry is U+FDF2, the ligature `liga` forms for الله, 1190 units wide with
-carets at 453, 692 and 960, which are not evenly spaced.
+entry is U+FDF2, the ligature `liga` forms for اللّٰه, spelt with U+0651
+SHADDA and U+0670 SUPERSCRIPT ALEF (plain الله shapes as four joined
+glyphs). It is 1190 units wide, with carets at 453, 692 and 960, which are
+not evenly spaced.
 
 ## Unicode conformance data (`ucd/`)
 
