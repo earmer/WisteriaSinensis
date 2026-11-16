@@ -15,8 +15,10 @@
 //! SVG path). The demo is compiled to `wasm32-unknown-unknown`; the crate is
 //! also a plain `rlib` so `cargo test` can exercise it natively.
 
+mod json;
 mod markup;
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -29,6 +31,8 @@ use mutil_engine::{
 use skrifa::outline::DrawSettings;
 use skrifa::prelude::{LocationRef, Size};
 use skrifa::{FontRef as SkrifaFont, GlyphId, MetadataProvider};
+
+use json::{conformance_json, error_json, font_json, layout_json};
 
 /// The registered families in the order every paragraph's stack lists them
 /// after the chosen face.
@@ -133,40 +137,31 @@ impl Demo {
             .collect::<Vec<_>>()
             .into()
     }
+}
 
-    /// Compiles, lays out and validates one paragraph. The returned JSON is
-    /// the engine's output, not a re-derived approximation.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one flat layout call crosses the wasm boundary"
-    )]
-    fn layout(
-        &mut self,
-        text: &str,
-        width: f32,
+struct LayoutRequest<'a> {
+    text: &'a str,
+    width: f32,
+    font_size: f32,
+    line_height: f32,
+    locale: Option<&'a str>,
+    cjk_quotes: bool,
+    primary: Option<&'a str>,
+    heuristics: bool,
+}
+
+impl Demo {
+    fn default_style(
+        &self,
         font_size: f32,
-        line_height: f32,
-        locale: Option<&str>,
-        cjk_quotes: bool,
         primary: Option<&str>,
-        heuristics: bool,
-    ) -> String {
-        let locale = match locale {
-            Some(tag) => match LocaleTag::parse_lenient(tag) {
-                Ok(tag) => Some(tag),
-                Err(_) => return error_json("input", "not a BCP 47 language tag", None),
-            },
-            None => None,
-        };
-        // The host step: inline locale tags become style spans over the
-        // plain paragraph text (spec AX-1, FE-25).
-        let marked = markup::parse(text);
-        let text = marked.text.as_str();
+        locale: Option<LocaleTag>,
+    ) -> TextStyle {
         let mut features = FontFeatures::new();
         if let Some(weight) = FontVariation::new(*b"wght", WEIGHT) {
             features.push_variation(weight);
         }
-        let style = TextStyle {
+        TextStyle {
             families: self.family_stack(primary),
             font_size,
             style: FontStyle::default(),
@@ -176,15 +171,32 @@ impl Demo {
             letter_spacing: 0.0,
             word_spacing: 0.0,
             script: None,
-            locale: locale.clone(),
+            locale,
+        }
+    }
+
+    /// Compiles, lays out and validates one paragraph. The returned JSON is
+    /// the engine's output, not a re-derived approximation.
+    fn layout(&mut self, req: &LayoutRequest<'_>) -> String {
+        let locale = match req.locale {
+            Some(tag) => match LocaleTag::parse_lenient(tag) {
+                Ok(tag) => Some(tag),
+                Err(_) => return error_json("input", "not a BCP 47 language tag", None),
+            },
+            None => None,
         };
+        // The host step: inline locale tags become style spans over the
+        // plain paragraph text (spec AX-1, FE-25).
+        let marked = markup::parse(req.text);
+        let text = marked.text.as_str();
+        let style = self.default_style(req.font_size, req.primary, locale.clone());
         let style_spans: Vec<StyleSpan> = marked
             .spans
             .iter()
-            .map(|(range, locale)| StyleSpan {
+            .map(|(range, span_locale)| StyleSpan {
                 byte_range: *range,
                 style: TextStyle {
-                    locale: Some(locale.clone()),
+                    locale: Some(span_locale.clone()),
                     ..style.clone()
                 },
             })
@@ -200,25 +212,25 @@ impl Demo {
             annotations: &[],
         };
         let constraints = LayoutConstraints {
-            wrap_width: width,
+            wrap_width: req.width,
             ..LayoutConstraints::default()
         };
         let options = LayoutOptions {
-            line_height: if line_height > 0.0 {
-                LineHeight::Fixed(line_height)
+            line_height: if req.line_height > 0.0 {
+                LineHeight::Fixed(req.line_height)
             } else {
                 LineHeight::Normal
             },
             ..LayoutOptions::default()
         };
         let frontend = FrontendOptions {
-            quote_policy: if cjk_quotes {
+            quote_policy: if req.cjk_quotes {
                 QuotePolicy::CjkAware
             } else {
                 QuotePolicy::Standard
             },
             default_locale: locale.unwrap_or_default(),
-            locale_policy: if heuristics {
+            locale_policy: if req.heuristics {
                 LocalePolicy::ExperimentalHeuristics
             } else {
                 LocalePolicy::ExplicitOnly
@@ -245,7 +257,7 @@ impl Demo {
                 return error_json("validate", &error.to_string(), Some(line));
             }
         };
-        out_json(&layout, font_size, width).finish()
+        layout_json(&layout, req.font_size, req.width)
     }
 
     fn outline(&self, font: u32, glyph: u32) -> String {
@@ -276,164 +288,6 @@ impl Demo {
             return String::new();
         }
         pen.0
-    }
-}
-
-fn error_json(stage: &str, message: &str, line: Option<usize>) -> String {
-    let mut out = Out::new();
-    out.raw("{\"ok\":false,\"stage\":");
-    out.string(stage);
-    out.raw(",\"error\":");
-    out.string(message);
-    out.raw(",\"line\":");
-    match line {
-        Some(line) => out.number(line as f32),
-        None => out.raw("null"),
-    }
-    out.raw("}");
-    out.finish()
-}
-
-/// The engine's own verdict on the paragraph: every line, its slots and
-/// carets, and every placed glyph origin (spec HST-3/HST-4).
-struct RunJson {
-    line: usize,
-    font: u32,
-    size: f32,
-    glyphs: Vec<(u32, f32, f32)>,
-}
-
-fn out_json(layout: &ValidatedLayout<'_>, font_size: f32, width: f32) -> Out {
-    let paragraph = layout.paragraph();
-    let mut out = Out::new();
-    let mut runs: Vec<RunJson> = Vec::new();
-    for run in layout.glyph_runs() {
-        let size = run.font_size() * run.font().scale;
-        let mut glyphs = Vec::new();
-        for glyph in run.glyphs() {
-            glyphs.push((glyph.glyph_id, glyph.origin.x, glyph.origin.y));
-        }
-        runs.push(RunJson {
-            line: run.line(),
-            font: run.font().font_id.0,
-            size,
-            glyphs,
-        });
-    }
-    out.raw("{\"ok\":true,\"blockSize\":");
-    out.number(paragraph.total_block_size);
-    out.raw(",\"fontSize\":");
-    out.number(font_size);
-    out.raw(",\"width\":");
-    out.number(width);
-    out.raw(",\"lineCount\":");
-    out.number(paragraph.lines.len() as f32);
-    out.raw(",\"lineHeight\":");
-    out.number(paragraph.lines.first().map_or(0.0, |line| line.line_height));
-    out.raw(",\"lines\":[");
-    for (index, line) in paragraph.lines.iter().enumerate() {
-        if index > 0 {
-            out.raw(",");
-        }
-        out.raw("{\"top\":");
-        out.number(line.baseline_y - line.ascent);
-        out.raw(",\"baseline\":");
-        out.number(line.baseline_y);
-        out.raw(",\"ascent\":");
-        out.number(line.ascent);
-        out.raw(",\"descent\":");
-        out.number(line.descent);
-        out.raw(",\"height\":");
-        out.number(line.line_height);
-        out.raw(",\"visibleEnd\":");
-        out.number(line.visible_byte_end as f32);
-        out.raw(",\"slots\":[");
-        for (slot_index, slot) in line.slots.iter().enumerate() {
-            if slot_index > 0 {
-                out.raw(",");
-            }
-            out.raw("[");
-            out.number(slot.content_start);
-            out.raw(",");
-            out.number(slot.content_end());
-            out.raw("]");
-        }
-        out.raw("],\"carets\":[");
-        for (caret_index, stop) in line.caret_stops.iter().enumerate() {
-            if caret_index > 0 {
-                out.raw(",");
-            }
-            out.number(stop.x);
-        }
-        out.raw("],\"runs\":[");
-        let mut first = true;
-        for run in runs.iter().filter(|run| run.line == index) {
-            if !first {
-                out.raw(",");
-            }
-            first = false;
-            out.raw("{\"font\":");
-            out.number(run.font as f32);
-            out.raw(",\"size\":");
-            out.number(run.size);
-            out.raw(",\"glyphs\":[");
-            for (glyph_index, (glyph, x, y)) in run.glyphs.iter().enumerate() {
-                if glyph_index > 0 {
-                    out.raw(",");
-                }
-                out.raw("[");
-                out.number(*glyph as f32);
-                out.raw(",");
-                out.number(*x);
-                out.raw(",");
-                out.number(*y);
-                out.raw("]");
-            }
-            out.raw("]}");
-        }
-        out.raw("]}");
-    }
-    out.raw("]}");
-    out
-}
-
-/// Minimal JSON writer. Every value written here is an engine output number,
-/// an id, or a string from an error, so only strings need escaping.
-struct Out(String);
-
-impl Out {
-    fn new() -> Self {
-        Self(String::with_capacity(4096))
-    }
-    fn raw(&mut self, text: &str) {
-        self.0.push_str(text);
-    }
-    fn number(&mut self, value: f32) {
-        if value.is_finite() {
-            self.0.push_str(&value.to_string());
-        } else {
-            self.0.push_str("null");
-        }
-    }
-    fn string(&mut self, text: &str) {
-        self.0.push('"');
-        for c in text.chars() {
-            match c {
-                '"' => self.0.push_str("\\\""),
-                '\\' => self.0.push_str("\\\\"),
-                '\n' => self.0.push_str("\\n"),
-                '\r' => self.0.push_str("\\r"),
-                '\t' => self.0.push_str("\\t"),
-                c if (c as u32) < 0x20 => {
-                    self.0.push_str(&format!("\\u{:04x}", c as u32));
-                }
-                c => self.0.push(c),
-            }
-        }
-        self.0.push('"');
-    }
-    fn finish(self) -> String {
-        self.0
     }
 }
 
@@ -474,7 +328,7 @@ impl PathPen {
     fn point(&mut self, x: f32, y: f32) {
         // Two decimals of a font unit: far below a device pixel at any
         // plausible size, and short enough to keep the payload small.
-        self.0.push_str(&format!("{:.2} {:.2}", x, -y));
+        let _ = write!(self.0, "{x:.2} {:.2}", -y);
     }
 }
 
@@ -560,20 +414,8 @@ pub unsafe extern "C" fn demo_add_font(
     }
     // SAFETY: the page wrote `data_len` bytes at `data_ptr`.
     let bytes = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) }.to_vec();
-    let result = with_demo(|demo| demo.add_font(family, bytes));
-    let json = match result {
-        Some(Some((id, upem))) => {
-            let mut out = Out::new();
-            out.raw("{\"id\":");
-            out.number(id as f32);
-            out.raw(",\"upem\":");
-            out.number(upem as f32);
-            out.raw("}");
-            out.finish()
-        }
-        _ => "{\"id\":null}".to_string(),
-    };
-    leak(json.into_bytes())
+    let result = with_demo(|demo| demo.add_font(family, bytes)).flatten();
+    leak(font_json(result).into_bytes())
 }
 
 /// Lays out one paragraph. `line_height` 0 means normal.
@@ -606,18 +448,17 @@ pub unsafe extern "C" fn demo_layout(
     };
     let locale = (!locale.is_empty()).then_some(locale);
     let primary = (!primary.is_empty()).then_some(primary);
-    let result = with_demo(|demo| {
-        demo.layout(
-            text,
-            width,
-            font_size,
-            line_height,
-            locale,
-            cjk_quotes != 0,
-            primary,
-            heuristics != 0,
-        )
-    });
+    let req = LayoutRequest {
+        text,
+        width,
+        font_size,
+        line_height,
+        locale,
+        cjk_quotes: cjk_quotes != 0,
+        primary,
+        heuristics: heuristics != 0,
+    };
+    let result = with_demo(|demo| demo.layout(&req));
     let json =
         result.unwrap_or_else(|| error_json("engine", "the engine is not initialised", None));
     leak(json.into_bytes())
@@ -635,27 +476,7 @@ pub extern "C" fn demo_outline(font_id: u32, glyph_id: u32) -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_conformance() -> u64 {
     let report = conformance_report();
-    let mut out = Out::new();
-    out.raw("{\"unicode\":");
-    out.string(mutil_engine::UNICODE_DATA_VERSION);
-    for (name, value) in [
-        ("grapheme", report.grapheme),
-        ("bidi", report.bidi),
-        ("lineBreak", report.line_break),
-        ("word", report.word),
-        ("script", report.script),
-        ("emoji", report.emoji),
-    ] {
-        out.raw(",\"");
-        out.raw(name);
-        out.raw("\":");
-        match value {
-            Some(version) => out.string(version),
-            None => out.raw("null"),
-        }
-    }
-    out.raw("}");
-    leak(out.finish().into_bytes())
+    leak(conformance_json(mutil_engine::UNICODE_DATA_VERSION, &report).into_bytes())
 }
 
 #[cfg(test)]
@@ -673,19 +494,23 @@ mod tests {
         demo
     }
 
+    fn req<'a>(text: &'a str, width: f32) -> LayoutRequest<'a> {
+        LayoutRequest {
+            text,
+            width,
+            font_size: 16.0,
+            line_height: 0.0,
+            locale: None,
+            cjk_quotes: false,
+            primary: None,
+            heuristics: false,
+        }
+    }
+
     #[test]
     fn a_paragraph_lays_out_and_validates() {
         let mut demo = engine();
-        let json = demo.layout(
-            "Hello world, hello world.",
-            120.0,
-            16.0,
-            0.0,
-            None,
-            false,
-            None,
-            false,
-        );
+        let json = demo.layout(&req("Hello world, hello world.", 120.0));
         assert!(json.starts_with("{\"ok\":true"), "{json}");
         assert!(json.contains("\"lines\":[{"), "{json}");
     }
@@ -723,16 +548,15 @@ mod tests {
         let sc = id("Noto Sans SC", "NotoSansSC-Subset.ttf");
         let tc = id("Noto Sans TC", "NotoSansTC-Subset.ttf");
         let jp = id("Noto Sans JP", "NotoSansJP-Subset.ttf");
-        let json = demo.layout(
-            "<zh-CN>令你甘心。骨肉分离。</zh-CN> <zh-TW>令你甘心。骨肉分離。</zh-TW> <ja>令。骨肉分離。</ja>",
-            2000.0,
-            18.0,
-            0.0,
-            None,
-            true,
-            Some("Noto Sans"),
-            false,
-        );
+        let json = demo.layout(&LayoutRequest {
+            font_size: 18.0,
+            cjk_quotes: true,
+            primary: Some("Noto Sans"),
+            ..req(
+                "<zh-CN>令你甘心。骨肉分离。</zh-CN> <zh-TW>令你甘心。骨肉分離。</zh-TW> <ja>令。骨肉分離。</ja>",
+                2000.0,
+            )
+        });
         assert!(json.starts_with("{\"ok\":true"), "{json}");
         let mut fonts = run_fonts(&json);
         fonts.dedup();
@@ -743,9 +567,16 @@ mod tests {
     #[test]
     fn a_shorthand_locale_is_accepted_and_a_malformed_one_is_not() {
         let mut demo = engine();
-        let ok = demo.layout("abc", 200.0, 16.0, 0.0, Some("jp"), false, None, true);
+        let ok = demo.layout(&LayoutRequest {
+            locale: Some("jp"),
+            heuristics: true,
+            ..req("abc", 200.0)
+        });
         assert!(ok.starts_with("{\"ok\":true"), "{ok}");
-        let bad = demo.layout("abc", 200.0, 16.0, 0.0, Some("ja JP"), false, None, false);
+        let bad = demo.layout(&LayoutRequest {
+            locale: Some("ja JP"),
+            ..req("abc", 200.0)
+        });
         assert!(bad.starts_with("{\"ok\":false"), "{bad}");
     }
 

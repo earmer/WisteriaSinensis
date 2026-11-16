@@ -69,10 +69,30 @@ const fontNote = $('font-note');
 const samples = $('samples');
 
 let textTimer = 0;
+let localeTimer = 0;
 let frame = 0;
 
+function applySample(key) {
+  const preset = PRESETS[key];
+  textarea.value = SAMPLES[key] ?? '';
+  if (preset) {
+    localeInput.value = preset.locale;
+    quotesInput.value = preset.quotes;
+    faceInput.value = preset.face;
+  }
+  syncLocalePresets();
+}
+
+function syncLocalePresets() {
+  const current = localeInput.value.trim().toLowerCase() || 'und';
+  for (const button of localePresets.querySelectorAll('button[data-locale]')) {
+    const active = button.dataset.locale.toLowerCase() === current;
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+}
+
 async function boot() {
-  textarea.value = SAMPLES.mixed;
+  applySample(samples.value);
   hint.hidden = false;
   hint.textContent = 'Loading engine and fonts…';
   renderEngineStatus(null);
@@ -91,23 +111,32 @@ async function boot() {
 }
 
 async function loadFonts() {
-  for (const [index, [family, file]] of FONTS.entries()) {
-    fontNote.textContent = `loading face ${index + 1} of ${FONTS.length}…`;
-    try {
-      const url = new URL(`../fonts/${encodeURIComponent(file)}`, import.meta.url);
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+  fontNote.textContent = `loading ${FONTS.length} faces…`;
+  const fetched = await Promise.all(
+    FONTS.map(async ([family, file]) => {
+      try {
+        const url = new URL(`../fonts/${encodeURIComponent(file)}`, import.meta.url);
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return { family, bytes: new Uint8Array(await response.arrayBuffer()) };
+      } catch (error) {
+        return { family, error: error.message };
       }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      const info = state.engine.addFont(family, bytes);
-      if (!info || info.id === null) {
-        throw new Error('not a readable font');
-      }
-      state.fonts.set(info.id, { upem: info.upem, family });
-    } catch (error) {
-      state.missing.push(`${family} (${error.message})`);
+    }),
+  );
+  for (const entry of fetched) {
+    if (entry.error) {
+      state.missing.push(`${entry.family} (${entry.error})`);
+      continue;
     }
+    const info = state.engine.addFont(entry.family, entry.bytes);
+    if (!info || info.id === null) {
+      state.missing.push(`${entry.family} (not a readable font)`);
+      continue;
+    }
+    state.fonts.set(info.id, { upem: info.upem, family: entry.family });
   }
   const loaded = state.fonts.size;
   fontChip.textContent = `${loaded} of ${FONTS.length} faces`;
@@ -198,7 +227,7 @@ function relayout() {
       gateChip.textContent = 'engine rejected the input';
       gateChip.className = 'chip bad';
       stats.innerHTML = '';
-      drawPlaceholder(settings.width, 'The engine rejected this paragraph — see the message above.');
+      drawPlaceholder(settings.width, 'Layout rejected — see message above.');
       return;
     }
     results.push(result);
@@ -425,7 +454,16 @@ for (const input of [widthInput, sizeInput, lineHeightInput, quotesInput, faceIn
   });
 }
 
-localeInput.addEventListener('change', relayout);
+localeInput.addEventListener('input', () => {
+  syncLocalePresets();
+  clearTimeout(localeTimer);
+  localeTimer = setTimeout(relayout, 200);
+});
+localeInput.addEventListener('change', () => {
+  clearTimeout(localeTimer);
+  syncLocalePresets();
+  relayout();
+});
 
 // Each preset only fills the locale field; the engine reads it with
 // `LocaleTag::parse_lenient`, so shorthand such as `jp` or `zh-tc` works too.
@@ -434,7 +472,9 @@ localePresets.addEventListener('click', (event) => {
   if (!button) {
     return;
   }
+  clearTimeout(localeTimer);
   localeInput.value = button.dataset.locale === 'und' ? '' : button.dataset.locale;
+  syncLocalePresets();
   relayout();
 });
 
@@ -461,13 +501,7 @@ const PRESETS = {
 };
 
 samples.addEventListener('change', () => {
-  const preset = PRESETS[samples.value];
-  textarea.value = SAMPLES[samples.value] ?? '';
-  if (preset) {
-    localeInput.value = preset.locale;
-    quotesInput.value = preset.quotes;
-    faceInput.value = preset.face;
-  }
+  applySample(samples.value);
   relayout();
 });
 

@@ -42,7 +42,7 @@ export class Engine {
   }
 
   #take(packed) {
-    const word = BigInt(packed);
+    const word = BigInt.asUintN(64, BigInt(packed));
     const length = Number(word & 0xffffffffn);
     const ptr = Number(word >> 32n);
     const view = new Uint8Array(this.#exports.memory.buffer, ptr, length);
