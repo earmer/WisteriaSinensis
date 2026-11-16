@@ -2,6 +2,7 @@
 
 use super::super::shaper_gate::{checked_font_metrics, checked_reshape_window, resolved_line_box};
 use super::super::{InlineSlotConstraint, LayoutInputError, StrutMetrics};
+use super::hanging::LineEdge;
 use super::{FIT_EPSILON, Layout, LineEnd, Piece, PieceKind, Reshaped, Token};
 use crate::frontend::{BoxNode, BoxOverflowPolicy, DiscretionaryNode, WordNode};
 use crate::types::{AtomFlags, FontInstanceRef, FontMetrics, RawShapedGlyph};
@@ -27,6 +28,15 @@ pub(super) fn ladder_tier(d: &DiscretionaryNode) -> usize {
         }
         _ => 0,
     }
+}
+
+/// Where a line starts: its first token, the cloned padding before it and
+/// whether it is the paragraph's first line.
+#[derive(Clone, Copy)]
+pub(super) struct LineStart {
+    pub(super) token: usize,
+    pub(super) post: f32,
+    pub(super) first_line: bool,
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
@@ -112,14 +122,26 @@ impl<'i, 'a> Layout<'i, 'a> {
         (self.inputs.cluster_glyphs(c), c.natural_width)
     }
 
-    /// Greedy fitting (spec ST1-1, ST1-5, WN-1): the last break of the
-    /// lowest ladder tier that fits before the content overflows, a
+    /// Greedy fitting (spec ST1-1, ST1-5, ST1-7, WN-1): the last break of
+    /// the lowest ladder tier that fits before the content overflows, a
     /// mandatory break, or an emergency cluster break when nothing fits.
-    pub(super) fn fit(&mut self, start: usize, post: f32, slot: InlineSlotConstraint) -> LineEnd {
-        let available = slot.width();
+    /// Under `justify` a line fits while its width less the shrink of its
+    /// visible glue after the last tab fits; a mark that may hang is credited
+    /// with its protruding half (ST1-3).
+    pub(super) fn fit(&mut self, line: LineStart, slot: InlineSlotConstraint) -> LineEnd {
+        let available = slot.width() + FIT_EPSILON;
+        let LineStart {
+            token: start,
+            post,
+            first_line,
+        } = line;
         let mut pen = post;
         let mut body = post;
         let mut has_content = false;
+        // The shrink of the glue since the last tab, and of the visible part.
+        let (mut shrink, mut visible_shrink) = (0.0_f32, 0.0_f32);
+        // The protruding half of the last visible piece, if it may hang.
+        let mut end_hang = 0.0;
         // The last fitting break of each ladder tier.
         let mut fits: [Option<usize>; 3] = [None; 3];
         let best = |fits: &[Option<usize>; 3]| fits.iter().find_map(|&b| b);
@@ -127,10 +149,17 @@ impl<'i, 'a> Layout<'i, 'a> {
         loop {
             match &self.tokens[t] {
                 Token::Break(b) => {
+                    let hang = if b.pre == 0.0 { end_hang } else { 0.0 };
                     if b.mandatory {
-                        return LineEnd::At(t);
+                        // A line ending here is not justified (ST3-2): if only
+                        // shrink would fit it, it ends at an earlier break.
+                        let overflows = body + b.pre - hang > available;
+                        return match best(&fits).filter(|_| overflows) {
+                            Some(earlier) => LineEnd::At(earlier),
+                            None => LineEnd::At(t),
+                        };
                     }
-                    if body + b.pre <= available + FIT_EPSILON {
+                    if body + b.pre - hang - visible_shrink <= available {
                         fits[b.tier] = Some(t);
                     }
                     pen += b.no_break;
@@ -152,10 +181,31 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 Token::Piece(piece) => {
                     let piece = *piece;
+                    match piece.kind {
+                        PieceKind::Glue { item } if self.options.justify => {
+                            shrink += self.glue(item).max_shrink;
+                        }
+                        PieceKind::Tab => shrink = 0.0,
+                        _ => {}
+                    }
+                    if piece.is_content() {
+                        if !has_content && post == 0.0 {
+                            pen -= self
+                                .hang_half(&piece, piece.level, LineEdge::Start, first_line)
+                                .unwrap_or(0.0);
+                        }
+                        visible_shrink = shrink;
+                        end_hang = match piece.kind {
+                            PieceKind::SpanEdge { .. } if piece.width == 0.0 => end_hang,
+                            _ => self
+                                .hang_half(&piece, piece.level, LineEdge::End, first_line)
+                                .unwrap_or(0.0),
+                        };
+                    }
                     let (advance, reach) = self.measure(&piece, pen, slot);
                     if piece.is_content() {
                         let end = pen + reach.max(advance);
-                        if end > available + FIT_EPSILON {
+                        if end - end_hang - visible_shrink > available {
                             return match best(&fits) {
                                 Some(b) => LineEnd::At(b),
                                 None => self.emergency(start, t, post, slot),
@@ -175,7 +225,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn next_break_after(&self, t: usize) -> Option<usize> {
         let mut e = t + 1;
         while let Some(Token::Piece(p)) = self.tokens.get(e) {
-            if !matches!(p.kind, PieceKind::Glue) {
+            if !matches!(p.kind, PieceKind::Glue { .. }) {
                 return None;
             }
             e += 1;

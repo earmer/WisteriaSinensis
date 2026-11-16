@@ -306,7 +306,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             };
             let (run, cluster) = match p.kind {
                 PieceKind::Cluster { run, cluster } if decorated(run) => (run, cluster),
-                PieceKind::Glue => {
+                PieceKind::Glue { .. } => {
                     if open.is_some() {
                         let end = placed_piece.x + placed_piece.width;
                         pending_glue = Some(match pending_glue {
@@ -369,7 +369,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             PieceKind::Cluster { .. } | PieceKind::Object { .. } | PieceKind::Tab => {
                 Some(placed_piece.level)
             }
-            PieceKind::Glue | PieceKind::SpanEdge { .. } => None,
+            PieceKind::Glue { .. } | PieceKind::SpanEdge { .. } => None,
         };
         let stop = |x: f32, edge: PieceEdge| RawStop {
             x,
@@ -412,8 +412,10 @@ impl<'i, 'a> Layout<'i, 'a> {
                     offsets.reverse();
                 }
                 let positions = resolve_ligature_carets(width, k_atoms, &carets);
+                // An RTL cluster's justification lies before its glyphs.
+                let origin = a + if rtl { placed_piece.expansion } else { 0.0 };
                 raw.extend(positions.iter().zip(offsets).map(|(&pos, offset)| RawStop {
-                    x: a + pos,
+                    x: origin + pos,
                     offset,
                     edge: PieceEdge::Start,
                     level,

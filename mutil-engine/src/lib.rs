@@ -4,10 +4,11 @@
 //! The crate contains the data model (§2), the `TextShaper` contract and
 //! backends (`HarfRustShaper`, `LineOnlyShaper`, `NoopShaper`, §4), the
 //! frontend (`compile_paragraph`, §3) with the Unicode Bidirectional
-//! Algorithm, input and output validators (§2.6), greedy line breaking with
-//! per-line L1/L2 bidi reordering and vertical stacking (`layout_paragraph`,
-//! §5), and the interaction queries (§6). Justification, hyphenation,
-//! annotations, clamping and the optimising breakers are not implemented yet.
+//! Algorithm and CJK autospace, input and output validators (§2.6), greedy
+//! line breaking with per-line L1/L2 bidi reordering, justification, hanging
+//! punctuation and vertical stacking (`layout_paragraph`, §5), and the
+//! interaction queries (§6). Hyphenation, annotations, clamping and the
+//! optimising breakers are not implemented yet.
 //!
 //! Layers (dependencies point left or up; the frontend calls the shaping
 //! bridge through the `TextShaper` trait):

@@ -7,13 +7,19 @@
 //! lines (MET-3), the strut and line boxes (Stage 4), decorations (Stage 5),
 //! and a geometry provider's first slot. Each line applies UAX #9 L1 and L2
 //! to the frontend's resolved levels (Stage 2) and groups span fragments
-//! visually and logically (ST2-3). Not yet: justification, hanging
-//! punctuation, hyphenation, the optimising strategies (every strategy
-//! breaks greedily), annotations and clamping.
+//! visually and logically (ST2-3). Under `LayoutOptions::justify` the
+//! breaker fits with shrink and Stage 3 spends the slack through the
+//! priority ladder (ST3-2 to ST3-5); marks hang by the `HangMode` (ST1-3).
+//! Not yet: hyphenation, the optimising strategies (every strategy breaks
+//! greedily), annotations and clamping.
 
 mod breaking;
+mod hanging;
+mod justify;
 mod line_artifacts;
 mod line_builder;
+
+use breaking::LineStart;
 
 use super::shaper_gate::checked_line_box;
 use super::{
@@ -53,9 +59,9 @@ const FIT_EPSILON: f32 = super::FIT_EPSILON;
 ///
 /// The inputs pass the input gate ([`ValidatedInputs::new`]) first; with a
 /// geometry provider, the first line is probed (spec GEO-5) and every answer
-/// passes the provider gate. Every strategy breaks greedily in Phase 1, and
-/// `justify`, the hang mode and the clamp are not applied yet: the result is
-/// ragged, nothing hangs and every line is rendered.
+/// passes the provider gate. Every strategy breaks greedily; `justify` and
+/// the hang mode apply (spec ME-3), while the clamp is not applied yet, so
+/// every line is rendered.
 ///
 /// # Errors
 /// The first invalid input, or a shaper or geometry provider that breaks its
@@ -193,7 +199,10 @@ pub(super) enum PieceKind {
         item: usize,
     },
     Tab,
-    Glue,
+    /// Index into `ParagraphAst::items` of a `Glue`.
+    Glue {
+        item: usize,
+    },
     /// A decoration span edge: its padding is advance no glyph covers.
     SpanEdge {
         /// Index into `ParagraphAst::decoration_spans`.
@@ -214,7 +223,7 @@ pub(super) struct Piece {
 impl Piece {
     /// Content (as opposed to whitespace): what ends a line's visible part.
     pub(super) fn is_content(&self) -> bool {
-        !matches!(self.kind, PieceKind::Glue)
+        !matches!(self.kind, PieceKind::Glue { .. })
     }
 }
 
@@ -276,6 +285,8 @@ pub(super) struct PlacedPiece {
     pub(super) gap: f32,
     pub(super) x: f32,
     pub(super) width: f32,
+    /// Justification space after a cluster, inside `width` (ST3-2).
+    pub(super) expansion: f32,
     pub(super) y_shift: f32,
 }
 
@@ -349,7 +360,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     }));
                 }
                 WordNode::Glue(glue) => tokens.push(Token::Piece(Piece {
-                    kind: PieceKind::Glue,
+                    kind: PieceKind::Glue { item: index },
                     bytes: glue.byte_range,
                     level: glue.bidi_level,
                     width: glue.natural_width,
@@ -448,7 +459,14 @@ impl<'i, 'a> Layout<'i, 'a> {
             for _ in 0..MAX_ENVELOPE_REFITS {
                 let slot = geometry.slots[0];
                 let saved_reshaped = has_provider.then(|| self.reshaped.clone());
-                let end = self.fit(cursor.token_start, cursor.post_break_width, slot);
+                let end = self.fit(
+                    LineStart {
+                        token: cursor.token_start,
+                        post: cursor.post_break_width,
+                        first_line: index == 0,
+                    },
+                    slot,
+                );
                 let line = self.place(index, cursor, end, &geometry)?;
                 if line.line_height
                     <= envelope + super::tolerance::tolerance(line.line_height, envelope)
@@ -613,6 +631,7 @@ mod tests {
             gap: 0.0,
             x: 0.0,
             width: 0.0,
+            expansion: 0.0,
             y_shift: 0.0,
         };
         let order = |levels: &[u8]| {
