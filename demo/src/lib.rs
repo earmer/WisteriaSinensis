@@ -158,11 +158,13 @@ struct LayoutRequest<'a> {
 /// ABI: bits 0-1 the base direction (0 from the text, 1 LTR, 2 RTL), bit 2
 /// `justify`, bits 3-4 the start hang (0 none, 1 first line, 2 all lines),
 /// bits 5-6 the end hang (0 none, 1 allow, 2 force), bit 7 the `CssCompat`
-/// autospace profile and bit 8 preserved trailing whitespace.
+/// autospace profile, bit 8 preserved trailing whitespace and bit 9
+/// `compress_last_lines`.
 #[derive(Clone, Copy, Default)]
 struct Phase2 {
     base_direction: Option<BidiDirection>,
     justify: bool,
+    compress_last_lines: bool,
     hang_mode: HangMode,
     autospace: AutospaceProfile,
     whitespace: HangingWhitespaceMode,
@@ -178,6 +180,7 @@ impl Phase2 {
                 _ => None,
             },
             justify: bits & (1 << 2) != 0,
+            compress_last_lines: bits & (1 << 9) != 0,
             hang_mode: HangMode {
                 start: match field(3) {
                     1 => HangStartMode::FirstLine,
@@ -276,6 +279,7 @@ impl Demo {
                 LineHeight::Normal
             },
             justify: req.phase2.justify,
+            compress_last_lines: req.phase2.compress_last_lines,
             hang_mode: req.phase2.hang_mode,
             whitespace: req.phase2.whitespace,
             ..LayoutOptions::default()

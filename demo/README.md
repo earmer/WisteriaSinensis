@@ -41,7 +41,8 @@ beside them. The files are not committed.
 
 The harness deliberately offers no control the engine does not implement.
 Phase 2's controls are there: the base direction (from the text, or forced
-LTR or RTL), justification, the hang modes at each line edge, the autospace
+LTR or RTL), justification (and whether lines that end the paragraph or at a
+hard break may be compressed), the hang modes at each line edge, the autospace
 profile and the trailing-whitespace mode. The bidi and CJK samples exercise
 them, and the statistics count justified lines and hanging marks.
 Hyphenation, clamping, vertical writing and the balanced/publication

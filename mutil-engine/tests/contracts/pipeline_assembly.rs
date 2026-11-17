@@ -996,6 +996,7 @@ fn context_follows_the_layout_options() {
     let options = LayoutOptions {
         clamp: None,
         justify: false,
+        compress_last_lines: false,
         strategy: LineBreakStrategy::Publication,
         hang_mode: HangMode {
             start: HangStartMode::FirstLine,

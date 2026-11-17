@@ -154,9 +154,15 @@ impl<'i, 'a> Layout<'i, 'a> {
                 Token::Break(b) => {
                     let hang = if b.pre == 0.0 { end_hang } else { 0.0 };
                     if b.mandatory {
-                        // A line ending here is not justified (ST3-2): if only
+                        // A line ending here is compressed only under
+                        // `compress_last_lines` (ST3-3): otherwise, if only
                         // shrink would fit it, it ends at an earlier break.
-                        let overflows = body + b.pre - hang > available;
+                        let shrink = if self.options.compress_last_lines {
+                            visible_shrink
+                        } else {
+                            0.0
+                        };
+                        let overflows = body + b.pre - hang - shrink > available;
                         return match best(&fits).filter(|_| overflows) {
                             Some(earlier) => LineEnd::At(earlier),
                             None => LineEnd::At(t),

@@ -186,7 +186,8 @@ function phase2Bits() {
     | (start << 3)
     | (end << 5)
     | ($('autospace').value === 'css' ? 1 << 7 : 0)
-    | ($('whitespace').value === 'preserved' ? 1 << 8 : 0);
+    | ($('whitespace').value === 'preserved' ? 1 << 8 : 0)
+    | ($('compress-last').checked ? 1 << 9 : 0);
 }
 
 function currentSettings() {
@@ -461,7 +462,7 @@ textarea.addEventListener('input', () => {
   textTimer = setTimeout(relayout, 140);
 });
 
-const phase2Inputs = ['direction', 'justify', 'hang-start', 'hang-end', 'autospace', 'whitespace']
+const phase2Inputs = ['direction', 'justify', 'compress-last', 'hang-start', 'hang-end', 'autospace', 'whitespace']
   .map((id) => $(id));
 
 for (const input of [widthInput, sizeInput, lineHeightInput, quotesInput, faceInput, policyInput, ...phase2Inputs]) {

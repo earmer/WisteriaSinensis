@@ -121,8 +121,10 @@ impl<'i, 'a> Layout<'i, 'a> {
             p.width = self.measure(&p.piece, distance, slot).0;
             distance += p.width;
         }
-        // Only a soft-wrapped line is compressed (ST3-2).
-        let shrink = if self.options.justify && soft_wrap {
+        // A soft-wrapped line is justified; one that ends the paragraph or at
+        // a hard break is only ever compressed, and only on request (ST3-3).
+        let compressible = self.options.justify && (soft_wrap || self.options.compress_last_lines);
+        let shrink = if compressible {
             self.shrink_capacity(&mut placed[..body_len])
         } else {
             0.0
@@ -132,10 +134,11 @@ impl<'i, 'a> Layout<'i, 'a> {
         let hangs = LineHangs { start, end };
         // The visible width `W`, hanging halves outside (ST3-2).
         let visible_width = distance + pre - LineHangs::protrusion(end);
-        let is_justified = self.options.justify
-            && soft_wrap
+        let slack = slot.width() - visible_width;
+        let is_justified = compressible
             && slot.width().is_finite()
-            && self.justify(&mut placed[..body_len], slot.width() - visible_width);
+            && (soft_wrap || slack < 0.0)
+            && self.justify(&mut placed[..body_len], slack);
         let mut x = left_pad - hangs.physical(rtl).0;
         for &k in &order {
             x += placed[k].gap;

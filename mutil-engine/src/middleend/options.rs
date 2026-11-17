@@ -441,6 +441,11 @@ impl LayoutConstraints {
 pub struct LayoutOptions {
     /// Whether available elastic capacity is used to justify content.
     pub justify: bool,
+    /// Under `justify`, whether a line that ends the paragraph or at a hard
+    /// break may be fitted with shrink and compressed flush (spec ST1-7,
+    /// ST3-3). Such a line is never stretched; when this is off (the
+    /// default), a line that only shrink would fit ends at an earlier break.
+    pub compress_last_lines: bool,
     /// Optional line-count or block-size truncation policy; when set it must
     /// satisfy [`LineClampPolicy::is_valid`] (`InvalidLayoutOptions` otherwise).
     pub clamp: Option<LineClampPolicy>,
