@@ -24,6 +24,32 @@ pub struct Marked {
     pub text: String,
     /// Disjoint, ascending, non-empty ranges of `text` with their locale.
     pub spans: Vec<(TextRange, LocaleTag)>,
+    /// The removed tags, as ascending byte ranges of the source.
+    pub removed: Vec<core::ops::Range<usize>>,
+}
+
+impl Marked {
+    /// The offset in `text` of byte `source_offset` of the source.
+    #[cfg(test)]
+    fn text_offset(&self, source_offset: usize) -> usize {
+        text_offset(&self.removed, source_offset)
+    }
+}
+
+/// The offset in the marked text of byte `source_offset` of a source whose
+/// `removed` tags are ascending: an offset inside a tag maps to where the
+/// tag was.
+#[must_use]
+pub fn text_offset(removed: &[core::ops::Range<usize>], source_offset: usize) -> usize {
+    let mut gone = 0;
+    for tag in removed {
+        if tag.end <= source_offset {
+            gone += tag.len();
+        } else {
+            return source_offset.min(tag.start) - gone;
+        }
+    }
+    source_offset - gone
 }
 
 enum Token {
@@ -161,6 +187,7 @@ pub fn parse(source: &str) -> Marked {
     let paired = pair(&tokens);
     let mut text = String::with_capacity(source.len());
     let mut spans: Vec<(TextRange, LocaleTag)> = Vec::new();
+    let mut removed = Vec::new();
     // The open paired tags, innermost last; the stretch since the last tag
     // edge takes the innermost one's locale.
     let mut open: Vec<&LocaleTag> = Vec::new();
@@ -183,19 +210,25 @@ pub fn parse(source: &str) -> Marked {
             Token::Open { raw, .. } | Token::Close { raw, .. } if !paired[index] => {
                 text.push_str(&source[raw.clone()]);
             }
-            Token::Open { locale, .. } => {
+            Token::Open { locale, raw, .. } => {
+                removed.push(raw.clone());
                 flush(&open, since, text.len());
                 open.push(locale);
                 since = text.len();
             }
-            Token::Close { .. } => {
+            Token::Close { raw, .. } => {
+                removed.push(raw.clone());
                 flush(&open, since, text.len());
                 open.pop();
                 since = text.len();
             }
         }
     }
-    Marked { text, spans }
+    Marked {
+        text,
+        spans,
+        removed,
+    }
 }
 
 #[cfg(test)]
@@ -324,8 +357,29 @@ mod tests {
             parse("a<ja></ja>b"),
             Marked {
                 text: "ab".into(),
-                spans: vec![]
+                spans: vec![],
+                removed: vec![1..5, 5..10],
             }
         );
+    }
+
+    #[test]
+    fn source_offsets_map_past_removed_tags() {
+        let marked = parse("ab<ja>cd</ja>ef");
+        assert_eq!(marked.text, "abcdef");
+        // Before, inside, between and after the tags.
+        for (source, text) in [
+            (0, 0),
+            (2, 2),
+            (4, 2),
+            (6, 2),
+            (7, 3),
+            (8, 4),
+            (12, 4),
+            (13, 4),
+            (15, 6),
+        ] {
+            assert_eq!(marked.text_offset(source), text, "source byte {source}");
+        }
     }
 }

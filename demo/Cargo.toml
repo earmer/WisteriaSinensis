@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 mutil-engine = { path = "../mutil-engine" }
+self_cell = "1"
 skrifa = "0.50"
 
 [profile.release]
