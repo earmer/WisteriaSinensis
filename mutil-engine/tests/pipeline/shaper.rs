@@ -52,3 +52,84 @@ fn the_space_advance_is_the_space_glyph_scaled() {
         12.0
     );
 }
+
+#[test]
+fn shp5_horizontal_in_vertical_shapes_into_one_valid_cluster() {
+    let text = "12";
+    let atoms = vec![
+        GraphemeAtom {
+            orientation: GlyphOrientation::HorizontalInVertical,
+            byte_range: TextRange::new(0, 1),
+            script: ScriptTag::LATIN,
+            bidi_level: BidiLevel::LTR,
+            linebreak_class: LineBreakClass::Nu,
+            flags: AtomFlags::EMPTY,
+        },
+        GraphemeAtom {
+            orientation: GlyphOrientation::HorizontalInVertical,
+            byte_range: TextRange::new(1, 2),
+            script: ScriptTag::LATIN,
+            bidi_level: BidiLevel::LTR,
+            linebreak_class: LineBreakClass::Nu,
+            flags: AtomFlags::EMPTY,
+        },
+    ];
+    let run = ShapingRun {
+        baseline_align: BaselineAlignment::Auto,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        orientation: GlyphOrientation::HorizontalInVertical,
+        features: FontFeatures::default(),
+        byte_range: TextRange::new(0, 2),
+        families: std::sync::Arc::from([FontFamily::Named(FAMILY.into())]),
+        font_size: 10.0,
+        style: FontStyle::default(),
+        script: ScriptTag::LATIN,
+        locale: LocaleTag::und(),
+        bidi_level: BidiLevel::LTR,
+        decoration: TextDecoration::default(),
+        atom_range: 0..2,
+        cluster_range: 0..1,
+    };
+    let mut clusters = Vec::new();
+    let mut glyphs = Vec::new();
+    SHAPER.shape_run(text, &run, &atoms, &mut clusters, &mut glyphs);
+
+    assert_eq!(clusters.len(), 1, "{clusters:?}");
+    let cluster = &clusters[0];
+    assert_eq!(cluster.atom_range, 0..atoms.len());
+    assert_eq!(cluster.byte_range, TextRange::new(0, 2));
+    assert_eq!(cluster.orientation, GlyphOrientation::HorizontalInVertical);
+    assert_eq!(cluster.glyph_range, 0..glyphs.len());
+    assert_eq!(glyphs.len(), 2);
+    assert!(cluster.safe_to_break_before);
+    assert!(cluster.safe_to_concat_before);
+
+    let natural_width = cluster.natural_width;
+    let ast = ParagraphAst {
+        writing_mode: WritingMode::VerticalRl,
+        bidi_spans: Vec::new(),
+        annotations: Vec::new(),
+        base_direction: BidiDirection::Ltr,
+        strut_metrics: SHAPER.font_metrics(instance(10.0)),
+        strut_font_size: 10.0,
+        runs: vec![run],
+        atoms,
+        clusters,
+        glyphs,
+        items: vec![
+            WordNode::Box(BoxNode::Text {
+                run_index: 0,
+                byte_range: TextRange::new(0, 2),
+                atom_range: 0..2,
+                cluster_range: 0..1,
+                natural_width,
+            }),
+            WordNode::Discretionary(DiscretionaryNode::paragraph_end(2)),
+        ],
+        decoration_spans: Vec::new(),
+        atomic_spans: Vec::new(),
+    };
+    check_layout_inputs(&ast, text, &column(100.0), &LayoutOptions::default())
+        .expect("G1 accepts HorizontalInVertical cluster");
+}

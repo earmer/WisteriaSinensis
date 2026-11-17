@@ -129,7 +129,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// visible glue after the last tab fits; a mark that may hang is credited
     /// with its protruding half (ST1-3).
     pub(super) fn fit(&mut self, line: LineStart, slot: InlineSlotConstraint) -> LineEnd {
-        let available = slot.width() + FIT_EPSILON;
+        let slot_width = slot.width();
         let LineStart {
             token: start,
             post,
@@ -162,13 +162,16 @@ impl<'i, 'a> Layout<'i, 'a> {
                         } else {
                             0.0
                         };
-                        let overflows = body + b.pre - hang - shrink > available;
+                        let used = body + b.pre - hang - shrink;
+                        let overflows = used
+                            > slot_width + super::super::tolerance::tolerance(used, slot_width);
                         return match best(&fits).filter(|_| overflows) {
                             Some(earlier) => LineEnd::At(earlier),
                             None => LineEnd::At(t),
                         };
                     }
-                    if body + b.pre - hang - visible_shrink <= available {
+                    let used = body + b.pre - hang - visible_shrink;
+                    if used <= slot_width + super::super::tolerance::tolerance(used, slot_width) {
                         fits[b.tier] = Some(t);
                     }
                     pen += b.no_break;
@@ -198,26 +201,23 @@ impl<'i, 'a> Layout<'i, 'a> {
                         _ => {}
                     }
                     if piece.is_content() {
-                        let is_bare_edge =
-                            matches!(piece.kind, PieceKind::SpanEdge { .. }) && piece.width == 0.0;
-                        if !has_visible && !is_bare_edge && post == 0.0 {
+                        if !has_visible && post == 0.0 {
                             pen -= self
                                 .hang_half(&piece, piece.level, LineEdge::Start, first_line)
                                 .unwrap_or(0.0);
                         }
-                        has_visible |= !is_bare_edge;
+                        has_visible = true;
                         visible_shrink = shrink;
-                        end_hang = match piece.kind {
-                            _ if is_bare_edge => end_hang,
-                            _ => self
-                                .hang_half(&piece, piece.level, LineEdge::End, first_line)
-                                .unwrap_or(0.0),
-                        };
+                        end_hang = self
+                            .hang_half(&piece, piece.level, LineEdge::End, first_line)
+                            .unwrap_or(0.0);
                     }
                     let (advance, reach) = self.measure(&piece, pen, slot);
                     if piece.is_content() {
                         let end = pen + reach.max(advance);
-                        if end - end_hang - visible_shrink > available {
+                        let used = end - end_hang - visible_shrink;
+                        if used > slot_width + super::super::tolerance::tolerance(used, slot_width)
+                        {
                             return match best(&fits) {
                                 Some(b) => LineEnd::At(b),
                                 None => self.emergency(start, t, post, slot),

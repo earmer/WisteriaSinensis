@@ -190,22 +190,42 @@ impl<B: LineShaper> LineOnlyShaper<B> {
                     .next_back()
                     .is_some_and(char::is_whitespace)
         };
-        // Split by face at atom boundaries: a face change inside an atom
-        // keeps the atom's first face (the backend contract forbids one).
-        // Entries store `(first atom, font, first glyph)`.
-        let mut segments: Vec<(usize, FontId, usize)> = Vec::new();
-        for (i, (atom, font, _)) in kept.iter().enumerate() {
-            match segments.last() {
-                Some((_, last_font, _)) if last_font == font => {}
-                Some((first, _, _)) if *atom <= *first => {}
-                _ => segments.push((*atom, *font, i)),
+        // Split by face at atom boundaries: a face change inside an atom or
+        // overlapping non-monotonic atom ranges keeps the earlier face.
+        // Entries store `(min_atom, max_atom, font, first_glyph)`.
+        let mut segments: Vec<(usize, usize, FontId, usize)> = Vec::new();
+        if run.orientation == crate::types::GlyphOrientation::HorizontalInVertical {
+            segments.push((range.start, range.end - 1, kept[0].1, 0));
+        } else {
+            for (i, &(atom, font, _)) in kept.iter().enumerate() {
+                match segments.last_mut() {
+                    Some((min, max, last_font, _)) if *last_font == font => {
+                        *min = (*min).min(atom);
+                        *max = (*max).max(atom);
+                        while segments.len() > 1 {
+                            let cur_min = segments[segments.len() - 1].0;
+                            let prev_max = segments[segments.len() - 2].1;
+                            if cur_min > prev_max {
+                                break;
+                            }
+                            let popped = segments.pop().expect("len > 1");
+                            let prev = segments.last_mut().expect("len >= 1");
+                            prev.0 = prev.0.min(popped.0);
+                            prev.1 = prev.1.max(popped.1);
+                        }
+                    }
+                    Some((_, max, _, _)) if atom <= *max => {
+                        *max = (*max).max(atom);
+                    }
+                    _ => segments.push((atom, atom, font, i)),
+                }
             }
+            segments[0].0 = range.start;
         }
-        segments[0].0 = range.start;
-        for (k, &(first_atom, font, first_glyph)) in segments.iter().enumerate() {
+        for (k, &(first_atom, _, font, first_glyph)) in segments.iter().enumerate() {
             let (end_atom, end_glyph) = segments
                 .get(k + 1)
-                .map_or((range.end, kept.len()), |&(a, _, g)| (a, g));
+                .map_or((range.end, kept.len()), |&(a, _, _, g)| (a, g));
             let tagged: Vec<(usize, RawShapedGlyph, bool, bool)> = kept[first_glyph..end_glyph]
                 .iter()
                 .map(|&(atom, _, glyph)| {

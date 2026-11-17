@@ -372,6 +372,25 @@ impl<'a> ItemChecks<'a> {
 
     /// Whether the hyphenation discretionary at `items[item]` is well formed.
     fn hyphen_is_valid(&self, item: usize, opportunity: &HyphenOpportunity) -> bool {
+        let has_line_break = |s: &str| {
+            s.chars().any(|c| {
+                matches!(
+                    c,
+                    '\n' | '\r' | '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+                )
+            })
+        };
+        if opportunity
+            .prefix_replacement
+            .as_deref()
+            .is_some_and(has_line_break)
+            || opportunity
+                .suffix_replacement
+                .as_deref()
+                .is_some_and(has_line_break)
+        {
+            return false;
+        }
         let Some((before, _)) = self.ast.hyphen_seam(item) else {
             return false;
         };

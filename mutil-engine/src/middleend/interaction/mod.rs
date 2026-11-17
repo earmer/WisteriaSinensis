@@ -464,7 +464,11 @@ fn selected_intervals(
         }
         if range.start() <= slot.lo && slot.hi <= range.end() {
             open = Some(match open {
-                Some((a, b, level)) => (a.min(slot.x0), b.max(slot.x1), level),
+                Some((a, b, level)) => (
+                    a.min(slot.x0),
+                    b.max(slot.x1),
+                    if approx_eq(a, b) { slot.level } else { level },
+                ),
                 None => (slot.x0, slot.x1, slot.level),
             });
         } else if let Some(done) = open.take() {

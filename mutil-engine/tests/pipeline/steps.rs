@@ -217,6 +217,47 @@ fn urls_gain_opportunities_in_the_url_band() {
 }
 
 #[test]
+fn fe22_www_url_after_opening_punctuation_gains_url_opportunities() {
+    let text = "(www.example.com/a/b)";
+    let ast = compile(text);
+    // "www.example.com/a/b" is bytes 1..20.
+    let url = TextRange::new(1, 20);
+    assert_eq!(&text[url.as_range()], "www.example.com/a/b");
+    let at: Vec<(usize, i32)> = discretionaries(&ast)
+        .iter()
+        .map(|d| (d.byte_offset(), d.penalty))
+        .collect();
+    // Never beside `(` (FE-22).
+    assert!(!at.iter().any(|&(offset, _)| offset == 1), "{at:?}");
+    let inside: Vec<(usize, i32)> = at
+        .iter()
+        .copied()
+        .filter(|&(offset, _)| url.start() < offset && offset < url.end())
+        .collect();
+    assert!(
+        inside
+            .iter()
+            .any(|&(offset, _)| text[offset..].starts_with(".example")
+                || text[offset..].starts_with("example")),
+        "{inside:?}"
+    );
+    assert!(
+        inside
+            .iter()
+            .any(|&(offset, _)| text[offset..].starts_with("a/b")),
+        "{inside:?}"
+    );
+    for (_, penalty) in &inside {
+        assert!(
+            (DiscretionaryNode::URL_PENALTY_MIN..=DiscretionaryNode::URL_PENALTY_MAX)
+                .contains(penalty),
+            "unexpected penalty {penalty} in {inside:?}"
+        );
+    }
+    passes_the_input_gate(&ast, text);
+}
+
+#[test]
 fn czech_one_letter_words_bind_to_the_next_word() {
     let text = "jdu v les a k nám";
     let base = style(10.0);
@@ -233,6 +274,33 @@ fn czech_one_letter_words_bind_to_the_next_word() {
     assert_eq!(after, ["v les a k nám", "a k nám", "k nám"]);
     let english = compile(text);
     assert_eq!(discretionaries(&english).len(), 5);
+}
+
+#[test]
+fn fe23_czech_one_letter_word_after_opening_punctuation_binds() {
+    let text = "(v lese)";
+    let base = style(10.0);
+    let czech = FrontendOptions {
+        default_locale: LocaleTag::try_from_str("cs-CZ").expect("a locale"),
+        ..Default::default()
+    };
+    let ast = compile_with(&input(text, &base), &czech);
+    let after: Vec<&str> = discretionaries(&ast)
+        .iter()
+        .map(|d| &text[d.byte_offset()..])
+        .collect();
+    assert!(
+        !after.contains(&"lese)"),
+        "expected no break after \"(v \": {after:?}"
+    );
+    passes_the_input_gate(&ast, text);
+
+    let english = compile(text);
+    let en_after: Vec<&str> = discretionaries(&english)
+        .iter()
+        .map(|d| &text[d.byte_offset()..])
+        .collect();
+    assert!(en_after.contains(&"lese)"), "{en_after:?}");
 }
 
 #[test]
@@ -277,6 +345,88 @@ fn dash_and_ellipsis_runs_never_break_inside() {
             .flags
             .contains(AtomFlags::BINDS_TO_PREVIOUS)
     );
+}
+
+#[test]
+fn fe15_space_separated_dashes_are_separate_runs_and_break_at_space() {
+    let text = "字 — — a";
+    let jp = script_style(&["Noto Sans JP"], 10.0);
+    let anywhere = FrontendOptions {
+        line_break_strictness: LineBreakStrictness::Anywhere,
+        ..Default::default()
+    };
+    let ast = compile_paragraph(&input(text, &jp), &anywhere, &*SCRIPT_SHAPER).expect("compiles");
+    passes_the_input_gate(&ast, text);
+
+    // Neither dash binds to the previous atom across the space.
+    for (i, atom) in ast.atoms.iter().enumerate() {
+        assert!(
+            !atom.flags.contains(AtomFlags::BINDS_TO_PREVIOUS),
+            "atom {i} unexpectedly bound: {atom:?}"
+        );
+    }
+
+    // There is a break opportunity between the space and the second dash.
+    let second_dash = text.rfind('—').expect("second dash");
+    let breaks: Vec<usize> = discretionaries(&ast)
+        .iter()
+        .map(|d| d.byte_offset())
+        .collect();
+    assert!(
+        breaks.contains(&second_dash),
+        "expected break before second dash at {second_dash}: {breaks:?}"
+    );
+
+    // Laying out the `Anywhere` AST at a width that fits "字 — " breaks
+    // between the space and the second dash (under `Normal`, UAX #14 LB17
+    // suppresses B2 SP* ÷ B2).
+    let p = layout_paragraph(
+        &ast,
+        text,
+        &*SCRIPT_SHAPER,
+        &column(25.0),
+        &LayoutOptions::default(),
+    )
+    .expect("lays out");
+    ValidatedLayout::new(&p, text).expect("validates");
+    assert_eq!(line_texts(&p, text), ["字 — ", "— a"]);
+
+    // Each space-separated dash resolves its script independently rather than
+    // merging across the space.
+    let mixed = "字 — a — b";
+    let mixed_ast = compile_in(mixed, &["Noto Sans JP"]);
+    passes_the_input_gate(&mixed_ast, mixed);
+    assert_eq!(mixed_ast.atoms[1].script, ScriptTag::HAN);
+    assert_eq!(mixed_ast.atoms[3].script, ScriptTag::LATIN);
+}
+
+#[test]
+fn fe11_decomposed_apostrophe_resolves_in_word_script() {
+    // Greek alpha + combining acute (U+0301) + apostrophe + beta:
+    // U+0301 is Extend (ignored per UAX #29 WB4), so AHLetter lies on both sides.
+    for text in ["α\u{0301}'β", "α\u{0301}\u{2019}β"] {
+        let ast = compile(text);
+        passes_the_input_gate(&ast, text);
+        assert_eq!(ast.atoms.len(), 3, "{text:?}: {:?}", ast.atoms);
+        let apos = &ast.atoms[1];
+        assert!(
+            apos.flags.contains(AtomFlags::IS_APOSTROPHE),
+            "{text:?}: expected IS_APOSTROPHE on {apos:?}"
+        );
+        assert_eq!(
+            apos.script,
+            ScriptTag::GREEK,
+            "{text:?}: expected Greek script on {apos:?}"
+        );
+    }
+
+    let latin = "cafe\u{0301}'s";
+    let ast = compile(latin);
+    passes_the_input_gate(&ast, latin);
+    assert_eq!(ast.atoms.len(), 6, "{:?}", ast.atoms);
+    let apos = &ast.atoms[4];
+    assert!(apos.flags.contains(AtomFlags::IS_APOSTROPHE), "{apos:?}");
+    assert_eq!(apos.script, ScriptTag::LATIN, "{apos:?}");
 }
 
 fn locale(tag: &str) -> LocaleTag {

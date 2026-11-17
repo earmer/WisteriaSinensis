@@ -135,6 +135,27 @@ impl<'i, 'a> Layout<'i, 'a> {
             if groups.iter().any(|g| !g.is_bare_boundary) {
                 groups.retain(|g| !g.is_bare_boundary);
             }
+            let trailing_bytes = ctx.placed[ctx.order.len()..]
+                .iter()
+                .filter(|p| is_member(&p.piece) && !p.piece.bytes.is_empty())
+                .fold(None::<TextRange>, |acc, p| {
+                    Some(acc.map_or(p.piece.bytes, |r| r.cover(p.piece.bytes)))
+                });
+            if let Some(tb) = trailing_bytes {
+                if let Some(last) = groups.iter_mut().max_by_key(|g| g.bytes.end()) {
+                    last.bytes = last.bytes.cover(tb);
+                    last.is_bare_boundary = false;
+                } else {
+                    let edge = if rtl { line_lo } else { line_hi };
+                    groups.push(VisualGroup {
+                        lo: edge,
+                        hi: edge,
+                        bytes: tb,
+                        level: self.base.base_level(),
+                        is_bare_boundary: false,
+                    });
+                }
+            }
             if groups.is_empty() {
                 continue;
             }
@@ -261,6 +282,9 @@ impl<'i, 'a> Layout<'i, 'a> {
             let n = groups.len();
             let mut covered = part_start;
             for (i, g) in groups.into_iter().enumerate() {
+                if covered >= part_end {
+                    break;
+                }
                 let end = if i + 1 == n {
                     part_end
                 } else {
@@ -316,6 +340,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     }
                     continue;
                 }
+                PieceKind::SpanEdge { .. } => continue,
                 _ => {
                     out.extend(open.take());
                     pending_glue = None;

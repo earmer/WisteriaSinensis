@@ -218,14 +218,18 @@ impl HarfRustShaper {
         while let Some(font) = current_font {
             let mut end = start + 1;
             let mut next_font = None;
-            while end < range.end {
-                let candidate =
-                    self.face_for(target.text, target.run, &target.atoms[end], candidates);
-                if candidate != font {
-                    next_font = Some(candidate);
-                    break;
+            if target.run.orientation == GlyphOrientation::HorizontalInVertical {
+                end = range.end;
+            } else {
+                while end < range.end {
+                    let candidate =
+                        self.face_for(target.text, target.run, &target.atoms[end], candidates);
+                    if candidate != font {
+                        next_font = Some(candidate);
+                        break;
+                    }
+                    end += 1;
                 }
-                end += 1;
             }
             let first_cluster = target.clusters.len();
             self.shape_font_run(target, start..end, font);
@@ -602,6 +606,7 @@ impl TextShaper for HarfRustShaper {
             return;
         }
         output_clusters[first_cluster].safe_to_concat_before = false;
+        output_clusters[first_cluster].safe_to_break_before &= plan.leading_text.is_empty();
         let leading = if plan.leading_text.is_empty() {
             Vec::new()
         } else {

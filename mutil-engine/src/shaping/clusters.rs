@@ -17,7 +17,8 @@ pub(crate) fn finite_nonnegative(v: f32) -> f32 {
     if v.is_finite() { v.max(0.0) } else { 0.0 }
 }
 
-/// Appends one glyph-less cluster per atom in `atoms[range]`.
+/// Appends one glyph-less cluster per atom in `atoms[range]`, or one merged
+/// cluster for `HorizontalInVertical` (spec SHP-5).
 pub(crate) fn push_empty_clusters(
     run: &ShapingRun,
     atoms: &[GraphemeAtom],
@@ -30,6 +31,24 @@ pub(crate) fn push_empty_clusters(
         return;
     }
     let at = output_glyphs.len();
+    if run.orientation == crate::types::GlyphOrientation::HorizontalInVertical {
+        output_clusters.push(ShapedCluster {
+            orientation: run.orientation,
+            byte_range: TextRange::new(
+                atoms[range.start].byte_range.start(),
+                atoms[range.end - 1].byte_range.end(),
+            ),
+            atom_range: range.clone(),
+            font: FontRef::unscaled(font),
+            bidi_level: run.bidi_level,
+            flags: AtomFlags::for_cluster(&atoms[range]),
+            glyph_range: at..at,
+            natural_width: 0.0,
+            safe_to_break_before: true,
+            safe_to_concat_before: true,
+        });
+        return;
+    }
     for (offset, atom) in atoms[range.clone()].iter().enumerate() {
         let index = range.start + offset;
         output_clusters.push(ShapedCluster {
@@ -73,46 +92,54 @@ pub(crate) fn push_clusters(
     // non-overlapping (`prev.max_atom < next.min_atom`) with contiguous glyph
     // slices (`prev.glyphs.end == next.glyphs.start`).
     let mut groups: SmallVec<[Group; 8]> = SmallVec::new();
-    for (index, (atom, ..)) in glyphs.iter().enumerate() {
-        let atom = *atom;
-        match groups.last_mut() {
-            Some(last) if atom >= last.min_atom && atom <= last.max_atom => {
-                last.glyphs.end = index + 1;
-            }
-            Some(last) if atom < last.min_atom => {
-                let mut min_atom = atom;
-                let mut max_atom = atom;
-                let mut members_start = index;
-                while let Some(prev) = groups.last() {
-                    if prev.max_atom < atom {
-                        break;
-                    }
-                    min_atom = min_atom.min(prev.min_atom);
-                    max_atom = max_atom.max(prev.max_atom);
-                    members_start = prev.glyphs.start;
-                    groups.pop();
-                }
-                groups.push(Group {
-                    min_atom,
-                    max_atom,
-                    glyphs: members_start..index + 1,
-                });
-            }
-            _ => groups.push(Group {
-                min_atom: atom,
-                max_atom: atom,
-                glyphs: index..index + 1,
-            }),
-        }
-    }
-    if groups.is_empty() {
+    if run.orientation == crate::types::GlyphOrientation::HorizontalInVertical {
         groups.push(Group {
             min_atom: range.start,
-            max_atom: range.start,
-            glyphs: 0..0,
+            max_atom: range.end - 1,
+            glyphs: 0..glyphs.len(),
         });
+    } else {
+        for (index, (atom, ..)) in glyphs.iter().enumerate() {
+            let atom = *atom;
+            match groups.last_mut() {
+                Some(last) if atom >= last.min_atom && atom <= last.max_atom => {
+                    last.glyphs.end = index + 1;
+                }
+                Some(last) if atom < last.min_atom => {
+                    let mut min_atom = atom;
+                    let mut max_atom = atom;
+                    let mut members_start = index;
+                    while let Some(prev) = groups.last() {
+                        if prev.max_atom < atom {
+                            break;
+                        }
+                        min_atom = min_atom.min(prev.min_atom);
+                        max_atom = max_atom.max(prev.max_atom);
+                        members_start = prev.glyphs.start;
+                        groups.pop();
+                    }
+                    groups.push(Group {
+                        min_atom,
+                        max_atom,
+                        glyphs: members_start..index + 1,
+                    });
+                }
+                _ => groups.push(Group {
+                    min_atom: atom,
+                    max_atom: atom,
+                    glyphs: index..index + 1,
+                }),
+            }
+        }
+        if groups.is_empty() {
+            groups.push(Group {
+                min_atom: range.start,
+                max_atom: range.start,
+                glyphs: 0..0,
+            });
+        }
+        groups[0].min_atom = range.start;
     }
-    groups[0].min_atom = range.start;
     for (k, group) in groups.iter().enumerate() {
         let start = group.min_atom;
         let end = groups.get(k + 1).map_or(range.end, |next| next.min_atom);

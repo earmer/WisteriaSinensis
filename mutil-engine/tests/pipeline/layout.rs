@@ -266,6 +266,99 @@ fn decorations_merge_across_words_and_spaces() {
 }
 
 #[test]
+fn st5_1_trailing_whitespace_in_decoration_span_collapses_at_wrap() {
+    let text = "word next";
+    let mut underlined = style(10.0);
+    underlined.decoration.underline = true;
+    let spans = [InlineDecorationSpan {
+        span_id: 1,
+        byte_range: TextRange::new(0, 5), // "word " including trailing space
+        start_padding: 0.0,
+        end_padding: 0.0,
+        break_mode: BoxDecorationBreak::Slice,
+    }];
+    let paragraph_input = ParagraphInput {
+        decoration_spans: &spans,
+        ..input(text, &underlined)
+    };
+    let ast = compile_paragraph(&paragraph_input, &FrontendOptions::default(), &*SHAPER)
+        .expect("compiles");
+    // "word" is 4 * 6 = 24.0; "word next" is 9 * 6 = 54.0.
+    // At wrap_width 36.0, "word " wraps before "next" and the trailing space collapses.
+    let p = layout_paragraph(
+        &ast,
+        text,
+        &*SHAPER,
+        &column(36.0),
+        &LayoutOptions::default(),
+    )
+    .expect("lays out");
+    ValidatedLayout::new(&p, text).expect("validates");
+    assert_eq!(line_texts(&p, text), ["word ", "next"]);
+    assert_eq!(p.lines[0].visible_byte_end, 4);
+    assert_close(p.lines[0].slots[0].visual_width, 24.0);
+    assert_eq!(p.lines[0].decorations.len(), 1);
+    let underline = &p.lines[0].decorations[0];
+    assert_eq!(underline.kind, DecorationKind::Underline);
+    assert_eq!(underline.byte_range, TextRange::new(0, 4));
+    assert_close(underline.width, 24.0);
+}
+
+#[test]
+fn st5_1_nested_zero_padding_decoration_span_does_not_split_underline() {
+    let text = "ab cd ef";
+    let mut underlined = style(10.0);
+    underlined.decoration.underline = true;
+    let style_spans = [StyleSpan {
+        byte_range: TextRange::new(3, 5),
+        style: underlined.clone(),
+    }];
+    let decoration_spans = [
+        InlineDecorationSpan {
+            span_id: 1,
+            byte_range: TextRange::new(0, 8),
+            start_padding: 0.0,
+            end_padding: 0.0,
+            break_mode: BoxDecorationBreak::Slice,
+        },
+        InlineDecorationSpan {
+            span_id: 2,
+            byte_range: TextRange::new(3, 5),
+            start_padding: 0.0,
+            end_padding: 0.0,
+            break_mode: BoxDecorationBreak::Slice,
+        },
+    ];
+    let paragraph_input = ParagraphInput {
+        style_spans: &style_spans,
+        decoration_spans: &decoration_spans,
+        ..input(text, &underlined)
+    };
+    let ast = compile_paragraph(&paragraph_input, &FrontendOptions::default(), &*SHAPER)
+        .expect("compiles");
+    let p = layout_paragraph(
+        &ast,
+        text,
+        &*SHAPER,
+        &column(200.0),
+        &LayoutOptions::default(),
+    )
+    .expect("lays out");
+    ValidatedLayout::new(&p, text).expect("validates");
+    assert_eq!(p.lines.len(), 1);
+    assert_eq!(
+        p.lines[0].decorations.len(),
+        1,
+        "expected one continuous underline, got {:?}",
+        p.lines[0].decorations
+    );
+    let underline = &p.lines[0].decorations[0];
+    assert_eq!(underline.kind, DecorationKind::Underline);
+    assert_eq!(underline.byte_range, TextRange::new(0, 8));
+    assert_close(underline.width, 48.0);
+}
+
+#[test]
 fn styled_runs_lay_out_with_the_tallest_line_box() {
     let text = "small BIG small";
     let base = style(10.0);

@@ -122,17 +122,29 @@ fn is_ah_letter(c: char) -> bool {
     )
 }
 
+/// Word_Break Extend, Format, or ZWJ (ignored by UAX #29 WB4).
+fn is_wb_transparent(c: char) -> bool {
+    matches!(
+        WORD_BREAK.get(c),
+        WordBreak::Extend | WordBreak::Format | WordBreak::ZWJ
+    )
+}
+
 /// Whether `c` at `range` of `text` is an apostrophe (FE-11): an ambiguous
-/// quote or apostrophe with an AHLetter on both sides.
+/// quote or apostrophe with an AHLetter on both sides (ignoring WB4 Extend/Format/ZWJ).
 pub(crate) fn is_apostrophe(text: &str, range: TextRange) -> bool {
     let atom = &text[range.as_range()];
     let is_ambiguous = matches!(atom, "\u{27}" | "\u{2019}" | "\u{2BC}");
     is_ambiguous
         && text[..range.start()]
             .chars()
-            .next_back()
+            .rev()
+            .find(|&c| !is_wb_transparent(c))
             .is_some_and(is_ah_letter)
-        && text[range.end()..].chars().next().is_some_and(is_ah_letter)
+        && text[range.end()..]
+            .chars()
+            .find(|&c| !is_wb_transparent(c))
+            .is_some_and(is_ah_letter)
 }
 
 /// The non-trivial `Script_Extensions` of `c`: none for a character whose
@@ -227,6 +239,8 @@ fn role(c: char, overrides: &[(char, char)]) -> Role {
 
 /// One atom as script resolution sees it.
 pub(crate) struct ScriptAtom<'a> {
+    /// The atom's byte range in the paragraph text.
+    pub byte_range: TextRange,
     /// The atom's text.
     pub text: &'a str,
     /// A script its style states, which stands.
@@ -418,7 +432,11 @@ fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
             continue;
         };
         let mut end = i + 1;
-        while end < atoms.len() && atoms[end].text.starts_with(c) && atoms[end].explicit.is_none() {
+        while end < atoms.len()
+            && atoms[end - 1].byte_range.end() == atoms[end].byte_range.start()
+            && atoms[end].text.starts_with(c)
+            && atoms[end].explicit.is_none()
+        {
             end += 1;
         }
         if next_anchor.is_none_or(|k| k < end) {
@@ -443,11 +461,7 @@ fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
     }
 }
 
-/// General punctuation, for the anchors of FE-15.
-fn is_punctuation(c: char) -> bool {
-    c.is_ascii_punctuation()
-        || matches!(c, '\u{2000}'..='\u{206F}' | '\u{3000}'..='\u{303F}' | '\u{FF01}'..='\u{FF0F}')
-}
+use super::spacing::is_punctuation;
 
 /// Atoms whose dash, ellipsis or middle-dot run must not break inside
 /// (FE-15): `true` for every atom of such a run but its last.
@@ -478,6 +492,7 @@ mod tests {
     fn atoms(text: &str) -> Vec<ScriptAtom<'_>> {
         text.char_indices()
             .map(|(i, c)| ScriptAtom {
+                byte_range: TextRange::new(i, i + c.len_utf8()),
                 text: &text[i..i + c.len_utf8()],
                 explicit: None,
                 is_emoji: false,

@@ -33,7 +33,7 @@ fn is_wide_or_full(c: char) -> bool {
 }
 
 /// General Category P*.
-fn is_punctuation(c: char) -> bool {
+pub(crate) fn is_punctuation(c: char) -> bool {
     matches!(
         CATEGORY.get(c),
         GeneralCategory::ConnectorPunctuation
