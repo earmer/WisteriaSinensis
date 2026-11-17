@@ -460,3 +460,203 @@ fn st3_3_compression_spends_tier_0_before_tier_1() {
         }
     }
 }
+
+/// `justify` with `compress_last_lines` (ST1-7, ST3-3).
+fn compressing() -> LayoutOptions {
+    LayoutOptions {
+        compress_last_lines: true,
+        ..justified()
+    }
+}
+
+/// `compress_last_lines` without `justify`.
+fn compressing_unjustified() -> LayoutOptions {
+    LayoutOptions {
+        compress_last_lines: true,
+        ..Default::default()
+    }
+}
+
+/// The width of the gap between the glyph at `previous` and the next glyph,
+/// at `next`.
+fn space_between(line: &PositionedLine, previous: usize, next: usize) -> f32 {
+    x_of(line, next) - (x_of(line, previous) + glyph_at(line, previous).advance)
+}
+
+/// The natural width of a monospace line's visible content: every visible
+/// character is `CHAR` wide, a hard break and trailing spaces none.
+fn natural_mono_width(line_text: &str) -> f32 {
+    let visible = line_text.trim_end_matches([' ', '\u{2028}']);
+    visible.chars().count() as f32 * CHAR
+}
+
+/// Asserts that `line` holds "aaa bbb ccc" from byte `start`, compressed
+/// flush to 63 units: the 3 units come equally from the two word spaces.
+#[track_caller]
+fn assert_compressed_aaa_bbb_ccc(line: &PositionedLine, start: usize) {
+    assert!(line.is_justified);
+    assert_close(line.visual_width(), 63.0);
+    assert_close(content_end(line), 63.0);
+    assert_close(x_of(line, start), 0.0);
+    assert_close(x_of(line, start + 4), 4.0 * CHAR - 1.5);
+    assert_close(x_of(line, start + 8), 8.0 * CHAR - 3.0);
+    for (previous, next) in [(2, 4), (6, 8)] {
+        let space = space_between(line, start + previous, start + next);
+        assert_close(space, CHAR - 1.5);
+    }
+    // The glyphs keep their advances: only the word spaces shrink.
+    assert!(glyphs(line).all(|g| (g.advance - CHAR).abs() < 1e-3));
+}
+
+#[test]
+fn st1_7_by_default_a_last_line_that_only_shrink_fits_ends_at_an_earlier_break() {
+    // "aaa bbb ccc" is 66 wide, 3 over a 63-unit column; its two word
+    // spaces could shrink by 4 together, but it ends the paragraph.
+    let text = "aaa bbb ccc";
+    let p = lay_out(text, &column(63.0), &justified());
+    assert_eq!(line_texts(&p, text), ["aaa bbb ", "ccc"]);
+    for line_text in line_texts(&p, text) {
+        assert!(natural_mono_width(line_text) <= 63.0, "{line_text:?}");
+    }
+    // The final line is neither compressed nor stretched.
+    let last = &p.lines[1];
+    assert!(!last.is_justified);
+    assert_close(last.visual_width(), 3.0 * CHAR);
+    assert_close(x_of(last, 8), 0.0);
+    assert_close(x_of(last, 10), 2.0 * CHAR);
+}
+
+#[test]
+fn st3_3_compress_last_lines_compresses_the_paragraph_end_flush() {
+    let text = "aaa bbb ccc";
+    let p = lay_out(text, &column(63.0), &compressing());
+    assert_eq!(line_texts(&p, text), ["aaa bbb ccc"]);
+    assert_compressed_aaa_bbb_ccc(&p.lines[0], 0);
+}
+
+#[test]
+fn st3_3_compress_last_lines_never_exceeds_the_shrink_capacity() {
+    // "aaa bbb cccc" is 72 wide: 9 over, beyond the 4 units of shrink, so
+    // it breaks as it does by default.
+    let text = "aaa bbb cccc";
+    let off = lay_out(text, &column(63.0), &justified());
+    let on = lay_out(text, &column(63.0), &compressing());
+    assert_eq!(line_texts(&on, text), ["aaa bbb ", "cccc"]);
+    assert_eq!(on.lines, off.lines);
+    assert!(!on.lines[1].is_justified);
+    assert_close(on.lines[1].visual_width(), 4.0 * CHAR);
+}
+
+#[test]
+fn st1_7_by_default_a_line_ending_at_a_hard_break_is_not_compressed() {
+    let text = "aaa bbb ccc\u{2028}dd";
+    let p = lay_out(text, &column(63.0), &justified());
+    assert_eq!(line_texts(&p, text), ["aaa bbb ", "ccc\u{2028}", "dd"]);
+    for line_text in line_texts(&p, text) {
+        assert!(natural_mono_width(line_text) <= 63.0, "{line_text:?}");
+    }
+    for (line, width) in p.lines[1..].iter().zip([3.0 * CHAR, 2.0 * CHAR]) {
+        assert!(!line.is_justified);
+        assert_close(line.visual_width(), width);
+    }
+}
+
+#[test]
+fn st3_3_compress_last_lines_compresses_a_line_ending_at_a_hard_break() {
+    let text = "aaa bbb ccc\u{2028}dd";
+    let p = lay_out(text, &column(63.0), &compressing());
+    assert_eq!(line_texts(&p, text), ["aaa bbb ccc\u{2028}", "dd"]);
+    assert_compressed_aaa_bbb_ccc(&p.lines[0], 0);
+    // The paragraph's last line is short: natural width.
+    let last = &p.lines[1];
+    assert!(!last.is_justified);
+    assert_close(last.visual_width(), 2.0 * CHAR);
+    assert_close(x_of(last, text.len() - 2), 0.0);
+}
+
+#[test]
+fn st3_3_compress_last_lines_never_stretches_a_short_last_line() {
+    // Each line ends the paragraph or at a hard break and is shorter than
+    // the column: natural widths under the option too.
+    for (text, lines) in [
+        ("aa bb", &["aa bb"][..]),
+        ("aa bb\u{2028}cc dd", &["aa bb\u{2028}", "cc dd"][..]),
+    ] {
+        let p = lay_out(text, &column(40.0), &compressing());
+        assert_eq!(line_texts(&p, text), lines);
+        for line in &p.lines {
+            assert!(!line.is_justified, "{text:?}");
+            assert_close(line.visual_width(), 5.0 * CHAR);
+            assert_close(line.slots[0].content_start, 0.0);
+        }
+        assert_close(x_of(&p.lines[0], 3), 3.0 * CHAR);
+        assert_close(x_of(p.lines.last().unwrap(), text.len() - 2), 3.0 * CHAR);
+    }
+}
+
+#[test]
+fn st3_2_compress_last_lines_has_no_effect_without_justify() {
+    let cases = [
+        ("aaa bbb ccc", 63.0),
+        ("aaa bbb ccc\u{2028}dd", 63.0),
+        ("aa bb\u{2028}cc dd", 40.0),
+        ("aaa bbb ccc dddddddddd", 63.0),
+        ("aa bb cc ddddddd", 52.0),
+    ];
+    for (text, width) in cases {
+        let plain = lay_out(text, &column(width), &LayoutOptions::default());
+        let p = lay_out(text, &column(width), &compressing_unjustified());
+        assert_eq!(p.lines, plain.lines, "{text:?}");
+        assert_close(p.total_block_size, plain.total_block_size);
+        assert!(p.lines.iter().all(|l| !l.is_justified), "{text:?}");
+    }
+    // At natural width, "aaa bbb ccc" does not fit 63 units.
+    let text = "aaa bbb ccc";
+    let p = lay_out(text, &column(63.0), &compressing_unjustified());
+    assert_eq!(line_texts(&p, text), ["aaa bbb ", "ccc"]);
+}
+
+#[test]
+fn st3_2_soft_wrapped_lines_justify_the_same_with_compress_last_lines() {
+    // A compressed soft-wrapped line (ST1-7) and a stretched one: in 52
+    // units "aa bb cc" (48) has 4 units of slack, which Level 0 covers (two
+    // spaces of stretch 3).
+    for (text, width, first) in [
+        ("aaa bbb ccc dddddddddd", 63.0, "aaa bbb ccc "),
+        ("aa bb cc ddddddd", 52.0, "aa bb cc "),
+    ] {
+        let off = lay_out(text, &column(width), &justified());
+        let on = lay_out(text, &column(width), &compressing());
+        assert_eq!(on.lines, off.lines, "{text:?}");
+        assert_eq!(line_texts(&on, text).len(), 2, "{text:?}");
+        assert_eq!(line_texts(&on, text)[0], first);
+        let line = &on.lines[0];
+        assert!(line.is_justified, "{text:?}");
+        assert_close(line.visual_width(), width);
+        assert!(!on.lines[1].is_justified, "{text:?}");
+    }
+    // Stretched: the 4 units shared equally by the two spaces; the short
+    // last line keeps its natural width.
+    let text = "aa bb cc ddddddd";
+    let p = lay_out(text, &column(52.0), &compressing());
+    assert_close(space_between(&p.lines[0], 1, 3), CHAR + 2.0);
+    assert_close(space_between(&p.lines[0], 4, 6), CHAR + 2.0);
+    assert_close(p.lines[1].visual_width(), 7.0 * CHAR);
+}
+
+#[test]
+fn st3_3_a_soft_wrapped_line_is_unchanged_when_the_option_compresses_the_last_line() {
+    // Both halves are 66 wide in a 63-unit column. The first line is
+    // soft-wrapped and compressed either way; the last is compressed only
+    // under the option, and otherwise ends at an earlier break.
+    let text = "aaa bbb ccc ddd eee fff";
+    let off = lay_out(text, &column(63.0), &justified());
+    let on = lay_out(text, &column(63.0), &compressing());
+    assert_eq!(line_texts(&off, text), ["aaa bbb ccc ", "ddd eee ", "fff"]);
+    assert_eq!(line_texts(&on, text), ["aaa bbb ccc ", "ddd eee fff"]);
+    assert_eq!(on.lines[0], off.lines[0]);
+    assert_compressed_aaa_bbb_ccc(&on.lines[0], 0);
+    assert_compressed_aaa_bbb_ccc(&on.lines[1], 12);
+    assert!(!off.lines[2].is_justified);
+    assert_close(off.lines[2].visual_width(), 3.0 * CHAR);
+}
