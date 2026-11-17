@@ -104,6 +104,8 @@ let frame = 0;
 function applySample(key) {
   const preset = PRESETS[key];
   textarea.value = SAMPLES[key] ?? '';
+  // A new sample is new text: the old selection's offsets mean nothing in it.
+  clearSelection();
   if (preset) {
     localeInput.value = preset.locale;
     quotesInput.value = preset.quotes;
@@ -863,25 +865,34 @@ function isRtl(paraId) {
 }
 
 /**
- * Collapses a selection to its visual edge on the arrow's side, as an unshifted
- * Left or Right does before it moves; `false` when there is none to collapse.
+ * Collapses a selection to its visual edge on `side` ('left' or 'right'), as
+ * an unshifted Left or Right does before it moves; `false` when there is none
+ * to collapse.
  */
-function collapseSelection(leftwards) {
+function collapseSelection(side) {
   const bounds = orderedSelection();
   if (!bounds) {
     return false;
   }
+  const { start, end } = bounds;
   const caret = (pos) => state.engine.caretGeometry(pos.paraId, pos.byteOffset, pos.affinity)?.primary;
-  const a = bounds.start.paraId === bounds.end.paraId ? caret(bounds.start) : null;
-  const b = a ? caret(bounds.end) : null;
+  const a = caret(start);
+  const b = caret(end);
+  // Each end says where `side` points from it: in an LTR paragraph Left is
+  // backwards, so the start is the left edge; in an RTL one it is the end.
+  const startOnSide = (side === 'left') !== isRtl(start.paraId);
+  const endOnSide = (side === 'left') === isRtl(end.paraId);
+  const sameLine = a && b && start.paraId === end.paraId && Math.abs(a.y - b.y) < 1;
   let edge;
-  if (a && b && Math.abs(a.y - b.y) < 1) {
-    // On one line, the edge on the arrow's side is the visual one.
-    edge = (a.x <= b.x) === leftwards ? bounds.start : bounds.end;
+  if (!sameLine && startOnSide !== endOnSide) {
+    // Exactly one end is on `side`, as across lines of one direction.
+    edge = startOnSide ? start : end;
+  } else if (a && b) {
+    // On one line, or when mixed directions put both ends or neither on
+    // `side`, the edge on `side` is the visual one.
+    edge = (a.x <= b.x) === (side === 'left') ? start : end;
   } else {
-    // Across lines, the arrow's side follows the paragraph's direction.
-    const towardsStart = leftwards !== isRtl(bounds.start.paraId);
-    edge = towardsStart ? bounds.start : bounds.end;
+    edge = start;
   }
   state.selection.anchor = edge;
   state.selection.focus = edge;
@@ -889,13 +900,12 @@ function collapseSelection(leftwards) {
   return true;
 }
 
-canvas.addEventListener('keydown', (event) => {
-  if (!state.layout || state.paraLayouts.length === 0) {
-    return;
-  }
+/** The motion code (`demo_move_cursor`) a key asks for, if any. */
+function motionFor(event) {
+  const word = event.altKey || event.ctrlKey;
   const motionMap = {
-    ArrowLeft: event.altKey || event.ctrlKey ? 6 : 0,
-    ArrowRight: event.altKey || event.ctrlKey ? 7 : 1,
+    ArrowLeft: word ? 6 : 0,
+    ArrowRight: word ? 7 : 1,
     ArrowUp: 2,
     ArrowDown: 3,
     Home: 4,
@@ -905,12 +915,42 @@ canvas.addEventListener('keydown', (event) => {
     BracketLeft: 8,
     BracketRight: 9,
   };
-  const motion = motionMap[event.key] ?? motionMap[event.code];
+  return motionMap[event.key] ?? motionMap[event.code];
+}
+
+/**
+ * Where a caret that left paragraph `paraId` at `moved.edge` lands in the
+ * neighbouring paragraph, or `null` at the first or last one. With no column
+ * to keep it lands on the neighbour's logical end or start, whose side
+ * depends on that paragraph's direction.
+ */
+function crossParagraph(paraId, moved) {
+  if (moved.edge === 'start' && paraId > 0) {
+    const prevId = paraId - 1;
+    const inlineX = moved.inlinePosition ?? (isRtl(prevId) ? -1e9 : 1e9);
+    const hit = state.engine.hitTestOnLine(prevId, 0xffffffff, inlineX);
+    return hit && { paraId: prevId, byteOffset: hit.byteOffset, affinity: hit.affinity };
+  }
+  if (moved.edge === 'end' && paraId + 1 < state.paraLayouts.length) {
+    const nextId = paraId + 1;
+    const inlineX = moved.inlinePosition ?? (isRtl(nextId) ? 1e9 : -1e9);
+    const hit = state.engine.hitTestOnLine(nextId, 0, inlineX);
+    return hit && { paraId: nextId, byteOffset: hit.byteOffset, affinity: hit.affinity };
+  }
+  return null;
+}
+
+canvas.addEventListener('keydown', (event) => {
+  if (!state.layout || state.paraLayouts.length === 0) {
+    return;
+  }
+  const motion = motionFor(event);
   if (motion === undefined) {
     return;
   }
   event.preventDefault();
-  if (!event.shiftKey && (motion === 0 || motion === 1) && collapseSelection(motion === 0)) {
+  if (!event.shiftKey && (motion === 0 || motion === 1)
+      && collapseSelection(motion === 0 ? 'left' : 'right')) {
     draw(state.layout.results, state.layout.settings);
     return;
   }
@@ -920,17 +960,12 @@ canvas.addEventListener('keydown', (event) => {
     state.selection.focus = start;
   }
   const focus = state.selection.focus;
-  if (motion === 2 || motion === 3) {
-    if (state.selection.preferredInline === null) {
-      const caret = state.engine.caretGeometry(focus.paraId, focus.byteOffset, focus.affinity);
-      if (caret) {
-        state.selection.preferredInline = caret.primary.x;
-      }
-    }
-  } else {
+  if (motion !== 2 && motion !== 3) {
     state.selection.preferredInline = null;
+  } else if (state.selection.preferredInline === null) {
+    const caret = state.engine.caretGeometry(focus.paraId, focus.byteOffset, focus.affinity);
+    state.selection.preferredInline = caret?.primary.x ?? null;
   }
-
   const moved = state.engine.moveCursor(
     focus.paraId,
     focus.byteOffset,
@@ -941,29 +976,9 @@ canvas.addEventListener('keydown', (event) => {
   if (!moved) {
     return;
   }
-  let nextPos = null;
-  if (moved.kind === 'moved') {
-    nextPos = { paraId: focus.paraId, byteOffset: moved.byteOffset, affinity: moved.affinity };
-  } else if (moved.kind === 'exited') {
-    if (moved.edge === 'start' && focus.paraId > 0) {
-      const prevId = focus.paraId - 1;
-      // With no column to keep, land on the paragraph's logical end: its
-      // last line's right edge in LTR, its left edge in RTL.
-      const inlineX = moved.inlinePosition ?? (isRtl(prevId) ? -1e9 : 1e9);
-      const hit = state.engine.hitTestOnLine(prevId, 0xffffffff, inlineX);
-      if (hit) {
-        nextPos = { paraId: prevId, byteOffset: hit.byteOffset, affinity: hit.affinity };
-      }
-    } else if (moved.edge === 'end' && focus.paraId + 1 < state.paraLayouts.length) {
-      const nextId = focus.paraId + 1;
-      // Likewise its logical start: the first line's left edge in LTR.
-      const inlineX = moved.inlinePosition ?? (isRtl(nextId) ? 1e9 : -1e9);
-      const hit = state.engine.hitTestOnLine(nextId, 0, inlineX);
-      if (hit) {
-        nextPos = { paraId: nextId, byteOffset: hit.byteOffset, affinity: hit.affinity };
-      }
-    }
-  }
+  const nextPos = moved.kind === 'moved'
+    ? { paraId: focus.paraId, byteOffset: moved.byteOffset, affinity: moved.affinity }
+    : crossParagraph(focus.paraId, moved);
   if (nextPos) {
     state.selection.focus = nextPos;
     if (!event.shiftKey) {
