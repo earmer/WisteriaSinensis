@@ -81,6 +81,9 @@ pub(crate) fn url_ranges(text: &str) -> Vec<TextRange> {
                 ')' => paren += 1,
                 ']' => square += 1,
                 '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' => {}
+                // Closing quotes and non-ASCII sentence punctuation (`”`,
+                // `’`, `»`, `」`, `。`) end the sentence, not the URL.
+                c if !c.is_ascii() && super::spacing::is_punctuation(c) => {}
                 _ => break,
             }
             end -= c.len_utf8();

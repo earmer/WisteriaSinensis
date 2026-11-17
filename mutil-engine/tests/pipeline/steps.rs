@@ -273,6 +273,28 @@ fn fe22_an_email_domain_is_not_a_www_url() {
 }
 
 #[test]
+fn fe22_a_closing_quote_is_not_part_of_a_url() {
+    // The label after the last dot is 14 bytes with its dot, under the 16
+    // that allow breaks anywhere; with `”` it would be 17.
+    for text in ["“www.abcdefghijklm”", "「www.abcdefghijklm」。"] {
+        let ast = compile(text);
+        let label = text.find(".abc").unwrap();
+        let url_band = DiscretionaryNode::URL_PENALTY_MIN..=DiscretionaryNode::URL_PENALTY_MAX;
+        let inside_label: Vec<usize> = discretionaries(&ast)
+            .iter()
+            .filter(|d| url_band.contains(&d.penalty) && d.byte_offset() > label + 1)
+            .map(|d| d.byte_offset())
+            .filter(|&at| text[..at].ends_with(|c: char| c.is_ascii_lowercase()))
+            .collect();
+        assert!(
+            inside_label.is_empty(),
+            "{text:?}: breaks at {inside_label:?}"
+        );
+        passes_the_input_gate(&ast, text);
+    }
+}
+
+#[test]
 fn czech_one_letter_words_bind_to_the_next_word() {
     let text = "jdu v les a k nám";
     let base = style(10.0);

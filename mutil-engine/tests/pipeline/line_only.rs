@@ -381,3 +381,87 @@ fn shp5_line_only_horizontal_in_vertical_across_faces_keeps_one_face() {
     );
     assert!(glyphs[1].x_advance > 0.0, "{glyphs:?}");
 }
+
+/// A line backend that returns fixed glyphs, `(byte, face, glyph id)` in the
+/// order given, each 5 units wide.
+struct ScriptedLines(Vec<(usize, u32, u32)>);
+
+impl LineShaper for ScriptedLines {
+    fn shape_line(
+        &self,
+        _text: &str,
+        _families: &[FontFamily],
+        _style: FontStyle,
+        _font_size: f32,
+        _features: &FontFeatures,
+    ) -> Vec<LineGlyph> {
+        self.0
+            .iter()
+            .map(|&(byte_index, font, glyph_id)| LineGlyph {
+                font: FontId(font),
+                glyph_id,
+                byte_index,
+                x_advance: 5.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+            })
+            .collect()
+    }
+
+    fn font_metrics(&self, instance: FontInstanceRef<'_>) -> FontMetrics {
+        SCRIPT_SHAPER.font_metrics(instance)
+    }
+
+    fn resolve_primary_font_metrics(
+        &self,
+        families: &[FontFamily],
+        style: FontStyle,
+        script: ScriptTag,
+        locale: &LocaleTag,
+        font_size: f32,
+        variations: &[FontVariation],
+    ) -> (FontId, FontMetrics) {
+        SCRIPT_SHAPER
+            .resolve_primary_font_metrics(families, style, script, locale, font_size, variations)
+    }
+
+    fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32 {
+        SCRIPT_SHAPER.space_advance(instance, orientation)
+    }
+}
+
+#[test]
+fn shp24_out_of_order_glyphs_across_faces_stay_on_their_own_atoms() {
+    // Glyphs in visual order with atoms 0, 2, 1, where atom 1 changes face:
+    // the glyph of atom 1 stays on atom 1, and as its segment's face is not
+    // its own, it becomes that face's .notdef.
+    let text = "abc";
+    let (mut atoms, mut run) = crate::shaper::tate_chu_yoko(text, &[FAMILY]);
+    run.orientation = GlyphOrientation::Horizontal;
+    for atom in &mut atoms {
+        atom.orientation = GlyphOrientation::Horizontal;
+    }
+    let shaper = LineOnlyShaper::new(ScriptedLines(vec![(0, 0, 10), (2, 1, 20), (1, 2, 30)]));
+    let mut clusters = Vec::new();
+    let mut glyphs = Vec::new();
+    shaper.shape_run(text, &run, &atoms, &mut clusters, &mut glyphs);
+
+    let atom_of_glyph = |glyph_id: u32| {
+        let at = glyphs.iter().position(|g| g.glyph_id == glyph_id).unwrap();
+        let cluster = clusters
+            .iter()
+            .find(|c| c.glyph_range.contains(&at))
+            .unwrap();
+        (cluster.atom_range.clone(), cluster.font.font_id)
+    };
+    assert_eq!(atom_of_glyph(10), (0..1, FontId(0)), "{clusters:?}");
+    assert_eq!(atom_of_glyph(20).1, FontId(1), "{clusters:?}");
+    let notdef = glyphs.iter().position(|g| g.glyph_id == 0).unwrap();
+    let home = clusters
+        .iter()
+        .find(|c| c.glyph_range.contains(&notdef))
+        .unwrap();
+    assert!(home.atom_range.contains(&1), "{clusters:?}");
+    assert_eq!(home.font.font_id, FontId(1));
+    assert!(!glyphs.iter().any(|g| g.glyph_id == 30), "{glyphs:?}");
+}

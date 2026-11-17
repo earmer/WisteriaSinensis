@@ -259,68 +259,39 @@ fn int13_visual_arrows_across_soft_wrap_with_bidi_boundary_advance() {
                 .map(|s| pos(s.offset, s.affinity))
                 .collect()
         };
-        let ltr = p.lines[0].caret_stops[0].level == BidiLevel::LTR;
-        let (expected_right, expected_left): (Vec<_>, Vec<_>) = if ltr {
-            let all: Vec<_> = p.lines.iter().flat_map(stops_of).collect();
-            (all.clone(), all.into_iter().rev().collect())
-        } else {
-            (
-                stops_of(&p.lines[0]),
-                stops_of(p.lines.last().unwrap())
-                    .into_iter()
-                    .rev()
-                    .collect(),
-            )
-        };
-        let line0_start = p.lines[0].caret_stops.first().copied().unwrap();
-        let mut cur = pos(line0_start.offset, line0_start.affinity);
-        let mut seen = vec![cur];
-        let mut exited_right = false;
-        for _ in 0..=total_stops {
-            match l.move_cursor(cur, Motion::Right, None) {
-                CursorMove::Moved(next) => {
-                    assert!(
-                        !seen.contains(&next),
-                        "{text:?}: Right stalled or looped at {next:?} (history: {seen:?})"
-                    );
-                    seen.push(next);
-                    cur = next;
-                }
-                CursorMove::Exited { .. } => {
-                    exited_right = true;
-                    break;
+        // Visual order across the paragraph, left to right: the lines in
+        // turn in an LTR paragraph, from the last one in an RTL paragraph.
+        let mut lines: Vec<&PositionedLine> = p.lines.iter().collect();
+        if p.base_direction == BidiDirection::Rtl {
+            lines.reverse();
+        }
+        let rightwards: Vec<CursorPosition> = lines.into_iter().flat_map(stops_of).collect();
+        let leftwards: Vec<CursorPosition> = rightwards.iter().rev().copied().collect();
+        // Each walk starts at the paragraph's far side, so it must cross every
+        // wrap, visiting every stop in visual order, before it exits.
+        for (motion, expected) in [(Motion::Right, &rightwards), (Motion::Left, &leftwards)] {
+            let mut cur = expected[0];
+            let mut seen = vec![cur];
+            let mut exited = false;
+            for _ in 0..=total_stops {
+                match l.move_cursor(cur, motion, None) {
+                    CursorMove::Moved(next) => {
+                        assert!(
+                            !seen.contains(&next),
+                            "{text:?}: {motion:?} stalled or looped at {next:?} (history: {seen:?})"
+                        );
+                        seen.push(next);
+                        cur = next;
+                    }
+                    CursorMove::Exited { .. } => {
+                        exited = true;
+                        break;
+                    }
                 }
             }
+            assert!(exited, "{text:?}: {motion:?} did not exit: {seen:?}");
+            assert_eq!(&seen, expected, "{text:?}: {motion:?}");
         }
-        assert!(exited_right, "{text:?}: Right did not exit: {seen:?}");
-        // Every stop is visited, in visual order: an LTR paragraph crosses
-        // each line in turn; in an RTL one, Right runs to the paragraph start
-        // and exits on the first line.
-        assert_eq!(seen, expected_right, "{text:?}: Right");
-
-        let last_line = p.lines.last().unwrap();
-        let last_stop = last_line.caret_stops.last().copied().unwrap();
-        let mut cur = pos(last_stop.offset, last_stop.affinity);
-        let mut seen = vec![cur];
-        let mut exited_left = false;
-        for _ in 0..=total_stops {
-            match l.move_cursor(cur, Motion::Left, None) {
-                CursorMove::Moved(next) => {
-                    assert!(
-                        !seen.contains(&next),
-                        "{text:?}: Left stalled or looped at {next:?} (history: {seen:?})"
-                    );
-                    seen.push(next);
-                    cur = next;
-                }
-                CursorMove::Exited { .. } => {
-                    exited_left = true;
-                    break;
-                }
-            }
-        }
-        assert!(exited_left, "{text:?}: Left did not exit: {seen:?}");
-        assert_eq!(seen, expected_left, "{text:?}: Left");
     }
 }
 

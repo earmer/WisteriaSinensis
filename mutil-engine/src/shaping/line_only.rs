@@ -234,60 +234,65 @@ struct FaceSegment {
 }
 
 /// Splits the kept `(atom, face, glyph)` triples of `atoms[range]` by face at
-/// atom boundaries: a face change inside an atom, or atom ranges that overlap
-/// because the glyphs are not monotonic, keep the earlier face. The first
-/// segment starts at `range.start`.
+/// atom boundaries. Segments partition the atoms in ascending order and every
+/// glyph's atom lies in the segment that emits it: a face change inside an
+/// atom, or atom ranges that overlap because the glyphs are not monotonic,
+/// merge into the earlier segment and keep its face. A tate-chu-yoko run is
+/// one segment, as SHP-5 makes it one cluster.
 ///
-/// A tate-chu-yoko run is one segment, as SHP-5 makes it one cluster: it
-/// takes its first glyph's face, and a glyph the backend took from another
-/// face becomes that face's `.notdef` (glyph 0), with its advance kept, since
-/// its id means nothing in the cluster's face.
+/// A glyph left in a segment of another face becomes the segment face's
+/// `.notdef` (glyph 0), with its advance kept: its id means nothing in the
+/// cluster's face (SHP-5, SHP-24).
 fn face_segments(
     run: &ShapingRun,
     range: core::ops::Range<usize>,
     kept: &mut [(usize, FontId, RawShapedGlyph)],
 ) -> Vec<FaceSegment> {
+    let mut segments: Vec<FaceSegment> = Vec::new();
     if run.orientation == GlyphOrientation::HorizontalInVertical {
-        let font = kept[0].1;
-        for (_, glyph_font, glyph) in kept.iter_mut() {
-            if *glyph_font != font {
-                *glyph_font = font;
+        segments.push(FaceSegment {
+            first_atom: range.start,
+            last_atom: range.end - 1,
+            font: kept[0].1,
+            first_glyph: 0,
+        });
+    } else {
+        for (i, &(atom, font, _)) in kept.iter().enumerate() {
+            match segments.last_mut() {
+                Some(last) if last.font == font || atom <= last.last_atom => {
+                    last.first_atom = last.first_atom.min(atom);
+                    last.last_atom = last.last_atom.max(atom);
+                    // Absorb earlier segments this one now overlaps.
+                    while let [.., prev, cur] = segments.as_mut_slice() {
+                        if cur.first_atom > prev.last_atom {
+                            break;
+                        }
+                        prev.first_atom = prev.first_atom.min(cur.first_atom);
+                        prev.last_atom = prev.last_atom.max(cur.last_atom);
+                        segments.pop();
+                    }
+                }
+                _ => segments.push(FaceSegment {
+                    first_atom: atom,
+                    last_atom: atom,
+                    font,
+                    first_glyph: i,
+                }),
+            }
+        }
+        segments[0].first_atom = range.start;
+    }
+    for (k, segment) in segments.iter().enumerate() {
+        let end = segments
+            .get(k + 1)
+            .map_or(kept.len(), |next| next.first_glyph);
+        for (_, font, glyph) in &mut kept[segment.first_glyph..end] {
+            if *font != segment.font {
+                *font = segment.font;
                 glyph.glyph_id = 0;
             }
         }
-        return vec![FaceSegment {
-            first_atom: range.start,
-            last_atom: range.end - 1,
-            font,
-            first_glyph: 0,
-        }];
     }
-    let mut segments: Vec<FaceSegment> = Vec::new();
-    for (i, &(atom, font, _)) in kept.iter().enumerate() {
-        match segments.last_mut() {
-            Some(last) if last.font == font => {
-                last.first_atom = last.first_atom.min(atom);
-                last.last_atom = last.last_atom.max(atom);
-                // Absorb earlier segments this one now overlaps.
-                while let [.., prev, cur] = segments.as_mut_slice() {
-                    if cur.first_atom > prev.last_atom {
-                        break;
-                    }
-                    prev.first_atom = prev.first_atom.min(cur.first_atom);
-                    prev.last_atom = prev.last_atom.max(cur.last_atom);
-                    segments.pop();
-                }
-            }
-            Some(last) if atom <= last.last_atom => last.last_atom = last.last_atom.max(atom),
-            _ => segments.push(FaceSegment {
-                first_atom: atom,
-                last_atom: atom,
-                font,
-                first_glyph: i,
-            }),
-        }
-    }
-    segments[0].first_atom = range.start;
     segments
 }
 

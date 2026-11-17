@@ -136,27 +136,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             if groups.iter().any(|g| !g.is_bare_boundary) {
                 groups.retain(|g| !g.is_bare_boundary);
             }
-            let trailing_bytes = ctx.placed[ctx.order.len()..]
-                .iter()
-                .filter(|p| is_member(&p.piece) && !p.piece.bytes.is_empty())
-                .fold(None::<TextRange>, |acc, p| {
-                    Some(acc.map_or(p.piece.bytes, |r| r.cover(p.piece.bytes)))
-                });
-            if let Some(tb) = trailing_bytes {
-                if let Some(last) = groups.iter_mut().max_by_key(|g| g.bytes.end()) {
-                    last.bytes = last.bytes.cover(tb);
-                    last.is_bare_boundary = false;
-                } else {
-                    let edge = if rtl { line_lo } else { line_hi };
-                    groups.push(VisualGroup {
-                        lo: edge,
-                        hi: edge,
-                        bytes: tb,
-                        level: self.base.base_level(),
-                        is_bare_boundary: false,
-                    });
-                }
-            }
+            let trailing_edge = if rtl { line_lo } else { line_hi };
+            self.attach_trailing_bytes(ctx, &is_member, trailing_edge, &mut groups);
             if groups.is_empty() {
                 continue;
             }
@@ -227,6 +208,38 @@ impl<'i, 'a> Layout<'i, 'a> {
                 g.bytes = TextRange::new(start, end);
                 emit(span, g);
             }
+        }
+    }
+
+    /// Gives a span's bytes in the line's collapsed trailing white space,
+    /// which has no visual order, to its last group by bytes, or to an empty
+    /// group at `edge`, the line end, when it has none on the line (ST2-3).
+    fn attach_trailing_bytes(
+        &self,
+        ctx: &SpanContext<'_>,
+        is_member: &impl Fn(&Piece) -> bool,
+        edge: f32,
+        groups: &mut Vec<VisualGroup>,
+    ) {
+        let Some(bytes) = ctx.placed[ctx.order.len()..]
+            .iter()
+            .filter(|p| is_member(&p.piece) && !p.piece.bytes.is_empty())
+            .map(|p| p.piece.bytes)
+            .reduce(|a, b| a.cover(b))
+        else {
+            return;
+        };
+        if let Some(last) = groups.iter_mut().max_by_key(|g| g.bytes.end()) {
+            last.bytes = last.bytes.cover(bytes);
+            last.is_bare_boundary = false;
+        } else {
+            groups.push(VisualGroup {
+                lo: edge,
+                hi: edge,
+                bytes,
+                level: self.base.base_level(),
+                is_bare_boundary: false,
+            });
         }
     }
 
