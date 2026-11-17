@@ -87,4 +87,64 @@ export class Engine {
   conformance() {
     return JSON.parse(this.#take(this.#exports.demo_conformance()));
   }
+
+  clearParagraphs() {
+    this.#exports.demo_clear_paragraphs();
+  }
+
+  setOptions({
+    lineBreak = 0,
+    wordBreak = 0,
+    letterSpacing = 0,
+    wordSpacing = 0,
+    firstLineIndent = 0,
+    hangingIndent = 0,
+  }) {
+    this.#exports.demo_set_options(
+      lineBreak,
+      wordBreak,
+      letterSpacing,
+      wordSpacing,
+      firstLineIndent,
+      hangingIndent,
+    );
+  }
+
+  hitTest(paraId, x, y) {
+    return JSON.parse(this.#take(this.#exports.demo_hit_test(paraId, x, y)));
+  }
+
+  hitTestOnLine(paraId, line, inlinePosition) {
+    return JSON.parse(this.#take(this.#exports.demo_hit_test_on_line(paraId, line, inlinePosition)));
+  }
+
+  caretGeometry(paraId, byteOffset, affinity) {
+    const aff = affinity === 'upstream' ? 1 : 0;
+    return JSON.parse(this.#take(this.#exports.demo_caret_geometry(paraId, byteOffset, aff)));
+  }
+
+  moveCursor(paraId, byteOffset, affinity, motion, preferredInline = null) {
+    const aff = affinity === 'upstream' ? 1 : 0;
+    const hasPreferred = preferredInline !== null && Number.isFinite(preferredInline) ? 1 : 0;
+    return JSON.parse(
+      this.#take(
+        this.#exports.demo_move_cursor(
+          paraId,
+          byteOffset,
+          aff,
+          motion,
+          hasPreferred,
+          hasPreferred ? preferredInline : 0,
+        ),
+      ),
+    );
+  }
+
+  selectionGeometry(paraId, start, end, heightStyle = 0) {
+    return JSON.parse(this.#take(this.#exports.demo_selection_geometry(paraId, start, end, heightStyle)));
+  }
+
+  rangeRects(paraId, start, end) {
+    return JSON.parse(this.#take(this.#exports.demo_range_rects(paraId, start, end)));
+  }
 }

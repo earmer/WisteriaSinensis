@@ -48,8 +48,22 @@ const state = {
   missing: [],
   glyphs: new Map(), // "font:gid" -> Path2D | null
   layout: null, // last successful results
+  paraLayouts: [], // [{ id, y, blockSize, utf16Start, utf16End, rawText }]
+  selection: {
+    anchor: null, // { paraId, byteOffset, affinity }
+    focus: null, // { paraId, byteOffset, affinity }
+    preferredInline: null,
+    dragging: false,
+  },
+  ime: {
+    active: false,
+    startUtf16: 0,
+    text: '',
+  },
   lastError: null,
 };
+
+const utf8Encoder = new TextEncoder();
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('canvas');
@@ -63,6 +77,14 @@ const quotesInput = $('quotes');
 const policyInput = $('locale-policy');
 const localePresets = $('locale-presets');
 const faceInput = $('face');
+const lineBreakInput = $('line-break');
+const wordBreakInput = $('word-break');
+const letterSpacingInput = $('letter-spacing');
+const wordSpacingInput = $('word-spacing');
+const firstIndentInput = $('first-indent');
+const hangingIndentInput = $('hanging-indent');
+const selectionHeightInput = $('selection-height');
+const cursorStatus = $('cursor-status');
 const showBoxes = $('show-boxes');
 const showBaselines = $('show-baselines');
 const showCarets = $('show-carets');
@@ -171,9 +193,22 @@ function renderEngineStatus(report) {
 }
 
 function splitParagraphs(text) {
-  return text
-    .split(/\r\n|[\r\n\u2029]/)
-    .filter((paragraph) => paragraph.trim() !== '');
+  const re = /\r\n|[\r\n\u2029]/g;
+  const out = [];
+  let start = 0;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    const slice = text.slice(start, match.index);
+    if (slice.trim() !== '') {
+      out.push({ rawText: slice, utf16Start: start, utf16End: match.index });
+    }
+    start = match.index + match[0].length;
+  }
+  const tail = text.slice(start);
+  if (tail.trim() !== '') {
+    out.push({ rawText: tail, utf16Start: start, utf16End: text.length });
+  }
+  return out;
 }
 
 /** The Phase 2 options packed as the demo's C ABI expects (`Phase2`). */
@@ -200,6 +235,13 @@ function currentSettings() {
     heuristics: policyInput.value === 'heuristics',
     phase2: phase2Bits(),
     primary: faceInput.value,
+    lineBreak: Number(lineBreakInput.value),
+    wordBreak: Number(wordBreakInput.value),
+    letterSpacing: Number(letterSpacingInput.value),
+    wordSpacing: Number(wordSpacingInput.value),
+    firstLineIndent: Number(firstIndentInput.value),
+    hangingIndent: Number(hangingIndentInput.value),
+    selectionHeight: Number(selectionHeightInput.value),
     showBoxes: showBoxes.checked,
     showBaselines: showBaselines.checked,
     showCarets: showCarets.checked,
@@ -219,15 +261,29 @@ function relayout() {
   state.lastError = null;
   hideError();
 
+  state.engine.clearParagraphs();
+  state.engine.setOptions({
+    lineBreak: settings.lineBreak,
+    wordBreak: settings.wordBreak,
+    letterSpacing: settings.letterSpacing,
+    wordSpacing: settings.wordSpacing,
+    firstLineIndent: settings.firstLineIndent,
+    hangingIndent: settings.hangingIndent,
+  });
+
   const started = performance.now();
   const results = [];
+  const paraLayouts = [];
+  const pad = 32;
+  const paragraphGap = 14;
+  let y = pad;
   let lines = 0;
   let glyphs = 0;
   let justified = 0;
   let hanging = 0;
-  for (const [index, paragraph] of paragraphs.entries()) {
+  for (const [index, para] of paragraphs.entries()) {
     const result = state.engine.layout(
-      paragraph,
+      para.rawText,
       settings.width,
       settings.fontSize,
       settings.lineHeight,
@@ -240,13 +296,26 @@ function relayout() {
     if (!result.ok) {
       showEngineError(result, index, paragraphs.length);
       state.layout = null;
+      state.paraLayouts = [];
+      state.selection.anchor = null;
+      state.selection.focus = null;
       gateChip.textContent = 'engine rejected the input';
       gateChip.className = 'chip bad';
       stats.replaceChildren();
       drawPlaceholder(settings.width, 'Layout rejected — see message above.');
+      updateCursorStatus();
       return;
     }
     results.push(result);
+    paraLayouts.push({
+      id: result.id,
+      y,
+      blockSize: result.blockSize,
+      utf16Start: para.utf16Start,
+      utf16End: para.utf16End,
+      rawText: para.rawText,
+    });
+    y += result.blockSize + paragraphGap;
     lines += result.lines.length;
     for (const line of result.lines) {
       justified += line.justified ? 1 : 0;
@@ -258,6 +327,12 @@ function relayout() {
   }
   const elapsed = performance.now() - started;
   state.layout = { results, settings };
+  state.paraLayouts = paraLayouts;
+
+  if (state.selection.focus && state.selection.focus.paraId >= results.length) {
+    state.selection.anchor = null;
+    state.selection.focus = null;
+  }
 
   gateChip.textContent = results.length === 0 ? 'nothing to draw' : 'output gate passed';
   gateChip.className = `chip ${results.length === 0 ? 'muted' : 'good'}`;
@@ -301,20 +376,34 @@ function draw(results, settings) {
   if (results.length === 0) {
     hint.textContent = 'Paste text to lay it out.';
     hint.hidden = false;
+    updateCursorStatus();
     return;
   }
   hint.hidden = true;
+
+  const selBounds = orderedSelection();
+  const imeRange = resolveImeParagraphRange();
 
   let y = pad;
   for (const paragraph of results) {
     ctx.save();
     ctx.translate(pad, y);
     drawLineGuides(paragraph, settings);
+    if (selBounds) {
+      drawSelection(paragraph.id, selBounds, settings.selectionHeight);
+    }
     drawGlyphs(paragraph);
     drawCaretStops(paragraph, settings);
+    if (imeRange && imeRange.paraId === paragraph.id) {
+      drawImeOverlay(paragraph.id, imeRange.startByte, imeRange.endByte);
+    }
+    if (state.selection.focus && state.selection.focus.paraId === paragraph.id) {
+      drawActiveCaret(state.selection.focus);
+    }
     ctx.restore();
     y += paragraph.blockSize + paragraphGap;
   }
+  updateCursorStatus(selBounds, imeRange);
 }
 
 function drawGlyphs(paragraph) {
@@ -396,6 +485,155 @@ function drawCaretStops(paragraph, settings) {
   }
 }
 
+function orderedSelection() {
+  const { anchor, focus } = state.selection;
+  if (!anchor || !focus) {
+    return null;
+  }
+  if (anchor.paraId === focus.paraId && anchor.byteOffset === focus.byteOffset) {
+    return null;
+  }
+  const forward =
+    anchor.paraId < focus.paraId ||
+    (anchor.paraId === focus.paraId && anchor.byteOffset <= focus.byteOffset);
+  return forward ? { start: anchor, end: focus } : { start: focus, end: anchor };
+}
+
+function drawSelection(paraId, selBounds, heightStyle) {
+  if (paraId < selBounds.start.paraId || paraId > selBounds.end.paraId) {
+    return;
+  }
+  const lo = paraId === selBounds.start.paraId ? selBounds.start.byteOffset : 0;
+  const hi = paraId === selBounds.end.paraId ? selBounds.end.byteOffset : 0x7fffffff;
+  if (lo >= hi) {
+    return;
+  }
+  const rects = state.engine.selectionGeometry(paraId, lo, hi, heightStyle);
+  if (!rects || rects.length === 0) {
+    return;
+  }
+  ctx.fillStyle = 'rgba(79, 112, 189, 0.24)';
+  for (const r of rects) {
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+  }
+}
+
+function drawActiveCaret(pos) {
+  const caret = state.engine.caretGeometry(pos.paraId, pos.byteOffset, pos.affinity);
+  if (!caret) {
+    return;
+  }
+  const focused = document.activeElement === canvas;
+  ctx.save();
+  const px = Math.round(caret.primary.x) + 0.5;
+  ctx.strokeStyle = focused ? '#2563eb' : '#1b1a17';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(px, caret.primary.y);
+  ctx.lineTo(px, caret.primary.y + caret.primary.h);
+  ctx.stroke();
+
+  if (caret.secondary) {
+    const sx = Math.round(caret.secondary.x) + 0.5;
+    const top = caret.secondary.y + caret.secondary.h * 0.45;
+    const bottom = caret.secondary.y + caret.secondary.h;
+    ctx.strokeStyle = '#d97706';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 2]);
+    ctx.beginPath();
+    ctx.moveTo(sx, top);
+    ctx.lineTo(sx, bottom);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function resolveImeParagraphRange() {
+  if (!state.ime.active || state.ime.text.length === 0) {
+    return null;
+  }
+  const startUtf16 = state.ime.startUtf16;
+  const endUtf16 = startUtf16 + state.ime.text.length;
+  const para = state.paraLayouts.find(
+    (p) => startUtf16 >= p.utf16Start && startUtf16 <= p.utf16End,
+  );
+  if (!para) {
+    return null;
+  }
+  const relStart = Math.max(0, startUtf16 - para.utf16Start);
+  const relEnd = Math.min(para.rawText.length, endUtf16 - para.utf16Start);
+  if (relEnd <= relStart) {
+    return null;
+  }
+  const startByte = utf8Encoder.encode(para.rawText.slice(0, relStart)).length;
+  const endByte = utf8Encoder.encode(para.rawText.slice(0, relEnd)).length;
+  return { paraId: para.id, startByte, endByte };
+}
+
+function drawImeOverlay(paraId, startByte, endByte) {
+  const rects = state.engine.rangeRects(paraId, startByte, endByte);
+  if (!rects || rects.length === 0) {
+    return;
+  }
+  ctx.save();
+  ctx.fillStyle = 'rgba(217, 119, 6, 0.12)';
+  ctx.strokeStyle = '#d97706';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 2]);
+  for (const r of rects) {
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    const uy = Math.round(r.y + r.h - 1) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(r.x, uy);
+    ctx.lineTo(r.x + r.w, uy);
+    ctx.stroke();
+  }
+  // Simulated IME candidate window anchor at the bottom-left of the first composing rect.
+  const anchor = rects[0];
+  const ax = Math.round(anchor.x) + 0.5;
+  const ay = Math.round(anchor.y + anchor.h) + 0.5;
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#d97706';
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(ax - 4, ay + 6);
+  ctx.lineTo(ax + 4, ay + 6);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
+  const label = 'IME anchor';
+  const tw = ctx.measureText(label).width;
+  ctx.fillStyle = '#1b1a17';
+  ctx.fillRect(ax - 4, ay + 6, tw + 10, 18);
+  ctx.fillStyle = '#fffdf7';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, ax + 1, ay + 15);
+  ctx.restore();
+}
+
+function updateCursorStatus(selBounds, imeRange) {
+  const parts = [];
+  if (state.selection.focus) {
+    const f = state.selection.focus;
+    parts.push(`Caret: p${f.paraId} · byte ${f.byteOffset} (${f.affinity})`);
+  }
+  if (selBounds) {
+    const heightLabel = ['Tight', 'Max', 'Strut'][Number(selectionHeightInput.value)] ?? 'Tight';
+    parts.push(
+      `Sel: p${selBounds.start.paraId}:${selBounds.start.byteOffset}–p${selBounds.end.paraId}:${selBounds.end.byteOffset} (${heightLabel})`,
+    );
+  }
+  if (imeRange) {
+    parts.push(`IME: p${imeRange.paraId} bytes ${imeRange.startByte}..${imeRange.endByte}`);
+  }
+  cursorStatus.textContent =
+    parts.length > 0
+      ? parts.join('  |  ')
+      : 'Click or drag on canvas · Arrow keys (+ Shift) · IME in Text';
+}
+
 function drawPlaceholder(width, message) {
   const pad = 32;
   const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
@@ -462,23 +700,224 @@ function schedule() {
   });
 }
 
-textarea.addEventListener('input', () => {
-  clearTimeout(textTimer);
-  textTimer = setTimeout(relayout, 140);
+textarea.addEventListener('compositionstart', (event) => {
+  state.ime.active = true;
+  state.ime.startUtf16 = textarea.selectionStart;
+  state.ime.text = event.data ?? '';
 });
 
 const phase2Inputs = ['direction', 'justify', 'compress-last', 'hang-start', 'hang-end', 'autospace', 'whitespace']
   .map((id) => $(id));
 
-for (const input of [widthInput, sizeInput, lineHeightInput, quotesInput, faceInput, policyInput, ...phase2Inputs]) {
+textarea.addEventListener('compositionupdate', (event) => {
+  state.ime.active = true;
+  state.ime.text = event.data ?? '';
+});
+
+textarea.addEventListener('compositionend', () => {
+  state.ime.active = false;
+  state.ime.text = '';
+  clearTimeout(textTimer);
+  relayout();
+});
+
+textarea.addEventListener('input', (event) => {
+  clearTimeout(textTimer);
+  if (event.isComposing || state.ime.active) {
+    relayout();
+  } else {
+    textTimer = setTimeout(relayout, 140);
+  }
+});
+
+const layoutInputs = [
+  widthInput,
+  sizeInput,
+  lineHeightInput,
+  quotesInput,
+  faceInput,
+  policyInput,
+  lineBreakInput,
+  wordBreakInput,
+  ...phase2Inputs,
+  letterSpacingInput,
+  wordSpacingInput,
+  firstIndentInput,
+  hangingIndentInput,
+];
+
+for (const input of layoutInputs) {
   input.addEventListener('input', () => {
     if (input === widthInput) {
       $('width-value').textContent = `${widthInput.value} px`;
-    }
-    if (input === sizeInput) {
+    } else if (input === sizeInput) {
       $('size-value').textContent = `${sizeInput.value} px`;
+    } else if (input === letterSpacingInput) {
+      $('letter-spacing-value').textContent = `${letterSpacingInput.value} px`;
+    } else if (input === wordSpacingInput) {
+      $('word-spacing-value').textContent = `${wordSpacingInput.value} px`;
+    } else if (input === firstIndentInput) {
+      $('first-indent-value').textContent = `${firstIndentInput.value} px`;
+    } else if (input === hangingIndentInput) {
+      $('hanging-indent-value').textContent = `${hangingIndentInput.value} px`;
     }
     schedule();
+  });
+}
+
+selectionHeightInput.addEventListener('change', () => {
+  if (state.layout) {
+    const { results, settings } = state.layout;
+    settings.selectionHeight = Number(selectionHeightInput.value);
+    draw(results, settings);
+  }
+});
+
+function canvasPointToParagraph(clientX, clientY) {
+  if (state.paraLayouts.length === 0) {
+    return null;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const cx = clientX - rect.left;
+  const cy = clientY - rect.top;
+  const pad = 32;
+  const paragraphGap = 14;
+  let target = state.paraLayouts[state.paraLayouts.length - 1];
+  for (const para of state.paraLayouts) {
+    if (cy < para.y + para.blockSize + paragraphGap * 0.5) {
+      target = para;
+      break;
+    }
+  }
+  return { paraId: target.id, x: cx - pad, y: cy - target.y };
+}
+
+canvas.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 || !state.layout || state.paraLayouts.length === 0) {
+    return;
+  }
+  canvas.focus({ preventScroll: true });
+  canvas.setPointerCapture(event.pointerId);
+  const pt = canvasPointToParagraph(event.clientX, event.clientY);
+  if (!pt) {
+    return;
+  }
+  const hit = state.engine.hitTest(pt.paraId, pt.x, pt.y);
+  if (!hit) {
+    return;
+  }
+  const pos = { paraId: pt.paraId, byteOffset: hit.byteOffset, affinity: hit.affinity };
+  if (event.shiftKey && state.selection.anchor) {
+    state.selection.focus = pos;
+  } else {
+    state.selection.anchor = pos;
+    state.selection.focus = pos;
+  }
+  state.selection.preferredInline = null;
+  state.selection.dragging = true;
+  draw(state.layout.results, state.layout.settings);
+});
+
+canvas.addEventListener('pointermove', (event) => {
+  if (!state.selection.dragging || !state.layout || state.paraLayouts.length === 0) {
+    return;
+  }
+  const pt = canvasPointToParagraph(event.clientX, event.clientY);
+  if (!pt) {
+    return;
+  }
+  const hit = state.engine.hitTest(pt.paraId, pt.x, pt.y);
+  if (!hit) {
+    return;
+  }
+  state.selection.focus = { paraId: pt.paraId, byteOffset: hit.byteOffset, affinity: hit.affinity };
+  draw(state.layout.results, state.layout.settings);
+});
+
+for (const evName of ['pointerup', 'pointercancel']) {
+  canvas.addEventListener(evName, () => {
+    state.selection.dragging = false;
+  });
+}
+
+canvas.addEventListener('keydown', (event) => {
+  if (!state.layout || state.paraLayouts.length === 0) {
+    return;
+  }
+  const motionMap = {
+    ArrowLeft: event.altKey || event.ctrlKey ? 6 : 0,
+    ArrowRight: event.altKey || event.ctrlKey ? 7 : 1,
+    ArrowUp: 2,
+    ArrowDown: 3,
+    Home: 4,
+    End: 5,
+  };
+  const motion = motionMap[event.key];
+  if (motion === undefined) {
+    return;
+  }
+  event.preventDefault();
+  if (!state.selection.focus) {
+    const start = { paraId: 0, byteOffset: 0, affinity: 'downstream' };
+    state.selection.anchor = start;
+    state.selection.focus = start;
+  }
+  const focus = state.selection.focus;
+  if (motion === 2 || motion === 3) {
+    if (state.selection.preferredInline === null) {
+      const caret = state.engine.caretGeometry(focus.paraId, focus.byteOffset, focus.affinity);
+      if (caret) {
+        state.selection.preferredInline = caret.primary.x;
+      }
+    }
+  } else {
+    state.selection.preferredInline = null;
+  }
+
+  const moved = state.engine.moveCursor(
+    focus.paraId,
+    focus.byteOffset,
+    focus.affinity,
+    motion,
+    state.selection.preferredInline,
+  );
+  if (!moved) {
+    return;
+  }
+  let nextPos = null;
+  if (moved.kind === 'moved') {
+    nextPos = { paraId: focus.paraId, byteOffset: moved.byteOffset, affinity: moved.affinity };
+  } else if (moved.kind === 'exited') {
+    if (moved.edge === 'start' && focus.paraId > 0) {
+      const prevId = focus.paraId - 1;
+      const inlineX = moved.inlinePosition !== null ? moved.inlinePosition : 1e9;
+      const hit = state.engine.hitTestOnLine(prevId, 0xffffffff, inlineX);
+      if (hit) {
+        nextPos = { paraId: prevId, byteOffset: hit.byteOffset, affinity: hit.affinity };
+      }
+    } else if (moved.edge === 'end' && focus.paraId + 1 < state.paraLayouts.length) {
+      const nextId = focus.paraId + 1;
+      const inlineX = moved.inlinePosition !== null ? moved.inlinePosition : -1e9;
+      const hit = state.engine.hitTestOnLine(nextId, 0, inlineX);
+      if (hit) {
+        nextPos = { paraId: nextId, byteOffset: hit.byteOffset, affinity: hit.affinity };
+      }
+    }
+  }
+  if (nextPos) {
+    state.selection.focus = nextPos;
+    if (!event.shiftKey) {
+      state.selection.anchor = nextPos;
+    }
+    draw(state.layout.results, state.layout.settings);
+  }
+});
+
+for (const evName of ['focus', 'blur']) {
+  canvas.addEventListener(evName, () => {
+    if (state.layout && state.selection.focus) {
+      draw(state.layout.results, state.layout.settings);
+    }
   });
 }
 
