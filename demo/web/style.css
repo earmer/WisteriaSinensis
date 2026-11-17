@@ -249,6 +249,31 @@ input[type="checkbox"] {
   min-width: 0;
 }
 
+.interaction-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin-bottom: 10px;
+}
+
+.inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inline-field select {
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.cursor-status {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .paper-wrap {
   position: relative;
   display: inline-block;
@@ -260,6 +285,12 @@ input[type="checkbox"] {
 
 canvas {
   display: block;
+  cursor: text;
+}
+
+canvas:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: -2px;
 }
 
 .hint {

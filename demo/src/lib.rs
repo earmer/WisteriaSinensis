@@ -23,17 +23,22 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use mutil_engine::{
-    AutospaceProfile, BaselineAlignment, BidiDirection, FontBytes, FontFace, FontFamily,
-    FontFeatures, FontRegistry, FontStyle, FontVariation, FrontendOptions, HangEndMode, HangMode,
-    HangStartMode, HangingWhitespaceMode, HarfRustShaper, LayoutConstraints, LayoutOptions,
-    LineHeight, LocalePolicy, LocaleTag, ParagraphInput, QuotePolicy, StyleSpan, TextDecoration,
-    TextStyle, ValidatedLayout, compile_paragraph, conformance_report, layout_paragraph,
+    AutospaceProfile, BaselineAlignment, BidiDirection, BoxHeightStyle, CaretAffinity,
+    CursorPosition, FontBytes, FontFace, FontFamily, FontFeatures, FontRegistry, FontStyle,
+    FontVariation, FrontendOptions, HangEndMode, HangMode, HangStartMode, HangingWhitespaceMode,
+    HarfRustShaper, LayoutConstraints, LayoutOptions, LineBreakStrictness, LineHeight,
+    LocalePolicy, LocaleTag, Motion, ParagraphInput, Point, PositionedParagraph, QuotePolicy,
+    StyleSpan, TextDecoration, TextRange, TextStyle, ValidatedLayout, WordBreakOption,
+    compile_paragraph, conformance_report, layout_paragraph,
 };
 use skrifa::outline::DrawSettings;
 use skrifa::prelude::{LocationRef, Size};
 use skrifa::{FontRef as SkrifaFont, GlyphId, MetadataProvider};
 
-use json::{conformance_json, error_json, font_json, layout_json};
+use json::{
+    caret_json, conformance_json, cursor_move_json, error_json, font_json, hit_json, layout_json,
+    range_rects_json, selection_rects_json,
+};
 
 /// The registered families in the order every paragraph's stack lists them
 /// after the chosen face.
@@ -64,11 +69,28 @@ struct FaceEntry {
     bytes: FontBytes,
 }
 
+struct StoredParagraph {
+    text: String,
+    paragraph: PositionedParagraph,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ExtraOptions {
+    line_break: LineBreakStrictness,
+    word_break: WordBreakOption,
+    letter_spacing: f32,
+    word_spacing: f32,
+    first_line_indent: f32,
+    hanging_indent: f32,
+}
+
 /// The registered faces and the shaper built over them. The registry is
 /// rebuilt only when a face is added, which the page does before laying out.
 struct Demo {
     faces: Vec<FaceEntry>,
     shaper: Option<HarfRustShaper>,
+    paragraphs: Vec<StoredParagraph>,
+    extra: ExtraOptions,
 }
 
 impl Demo {
@@ -76,6 +98,8 @@ impl Demo {
         Self {
             faces: Vec::new(),
             shaper: None,
+            paragraphs: Vec::new(),
+            extra: ExtraOptions::default(),
         }
     }
 
@@ -225,8 +249,8 @@ impl Demo {
             features,
             decoration: TextDecoration::default(),
             baseline_align: BaselineAlignment::Auto,
-            letter_spacing: 0.0,
-            word_spacing: 0.0,
+            letter_spacing: self.extra.letter_spacing,
+            word_spacing: self.extra.word_spacing,
             script: None,
             locale,
         }
@@ -270,6 +294,8 @@ impl Demo {
         };
         let constraints = LayoutConstraints {
             wrap_width: req.width,
+            first_line_indent: self.extra.first_line_indent,
+            hanging_indent: self.extra.hanging_indent,
             ..LayoutConstraints::default()
         };
         let options = LayoutOptions {
@@ -298,6 +324,8 @@ impl Demo {
             },
             base_direction: req.phase2.base_direction,
             autospace_profile: req.phase2.autospace,
+            line_break_strictness: self.extra.line_break,
+            word_break_option: self.extra.word_break,
             ..FrontendOptions::default()
         };
         let ast = match compile_paragraph(&input, &frontend, self.shaper()) {
@@ -314,13 +342,89 @@ impl Demo {
             Ok(paragraph) => paragraph,
             Err(error) => return error_json("layout", &error.to_string(), None),
         };
-        let layout = match ValidatedLayout::new(&paragraph, text) {
-            Ok(layout) => layout,
+        let id = self.paragraphs.len();
+        let json = match ValidatedLayout::new(&paragraph, text) {
+            Ok(layout) => layout_json(&layout, req.font_size, req.width, id),
             Err((line, error)) => {
                 return error_json("validate", &error.to_string(), Some(line));
             }
         };
-        layout_json(&layout, req.font_size, req.width)
+        self.paragraphs.push(StoredParagraph {
+            text: marked.text,
+            paragraph,
+        });
+        json
+    }
+
+    fn validated(&self, para_id: usize) -> Option<ValidatedLayout<'_>> {
+        let stored = self.paragraphs.get(para_id)?;
+        ValidatedLayout::new(&stored.paragraph, &stored.text).ok()
+    }
+
+    fn hit_test(&self, para_id: usize, x: f32, y: f32) -> Option<String> {
+        let layout = self.validated(para_id)?;
+        Some(hit_json(layout.hit_test(Point { x, y })))
+    }
+
+    fn hit_test_on_line(&self, para_id: usize, line: u32, inline_position: f32) -> Option<String> {
+        let layout = self.validated(para_id)?;
+        let line_idx = if line == u32::MAX {
+            layout.paragraph().lines.len().saturating_sub(1)
+        } else {
+            line as usize
+        };
+        Some(hit_json(layout.hit_test_on_line(line_idx, inline_position)))
+    }
+
+    fn caret_geometry(&self, para_id: usize, pos: CursorPosition) -> Option<String> {
+        let layout = self.validated(para_id)?;
+        Some(caret_json(layout.caret_geometry(pos)))
+    }
+
+    fn move_cursor(
+        &self,
+        para_id: usize,
+        pos: CursorPosition,
+        motion: Motion,
+        preferred_inline: Option<f32>,
+    ) -> Option<String> {
+        let layout = self.validated(para_id)?;
+        Some(cursor_move_json(layout.move_cursor(
+            pos,
+            motion,
+            preferred_inline,
+        )))
+    }
+
+    fn selection_geometry(
+        &mut self,
+        para_id: usize,
+        start: usize,
+        end: usize,
+        height: BoxHeightStyle,
+    ) -> Option<String> {
+        let _ = self.shaper();
+        let shaper = self.shaper.as_ref()?;
+        let stored = self.paragraphs.get(para_id)?;
+        let layout = ValidatedLayout::new(&stored.paragraph, &stored.text).ok()?;
+        let len = stored.text.len();
+        let lo = start.min(end).min(len);
+        let hi = start.max(end).min(len);
+        Some(selection_rects_json(&layout.selection_geometry(
+            shaper,
+            TextRange::new(lo, hi),
+            height,
+        )))
+    }
+
+    fn range_rects(&self, para_id: usize, start: usize, end: usize) -> Option<String> {
+        let layout = self.validated(para_id)?;
+        let len = layout.text().len();
+        let lo = start.min(end).min(len);
+        let hi = start.max(end).min(len);
+        Some(range_rects_json(
+            &layout.range_rects(TextRange::new(lo, hi)),
+        ))
     }
 
     fn outline(&self, font: u32, glyph: u32) -> String {
@@ -543,6 +647,137 @@ pub extern "C" fn demo_outline(font_id: u32, glyph_id: u32) -> u64 {
 pub extern "C" fn demo_conformance() -> u64 {
     let report = conformance_report();
     leak(conformance_json(mutil_engine::UNICODE_DATA_VERSION, &report).into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_clear_paragraphs() {
+    with_demo(|demo| demo.paragraphs.clear());
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_set_options(
+    line_break: u32,
+    word_break: u32,
+    letter_spacing: f32,
+    word_spacing: f32,
+    first_line_indent: f32,
+    hanging_indent: f32,
+) {
+    with_demo(|demo| {
+        demo.extra = ExtraOptions {
+            line_break: match line_break {
+                1 => LineBreakStrictness::Loose,
+                2 => LineBreakStrictness::Strict,
+                3 => LineBreakStrictness::Anywhere,
+                _ => LineBreakStrictness::Normal,
+            },
+            word_break: match word_break {
+                1 => WordBreakOption::BreakAll,
+                2 => WordBreakOption::KeepAll,
+                _ => WordBreakOption::Normal,
+            },
+            letter_spacing,
+            word_spacing,
+            first_line_indent,
+            hanging_indent,
+        };
+    });
+}
+
+fn parse_affinity(affinity: u32) -> CaretAffinity {
+    if affinity != 0 {
+        CaretAffinity::Upstream
+    } else {
+        CaretAffinity::Downstream
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_hit_test(para_id: u32, x: f32, y: f32) -> u64 {
+    let json = with_demo(|demo| demo.hit_test(para_id as usize, x, y))
+        .flatten()
+        .unwrap_or_else(|| "null".to_string());
+    leak(json.into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_hit_test_on_line(para_id: u32, line: u32, inline_position: f32) -> u64 {
+    let json = with_demo(|demo| demo.hit_test_on_line(para_id as usize, line, inline_position))
+        .flatten()
+        .unwrap_or_else(|| "null".to_string());
+    leak(json.into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_caret_geometry(para_id: u32, byte_offset: u32, affinity: u32) -> u64 {
+    let pos = CursorPosition {
+        byte_offset: byte_offset as usize,
+        affinity: parse_affinity(affinity),
+    };
+    let json = with_demo(|demo| demo.caret_geometry(para_id as usize, pos))
+        .flatten()
+        .unwrap_or_else(|| "null".to_string());
+    leak(json.into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_move_cursor(
+    para_id: u32,
+    byte_offset: u32,
+    affinity: u32,
+    motion: u32,
+    has_preferred: u32,
+    preferred_inline: f32,
+) -> u64 {
+    let pos = CursorPosition {
+        byte_offset: byte_offset as usize,
+        affinity: parse_affinity(affinity),
+    };
+    let motion = match motion {
+        1 => Motion::Right,
+        2 => Motion::Up,
+        3 => Motion::Down,
+        4 => Motion::LineStart,
+        5 => Motion::LineEnd,
+        6 => Motion::WordLeft,
+        7 => Motion::WordRight,
+        8 => Motion::Previous,
+        9 => Motion::Next,
+        _ => Motion::Left,
+    };
+    let preferred = (has_preferred != 0).then_some(preferred_inline);
+    let json = with_demo(|demo| demo.move_cursor(para_id as usize, pos, motion, preferred))
+        .flatten()
+        .unwrap_or_else(|| "null".to_string());
+    leak(json.into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_selection_geometry(
+    para_id: u32,
+    start: u32,
+    end: u32,
+    height_style: u32,
+) -> u64 {
+    let height = match height_style {
+        1 => BoxHeightStyle::Max,
+        2 => BoxHeightStyle::Strut,
+        _ => BoxHeightStyle::Tight,
+    };
+    let json = with_demo(|demo| {
+        demo.selection_geometry(para_id as usize, start as usize, end as usize, height)
+    })
+    .flatten()
+    .unwrap_or_else(|| "[]".to_string());
+    leak(json.into_bytes())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_range_rects(para_id: u32, start: u32, end: u32) -> u64 {
+    let json = with_demo(|demo| demo.range_rects(para_id as usize, start as usize, end as usize))
+        .flatten()
+        .unwrap_or_else(|| "[]".to_string());
+    leak(json.into_bytes())
 }
 
 #[cfg(test)]

@@ -2,7 +2,10 @@
 
 use std::fmt::Write as _;
 
-use mutil_engine::{ConformanceReport, PositionedLine, ValidatedLayout};
+use mutil_engine::{
+    CaretAffinity, CaretVisual, ConformanceReport, CursorMove, CursorPosition, HitResult,
+    ParagraphEdge, PositionedLine, Rect, SelectionRect, ValidatedLayout,
+};
 
 /// Minimal JSON writer. Every value written here is an engine output number,
 /// an id, or a string from an error, so only strings need escaping.
@@ -119,7 +122,7 @@ struct RunJson {
     glyphs: Vec<(u32, f32, f32)>,
 }
 
-pub fn layout_json(layout: &ValidatedLayout<'_>, font_size: f32, width: f32) -> String {
+pub fn layout_json(layout: &ValidatedLayout<'_>, font_size: f32, width: f32, id: usize) -> String {
     let paragraph = layout.paragraph();
     let runs: Vec<RunJson> = layout
         .glyph_runs()
@@ -135,7 +138,9 @@ pub fn layout_json(layout: &ValidatedLayout<'_>, font_size: f32, width: f32) -> 
         .collect();
 
     let mut out = Out::new();
-    out.raw("{\"ok\":true,\"blockSize\":");
+    out.raw("{\"ok\":true,\"id\":");
+    out.uint(id);
+    out.raw(",\"blockSize\":");
     out.number(paragraph.total_block_size);
     out.raw(",\"fontSize\":");
     out.number(font_size);
@@ -231,4 +236,119 @@ fn write_run(out: &mut Out, run: &RunJson) {
         out.raw("]");
     }
     out.raw("]}");
+}
+
+fn write_affinity(out: &mut Out, affinity: CaretAffinity) {
+    out.string(match affinity {
+        CaretAffinity::Downstream => "downstream",
+        CaretAffinity::Upstream => "upstream",
+    });
+}
+
+fn write_position_fields(out: &mut Out, pos: CursorPosition) {
+    out.raw("\"byteOffset\":");
+    out.uint(pos.byte_offset);
+    out.raw(",\"affinity\":");
+    write_affinity(out, pos.affinity);
+}
+
+fn write_rect(out: &mut Out, rect: Rect) {
+    out.raw("{\"x\":");
+    out.number(rect.x);
+    out.raw(",\"y\":");
+    out.number(rect.y);
+    out.raw(",\"w\":");
+    out.number(rect.width);
+    out.raw(",\"h\":");
+    out.number(rect.height);
+    out.raw("}");
+}
+
+pub fn hit_json(hit: HitResult) -> String {
+    let mut out = Out::new();
+    out.raw("{");
+    write_position_fields(&mut out, hit.position);
+    out.raw(",\"inside\":");
+    out.raw(if hit.inside { "true" } else { "false" });
+    out.raw("}");
+    out.finish()
+}
+
+pub fn caret_json(caret: CaretVisual) -> String {
+    let mut out = Out::new();
+    out.raw("{\"primary\":");
+    write_rect(&mut out, caret.primary_rect);
+    out.raw(",\"secondary\":");
+    match caret.secondary_rect {
+        Some(rect) => write_rect(&mut out, rect),
+        None => out.raw("null"),
+    }
+    out.raw("}");
+    out.finish()
+}
+
+pub fn cursor_move_json(moved: CursorMove) -> String {
+    let mut out = Out::new();
+    match moved {
+        CursorMove::Moved(pos) => {
+            out.raw("{\"kind\":\"moved\",");
+            write_position_fields(&mut out, pos);
+            out.raw("}");
+        }
+        CursorMove::Exited {
+            edge,
+            inline_position,
+        } => {
+            out.raw("{\"kind\":\"exited\",\"edge\":");
+            out.string(match edge {
+                ParagraphEdge::Start => "start",
+                ParagraphEdge::End => "end",
+            });
+            out.raw(",\"inlinePosition\":");
+            match inline_position {
+                Some(x) => out.number(x),
+                None => out.raw("null"),
+            }
+            out.raw("}");
+        }
+    }
+    out.finish()
+}
+
+pub fn selection_rects_json(rects: &[SelectionRect]) -> String {
+    let mut out = Out::new();
+    out.raw("[");
+    for (index, item) in rects.iter().enumerate() {
+        if index > 0 {
+            out.raw(",");
+        }
+        out.raw("{\"x\":");
+        out.number(item.rect.x);
+        out.raw(",\"y\":");
+        out.number(item.rect.y);
+        out.raw(",\"w\":");
+        out.number(item.rect.width);
+        out.raw(",\"h\":");
+        out.number(item.rect.height);
+        out.raw(",\"line\":");
+        out.uint(item.line);
+        out.raw(",\"level\":");
+        out.u32(u32::from(item.level.get()));
+        out.raw("}");
+    }
+    out.raw("]");
+    out.finish()
+}
+
+pub fn range_rects_json(rects: &[Rect]) -> String {
+    let mut out = Out::new();
+    out.raw("[");
+    for (index, rect) in rects.iter().enumerate() {
+        if index > 0 {
+            out.raw(",");
+        }
+        write_rect(&mut out, *rect);
+    }
+    out.raw("]");
+    out.finish()
 }

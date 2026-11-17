@@ -164,6 +164,48 @@
           </label>
         </div>
 
+        <div class="two-up">
+          <label class="field">
+            <span class="field-label">Line break</span>
+            <select id="line-break">
+              <option value="0">normal</option>
+              <option value="1">loose</option>
+              <option value="2">strict</option>
+              <option value="3">anywhere</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Word break</span>
+            <select id="word-break">
+              <option value="0">normal</option>
+              <option value="1">break-all</option>
+              <option value="2">keep-all</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="two-up">
+          <label class="field slider-field">
+            <span class="field-label">Letter spacing <output id="letter-spacing-value" for="letter-spacing">0 px</output></span>
+            <input id="letter-spacing" type="range" min="-2" max="8" step="0.5" value="0" />
+          </label>
+          <label class="field slider-field">
+            <span class="field-label">Word spacing <output id="word-spacing-value" for="word-spacing">0 px</output></span>
+            <input id="word-spacing" type="range" min="-4" max="16" step="0.5" value="0" />
+          </label>
+        </div>
+
+        <div class="two-up">
+          <label class="field slider-field">
+            <span class="field-label">First indent <output id="first-indent-value" for="first-indent">0 px</output></span>
+            <input id="first-indent" type="range" min="0" max="80" step="4" value="0" />
+          </label>
+          <label class="field slider-field">
+            <span class="field-label">Hanging indent <output id="hanging-indent-value" for="hanging-indent">0 px</output></span>
+            <input id="hanging-indent" type="range" min="0" max="80" step="4" value="0" />
+          </label>
+        </div>
+
         <fieldset class="overlays">
           <legend class="field-label">Overlays</legend>
           <label><input id="show-boxes" type="checkbox" /> line boxes &amp; slots</label>
@@ -182,15 +224,28 @@
 
       <section class="panel preview" aria-label="Rendered paragraph">
         <div id="error" class="error" role="alert" hidden></div>
+        <div class="interaction-bar">
+          <label class="inline-field">
+            <span class="field-label">Selection height</span>
+            <select id="selection-height">
+              <option value="0">Tight</option>
+              <option value="1">Max</option>
+              <option value="2">Strut</option>
+            </select>
+          </label>
+          <span id="cursor-status" class="cursor-status">Click or drag on canvas · Arrow keys (+ Shift) · IME in Text</span>
+        </div>
         <div class="paper-wrap">
-          <canvas id="canvas" width="624" height="320"
+          <canvas id="canvas" width="624" height="320" tabindex="0"
             aria-label="Text rendered from the engine's glyph positions"></canvas>
           <div id="hint" class="hint" hidden>Paste text to lay it out.</div>
         </div>
         <p class="preview-note">
           Width is the engine's <code>wrap_width</code>; the whitespace around the
-          text is the page's margin, not part of the container. Line boxes and
-          carets are the engine's slots and caret stops, not guesses.
+          text is the page's margin, not part of the container. Click or drag on the
+          canvas to test <code>hit_test</code>, <code>caret_geometry</code>,
+          <code>selection_geometry</code>, and <code>move_cursor</code>; compose
+          with an IME in the text box for <code>range_rects</code>.
         </p>
       </section>
 
@@ -234,6 +289,12 @@
                 Strut-derived line boxes, caret stops in the output, and the
                 output gate every paragraph passes before it is drawn.
               </li>
+              <li>
+                Interactive hit-testing, caret geometry, cursor movement,
+                selection geometry (<code>Tight</code> / <code>Max</code> /
+                <code>Strut</code>), and IME pre-edit <code>range_rects</code>
+                are wired into the canvas and text box.
+              </li>
             </ul>
           </div>
           <div>
@@ -251,12 +312,6 @@
               <li>
                 Balanced and Publication line-breaking strategies: every strategy
                 breaks greedily today.
-              </li>
-              <li>
-                Interactive hit-testing and selection queries (<code>hit_test</code>,
-                <code>range_rects</code>, <code>rect_for_offset</code>) exist in
-                the engine but are not wired into this canvas; only the emitted
-                caret stops are shown.
               </li>
               <li>
                 Colour glyphs (COLR, sbix, CBDT) are not painted, and no emoji
