@@ -21,8 +21,12 @@ pub(super) struct Seam {
 pub(super) enum SeamKind {
     /// `CjkAutospace`, with the font size of the CJK-class atom's style.
     Autospace { em: f32 },
-    /// `CjkPunctCompression`, with the font size of the pair's run.
-    Compression { font_size: f32 },
+    /// `CjkPunctCompression`, with the font size of the pair's run and its
+    /// shrink share (`0.5` for full-width pairs, `0.25` for middle-dot pairs).
+    Compression {
+        font_size: f32,
+        shrink_fraction: f32,
+    },
 }
 
 impl Compiler<'_> {
@@ -105,15 +109,28 @@ impl Compiler<'_> {
                 em: self.styles[self.atom_styles[c]].font_size,
             });
         }
-        let compressible = (spacing::is_compressible_close(left)
-            && spacing::is_wide_punctuation(right))
-            || (spacing::is_wide_opening(left) && spacing::is_wide_opening(right));
-        (compressible
-            && self.same_run(a, a + 1)
-            && !spacing::turns_compression_off(&self.atom_locales[a]))
-        .then(|| SeamKind::Compression {
-            font_size: self.styles[self.atom_styles[a]].font_size,
-        })
+        let shrink_fraction = if ((spacing::is_compressible_close(left)
+            || spacing::is_wide_opening(left))
+            && spacing::is_middle_dot(right))
+            || (spacing::is_middle_dot(left)
+                && (spacing::is_compressible_close(right) || spacing::is_wide_opening(right)))
+        {
+            Some(0.25)
+        } else if (spacing::is_compressible_close(left) && spacing::is_wide_punctuation(right))
+            || (spacing::is_wide_opening(left) && spacing::is_wide_opening(right))
+        {
+            Some(0.5)
+        } else {
+            None
+        };
+        shrink_fraction
+            .filter(|_| {
+                self.same_run(a, a + 1) && !spacing::turns_compression_off(&self.atom_locales[a])
+            })
+            .map(|shrink_fraction| SeamKind::Compression {
+                font_size: self.styles[self.atom_styles[a]].font_size,
+                shrink_fraction,
+            })
     }
 
     /// `ALLOW_CJK_JUSTIFY_AFTER` on a CJK-class atom that another atom
@@ -164,7 +181,7 @@ impl Compiler<'_> {
         };
         self.seams.retain(|seam| match seam.kind {
             SeamKind::Autospace { .. } => true,
-            SeamKind::Compression { font_size } => {
+            SeamKind::Compression { font_size, .. } => {
                 let floor = COMPRESSED_PAIR_FRACTION * font_size;
                 width_of(seam.after, true) > floor && width_of(seam.after + 1, false) > floor
             }
@@ -179,9 +196,15 @@ impl Compiler<'_> {
                 AutospaceProfile::Jlreq => (GlueKind::CjkAutospace, em / 4.0, em / 4.0, em / 8.0),
                 AutospaceProfile::CssCompat => (GlueKind::CjkAutospace, em / 8.0, 0.0, 0.0),
             },
-            SeamKind::Compression { font_size } => {
-                (GlueKind::CjkPunctCompression, 0.0, 0.0, font_size / 2.0)
-            }
+            SeamKind::Compression {
+                font_size,
+                shrink_fraction,
+            } => (
+                GlueKind::CjkPunctCompression,
+                0.0,
+                0.0,
+                font_size * shrink_fraction,
+            ),
         };
         WordNode::Glue(GlueNode {
             original_bidi_class: BidiClass::Bn,

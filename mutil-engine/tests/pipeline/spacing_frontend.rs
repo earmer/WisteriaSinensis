@@ -400,6 +400,117 @@ fn fe31_compression_needs_two_wide_clusters_of_one_run() {
 }
 
 #[test]
+fn fe31_wn13_middle_dot_compression_is_quarter_em() {
+    // U+00B7 in Noto Sans SC is full-width (1000 units), so it compresses at 0.25 em.
+    for (text, expected) in [("「·」", vec![3, 5]), ("漢。·字", vec![6])] {
+        let ast = compile_localized(text, &[SIMPLIFIED], "zh-Hans");
+        assert_eq!(compression_offsets(&ast), expected, "{text:?}");
+        for (_, glue) in glues_of(&ast, GlueKind::CjkPunctCompression) {
+            assert_synthetic(glue);
+            assert_eq!(glue.kind.tier(), GlueTier::Tier0);
+            assert_sizes(glue, (0.0, 2.5, 0.0));
+        }
+    }
+
+    // Middle dots (U+30FB in Noto Sans JP, U+00B7 in Noto Sans SC) compress
+    // against adjacent closing/stop marks or opening brackets/quotes, with
+    // max_shrink == 0.25 * font_size (WN-13).
+    for (text, expected) in [
+        ("あ「・」", vec![6, 9]),
+        ("あ「・い」", vec![6]),
+        ("あ。・い", vec![6]),
+        ("あ・「い」", vec![6]),
+        ("あ「い・」", vec![12]),
+        // Middle dot beside a Kana character does not compress.
+        ("あ・い", vec![]),
+    ] {
+        let ast = compile_localized(text, &[JAPANESE], "ja");
+        assert_eq!(compression_offsets(&ast), expected, "{text:?}");
+        for (_, glue) in glues_of(&ast, GlueKind::CjkPunctCompression) {
+            assert_synthetic(glue);
+            assert_eq!(glue.kind.tier(), GlueTier::Tier0);
+            assert_sizes(glue, (0.0, 2.5, 0.0));
+        }
+    }
+
+    // Scaling with font_size: 0.25 * 16.0 == 4.0.
+    let style = localized_style(&[JAPANESE], 16.0, "ja");
+    let ast = compile_paragraph(
+        &input("あ。・い", &style),
+        &FrontendOptions::default(),
+        &*SPACING_SHAPER,
+    )
+    .unwrap();
+    let [(6, glue)] = glues_of(&ast, GlueKind::CjkPunctCompression)[..] else {
+        panic!("{:?}", ast.items)
+    };
+    assert_synthetic(glue);
+    assert_sizes(glue, (0.0, 4.0, 0.0));
+
+    // U+00B7 in Noto Sans JP is proportional (<= 0.75 em), so it does not compress.
+    let ast = compile_localized("漢。·字", &[JAPANESE], "ja");
+    assert!(
+        ast.clusters
+            .iter()
+            .any(|c| c.byte_range == TextRange::new(6, 8) && c.natural_width <= 7.5),
+        "{:?}",
+        ast.clusters
+    );
+    assert_eq!(compression_offsets(&ast), [] as [usize; 0]);
+}
+
+#[test]
+fn fe31_curly_quotes_compress_only_when_wide() {
+    // In a Latin/narrow font (Noto Serif / "en"), curly quotes are <= 0.75 em
+    // and must not receive CjkPunctCompression.
+    for text in ["‘“a”’", "”‘a’“", "“（a）”"] {
+        let ast = compile_localized(text, &[SERIF, JAPANESE], "en");
+        let quote_widths: Vec<f32> = ast
+            .clusters
+            .iter()
+            .filter(|c| matches!(&text[c.byte_range.as_range()], "‘" | "’" | "“" | "”"))
+            .map(|c| c.natural_width)
+            .collect();
+        assert!(!quote_widths.is_empty(), "{text:?}");
+        assert!(
+            quote_widths.iter().all(|&w| w <= 7.5),
+            "{text:?}: {quote_widths:?}"
+        );
+        assert_eq!(compression_offsets(&ast), [] as [usize; 0], "{text:?}");
+    }
+
+    // In Noto Sans JP, curly quotes are proportional (<= 0.75 em), so no compression.
+    let ast = compile_localized("“（中文）”", &[JAPANESE], "ja");
+    assert_eq!(compression_offsets(&ast), [] as [usize; 0]);
+
+    // In Noto Sans SC ("zh-Hans"), curly quotes are full-width (> 0.75 em),
+    // so pairs with curly quotes receive CjkPunctCompression.
+    for (text, expected) in [
+        ("人：“（中文）”", vec![6, 9, 21]),
+        ("“中文。”「日本」", vec![12, 15]),
+        ("“‘中文’”", vec![3, 15]),
+    ] {
+        let ast = compile_localized(text, &[SIMPLIFIED], "zh-Hans");
+        let punct_widths: Vec<(&str, f32)> = ast
+            .clusters
+            .iter()
+            .filter(|c| !c.flags.contains(AtomFlags::IS_CJK_IDEOGRAPH))
+            .map(|c| (&text[c.byte_range.as_range()], c.natural_width))
+            .collect();
+        assert!(
+            punct_widths.iter().all(|&(_, w)| w > 7.5),
+            "{text:?}: {punct_widths:?}"
+        );
+        assert_eq!(compression_offsets(&ast), expected, "{text:?}");
+        for (_, glue) in glues_of(&ast, GlueKind::CjkPunctCompression) {
+            assert_synthetic(glue);
+            assert_eq!(glue.kind.tier(), GlueTier::Tier0);
+            assert_sizes(glue, (0.0, 5.0, 0.0));
+        }
+    }
+}
+
+#[test]
 fn fe31_cursive_scripts_are_flagged_for_no_letter_spacing() {
     let text = "abc אבג مرحبا";
     let style = script_style(&[HEBREW, ARABIC], 10.0);

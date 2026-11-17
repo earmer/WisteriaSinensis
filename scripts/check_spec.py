@@ -182,7 +182,8 @@ def parse_members(code: str, types: dict[str, TypeDef]) -> None:
         vis = "" if trait else r"\bpub\s+(?:const\s+)?(?:unsafe\s+)?"
         for fm in re.finditer(rf"{vis}fn\s+({IDENT})", body):
             types[name].members.add(fm.group(1))
-        for cm in re.finditer(rf"{vis or r'\b'}const\s+({IDENT})\s*:", body):
+        const_vis = vis or r"\b"
+        for cm in re.finditer(rf"{const_vis}const\s+({IDENT})\s*:", body):
             types[name].members.add(cm.group(1))
         for tm in re.finditer(rf"\btype\s+({IDENT})\s*=", body):
             types[name].members.add(tm.group(1))

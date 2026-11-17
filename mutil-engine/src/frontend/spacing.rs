@@ -75,12 +75,19 @@ pub(crate) fn autospace_class(c: char) -> Option<AutospaceClass> {
 }
 
 /// A closing or stop mark after which compression may follow (FE-31):
-/// U+3001, U+3002, U+FF0C, U+FF0E, U+FF1A, U+FF1B, or a wide or full-width
-/// mark of UAX #14 class CL or CP.
+/// U+3001, U+3002, U+FF0C, U+FF0E, U+FF1A, U+FF1B, closing quotes ’ / ”,
+/// or a wide or full-width mark of UAX #14 class CL or CP.
 pub(crate) fn is_compressible_close(c: char) -> bool {
     matches!(
         c,
-        '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}' | '\u{FF1A}' | '\u{FF1B}'
+        '\u{3001}'
+            | '\u{3002}'
+            | '\u{FF0C}'
+            | '\u{FF0E}'
+            | '\u{FF1A}'
+            | '\u{FF1B}'
+            | '\u{2019}'
+            | '\u{201D}'
     ) || is_wide_or_full(c)
         && matches!(
             LINE_BREAK.get(c),
@@ -88,14 +95,22 @@ pub(crate) fn is_compressible_close(c: char) -> bool {
         )
 }
 
-/// A wide or full-width punctuation mark (FE-31).
+/// A wide or full-width punctuation mark or curly quote (FE-31).
 pub(crate) fn is_wide_punctuation(c: char) -> bool {
-    is_wide_or_full(c) && is_punctuation(c)
+    (is_wide_or_full(c) || matches!(c, '\u{2018}' | '\u{2019}' | '\u{201C}' | '\u{201D}'))
+        && is_punctuation(c)
 }
 
-/// A wide or full-width opening bracket, UAX #14 class OP (FE-31).
+/// A wide or full-width opening bracket (UAX #14 class OP) or opening curly
+/// quote (FE-31).
 pub(crate) fn is_wide_opening(c: char) -> bool {
-    is_wide_or_full(c) && LINE_BREAK.get(c) == LineBreak::OpenPunctuation
+    (is_wide_or_full(c) && LINE_BREAK.get(c) == LineBreak::OpenPunctuation)
+        || matches!(c, '\u{2018}' | '\u{201C}')
+}
+
+/// A CJK middle dot (FE-31): U+00B7, U+30FB, or U+2027.
+pub(crate) const fn is_middle_dot(c: char) -> bool {
+    matches!(c, '\u{00B7}' | '\u{30FB}' | '\u{2027}')
 }
 
 /// Closing or prohibited-start punctuation, after which no inter-character

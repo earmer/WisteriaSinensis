@@ -362,6 +362,9 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// INT-5 sub-slots of a ligature between them.
     fn push_piece_stops(&self, placed_piece: PlacedPiece, raw: &mut Vec<RawStop>) {
         let p = placed_piece.piece;
+        if matches!(p.kind, PieceKind::Glue { .. }) && placed_piece.width < 0.0 {
+            return;
+        }
         let (a, b) = (placed_piece.x, placed_piece.x + placed_piece.width);
         let rtl = placed_piece.level.direction().is_rtl();
         // A glyph-less piece lends no level of its own (spec CRT-2).
@@ -513,6 +516,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             }
         }
         stops.sort_by(|a, b| a.x.total_cmp(&b.x));
+        collapse_same_level_overlaps(&mut stops);
         let split = split_offsets(&stops);
         let mut out: Vec<CaretStop> = stops
             .iter()
@@ -562,6 +566,53 @@ struct RawStop {
     offset: usize,
     edge: PieceEdge,
     level: Option<BidiLevel>,
+}
+
+/// Merges stops at the same `offset` that share the same bidi level (e.g.
+/// when negative-width `CjkPunctCompression` overlaps two adjacent clusters)
+/// into one stop at their midpoint, so `split_offsets` only splits genuine
+/// direction boundaries (CRT-3).
+fn collapse_same_level_overlaps(stops: &mut Vec<RawStop>) {
+    let mut by_offset: Vec<usize> = (0..stops.len()).collect();
+    by_offset.sort_by_key(|&i| stops[i].offset);
+    let mut remove = vec![false; stops.len()];
+    let mut updates: Vec<(usize, f32)> = Vec::new();
+    for same in by_offset.chunk_by(|&i, &j| stops[i].offset == stops[j].offset) {
+        if same.len() < 2 {
+            continue;
+        }
+        let first_level = stops[same[0]].level;
+        if first_level.is_none() || same.iter().any(|&i| stops[i].level != first_level) {
+            continue;
+        }
+        let min_x = same
+            .iter()
+            .map(|&i| stops[i].x)
+            .fold(f32::INFINITY, f32::min);
+        let max_x = same
+            .iter()
+            .map(|&i| stops[i].x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        if approx_eq(min_x, max_x) {
+            continue;
+        }
+        updates.push((same[0], (min_x + max_x) / 2.0));
+        for &i in &same[1..] {
+            remove[i] = true;
+        }
+    }
+    if !updates.is_empty() {
+        for (i, x) in updates {
+            stops[i].x = x;
+        }
+        let mut idx = 0;
+        stops.retain(|_| {
+            let keep = !remove[idx];
+            idx += 1;
+            keep
+        });
+        stops.sort_by(|a, b| a.x.total_cmp(&b.x));
+    }
 }
 
 /// For each stop, whether its offset has stops at two positions on the line:

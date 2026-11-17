@@ -461,6 +461,43 @@ fn st3_3_compression_spends_tier_0_before_tier_1() {
     }
 }
 
+#[test]
+fn crt1_crt3_compressed_cjk_seam_has_no_false_split_caret() {
+    let text = "漢、「漢漢b漢漢abcdefghijkl";
+    let style = localized_style(&[SERIF, JAPANESE], 10.0, "ja");
+    let ast = compile_bidi_input(&input(text, &style), &FrontendOptions::default());
+    let probe = lay_out_bidi_ast(&ast, text, &column(1000.0), &LayoutOptions::default());
+    let wide = &probe.lines[0];
+    let natural = x_of(wide, 19) + glyph_at(wide, 19).advance;
+
+    for shortfall in [4.0, 6.0] {
+        let p = lay_out_bidi_ast(&ast, text, &column(natural - shortfall), &justified());
+        assert!(ValidatedLayout::new(&p, text).is_ok(), "{shortfall}");
+        let line = &p.lines[0];
+        assert!(line.is_justified, "{shortfall}");
+
+        // CRT-1: stops are in non-decreasing visual order, within the line's bytes,
+        // and carry the line's index.
+        assert!(line.caret_stops.windows(2).all(|w| w[0].x <= w[1].x));
+        assert!(line.caret_stops.iter().all(|s| s.line == 0
+            && s.offset >= line.byte_range.start()
+            && s.offset <= line.byte_range.end()));
+
+        // CRT-3: no false split caret at the compressed seam (byte 6); there is
+        // a single CaretStop at offset 6 strictly between offsets 3 and 9.
+        let stops_at_6: Vec<&CaretStop> =
+            line.caret_stops.iter().filter(|s| s.offset == 6).collect();
+        assert_eq!(stops_at_6.len(), 1, "{shortfall}: {stops_at_6:?}");
+        let stop_3 = line.caret_stops.iter().find(|s| s.offset == 3).unwrap();
+        let stop_6 = stops_at_6[0];
+        let stop_9 = line.caret_stops.iter().find(|s| s.offset == 9).unwrap();
+        assert!(
+            stop_3.x < stop_6.x && stop_6.x < stop_9.x,
+            "{shortfall}: {stop_3:?} {stop_6:?} {stop_9:?}"
+        );
+    }
+}
+
 /// `justify` with `compress_last_lines` (ST1-7, ST3-3).
 fn compressing() -> LayoutOptions {
     LayoutOptions {
