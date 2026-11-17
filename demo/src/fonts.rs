@@ -13,8 +13,8 @@ use skrifa::outline::DrawSettings;
 use skrifa::prelude::{LocationRef, Size};
 use skrifa::{FontRef as SkrifaFont, GlyphId, MetadataProvider};
 
-/// The registered families in the order every paragraph's stack lists them
-/// after the chosen face.
+/// The order of the registered families in every paragraph's stack after the
+/// chosen face: Latin, CJK, Indic and Southeast Asian, then the rest.
 const FIXED_STACK: [&str; 13] = [
     "Noto Sans",
     "Noto Serif",
@@ -88,25 +88,24 @@ impl Fonts {
         })
     }
 
-    /// The family stack handed to the engine: the chosen face, then the
-    /// Latin faces, the CJK faces, the Indic and Southeast Asian faces and
-    /// anything else registered. It is the same for every locale: the engine
+    /// The family stack handed to the engine: every registered face, the
+    /// chosen one first, then in `FIXED_STACK` order, then the rest in
+    /// registration order. It is the same for every locale: the engine
     /// routes CJK runs to the regional face of their locale (spec SHP-12,
     /// SHP-25), so the page never reorders the stack.
     pub fn family_stack(&self, primary: Option<&str>) -> Arc<[FontFamily]> {
-        let requested = primary
+        let rank = |family: &str| {
+            primary
+                .into_iter()
+                .chain(FIXED_STACK)
+                .position(|f| f == family)
+        };
+        let mut families: Vec<&Arc<str>> = self.faces.iter().map(|face| &face.family).collect();
+        families.sort_by_key(|family| rank(family).unwrap_or(usize::MAX));
+        families
             .into_iter()
-            .chain(FIXED_STACK)
-            .chain(self.faces.iter().map(|face| &*face.family));
-        let mut names: Vec<Arc<str>> = Vec::new();
-        for family in requested {
-            if let Some(face) = self.faces.iter().find(|face| *face.family == *family)
-                && !names.contains(&face.family)
-            {
-                names.push(Arc::clone(&face.family));
-            }
-        }
-        names.into_iter().map(FontFamily::Named).collect()
+            .map(|family| FontFamily::Named(Arc::clone(family)))
+            .collect()
     }
 
     /// The outline of `glyph` in face `font`, in font units, y down, as SVG
@@ -117,15 +116,10 @@ impl Fonts {
         let outline = font.outline_glyphs().get(GlyphId::new(glyph))?;
         // Draw the same instance the layout shaped (see `WEIGHT`).
         let location = font.axes().location([("wght", WEIGHT)]);
+        // Font units, no hinting (spec HST-5/HST-6).
+        let settings = DrawSettings::unhinted(Size::unscaled(), &location);
         let mut pen = PathPen::default();
-        // Font units, no hinting (spec HST-5/HST-6). The pen flips y into
-        // canvas coordinates.
-        outline
-            .draw(
-                DrawSettings::unhinted(Size::unscaled(), &location),
-                &mut pen,
-            )
-            .ok()?;
+        outline.draw(settings, &mut pen).ok()?;
         Some(pen.0)
     }
 }
@@ -144,38 +138,32 @@ pub fn regular_weight() -> FontFeatures {
 #[derive(Default)]
 struct PathPen(String);
 
-impl skrifa::outline::OutlinePen for PathPen {
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.0.push('M');
-        self.point(x, y);
-    }
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.0.push('L');
-        self.point(x, y);
-    }
-    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
-        self.0.push('Q');
-        self.point(cx0, cy0);
-        self.0.push(' ');
-        self.point(x, y);
-    }
-    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
-        self.0.push('C');
-        self.point(cx0, cy0);
-        self.0.push(' ');
-        self.point(cx1, cy1);
-        self.0.push(' ');
-        self.point(x, y);
-    }
-    fn close(&mut self) {
-        self.0.push('Z');
+impl PathPen {
+    /// Two decimals of a font unit: far below a device pixel at any plausible
+    /// size, and short enough to keep the payload small.
+    fn segment(&mut self, command: char, points: &[(f32, f32)]) {
+        self.0.push(command);
+        for (index, (x, y)) in points.iter().enumerate() {
+            let separator = if index > 0 { " " } else { "" };
+            let _ = write!(self.0, "{separator}{x:.2} {:.2}", -y);
+        }
     }
 }
 
-impl PathPen {
-    fn point(&mut self, x: f32, y: f32) {
-        // Two decimals of a font unit: far below a device pixel at any
-        // plausible size, and short enough to keep the payload small.
-        let _ = write!(self.0, "{x:.2} {:.2}", -y);
+impl skrifa::outline::OutlinePen for PathPen {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.segment('M', &[(x, y)]);
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.segment('L', &[(x, y)]);
+    }
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        self.segment('Q', &[(cx0, cy0), (x, y)]);
+    }
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        self.segment('C', &[(cx0, cy0), (cx1, cy1), (x, y)]);
+    }
+    fn close(&mut self) {
+        self.0.push('Z');
     }
 }
