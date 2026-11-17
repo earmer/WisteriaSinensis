@@ -254,3 +254,105 @@ fn window_edits_append_and_replace_with_synthesized_glyphs() {
     assert!(synthesized[0]);
     assert_eq!(clusters[0].glyph_range.len(), 2);
 }
+
+#[test]
+fn shp6_a_cut_cluster_takes_the_face_of_the_nearest_kept_cluster() {
+    // A Latin face first and a CJK face second: the ideographs are shaped
+    // in the second face.
+    let text = "漢字漢字";
+    let ast = compile_in(text, &[FAMILY, JAPANESE]);
+    assert_eq!(ast.runs.len(), 1);
+    let (run, atoms) = (&ast.runs[0], ast.run_atoms(0));
+    let japanese = SCRIPT_FONTS
+        .iter()
+        .find(|(family, _)| *family == JAPANESE)
+        .unwrap()
+        .1;
+    let reshape = |window: TextRange, leading: LeadingEdit, trailing: TrailingEdit| {
+        let mut clusters = Vec::new();
+        let mut glyphs = Vec::new();
+        SCRIPT_SHAPER.reshape_window(
+            text,
+            run,
+            atoms,
+            window,
+            leading,
+            trailing,
+            &mut clusters,
+            &mut glyphs,
+        );
+        (clusters, glyphs)
+    };
+    let cjk_face = ast.clusters[0].font.font_id;
+    assert_ne!(cjk_face, FontId(0), "the ideographs take the CJK face");
+
+    // A trailing cut of the last ideograph, replaced by another: the cut
+    // cluster takes the face of the last kept one, and the replacement is
+    // shaped in it.
+    let (clusters, glyphs) = reshape(
+        TextRange::new(0, 12),
+        LeadingEdit::None,
+        TrailingEdit::ReplacePrefix {
+            replacement: "漢".into(),
+            cut_bytes: 3,
+            hyphen: '-',
+        },
+    );
+    assert_eq!(clusters.len(), 4);
+    let (kept, cut) = (&clusters[2], &clusters[3]);
+    assert_eq!(cut.byte_range, TextRange::new(9, 12));
+    assert_eq!(kept.font.font_id, cjk_face);
+    assert_eq!(cut.font.font_id, kept.font.font_id);
+    let first = &glyphs[cut.glyph_range.start];
+    assert!(first.is_synthesized);
+    assert_eq!(Some(first.glyph_id), glyph_for(japanese, '漢'));
+
+    // A leading cut of the first ideograph: the face of the first kept one.
+    let (clusters, glyphs) = reshape(
+        TextRange::new(0, 12),
+        LeadingEdit::ReplaceSuffix {
+            replacement: "字".into(),
+            cut_bytes: 3,
+        },
+        TrailingEdit::None,
+    );
+    assert_eq!(clusters.len(), 4);
+    let (cut, kept) = (&clusters[0], &clusters[1]);
+    assert_eq!(cut.byte_range, TextRange::new(0, 3));
+    assert_eq!(kept.font.font_id, cjk_face);
+    assert_eq!(cut.font.font_id, kept.font.font_id);
+    let first = &glyphs[cut.glyph_range.start];
+    assert!(first.is_synthesized);
+    assert_eq!(Some(first.glyph_id), glyph_for(japanese, '字'));
+
+    // Both edges cut in one window: each cut follows its own side.
+    let (clusters, _) = reshape(
+        TextRange::new(0, 12),
+        LeadingEdit::ReplaceSuffix {
+            replacement: "字".into(),
+            cut_bytes: 3,
+        },
+        TrailingEdit::ReplacePrefix {
+            replacement: "漢".into(),
+            cut_bytes: 3,
+            hyphen: '-',
+        },
+    );
+    assert_eq!(clusters.len(), 4);
+    assert!(
+        clusters.iter().all(|c| c.font.font_id == cjk_face),
+        "{clusters:?}"
+    );
+
+    // A window that keeps no atom falls back to the stack's first face.
+    let (clusters, _) = reshape(
+        TextRange::new(3, 6),
+        LeadingEdit::ReplaceSuffix {
+            replacement: "漢".into(),
+            cut_bytes: 3,
+        },
+        TrailingEdit::None,
+    );
+    assert_eq!(clusters.len(), 1);
+    assert_eq!(clusters[0].font.font_id, FontId(0));
+}

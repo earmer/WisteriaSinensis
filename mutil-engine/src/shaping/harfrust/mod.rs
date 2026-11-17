@@ -19,29 +19,23 @@ use harfrust::{
     Buffer, BufferFlags, Feature, GlyphInfo, GlyphPosition, Language, Script, ShapeOptions,
     ShaperFont, Tag,
 };
-use icu_normalizer::{ComposingNormalizerBorrowed, DecomposingNormalizerBorrowed};
 use read_fonts::model::Font;
 use smallvec::SmallVec;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
+mod face_choice;
 mod metrics;
 mod registry;
 #[cfg(test)]
 mod tests;
 
 use metrics::{UnitMetrics, gdef_carets, unit_metrics};
-use registry::preferred_regions;
 pub use registry::{CjkRegion, FaceProfile, FontRegistry};
 
 /// How many bytes of text on each side of a shaped segment reach HarfRust as
 /// context (spec SHP-3). HarfBuzz reads at most five code points.
 const CONTEXT_BYTES: usize = 32;
-
-/// The normalisations under which a face covers an atom (spec SHP-26).
-static NFC: ComposingNormalizerBorrowed<'static> = ComposingNormalizerBorrowed::new_nfc();
-static NFD: DecomposingNormalizerBorrowed<'static> = DecomposingNormalizerBorrowed::new_nfd();
 
 /// A variable instance, keyed by face and the bit patterns of its
 /// coordinates (spec FNT-1 makes them sound keys).
@@ -73,6 +67,8 @@ struct ShapingTarget<'a> {
     atoms: &'a [GraphemeAtom],
     clusters: &'a mut Vec<ShapedCluster>,
     glyphs: &'a mut Vec<RawShapedGlyph>,
+    /// One HarfRust buffer reused by every font run of the call.
+    buffer: &'a mut Buffer,
 }
 
 impl HarfRustShaper {
@@ -99,13 +95,15 @@ impl HarfRustShaper {
         if variations.is_empty() || face.font.axes().is_empty() {
             return Some((face.font.clone(), face.metrics));
         }
-        let key: InstanceKey = (
-            id.0,
-            variations
-                .iter()
-                .map(|v| (v.tag(), v.value().to_bits()))
-                .collect(),
-        );
+        // Distinct axes commute, so the key lists them by tag: `[wght, wdth]`
+        // and `[wdth, wght]` share one instance. The sort is stable, so a
+        // repeated tag keeps its order and its meaning.
+        let mut coordinates: SmallVec<[([u8; 4], u32); 2]> = variations
+            .iter()
+            .map(|v| (v.tag(), v.value().to_bits()))
+            .collect();
+        coordinates.sort_by_key(|&(tag, _)| tag);
+        let key: InstanceKey = (id.0, coordinates);
         let mut cache = self
             .instances
             .lock()
@@ -120,112 +118,6 @@ impl HarfRustShaper {
             (font, metrics)
         });
         Some(entry.clone())
-    }
-
-    /// The face that shapes `atom` of `run`, keyed by the run's script and
-    /// locale (spec SHP-12, SHP-25).
-    ///
-    /// In a CJK run (`Hani`, `Hira`, `Kana`, `Hang`, `Bopo`) an atom whose
-    /// first code point is ASCII keeps stack order; for any other atom the
-    /// CJK faces come first: the first candidate whose region the run prefers and
-    /// whose character map covers the whole atom, else the first CJK
-    /// candidate that covers it; a face that is not CJK is reached only when
-    /// no CJK face covers the atom. Every run then falls back to the first
-    /// candidate that covers the whole atom, else the first that covers its
-    /// first code point, else the first candidate, CJK faces first in a CJK
-    /// run. A face covers an atom when it covers the atom as written or its
-    /// NFC or NFD form (SHP-26).
-    fn face_for(
-        &self,
-        text: &str,
-        run: &ShapingRun,
-        atom: &GraphemeAtom,
-        candidates: &[FontId],
-    ) -> Option<FontId> {
-        let chars = || text[atom.byte_range.as_range()].chars();
-        let covers = |id: FontId, c: char| self.covers_char(id, c);
-        let forms = atom_forms(&text[atom.byte_range.as_range()]);
-        let covers_atom = |id: FontId| self.covers_forms(id, &forms);
-        let profile = |id: FontId| self.registry.profile(id).unwrap_or_default();
-        let first = |pass: &dyn Fn(FontId) -> bool| candidates.iter().copied().find(|&id| pass(id));
-        // ASCII keeps stack order even in a CJK run: FE-13 folds digits and
-        // ASCII punctuation into a neighbouring Han run, and they belong to
-        // the stack's leading Latin face.
-        let ascii = chars().next().is_some_and(|c| c.is_ascii());
-        if !is_cjk_script(run.script) || ascii {
-            return first(&covers_atom)
-                .or_else(|| {
-                    let lead = chars().next()?;
-                    first(&|id| covers(id, lead))
-                })
-                .or_else(|| candidates.first().copied());
-        }
-        let cjk = |id: FontId| profile(id).cjk;
-        let preferred = preferred_regions(run);
-        for (tier, &region) in preferred.iter().enumerate() {
-            let found = first(&|id| {
-                let face = profile(id);
-                face.cjk
-                    && (face.region == Some(region)
-                        || (tier == 0 && face.region == Some(CjkRegion::Pan)))
-                    && covers_atom(id)
-            });
-            if found.is_some() {
-                return found;
-            }
-        }
-        first(&|id| cjk(id) && covers_atom(id))
-            .or_else(|| first(&covers_atom))
-            .or_else(|| {
-                let lead = chars().next()?;
-                first(&|id| cjk(id) && covers(id, lead)).or_else(|| first(&|id| covers(id, lead)))
-            })
-            .or_else(|| first(&cjk))
-            .or_else(|| candidates.first().copied())
-    }
-
-    /// Whether face `id` maps `c`, or `c` needs no glyph of its own.
-    fn covers_char(&self, id: FontId, c: char) -> bool {
-        is_coverage_exempt(c)
-            || self
-                .registry
-                .face(id)
-                .is_some_and(|face| face.font.charmap().map_unicode(c).is_some())
-    }
-
-    /// Whether face `id` covers one of an atom's `forms` (SHP-26).
-    fn covers_forms(&self, id: FontId, forms: &[Cow<'_, str>]) -> bool {
-        forms
-            .iter()
-            .any(|form| form.chars().all(|c| self.covers_char(id, c)))
-    }
-
-    /// The one face that shapes a tate-chu-yoko group `atoms` (SHP-5): the
-    /// face of its first atom when that covers every atom, else the first
-    /// face, among those chosen for its atoms and then the candidates, that
-    /// does, else the first atom's face.
-    fn face_for_group(
-        &self,
-        text: &str,
-        run: &ShapingRun,
-        atoms: &[GraphemeAtom],
-        candidates: &[FontId],
-    ) -> Option<FontId> {
-        let lead = self.face_for(text, run, atoms.first()?, candidates)?;
-        let forms: Vec<_> = atoms
-            .iter()
-            .map(|atom| atom_forms(&text[atom.byte_range.as_range()]))
-            .collect();
-        let covers_all = |id: FontId| forms.iter().all(|f| self.covers_forms(id, f));
-        core::iter::once(lead)
-            .chain(
-                atoms[1..]
-                    .iter()
-                    .filter_map(|atom| self.face_for(text, run, atom, candidates)),
-            )
-            .chain(candidates.iter().copied())
-            .find(|&id| covers_all(id))
-            .or(Some(lead))
     }
 
     /// Shapes the atoms `target.atoms[range]` of `target.run`, all contiguous
@@ -298,22 +190,19 @@ impl HarfRustShaper {
             atoms[range.start].byte_range.start(),
             atoms[range.end - 1].byte_range.end(),
         );
-        let instance =
-            font.and_then(|id| Some((id, self.instance(id, run.features.variations())?)));
-        let Some((font_id, (parsed, units))) = instance else {
+        let Some(font_id) = font else {
             push_empty_clusters(
                 run,
                 atoms,
                 range,
-                font.unwrap_or_default(),
+                FontId::default(),
                 output_clusters,
                 output_glyphs,
             );
             return;
         };
-        let vertical = run.orientation == GlyphOrientation::VerticalUpright;
-        let rtl = run.bidi_level.direction().is_rtl();
-        let mut buffer = Buffer::new();
+        let buffer = &mut *target.buffer;
+        buffer.reset();
         for (offset, c) in text[bytes.as_range()].char_indices() {
             buffer.push(c as u32, u32::try_from(offset).unwrap_or(u32::MAX));
         }
@@ -327,13 +216,11 @@ impl HarfRustShaper {
             flags |= BufferFlags::END_OF_TEXT;
         }
         buffer.set_flags(flags);
-        // A fresh buffer with its direction set and no cached plan: none of
-        // `ShapeError`'s misuse cases can arise.
-        if !shape_buffer(run, &parsed, &mut buffer, vertical, rtl) {
+        let Some(k) = self.shape_run_buffer(run, font_id, buffer) else {
             push_empty_clusters(run, atoms, range, font_id, output_clusters, output_glyphs);
             return;
-        }
-        let k = run.font_size / units.units_per_em;
+        };
+        let vertical = run.orientation == GlyphOrientation::VerticalUpright;
         let mut glyphs: Vec<(usize, RawShapedGlyph, bool, bool)> = buffer
             .glyph_infos()
             .iter()
@@ -349,7 +236,7 @@ impl HarfRustShaper {
                 (atom, glyph, info.unsafe_to_break(), info.unsafe_to_concat())
             })
             .collect();
-        if rtl && !vertical {
+        if run.bidi_level.direction().is_rtl() && !vertical {
             // HarfRust returns visual order; the contract is logical (SHP-11).
             glyphs.reverse();
         }
@@ -372,28 +259,37 @@ impl HarfRustShaper {
         font: FontId,
         replacement: &str,
     ) -> Vec<RawShapedGlyph> {
-        let Some((parsed, units)) = self.instance(font, run.features.variations()) else {
-            return Vec::new();
-        };
-        let vertical = run.orientation == GlyphOrientation::VerticalUpright;
-        let rtl = run.bidi_level.direction().is_rtl();
         let mut buffer = Buffer::new();
         buffer.push_str(replacement);
         // The replacement takes the kept text's language, features and size.
-        if !shape_buffer(run, &parsed, &mut buffer, vertical, rtl) {
+        let Some(k) = self.shape_run_buffer(run, font, &mut buffer) else {
             return Vec::new();
-        }
-        let k = run.font_size / units.units_per_em;
+        };
+        let vertical = run.orientation == GlyphOrientation::VerticalUpright;
         let mut glyphs: Vec<RawShapedGlyph> = buffer
             .glyph_infos()
             .iter()
             .zip(buffer.glyph_positions())
             .map(|(info, pos)| raw_glyph(info, pos, k, vertical, true))
             .collect();
-        if rtl && !vertical {
+        if run.bidi_level.direction().is_rtl() && !vertical {
             glyphs.reverse();
         }
         glyphs
+    }
+
+    /// Shapes the filled `buffer` with face `font` under `run`'s direction,
+    /// script, language, features and size, and returns the scale from font
+    /// units (`font_size / units_per_em`); `None` without the instance or
+    /// when HarfRust reports an error. A buffer that was reset and refilled
+    /// has no output and no cached plan, so none of `ShapeError`'s misuse
+    /// cases can arise.
+    fn shape_run_buffer(&self, run: &ShapingRun, font: FontId, buffer: &mut Buffer) -> Option<f32> {
+        let (parsed, units) = self.instance(font, run.features.variations())?;
+        let vertical = run.orientation == GlyphOrientation::VerticalUpright;
+        let rtl = run.bidi_level.direction().is_rtl();
+        shape_buffer(run, &parsed, buffer, vertical, rtl)
+            .then_some(run.font_size / units.units_per_em)
     }
 }
 
@@ -437,7 +333,14 @@ fn raw_glyph(
     vertical: bool,
     is_synthesized: bool,
 ) -> RawShapedGlyph {
-    let (x_advance, x_offset, y_offset) = flow_offsets(pos, k, vertical);
+    let [x_advance, y_advance, x_offset, y_offset] =
+        [pos.x_advance, pos.y_advance, pos.x_offset, pos.y_offset].map(|v| v as f32 * k);
+    // Along the flow: a vertical advance runs down the page.
+    let (x_advance, x_offset, y_offset) = if vertical {
+        (-y_advance, -y_offset, x_offset)
+    } else {
+        (x_advance, x_offset, y_offset)
+    };
     RawShapedGlyph {
         glyph_id: info.glyph_id,
         x_advance,
@@ -445,51 +348,6 @@ fn raw_glyph(
         y_offset,
         is_synthesized,
     }
-}
-
-/// A glyph position's advance and offsets along the flow, scaled by `k`.
-fn flow_offsets(pos: &GlyphPosition, k: f32, vertical: bool) -> (f32, f32, f32) {
-    let [x_advance, y_advance, x_offset, y_offset] =
-        [pos.x_advance, pos.y_advance, pos.x_offset, pos.y_offset].map(|v| v as f32 * k);
-    if vertical {
-        (-y_advance, -y_offset, x_offset)
-    } else {
-        (x_advance, x_offset, y_offset)
-    }
-}
-
-/// Code points shaped by whatever face shapes the rest of their atom:
-/// joiners and variation selectors, which faces rarely map.
-/// An atom's text as written, then its NFC and NFD forms where they differ
-/// (SHP-26).
-fn atom_forms(written: &str) -> SmallVec<[Cow<'_, str>; 3]> {
-    let mut forms: SmallVec<[Cow<'_, str>; 3]> = SmallVec::new();
-    for form in [
-        Cow::Borrowed(written),
-        NFC.normalize(written),
-        NFD.normalize(written),
-    ] {
-        if !forms.contains(&form) {
-            forms.push(form);
-        }
-    }
-    forms
-}
-
-fn is_coverage_exempt(c: char) -> bool {
-    matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
-}
-
-/// The scripts whose runs route to CJK faces first (spec SHP-12, SHP-25).
-fn is_cjk_script(script: ScriptTag) -> bool {
-    [
-        ScriptTag::HAN,
-        ScriptTag::HIRAGANA,
-        ScriptTag::KATAKANA,
-        ScriptTag::HANGUL,
-        ScriptTag::BOPOMOFO,
-    ]
-    .contains(&script)
 }
 
 fn context_before(text: &str, at: usize) -> &str {
@@ -592,12 +450,14 @@ impl TextShaper for HarfRustShaper {
         output_glyphs: &mut Vec<RawShapedGlyph>,
     ) {
         let candidates = self.registry.candidates(&run.families, run.style);
+        let mut buffer = Buffer::new();
         let mut target = ShapingTarget {
             text,
             run,
             atoms,
             clusters: output_clusters,
             glyphs: output_glyphs,
+            buffer: &mut buffer,
         };
         for segment in contiguous_segments(atoms, 0..atoms.len()) {
             self.shape_segment(&mut target, segment, &candidates, false);
@@ -631,13 +491,16 @@ impl TextShaper for HarfRustShaper {
             output_clusters,
             output_glyphs,
         );
+        let kept_first = output_clusters.len();
         if plan.kept_start < plan.kept_end {
+            let mut buffer = Buffer::new();
             let mut target = ShapingTarget {
                 text,
                 run,
                 atoms,
                 clusters: output_clusters,
                 glyphs: output_glyphs,
+                buffer: &mut buffer,
             };
             for (k, segment) in contiguous_segments(atoms, plan.kept_start..plan.kept_end)
                 .into_iter()
@@ -646,6 +509,7 @@ impl TextShaper for HarfRustShaper {
                 self.shape_segment(&mut target, segment, &candidates, k == 0);
             }
         }
+        let kept_end = output_clusters.len();
         push_empty_clusters(
             run,
             atoms,
@@ -657,6 +521,18 @@ impl TextShaper for HarfRustShaper {
         let appended = output_clusters.len();
         if appended == first_cluster {
             return;
+        }
+        // A cut atom's empty cluster takes the face of the kept text beside
+        // it, so a replacement attached to it is shaped in that face rather
+        // than in the stack's first one.
+        if kept_first < kept_end {
+            let (lead, rest) =
+                output_clusters[first_cluster..].split_at_mut(kept_first - first_cluster);
+            let (kept, trail) = rest.split_at_mut(kept_end - kept_first);
+            lead.iter_mut().for_each(|c| c.font = kept[0].font);
+            trail
+                .iter_mut()
+                .for_each(|c| c.font = kept[kept.len() - 1].font);
         }
         output_clusters[first_cluster].safe_to_concat_before = false;
         output_clusters[first_cluster].safe_to_break_before &= plan.leading_text.is_empty();
@@ -705,20 +581,21 @@ impl TextShaper for HarfRustShaper {
 
     fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32 {
         let size = instance.font_size * instance.font.scale;
-        let fallback = 0.25 * size;
-        let Some((font, units)) = self.instance(instance.font.font_id, instance.variations) else {
-            return finite_nonnegative(fallback);
-        };
-        let Some(glyph) = font.charmap().map_unicode(' ') else {
-            return finite_nonnegative(fallback);
-        };
-        let metrics = font.glyph_metrics();
-        let advance = if orientation == GlyphOrientation::VerticalUpright {
-            metrics.v_advance(glyph)
-        } else {
-            metrics.h_advance(glyph)
-        };
-        finite_nonnegative(advance * size / units.units_per_em)
+        // A face without a space falls back to a quarter em.
+        let advance = self
+            .instance(instance.font.font_id, instance.variations)
+            .and_then(|(font, units)| {
+                let glyph = font.charmap().map_unicode(' ')?;
+                let metrics = font.glyph_metrics();
+                let advance = if orientation == GlyphOrientation::VerticalUpright {
+                    metrics.v_advance(glyph)
+                } else {
+                    metrics.h_advance(glyph)
+                };
+                Some(advance * size / units.units_per_em)
+            })
+            .unwrap_or(0.25 * size);
+        finite_nonnegative(advance)
     }
 }
 

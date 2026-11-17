@@ -463,6 +463,20 @@ fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
 
 use super::spacing::is_punctuation;
 
+/// Whether atom `index` is a middle dot (U+00B7, U+2027) resolved to a CJK
+/// script (FE-15): such a dot never begins a line after the atom before it.
+/// UAX #14 leaves U+00B7 ambiguous (AI), and the segmenter resolves it to AL,
+/// which allows a break after an ideograph (`号·`).
+pub(crate) fn is_cjk_middle_dot(text: &str, atoms: &[GraphemeAtom], index: usize) -> bool {
+    atoms.get(index).is_some_and(|a| {
+        HAN_LIST.contains(&a.script)
+            && text
+                .get(a.byte_range.as_range())
+                .and_then(|s| s.chars().next())
+                .is_some_and(|c| matches!(c, '\u{00B7}' | '\u{2027}'))
+    })
+}
+
 /// Atoms whose dash, ellipsis or middle-dot run must not break inside
 /// (FE-15): `true` for every atom of such a run but its last.
 pub(crate) fn binds_to_next(text: &str, atoms: &[GraphemeAtom], index: usize) -> bool {

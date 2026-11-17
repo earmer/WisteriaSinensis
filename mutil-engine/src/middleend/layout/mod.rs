@@ -17,6 +17,7 @@ mod breaking;
 mod hanging;
 mod justify;
 mod line_artifacts;
+mod line_box;
 mod line_builder;
 
 use breaking::LineStart;
@@ -277,12 +278,12 @@ pub(super) struct Layout<'i, 'a> {
     pub(super) reshaped: HashMap<usize, Reshaped>,
 }
 
-/// One piece of the current line together with its L1-resolved bidi level,
-/// preceding no-break gap, horizontal placement and baseline shift.
+/// One piece of the current line, its level resolved by UAX #9 L1 in
+/// `piece.level`, with its preceding no-break gap, horizontal placement and
+/// baseline shift.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PlacedPiece {
     pub(super) piece: Piece,
-    pub(super) level: BidiLevel,
     pub(super) gap: f32,
     pub(super) x: f32,
     pub(super) width: f32,
@@ -628,7 +629,6 @@ mod tests {
                 level: BidiLevel::new(v).unwrap(),
                 width: 0.0,
             },
-            level: BidiLevel::new(v).unwrap(),
             gap: 0.0,
             x: 0.0,
             width: 0.0,

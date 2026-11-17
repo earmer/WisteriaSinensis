@@ -200,6 +200,36 @@ fn write_line<'a>(out: &mut Out, line: &PositionedLine, runs: impl Iterator<Item
         out.number(slot.content_end());
         out.raw("]");
     }
+    // The available interval of each slot, which a hanging mark protrudes
+    // from (spec HNG-1).
+    out.raw("],\"columns\":[");
+    for (slot_index, slot) in line.slots.iter().enumerate() {
+        if slot_index > 0 {
+            out.raw(",");
+        }
+        out.raw("[");
+        out.number(slot.constraint.start());
+        out.raw(",");
+        out.number(slot.constraint.end());
+        out.raw("]");
+    }
+    // The pen interval of each hanging glyph.
+    out.raw("],\"hangs\":[");
+    let hanging = line
+        .visual_runs
+        .iter()
+        .flat_map(|run| run.glyphs.iter())
+        .filter(|glyph| glyph.is_hanging);
+    for (index, glyph) in hanging.enumerate() {
+        if index > 0 {
+            out.raw(",");
+        }
+        out.raw("[");
+        out.number(glyph.x);
+        out.raw(",");
+        out.number(glyph.x + glyph.advance);
+        out.raw("]");
+    }
     out.raw("],\"carets\":[");
     for (caret_index, stop) in line.caret_stops.iter().enumerate() {
         if caret_index > 0 {
