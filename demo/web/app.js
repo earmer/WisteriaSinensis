@@ -242,7 +242,7 @@ function relayout() {
       state.layout = null;
       gateChip.textContent = 'engine rejected the input';
       gateChip.className = 'chip bad';
-      stats.innerHTML = '';
+      stats.replaceChildren();
       drawPlaceholder(settings.width, 'Layout rejected — see message above.');
       return;
     }
@@ -261,16 +261,21 @@ function relayout() {
 
   gateChip.textContent = results.length === 0 ? 'nothing to draw' : 'output gate passed';
   gateChip.className = `chip ${results.length === 0 ? 'muted' : 'good'}`;
-  stats.innerHTML = results.length === 0
-    ? ''
-    : [
-        `<span><strong>${paragraphs.length}</strong> paragraph${paragraphs.length === 1 ? '' : 's'}</span>`,
-        `<span><strong>${lines}</strong> lines</span>`,
-        `<span><strong>${justified}</strong> justified</span>`,
-        `<span><strong>${hanging}</strong> hanging marks</span>`,
-        `<span><strong>${glyphs.toLocaleString()}</strong> glyphs</span>`,
-        `<span><strong>${elapsed.toFixed(1)}</strong> ms</span>`,
-      ].join('');
+  const figures = [
+    [paragraphs.length, paragraphs.length === 1 ? 'paragraph' : 'paragraphs'],
+    [lines, 'lines'],
+    [justified, 'justified'],
+    [hanging, 'hanging marks'],
+    [glyphs.toLocaleString(), 'glyphs'],
+    [elapsed.toFixed(1), 'ms'],
+  ];
+  stats.replaceChildren(...(results.length === 0 ? [] : figures.map(([value, label]) => {
+    const item = document.createElement('span');
+    const strong = document.createElement('strong');
+    strong.textContent = String(value);
+    item.append(strong, ` ${label}`);
+    return item;
+  })));
   draw(results, settings);
 }
 

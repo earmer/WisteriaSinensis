@@ -38,15 +38,23 @@ impl Layout<'_, '_> {
     }
 
     /// The capacities of the pieces after the line's last tab (ST3-1): glue
-    /// by its tier, and the gap after each cluster but the last (ST1-7,
-    /// ST3-2).
+    /// by its tier, and the gap after each cluster that another cluster
+    /// follows, with no inline object between them (ST1-7, ST3-2).
     fn capacities(&self, body: &[PlacedPiece]) -> Vec<Capacity> {
-        let last_cluster = body
-            .iter()
-            .rposition(|p| matches!(p.piece.kind, PieceKind::Cluster { .. }));
+        // Whether the next cluster or object after each piece is a cluster.
+        let mut cluster_follows = vec![false; body.len()];
+        let mut next_is_cluster = false;
+        for (k, p) in body.iter().enumerate().rev() {
+            cluster_follows[k] = next_is_cluster;
+            match p.piece.kind {
+                PieceKind::Cluster { .. } => next_is_cluster = true,
+                PieceKind::Object { .. } => next_is_cluster = false,
+                _ => {}
+            }
+        }
         body.iter()
-            .enumerate()
-            .map(|(k, p)| match p.piece.kind {
+            .zip(cluster_follows)
+            .map(|(p, cluster_follows)| match p.piece.kind {
                 PieceKind::Glue { item } => {
                     let glue = self.glue(item);
                     let tier = match glue.kind.tier() {
@@ -58,7 +66,7 @@ impl Layout<'_, '_> {
                     capacity.shrink[tier] = glue.max_shrink;
                     capacity
                 }
-                PieceKind::Cluster { run, cluster } if Some(k) != last_cluster => {
+                PieceKind::Cluster { run, cluster } if cluster_follows => {
                     let run = &self.ast.runs[run];
                     let flags = self.ast.clusters[cluster].flags;
                     let mut capacity = Capacity::default();
