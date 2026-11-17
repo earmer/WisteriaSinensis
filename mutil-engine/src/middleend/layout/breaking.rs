@@ -127,7 +127,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// mandatory break, or an emergency cluster break when nothing fits.
     /// Under `justify` a line fits while its width less the shrink of its
     /// visible glue after the last tab fits; a mark that may hang is credited
-    /// with its protruding half (ST1-3).
+    /// with its protrusion (ST1-3).
     pub(super) fn fit(&mut self, line: LineStart, slot: InlineSlotConstraint) -> LineEnd {
         let slot_width = slot.width();
         let LineStart {
@@ -143,7 +143,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut has_visible = false;
         // The shrink of the glue since the last tab, and of the visible part.
         let (mut shrink, mut visible_shrink) = (0.0_f32, 0.0_f32);
-        // The protruding half of the last visible piece, if it may hang.
+        // The protrusion of the last visible piece, if it may hang.
         let mut end_hang = 0.0;
         // The last fitting break of each ladder tier.
         let mut fits: [Option<usize>; 3] = [None; 3];
@@ -203,13 +203,13 @@ impl<'i, 'a> Layout<'i, 'a> {
                     if piece.is_content() {
                         if !has_visible && post == 0.0 {
                             pen -= self
-                                .hang_half(&piece, piece.level, LineEdge::Start, first_line)
+                                .hang_protrusion(&piece, piece.level, LineEdge::Start, first_line)
                                 .unwrap_or(0.0);
                         }
                         has_visible = true;
                         visible_shrink = shrink;
                         end_hang = self
-                            .hang_half(&piece, piece.level, LineEdge::End, first_line)
+                            .hang_protrusion(&piece, piece.level, LineEdge::End, first_line)
                             .unwrap_or(0.0);
                     }
                     let (advance, reach) = self.measure(&piece, pen, slot);

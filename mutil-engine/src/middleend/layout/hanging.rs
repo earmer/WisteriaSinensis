@@ -1,10 +1,16 @@
 //! Hanging punctuation (spec ST1-3, HNG-1 to HNG-4): which mark hangs at
-//! each edge of a line, by half its advance.
+//! each edge of a line, by [`HANG_FRACTION`] of its advance.
 
 use super::super::tolerance::tolerance;
 use super::super::{DecorationLine, HangEndMode, HangSide, PositionedSpanFragment, VisualGlyphRun};
 use super::{Layout, Piece, PieceKind, PlacedPiece};
 use crate::types::{AtomFlags, BidiLevel};
+
+/// The part of a hanging mark's advance that protrudes past the content
+/// block (ST1-3). A full-width CJK mark keeps its ink in one half of its em
+/// box, so a half-advance hang would push only the blank half out; at 0.85
+/// the ink itself protrudes, and 0.15 of the advance stays inside (HNG-1).
+pub(super) const HANG_FRACTION: f32 = 0.85;
 
 /// The logical edge of a line a mark hangs from.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -14,7 +20,7 @@ pub(super) enum LineEdge {
 }
 
 /// The marks hanging on one line: for each, its index into the placed
-/// pieces and the half of its advance that protrudes (ST1-3).
+/// pieces and the part of its advance that protrudes (ST1-3).
 #[derive(Clone, Copy, Default)]
 pub(super) struct LineHangs {
     pub(super) start: Option<(usize, f32)>,
@@ -22,9 +28,9 @@ pub(super) struct LineHangs {
 }
 
 impl LineHangs {
-    /// The protruding half of a mark, or 0.
+    /// The protrusion of a mark, or 0.
     pub(super) fn protrusion(hang: Option<(usize, f32)>) -> f32 {
-        hang.map_or(0.0, |(_, half)| half)
+        hang.map_or(0.0, |(_, protrusion)| protrusion)
     }
 
     /// The protrusion at the physical left and right edges.
@@ -35,11 +41,11 @@ impl LineHangs {
 }
 
 impl Layout<'_, '_> {
-    /// The protruding half of `piece` if it may hang at `edge` of a line
+    /// The protruding part of `piece` if it may hang at `edge` of a line
     /// (the first line when `first_line`): a mark of the edge's class whose
     /// post-L1 `level` is the paragraph's, on a side the mode allows (ST1-3, HNG-2). Whether
     /// anything lies between it and the edge is the caller's to judge.
-    pub(super) fn hang_half(
+    pub(super) fn hang_protrusion(
         &self,
         piece: &Piece,
         level: BidiLevel,
@@ -62,7 +68,7 @@ impl Layout<'_, '_> {
         (c.flags.contains(flag)
             && level == self.base.base_level()
             && self.options.hang_mode.allows(side, self.base, first_line))
-        .then(|| self.cluster_glyphs(cluster).1 / 2.0)
+        .then(|| self.cluster_glyphs(cluster).1 * HANG_FRACTION)
     }
 
     /// The index of the first or last visible piece of `body`: only
@@ -90,7 +96,7 @@ impl Layout<'_, '_> {
         let p = &body[k];
         Some((
             k,
-            self.hang_half(&p.piece, p.level, LineEdge::Start, first_line)?,
+            self.hang_protrusion(&p.piece, p.piece.level, LineEdge::Start, first_line)?,
         ))
     }
 
@@ -113,7 +119,7 @@ impl Layout<'_, '_> {
         let p = &body[k];
         Some((
             k,
-            self.hang_half(&p.piece, p.level, LineEdge::End, first_line)?,
+            self.hang_protrusion(&p.piece, p.piece.level, LineEdge::End, first_line)?,
         ))
     }
 }

@@ -5,12 +5,15 @@
 //! `selection_geometry` and `range_rects`; on validated inputs, the
 //! deletion ranges and the copied text; and the UTF-16 conversions.
 
-use super::output::{AtomicFragment, CaretAffinity, CaretStop, HangSide, PositionedParagraph};
-use super::tolerance::{approx_eq, tolerance};
+use super::output::{
+    AtomicFragment, CaretAffinity, CaretStop, HangSide, PositionedLine, PositionedParagraph,
+};
+use super::tolerance::approx_eq;
 use super::{ValidatedInputs, ValidatedLayout};
 use crate::types::{AtomFlags, BidiLevel, ByteIndex, Point, Rect, TextRange, WritingMode};
 
 mod motion;
+mod selection;
 
 /// A caret location: offset plus affinity (spec §6.1).
 ///
@@ -263,9 +266,12 @@ impl ValidatedLayout<'_> {
         let lines = &p.lines;
         let (top, _) = line_block(p, 0);
         let (_, bottom) = line_block(p, lines.len() - 1);
-        let line = (0..lines.len())
-            .position(|i| flow.y < line_block(p, i).1)
-            .unwrap_or(lines.len() - 1);
+        // The output gate stacks line boxes without overlap (LineBoxesOverlap),
+        // so their bottoms ascend and the first one below the point is found
+        // by bisection.
+        let line = lines
+            .partition_point(|l| line_box(p, l).1 <= flow.y)
+            .min(lines.len() - 1);
         let hit = self.hit_test_on_line(line, flow.x);
         HitResult {
             position: hit.position,
@@ -421,196 +427,15 @@ fn stop_position(stop: &CaretStop) -> CursorPosition {
 
 /// The flow-space block interval of line `line`: its line box.
 fn line_block(paragraph: &PositionedParagraph, line: usize) -> (f32, f32) {
-    let l = &paragraph.lines[line];
+    line_box(paragraph, &paragraph.lines[line])
+}
+
+/// The flow-space block interval of `line`, a line of `paragraph`.
+fn line_box(paragraph: &PositionedParagraph, line: &PositionedLine) -> (f32, f32) {
     paragraph
         .policy
         .writing_mode
-        .line_bounds(l.baseline_y, l.ascent, l.descent)
-}
-
-/// A visual slot of a line: the stretch between two neighbouring caret
-/// stops, with the bytes between their offsets.
-struct Slot {
-    x0: f32,
-    x1: f32,
-    lo: ByteIndex,
-    hi: ByteIndex,
-    level: BidiLevel,
-}
-
-fn slots(stops: &[CaretStop]) -> impl Iterator<Item = Slot> + '_ {
-    stops.windows(2).map(|w| Slot {
-        x0: w[0].x.min(w[1].x),
-        x1: w[0].x.max(w[1].x),
-        lo: w[0].offset.min(w[1].offset),
-        hi: w[0].offset.max(w[1].offset),
-        level: w[0].level,
-    })
-}
-
-/// The inline intervals of line `line` that `range` selects (spec INT-16):
-/// visually adjacent selected slots merge, a zero-width slot between two
-/// selected ones bridges them, and an unselected slot breaks the merge.
-fn selected_intervals(
-    paragraph: &PositionedParagraph,
-    line: usize,
-    range: TextRange,
-) -> Vec<(f32, f32, BidiLevel)> {
-    let mut out = Vec::new();
-    let mut open: Option<(f32, f32, BidiLevel)> = None;
-    for slot in slots(&paragraph.lines[line].caret_stops) {
-        if slot.lo == slot.hi {
-            continue;
-        }
-        if range.start() <= slot.lo && slot.hi <= range.end() {
-            open = Some(match open {
-                Some((a, b, level)) => (
-                    a.min(slot.x0),
-                    b.max(slot.x1),
-                    if approx_eq(a, b) { slot.level } else { level },
-                ),
-                None => (slot.x0, slot.x1, slot.level),
-            });
-        } else if let Some(done) = open.take() {
-            out.push(done);
-        }
-    }
-    out.extend(open);
-    out
-}
-
-impl ValidatedLayout<'_> {
-    /// The selection rectangles of `range` (spec INT-16), physical and
-    /// paragraph-local, line by line in visual order. `Tight` spans the
-    /// ascent and descent of the font instances and inline boxes the piece
-    /// crosses, asked of `shaper` through the shaper gate; `Max` the line
-    /// box, which holds the line gap and the tallest inline box; `Strut` the
-    /// resolved strut. An empty range gives none, and no line-end extension
-    /// is drawn.
-    #[must_use]
-    pub fn selection_geometry(
-        &self,
-        shaper: &dyn crate::shaping::TextShaper,
-        range: TextRange,
-        height: BoxHeightStyle,
-    ) -> Vec<SelectionRect> {
-        let p = self.paragraph();
-        if range.is_empty() {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        for (index, line) in p.lines.iter().enumerate() {
-            if line.byte_range.end() <= range.start() && !line.byte_range.is_empty() {
-                continue;
-            }
-            if line.byte_range.start() >= range.end() {
-                break;
-            }
-            for (x0, x1, level) in selected_intervals(p, index, range) {
-                let (top, bottom) = match height {
-                    BoxHeightStyle::Max => line_block(p, index),
-                    BoxHeightStyle::Strut => (
-                        line.baseline_y - p.policy.strut.ascent,
-                        line.baseline_y + p.policy.strut.descent,
-                    ),
-                    BoxHeightStyle::Tight => self.tight_block(shaper, index, x0, x1, range),
-                };
-                out.push(SelectionRect {
-                    rect: p.policy.writing_mode.flow_to_physical_rect(
-                        Rect::new(x0, top, x1 - x0, (bottom - top).max(0.0)),
-                        p.total_block_size,
-                    ),
-                    line: index,
-                    level,
-                    is_line_end_extension: false,
-                });
-            }
-        }
-        out
-    }
-
-    /// The rectangles of `range` over full line boxes, for placing an IME
-    /// candidate window (spec INT-18).
-    #[must_use]
-    pub fn range_rects(&self, range: TextRange) -> Vec<Rect> {
-        let p = self.paragraph();
-        let mut out = Vec::new();
-        if range.is_empty() {
-            return out;
-        }
-        for index in 0..p.lines.len() {
-            let (top, bottom) = line_block(p, index);
-            for (x0, x1, _) in selected_intervals(p, index, range) {
-                out.push(p.policy.writing_mode.flow_to_physical_rect(
-                    Rect::new(x0, top, x1 - x0, bottom - top),
-                    p.total_block_size,
-                ));
-            }
-        }
-        out
-    }
-
-    /// The block interval of a `Tight` piece `[x0, x1]` of line `line`: the
-    /// union of the ascents and descents of the selected glyph runs' font
-    /// instances (through the shaper gate) and inline boxes, else the strut.
-    fn tight_block(
-        &self,
-        shaper: &dyn crate::shaping::TextShaper,
-        line: usize,
-        x0: f32,
-        x1: f32,
-        range: TextRange,
-    ) -> (f32, f32) {
-        let p = self.paragraph();
-        let l = &p.lines[line];
-        let (mut above, mut below) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-        let eps = tolerance(x0, x1);
-        let inside = |x: f32| x >= x0 - eps && x <= x1 + eps;
-        for run in &l.visual_runs {
-            // A glyph counts when its extent meets the piece and its bytes
-            // meet the selection: part of a ligature selects its font.
-            let selected = run.glyphs.iter().any(|g| {
-                let (lo, hi) = g.pen_interval();
-                lo < x1 - eps
-                    && hi > x0 + eps
-                    && g.byte_range
-                        .is_some_and(|b| b.start() < range.end() && range.start() < b.end())
-            });
-            if !selected {
-                continue;
-            }
-            let Ok(metrics) = super::shaper_gate::checked_font_metrics(
-                shaper,
-                crate::types::FontInstanceRef {
-                    font: run.font,
-                    font_size: run.font_size,
-                    variations: &run.variations,
-                },
-            ) else {
-                continue;
-            };
-            let (ascent, descent) = if p.policy.writing_mode.is_vertical() {
-                (metrics.vertical_ascent, metrics.vertical_descent)
-            } else {
-                (metrics.ascent, metrics.descent)
-            };
-            above = above.max(ascent);
-            below = below.max(descent);
-        }
-        for b in &l.visual_boxes {
-            if inside(b.x) && range.contains_range(b.byte_range) {
-                above = above.max(b.ascent - b.y);
-                below = below.max(b.descent + b.y);
-            }
-        }
-        if !above.is_finite() || !below.is_finite() {
-            above = p.policy.strut.ascent;
-            below = p.policy.strut.descent;
-        }
-        p.policy
-            .writing_mode
-            .line_bounds(l.baseline_y, above, below)
-    }
+        .line_bounds(line.baseline_y, line.ascent, line.descent)
 }
 
 impl ValidatedInputs<'_> {
@@ -628,11 +453,8 @@ impl ValidatedInputs<'_> {
         if offset == 0 {
             return TextRange::empty_at(0);
         }
-        if let Some(span) = ast.atomic_span_containing(offset - 1) {
-            return span.byte_range;
-        }
-        if let Some(object) = object_holding(ast, offset - 1) {
-            return object;
+        if let Some(unit) = anchored_unit_range(ast, offset - 1) {
+            return unit;
         }
         let k = ast.atoms.partition_point(|a| a.byte_range.end() < offset);
         if let Some(atom) = ast.atoms.get(k).filter(|a| a.byte_range.end() == offset)
@@ -658,11 +480,8 @@ impl ValidatedInputs<'_> {
         if offset >= text.len() {
             return TextRange::empty_at(text.len());
         }
-        if let Some(span) = ast.atomic_span_containing(offset) {
-            return span.byte_range;
-        }
-        if let Some(object) = object_holding(ast, offset) {
-            return object;
+        if let Some(unit) = anchored_unit_range(ast, offset) {
+            return unit;
         }
         let k = ast.atoms.partition_point(|a| a.byte_range.start() < offset);
         if let Some(atom) = ast.atoms.get(k).filter(|a| a.byte_range.start() == offset) {
@@ -687,6 +506,14 @@ impl ValidatedInputs<'_> {
             super::SoftHyphenPolicy::Strip => source.replace('\u{AD}', ""),
         }
     }
+}
+
+/// The atomic span holding `byte`, else the inline object holding it: the
+/// units that editing removes whole (spec INT-12).
+fn anchored_unit_range(ast: &crate::frontend::ParagraphAst, byte: ByteIndex) -> Option<TextRange> {
+    ast.atomic_span_containing(byte)
+        .map(|span| span.byte_range)
+        .or_else(|| object_holding(ast, byte))
 }
 
 /// The range of the inline object holding `byte`, if any.

@@ -773,3 +773,113 @@ fn line_top_and_bottom_objects_sit_on_the_line_edges() {
     // Bottom flush with the under edge.
     assert_close(-bottom.y - bottom.descent, -line.descent);
 }
+
+/// Compiles `text` in Simplified Chinese with [`SPACING_SHAPER`] under
+/// `strictness`.
+#[track_caller]
+fn compile_zh(text: &str, strictness: LineBreakStrictness) -> ParagraphAst {
+    let style = localized_style(&[SIMPLIFIED], 10.0, "zh-CN");
+    let options = FrontendOptions {
+        line_break_strictness: strictness,
+        ..Default::default()
+    };
+    compile_paragraph(&input(text, &style), &options, &*SPACING_SHAPER)
+        .unwrap_or_else(|e| panic!("{text:?}: {e}"))
+}
+
+/// The offsets of the break opportunities of `ast`, the paragraph end
+/// excluded.
+fn opportunities(ast: &ParagraphAst) -> Vec<usize> {
+    discretionaries(ast)
+        .iter()
+        .map(|d| d.byte_offset())
+        .collect()
+}
+
+const BREAKING_STRICTNESSES: [LineBreakStrictness; 3] = [
+    LineBreakStrictness::Loose,
+    LineBreakStrictness::Normal,
+    LineBreakStrictness::Strict,
+];
+
+#[test]
+fn fe15_a_cjk_middle_dot_never_begins_a_line_after_the_atom_it_touches() {
+    for text in ["号·都在", "号\u{2027}都在"] {
+        let dot = text.find(['·', '\u{2027}']).unwrap();
+        let after = dot + text[dot..].chars().next().unwrap().len_utf8();
+        for strictness in BREAKING_STRICTNESSES {
+            let ast = compile_zh(text, strictness);
+            passes_the_input_gate(&ast, text);
+            let script = ast
+                .atoms
+                .iter()
+                .find(|a| a.byte_range.start() == dot)
+                .unwrap()
+                .script;
+            assert_eq!(script, ScriptTag::HAN, "{text:?} {strictness:?}");
+            let at = opportunities(&ast);
+            assert!(!at.contains(&dot), "{text:?} {strictness:?}: {at:?}");
+            // The opportunity after the dot remains.
+            assert!(at.contains(&after), "{text:?} {strictness:?}: {at:?}");
+        }
+        // `Anywhere` breaks before the dot.
+        let ast = compile_zh(text, LineBreakStrictness::Anywhere);
+        let at = opportunities(&ast);
+        assert!(at.contains(&dot), "{text:?} Anywhere: {at:?}");
+        assert!(at.contains(&after), "{text:?} Anywhere: {at:?}");
+    }
+}
+
+#[test]
+fn fe15_a_cjk_middle_dot_after_a_closing_bracket_does_not_begin_a_line() {
+    // "》·《": compression glue (FE-31) may sit at the dot's offset, but no
+    // opportunity does.
+    let text = "《书名》·《书名》";
+    let dot = text.find('·').unwrap();
+    for strictness in BREAKING_STRICTNESSES {
+        let ast = compile_zh(text, strictness);
+        passes_the_input_gate(&ast, text);
+        let at = opportunities(&ast);
+        assert!(!at.contains(&dot), "{strictness:?}: {at:?}");
+    }
+    let ast = compile_zh(text, LineBreakStrictness::Anywhere);
+    assert!(opportunities(&ast).contains(&dot));
+}
+
+#[test]
+fn fe15_a_cjk_middle_dot_after_a_space_may_begin_a_line() {
+    let text = "号 ·都";
+    let dot = text.find('·').unwrap();
+    for strictness in BREAKING_STRICTNESSES {
+        let ast = compile_zh(text, strictness);
+        passes_the_input_gate(&ast, text);
+        let at = opportunities(&ast);
+        assert!(at.contains(&dot), "{strictness:?}: {at:?}");
+    }
+}
+
+#[test]
+fn fe15_a_cjk_middle_dot_moves_to_the_next_line_with_the_ideograph_before_it() {
+    let text = "间隔号·都在这里。";
+    let ast = compile_zh(text, LineBreakStrictness::Normal);
+    let dot = text.find('·').unwrap();
+    let head = crate::acceptance_phase2::width_of(&ast, TextRange::new(0, dot));
+    let dot_width = crate::acceptance_phase2::width_of(&ast, TextRange::new(dot, dot + 2));
+    assert!(dot_width > 0.0);
+    // The column holds "间隔号" but not the dot after it.
+    let constraints = column(head + dot_width / 2.0);
+    let p = layout_paragraph(
+        &ast,
+        text,
+        &*SPACING_SHAPER,
+        &constraints,
+        &LayoutOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    ValidatedLayout::new(&p, text).unwrap_or_else(|(line, e)| panic!("line {line}: {e}"));
+    let lines = line_texts(&p, text);
+    assert!(lines.len() >= 2, "{lines:?}");
+    assert_eq!(lines[0], "间隔", "{lines:?}");
+    assert!(lines[1].starts_with("号·"), "{lines:?}");
+    assert!(lines.iter().all(|l| !l.starts_with('·')), "{lines:?}");
+}

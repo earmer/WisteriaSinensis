@@ -92,7 +92,7 @@ fn visual_groups(
                 lo,
                 hi,
                 bytes: p.piece.bytes,
-                level: p.level,
+                level: p.piece.level,
                 is_bare_boundary,
             }),
         }
@@ -410,11 +410,11 @@ impl<'i, 'a> Layout<'i, 'a> {
             return;
         }
         let (a, b) = (placed_piece.x, placed_piece.x + placed_piece.width);
-        let rtl = placed_piece.level.direction().is_rtl();
+        let rtl = placed_piece.piece.level.direction().is_rtl();
         // A glyph-less piece lends no level of its own (spec CRT-2).
         let level = match p.kind {
             PieceKind::Cluster { .. } | PieceKind::Object { .. } | PieceKind::Tab => {
-                Some(placed_piece.level)
+                Some(placed_piece.piece.level)
             }
             PieceKind::Glue { .. } | PieceKind::SpanEdge { .. } => None,
         };
@@ -447,7 +447,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                         variations: self.ast.runs[run].features.variations(),
                     },
                     first_glyph,
-                    placed_piece.level.direction(),
+                    placed_piece.piece.level.direction(),
                 );
                 // Positions increase from the left edge (SHP-7); in RTL they
                 // pair with the atoms in reverse logical order (INT-5).

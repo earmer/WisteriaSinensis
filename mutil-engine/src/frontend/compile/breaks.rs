@@ -1,15 +1,17 @@
 //! Break opportunities and text box edges (spec §3 Step 6, FE-15, FE-19,
 //! FE-22, FE-23, FE-30).
 
-use super::super::{DiscretionaryNode, MAX_DECORATION_NESTING_DEPTH, script, segment, url};
+use super::super::{
+    DiscretionaryNode, LineBreakStrictness, MAX_DECORATION_NESTING_DEPTH, script, segment, url,
+};
 use super::{Compiler, Unit};
 use crate::types::AtomFlags;
 use smallvec::SmallVec;
 
 impl Compiler<'_> {
     /// The penalty of the discretionary after each unit, if any (FE-19,
-    /// WN-2, WN-3), with URL tailoring (FE-22), unbreakable dash runs (FE-15)
-    /// and the no-line-end words (FE-23).
+    /// WN-2, WN-3), with URL tailoring (FE-22), unbreakable dash runs and fused CJK middle
+    /// dots (FE-15) and the no-line-end words (FE-23).
     pub(super) fn breaks_after(&mut self, graphemes: &[usize]) -> Vec<Option<i32>> {
         let text = self.text;
         let opportunities = segment::line_opportunities(
@@ -43,6 +45,16 @@ impl Compiler<'_> {
                 && script::binds_to_next(self.text, &self.atoms, a)
             {
                 self.atoms[b].flags.insert(AtomFlags::BINDS_TO_PREVIOUS);
+                breaks_after.push(None);
+                continue;
+            }
+            // A CJK middle dot is fused to the atom before it (FE-15, WN-3).
+            if let (Unit::Atom(a), Some(Unit::Atom(b))) = (unit, self.units.get(i + 1).copied())
+                && b == a + 1
+                && self.atoms[a].byte_range.end() == self.atoms[b].byte_range.start()
+                && script::is_cjk_middle_dot(self.text, &self.atoms, b)
+                && self.options.line_break_strictness != LineBreakStrictness::Anywhere
+            {
                 breaks_after.push(None);
                 continue;
             }

@@ -450,6 +450,28 @@ function drawLineGuides(paragraph, settings) {
     return;
   }
   for (const line of paragraph.lines) {
+    if (settings.showBoxes) {
+      // The slot's available interval, dashed: a hanging mark protrudes
+      // past it, while the solid content box below stops at the body.
+      ctx.save();
+      ctx.setLineDash([2, 3]);
+      ctx.strokeStyle = 'rgba(79, 112, 189, 0.45)';
+      ctx.lineWidth = 1;
+      for (const [start, end] of line.columns ?? []) {
+        if (end !== null) {
+          ctx.strokeRect(start + 0.5, line.top + 0.5, end - start - 1, line.height - 1);
+        }
+      }
+      ctx.restore();
+      // Each hanging glyph's advance, in amber.
+      for (const [start, end] of line.hangs ?? []) {
+        ctx.fillStyle = 'rgba(214, 140, 30, 0.22)';
+        ctx.fillRect(start, line.top, end - start, line.height);
+        ctx.strokeStyle = 'rgba(214, 140, 30, 0.8)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(start + 0.5, line.top + 0.5, end - start - 1, line.height - 1);
+      }
+    }
     for (const [start, end] of line.slots) {
       if (settings.showBoxes) {
         ctx.fillStyle = 'rgba(79, 112, 189, 0.06)';
