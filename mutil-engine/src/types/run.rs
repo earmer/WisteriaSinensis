@@ -6,8 +6,8 @@
 use core::ops::Range;
 
 use super::{
-    BaselineAlignment, BidiLevel, Direction, FamilyStack, FontFeatures, FontStyle,
-    GlyphOrientation, LocaleTag, ScriptTag, TextRange,
+    BaselineAlignment, BidiLevel, Direction, FamilyStack, FontFeatures, FontInstanceRef, FontRef,
+    FontStyle, GlyphOrientation, LocaleTag, ScriptTag, TextRange,
 };
 
 /// Text decoration requested for a run. Colour is deliberately absent: it is
@@ -67,5 +67,14 @@ impl ShapingRun {
     #[must_use]
     pub const fn direction(&self) -> Direction {
         Direction::from_level(self.bidi_level)
+    }
+
+    /// `font` at this run's size and variations.
+    pub(crate) fn font_instance(&self, font: FontRef) -> FontInstanceRef<'_> {
+        FontInstanceRef {
+            font,
+            font_size: self.font_size,
+            variations: self.features.variations(),
+        }
     }
 }

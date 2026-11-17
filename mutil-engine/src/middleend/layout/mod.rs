@@ -31,9 +31,7 @@ use crate::frontend::{
     AnnotationSide, BoxNode, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge, WordNode,
 };
 use crate::shaping::TextShaper;
-use crate::types::{
-    BidiDirection, BidiLevel, FontInstanceRef, FontMetrics, RawShapedGlyph, TextRange,
-};
+use crate::types::{BidiDirection, BidiLevel, FontMetrics, RawShapedGlyph, TextRange};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
@@ -160,11 +158,7 @@ fn tallest_first_line(
         };
         let run = &ast.runs[view.run_index];
         for cluster in view.clusters {
-            let instance = FontInstanceRef {
-                font: cluster.font,
-                font_size: run.font_size,
-                variations: run.features.variations(),
-            };
+            let instance = run.font_instance(cluster.font);
             let line_box =
                 checked_line_box(shaper, instance, options.line_height, ast.writing_mode)?;
             content_height = content_height.max(line_box.line_height());
