@@ -144,6 +144,12 @@ export class Engine {
     return JSON.parse(this.#take(this.#exports.demo_selection_geometry(paraId, start, end, heightStyle)));
   }
 
+  /** The laid-out text offset of source byte `sourceOffset`, past locale tags. */
+  textOffset(paraId, sourceOffset) {
+    const offset = this.#exports.demo_text_offset(paraId, sourceOffset) >>> 0;
+    return offset === 0xffffffff ? null : offset;
+  }
+
   rangeRects(paraId, start, end) {
     return JSON.parse(this.#take(this.#exports.demo_range_rects(paraId, start, end)));
   }

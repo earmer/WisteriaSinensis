@@ -69,10 +69,23 @@ struct FaceEntry {
     bytes: FontBytes,
 }
 
+/// A laid-out paragraph as the page drew it: its text without the locale
+/// markup, the tags removed from its source, and the paragraph.
 struct StoredParagraph {
     text: String,
+    removed: Vec<core::ops::Range<usize>>,
     paragraph: PositionedParagraph,
 }
+
+self_cell::self_cell!(
+    /// A stored paragraph with the view that passed the output gate, kept so
+    /// queries never re-validate it.
+    struct ValidatedParagraph {
+        owner: StoredParagraph,
+        #[covariant]
+        dependent: ValidatedLayout,
+    }
+);
 
 #[derive(Clone, Copy, Default)]
 struct ExtraOptions {
@@ -89,7 +102,7 @@ struct ExtraOptions {
 struct Demo {
     faces: Vec<FaceEntry>,
     shaper: Option<HarfRustShaper>,
-    paragraphs: Vec<StoredParagraph>,
+    paragraphs: Vec<ValidatedParagraph>,
     extra: ExtraOptions,
 }
 
@@ -343,22 +356,33 @@ impl Demo {
             Err(error) => return error_json("layout", &error.to_string(), None),
         };
         let id = self.paragraphs.len();
-        let json = match ValidatedLayout::new(&paragraph, text) {
-            Ok(layout) => layout_json(&layout, req.font_size, req.width, id),
+        let stored = StoredParagraph {
+            text: marked.text,
+            removed: marked.removed,
+            paragraph,
+        };
+        let validated = match ValidatedParagraph::try_new(stored, |s| {
+            ValidatedLayout::new(&s.paragraph, &s.text)
+        }) {
+            Ok(validated) => validated,
             Err((line, error)) => {
                 return error_json("validate", &error.to_string(), Some(line));
             }
         };
-        self.paragraphs.push(StoredParagraph {
-            text: marked.text,
-            paragraph,
-        });
+        let json = layout_json(validated.borrow_dependent(), req.font_size, req.width, id);
+        self.paragraphs.push(validated);
         json
     }
 
-    fn validated(&self, para_id: usize) -> Option<ValidatedLayout<'_>> {
-        let stored = self.paragraphs.get(para_id)?;
-        ValidatedLayout::new(&stored.paragraph, &stored.text).ok()
+    fn validated(&self, para_id: usize) -> Option<&ValidatedLayout<'_>> {
+        Some(self.paragraphs.get(para_id)?.borrow_dependent())
+    }
+
+    /// The offset in paragraph `para_id`'s laid-out text of byte
+    /// `source_offset` of its source, which may hold locale markup.
+    fn text_offset(&self, para_id: usize, source_offset: usize) -> Option<usize> {
+        let stored = self.paragraphs.get(para_id)?.borrow_owner();
+        Some(markup::text_offset(&stored.removed, source_offset).min(stored.text.len()))
     }
 
     fn hit_test(&self, para_id: usize, x: f32, y: f32) -> Option<String> {
@@ -405,9 +429,8 @@ impl Demo {
     ) -> Option<String> {
         let _ = self.shaper();
         let shaper = self.shaper.as_ref()?;
-        let stored = self.paragraphs.get(para_id)?;
-        let layout = ValidatedLayout::new(&stored.paragraph, &stored.text).ok()?;
-        let len = stored.text.len();
+        let layout = self.paragraphs.get(para_id)?.borrow_dependent();
+        let len = layout.text().len();
         let lo = start.min(end).min(len);
         let hi = start.max(end).min(len);
         Some(selection_rects_json(&layout.selection_geometry(
@@ -770,6 +793,15 @@ pub extern "C" fn demo_selection_geometry(
     .flatten()
     .unwrap_or_else(|| "[]".to_string());
     leak(json.into_bytes())
+}
+
+/// The offset in paragraph `para_id`'s laid-out text of byte `source_offset`
+/// of its source, past any locale tags; `u32::MAX` for no such paragraph.
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_text_offset(para_id: u32, source_offset: u32) -> u32 {
+    with_demo(|demo| demo.text_offset(para_id as usize, source_offset as usize))
+        .flatten()
+        .map_or(u32::MAX, |offset| offset as u32)
 }
 
 #[unsafe(no_mangle)]

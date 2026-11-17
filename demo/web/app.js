@@ -261,6 +261,8 @@ function relayout() {
   state.lastError = null;
   hideError();
 
+  // Geometry changes with every layout: a remembered column is stale.
+  state.selection.preferredInline = null;
   state.engine.clearParagraphs();
   state.engine.setOptions({
     lineBreak: settings.lineBreak,
@@ -565,8 +567,15 @@ function resolveImeParagraphRange() {
   if (relEnd <= relStart) {
     return null;
   }
-  const startByte = utf8Encoder.encode(para.rawText.slice(0, relStart)).length;
-  const endByte = utf8Encoder.encode(para.rawText.slice(0, relEnd)).length;
+  // The layout holds the text without locale tags: map the source bytes past
+  // them.
+  const toText = (rel) =>
+    state.engine.textOffset(para.id, utf8Encoder.encode(para.rawText.slice(0, rel)).length);
+  const startByte = toText(relStart);
+  const endByte = toText(relEnd);
+  if (startByte === null || endByte === null || endByte <= startByte) {
+    return null;
+  }
   return { paraId: para.id, startByte, endByte };
 }
 
@@ -631,7 +640,7 @@ function updateCursorStatus(selBounds, imeRange) {
   cursorStatus.textContent =
     parts.length > 0
       ? parts.join('  |  ')
-      : 'Click or drag on canvas · Arrow keys (+ Shift) · IME in Text';
+      : 'Click or drag on canvas · Arrow keys, [ ] logical (+ Shift) · IME in Text';
 }
 
 function drawPlaceholder(width, message) {
@@ -714,14 +723,23 @@ textarea.addEventListener('compositionupdate', (event) => {
   state.ime.text = event.data ?? '';
 });
 
+/** Drops the canvas selection: its offsets belong to the text before an edit. */
+function clearSelection() {
+  state.selection.anchor = null;
+  state.selection.focus = null;
+  state.selection.preferredInline = null;
+}
+
 textarea.addEventListener('compositionend', () => {
   state.ime.active = false;
   state.ime.text = '';
+  clearSelection();
   clearTimeout(textTimer);
   relayout();
 });
 
 textarea.addEventListener('input', (event) => {
+  clearSelection();
   clearTimeout(textTimer);
   if (event.isComposing || state.ime.active) {
     relayout();
@@ -840,6 +858,37 @@ for (const evName of ['pointerup', 'pointercancel']) {
   });
 }
 
+function isRtl(paraId) {
+  return state.layout?.results[paraId]?.direction === 'rtl';
+}
+
+/**
+ * Collapses a selection to its visual edge on the arrow's side, as an unshifted
+ * Left or Right does before it moves; `false` when there is none to collapse.
+ */
+function collapseSelection(leftwards) {
+  const bounds = orderedSelection();
+  if (!bounds) {
+    return false;
+  }
+  const caret = (pos) => state.engine.caretGeometry(pos.paraId, pos.byteOffset, pos.affinity)?.primary;
+  const a = bounds.start.paraId === bounds.end.paraId ? caret(bounds.start) : null;
+  const b = a ? caret(bounds.end) : null;
+  let edge;
+  if (a && b && Math.abs(a.y - b.y) < 1) {
+    // On one line, the edge on the arrow's side is the visual one.
+    edge = (a.x <= b.x) === leftwards ? bounds.start : bounds.end;
+  } else {
+    // Across lines, the arrow's side follows the paragraph's direction.
+    const towardsStart = leftwards !== isRtl(bounds.start.paraId);
+    edge = towardsStart ? bounds.start : bounds.end;
+  }
+  state.selection.anchor = edge;
+  state.selection.focus = edge;
+  state.selection.preferredInline = null;
+  return true;
+}
+
 canvas.addEventListener('keydown', (event) => {
   if (!state.layout || state.paraLayouts.length === 0) {
     return;
@@ -851,12 +900,20 @@ canvas.addEventListener('keydown', (event) => {
     ArrowDown: 3,
     Home: 4,
     End: 5,
+    // Logical order (Motion::Previous / Motion::Next), by key position so
+    // Shift still extends.
+    BracketLeft: 8,
+    BracketRight: 9,
   };
-  const motion = motionMap[event.key];
+  const motion = motionMap[event.key] ?? motionMap[event.code];
   if (motion === undefined) {
     return;
   }
   event.preventDefault();
+  if (!event.shiftKey && (motion === 0 || motion === 1) && collapseSelection(motion === 0)) {
+    draw(state.layout.results, state.layout.settings);
+    return;
+  }
   if (!state.selection.focus) {
     const start = { paraId: 0, byteOffset: 0, affinity: 'downstream' };
     state.selection.anchor = start;
@@ -890,14 +947,17 @@ canvas.addEventListener('keydown', (event) => {
   } else if (moved.kind === 'exited') {
     if (moved.edge === 'start' && focus.paraId > 0) {
       const prevId = focus.paraId - 1;
-      const inlineX = moved.inlinePosition !== null ? moved.inlinePosition : 1e9;
+      // With no column to keep, land on the paragraph's logical end: its
+      // last line's right edge in LTR, its left edge in RTL.
+      const inlineX = moved.inlinePosition ?? (isRtl(prevId) ? -1e9 : 1e9);
       const hit = state.engine.hitTestOnLine(prevId, 0xffffffff, inlineX);
       if (hit) {
         nextPos = { paraId: prevId, byteOffset: hit.byteOffset, affinity: hit.affinity };
       }
     } else if (moved.edge === 'end' && focus.paraId + 1 < state.paraLayouts.length) {
       const nextId = focus.paraId + 1;
-      const inlineX = moved.inlinePosition !== null ? moved.inlinePosition : -1e9;
+      // Likewise its logical start: the first line's left edge in LTR.
+      const inlineX = moved.inlinePosition ?? (isRtl(nextId) ? 1e9 : -1e9);
       const hit = state.engine.hitTestOnLine(nextId, 0, inlineX);
       if (hit) {
         nextPos = { paraId: nextId, byteOffset: hit.byteOffset, affinity: hit.affinity };
