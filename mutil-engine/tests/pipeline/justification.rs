@@ -660,3 +660,146 @@ fn st3_3_a_soft_wrapped_line_is_unchanged_when_the_option_compresses_the_last_li
     assert!(!off.lines[2].is_justified);
     assert_close(off.lines[2].visual_width(), 3.0 * CHAR);
 }
+
+/// The width of the test objects of the Level 3 object tests.
+const OBJECT: f32 = 10.0;
+
+/// The Level 3 step at 10 units per em: 0.125 em (ST3-2).
+const LEVEL3: f32 = 1.25;
+
+/// Lays out `text` in the monospace face with an `OBJECT`-wide inline object
+/// on the U+FFFC at each of `starts`, in a `wrap_width` column: ragged, then
+/// justified.
+fn with_objects(
+    text: &str,
+    starts: &[usize],
+    wrap_width: f32,
+) -> (PositionedParagraph, PositionedParagraph) {
+    let style = style(10.0);
+    let objects: Vec<InlineObjectInput> = starts
+        .iter()
+        .map(|&start| InlineObjectInput {
+            byte_range: TextRange::new(start, start + '\u{fffc}'.len_utf8()),
+            box_id: start as u64,
+            width: OBJECT,
+            ascent: 8.0,
+            descent: 2.0,
+            baseline_align: BaselineAlignment::Auto,
+            overflow_policy: BoxOverflowPolicy::AllowOverflow,
+        })
+        .collect();
+    let paragraph = ParagraphInput {
+        inline_objects: &objects,
+        ..input(text, &style)
+    };
+    let constraints = column(wrap_width);
+    (
+        lay_out_mono(&paragraph, &constraints, &LayoutOptions::default()),
+        lay_out_mono(&paragraph, &constraints, &justified()),
+    )
+}
+
+/// The box of `line` whose source starts at `start`.
+#[track_caller]
+fn box_at(line: &PositionedLine, start: usize) -> &PositionedInlineBox {
+    line.visual_boxes
+        .iter()
+        .find(|b| b.byte_range.start() == start)
+        .unwrap_or_else(|| panic!("no box at {start}: {:?}", line.visual_boxes))
+}
+
+/// "ab￼cd ef" then a word too long to join it: line 1 holds six characters,
+/// one object and a word space of stretch 3, 7 · 6 + 10 = 52 units.
+/// Its visible-cluster boundaries are a|b, c|d, d|e (across the space) and
+/// e|f; "b" and "c" are separated by the object, so neither b→object nor
+/// object→c is one.
+const OBJECT_LINE: &str = "ab\u{fffc}cd ef xxxxxx";
+const OBJECT_AT: usize = 2;
+const OBJECT_LINE_NATURAL: f32 = 7.0 * CHAR + OBJECT;
+const OBJECT_LINE_SPACE_STRETCH: f32 = 3.0;
+
+#[test]
+fn st3_2_level_3_skips_the_boundaries_beside_an_inline_object() {
+    // 2 units beyond the word space's stretch: Level 3 covers them, shared
+    // equally by its four boundaries (0.5 each, under the 1.25 cap).
+    let slack = OBJECT_LINE_SPACE_STRETCH + 2.0;
+    let (ragged, p) = with_objects(OBJECT_LINE, &[OBJECT_AT], OBJECT_LINE_NATURAL + slack);
+    for layout in [&ragged, &p] {
+        assert_eq!(
+            line_texts(layout, OBJECT_LINE),
+            ["ab\u{fffc}cd ef ", "xxxxxx"]
+        );
+    }
+    let (before, line) = (&ragged.lines[0], &p.lines[0]);
+    assert!(line.is_justified);
+    assert_close(line.visual_width(), OBJECT_LINE_NATURAL + slack);
+    let growth = |offset| glyph_at(line, offset).advance - glyph_at(before, offset).advance;
+    // No expansion after "b", the cluster immediately before the object,
+    // nor after "f", the last; 0.5 after "a", "c", "d" and "e".
+    assert_close(growth(1), 0.0);
+    assert_close(growth(9), 0.0);
+    for offset in [0, 5, 6, 8] {
+        assert_close(growth(offset), 0.5);
+    }
+    // The object keeps its width and moves only by the expansion after "a";
+    // "c" follows it directly, with no gap after the object.
+    let (object, ragged_object) = (box_at(line, OBJECT_AT), box_at(before, OBJECT_AT));
+    assert_close(object.width, OBJECT);
+    assert_close(object.x, ragged_object.x + 0.5);
+    assert_close(object.x, x_of(line, 1) + CHAR);
+    assert_close(x_of(line, 5), object.x + OBJECT);
+    // The word space takes its full stretch.
+    assert_close(
+        space_between(line, 6, 8) - space_between(before, 6, 8),
+        OBJECT_LINE_SPACE_STRETCH,
+    );
+}
+
+#[test]
+fn st3_4_an_over_loose_object_line_caps_level_3_at_its_four_boundaries() {
+    // Far beyond every level: Level 3 spends 0.125 em at each of its four
+    // boundaries and no more, so the line stays ragged; a boundary beside
+    // the object would have made it 1.25 wider.
+    let slack = 20.0;
+    let (ragged, p) = with_objects(OBJECT_LINE, &[OBJECT_AT], OBJECT_LINE_NATURAL + slack);
+    assert_eq!(line_texts(&p, OBJECT_LINE), ["ab\u{fffc}cd ef ", "xxxxxx"]);
+    let (before, line) = (&ragged.lines[0], &p.lines[0]);
+    assert!(!line.is_justified);
+    assert_close(
+        line.visual_width(),
+        OBJECT_LINE_NATURAL + OBJECT_LINE_SPACE_STRETCH + 4.0 * LEVEL3,
+    );
+    let growth = |offset| glyph_at(line, offset).advance - glyph_at(before, offset).advance;
+    for offset in [0, 5, 6, 8] {
+        assert_close(growth(offset), LEVEL3);
+    }
+    assert_close(growth(1), 0.0);
+    assert_close(growth(9), 0.0);
+    let object = box_at(line, OBJECT_AT);
+    assert_close(object.width, OBJECT);
+    assert_close(x_of(line, 5), object.x + OBJECT);
+}
+
+#[test]
+fn st3_2_clusters_separated_only_by_objects_offer_no_level_3_capacity() {
+    // "a￼b￼c": three clusters, each pair separated by an object, and no word
+    // space inside the line (the trailing one collapses). No level has any
+    // capacity, so nothing expands and the line stays at natural width.
+    let text = "a\u{fffc}b\u{fffc}c xxxxxx";
+    let starts = [1, 5];
+    let natural = 3.0 * CHAR + 2.0 * OBJECT;
+    let (ragged, p) = with_objects(text, &starts, natural + 5.0);
+    for layout in [&ragged, &p] {
+        assert_eq!(line_texts(layout, text), ["a\u{fffc}b\u{fffc}c ", "xxxxxx"]);
+    }
+    let (before, line) = (&ragged.lines[0], &p.lines[0]);
+    assert!(!line.is_justified);
+    assert_close(line.visual_width(), natural);
+    assert_eq!(line.visual_runs, before.visual_runs);
+    for start in starts {
+        let object = box_at(line, start);
+        assert_close(object.x, box_at(before, start).x);
+        assert_close(object.width, OBJECT);
+    }
+    assert!(glyphs(line).all(|g| (g.advance - CHAR).abs() < 1e-3));
+}
