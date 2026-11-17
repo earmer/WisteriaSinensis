@@ -7,7 +7,6 @@ use super::super::{
     PositionedTab, VisualGlyphRun,
 };
 use super::hanging::{LineHangs, clip_to_content, mark_hanging};
-use super::line_artifacts::{CaretContext, SpanContext};
 use super::{Break, Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Token};
 use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_order};
 use crate::frontend::{BoxNode, SpanEdge, WordNode};
@@ -55,34 +54,20 @@ impl ContentBlock {
 
 /// A line placed in logical order and ready for its output: the pieces,
 /// their visual order, and what the line's end and hanging marks leave.
-struct LineBuildState<'a> {
-    index: usize,
-    placed: &'a mut [PlacedPiece],
-    order: &'a [usize],
-    body_len: usize,
-    soft_wrap: bool,
-    byte_range: TextRange,
-    bounds: LineBounds,
-    end_break: Option<&'a Break>,
-    post: f32,
+pub(super) struct LineBuildState<'a> {
+    pub(super) index: usize,
+    pub(super) placed: &'a mut [PlacedPiece],
+    pub(super) order: &'a [usize],
+    pub(super) body_len: usize,
+    pub(super) soft_wrap: bool,
+    pub(super) byte_range: TextRange,
+    pub(super) bounds: LineBounds,
+    pub(super) end_break: Option<&'a Break>,
+    pub(super) post: f32,
     hangs: LineHangs,
     is_justified: bool,
     block_top: f32,
     geometry: &'a LineGeometry,
-}
-
-impl LineBuildState<'_> {
-    /// The span walk's view of the line in its current coordinates.
-    fn span_context(&self) -> SpanContext<'_> {
-        SpanContext {
-            placed: self.placed,
-            order: self.order,
-            bounds: self.bounds,
-            end_break: self.end_break,
-            post: self.post,
-            line_bytes: self.byte_range,
-        }
-    }
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
@@ -298,32 +283,26 @@ impl<'i, 'a> Layout<'i, 'a> {
         let content_edges = content.edges();
         mark_hanging(&mut visual_runs, state.placed, state.hangs, content_edges);
         let (visual_boxes, tabs) = self.build_boxes_and_tabs(state.placed, slot);
-        let mut span_fragments = self.span_fragments(&state.span_context());
+        let mut span_fragments = self.span_fragments(&state);
 
         let mut decorations: Vec<DecorationLine> = Vec::new();
         for kind in [DecorationKind::Underline, DecorationKind::Strikethrough] {
-            self.decorations(kind, state.placed, state.order, &mut decorations)?;
+            self.decorations(kind, &state, &mut decorations)?;
         }
-        let atomic_fragments = self.atomic_fragments(state.placed, state.order, state.byte_range);
+        let atomic_fragments = self.atomic_fragments(&state);
         clip_to_content(
             state.hangs.physical(self.base.is_rtl()),
             content_edges,
             &mut span_fragments,
             &mut decorations,
         );
-        let caret_stops = self.caret_stops(&CaretContext {
-            index: state.index,
-            placed: state.placed,
-            order: state.order,
-            body_len: state.body_len,
-            soft_wrap: state.soft_wrap,
-            byte_range: state.byte_range,
+        let caret_stops = self.caret_stops(
+            &state,
             visible_end,
-            content_start: content.start,
-            end_break: state.end_break,
-            runs: &visual_runs,
-            boxes: &visual_boxes,
-        });
+            content.start,
+            &visual_runs,
+            &visual_boxes,
+        );
 
         // The line fills its first slot; the others stay empty (ME-2).
         let slots: SmallVec<[PositionedSlot; 1]> = state
@@ -383,9 +362,9 @@ impl<'i, 'a> Layout<'i, 'a> {
         slot: InlineSlotConstraint,
     ) -> ContentBlock {
         let (mut lo, mut hi) = extent.unwrap_or((f32::INFINITY, f32::NEG_INFINITY));
-        self.span_fragment_extents(&state.span_context(), |a: f32, b: f32| {
-            lo = lo.min(a.min(b));
-            hi = hi.max(a.max(b));
+        self.for_each_span_group(state, |_, g| {
+            lo = lo.min(g.lo.min(g.hi));
+            hi = hi.max(g.lo.max(g.hi));
         });
         let rtl = self.base.is_rtl();
         // A hanging mark's protrusion lies outside the content (ST1-3).
