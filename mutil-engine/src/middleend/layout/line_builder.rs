@@ -6,11 +6,13 @@ use super::super::{
     LineGeometry, LineHeight, PositionedGlyph, PositionedInlineBox, PositionedLine, PositionedSlot,
     PositionedTab, StrutMetrics, VisualGlyphRun,
 };
+use super::hanging::{LineHangs, clip_to_content, mark_hanging};
 use super::line_artifacts::{CaretContext, SpanContext};
-use super::{Break, Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Token};
-use crate::frontend::{BoxNode, WordNode};
+use super::{Break, FIT_EPSILON, Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Token};
+use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_order};
+use crate::frontend::{BoxNode, SpanEdge, WordNode};
 use crate::types::{
-    BaselineAlignment, BidiLevel, FontMetrics, RawShapedGlyph, TextRange, WritingMode,
+    AtomFlags, BaselineAlignment, BidiLevel, FontMetrics, RawShapedGlyph, TextRange, WritingMode,
 };
 use smallvec::SmallVec;
 
@@ -58,7 +60,6 @@ struct LineAlignment {
     visible_end: usize,
     content_start: f32,
     content_width: f32,
-    align_shift: f32,
 }
 
 struct LineBuildState<'a> {
@@ -71,6 +72,8 @@ struct LineBuildState<'a> {
     bounds: LineBounds,
     end_break: Option<&'a Break>,
     post: f32,
+    hangs: LineHangs,
+    is_justified: bool,
     block_top: f32,
     geometry: &'a LineGeometry,
 }
@@ -102,23 +105,55 @@ impl<'i, 'a> Layout<'i, 'a> {
             .iter()
             .rposition(|p| p.piece.is_content())
             .map_or(0, |k| k + 1);
-        apply_l1_trailing_levels(&mut placed, body_len, self.base.base_level());
+        self.apply_l1(&mut placed);
         let order = visual_order(&placed[..body_len]);
 
         let rtl = self.base.is_rtl();
         let post = cursor.post_break_width;
         let (left_pad, right_pad) = if rtl { (pre, post) } else { (post, pre) };
-        let origin = slot.start();
-        let mut x = left_pad;
+        let first_line = index == 0;
+        let start = self.start_hang(&placed[..body_len], first_line, post);
+        // Widths in logical order: a tab's depends on its distance from the
+        // line-start edge (spec ST3-1), the start mark's protrusion outside.
+        let mut distance = post - LineHangs::protrusion(start);
+        for p in &mut placed[..body_len] {
+            distance += p.gap;
+            p.width = self.measure(&p.piece, distance, slot).0;
+            distance += p.width;
+        }
+        // A soft-wrapped line is justified; one that ends the paragraph or at
+        // a hard break is only ever compressed, and only on request (ST3-3).
+        let compressible = self.options.justify && (soft_wrap || self.options.compress_last_lines);
+        let shrink = if compressible {
+            self.shrink_capacity(&mut placed[..body_len])
+        } else {
+            0.0
+        };
+        let fits_without = distance + pre - shrink <= slot.width() + FIT_EPSILON;
+        let end = self.end_hang(&placed[..body_len], first_line, pre, start, fits_without);
+        let hangs = LineHangs { start, end };
+        // The visible width `W`, hanging halves outside (ST3-2).
+        let visible_width = distance + pre - LineHangs::protrusion(end);
+        let slack = slot.width() - visible_width;
+        let is_justified = compressible
+            && slot.width().is_finite()
+            && (soft_wrap || slack < 0.0)
+            && self.justify(&mut placed[..body_len], slack);
+        let mut x = left_pad - hangs.physical(rtl).0;
         for &k in &order {
             x += placed[k].gap;
-            let (advance, _) = self.measure(&placed[k].piece, origin + x, slot);
             placed[k].x = x;
-            placed[k].width = advance;
-            x += advance;
+            x += placed[k].width;
         }
         let body_end = x + right_pad;
-        self.place_trailing_whitespace(&mut placed[body_len..], body_end, rtl);
+        // In RTL the trailing whitespace lies left of everything on the line,
+        // a hanging mark's protrusion included (HNG-3).
+        let far_edge = if rtl {
+            -hangs.physical(rtl).0
+        } else {
+            body_end
+        };
+        self.place_trailing_whitespace(&mut placed[body_len..], far_edge, rtl);
 
         self.build_line(LineBuildState {
             index,
@@ -133,9 +168,55 @@ impl<'i, 'a> Layout<'i, 'a> {
             },
             end_break: end_break.as_ref(),
             post,
+            hangs,
+            is_justified,
             block_top: cursor.block_top,
             geometry,
         })
+    }
+
+    /// UAX #9 L1 on the line (spec ST2-1): tabs, the whitespace before them
+    /// and the whitespace at the line end take the paragraph level, read
+    /// from glue classes, cluster flags and tabs, never from the text. A span
+    /// boundary is transparent and then takes the level of its span's next
+    /// (leading) or previous (trailing) item on the line.
+    fn apply_l1(&self, placed: &mut [PlacedPiece]) {
+        let class = |p: &PlacedPiece| match p.piece.kind {
+            PieceKind::Tab => LineClass::Separator,
+            PieceKind::Glue { .. } | PieceKind::SpanEdge { .. } => LineClass::Whitespace,
+            PieceKind::Cluster { cluster, .. }
+                if self.ast.clusters[cluster]
+                    .flags
+                    .contains(AtomFlags::L1_RESETTABLE) =>
+            {
+                LineClass::Whitespace
+            }
+            PieceKind::Cluster { .. } | PieceKind::Object { .. } => LineClass::Other,
+        };
+        let classes: Vec<LineClass> = placed.iter().map(class).collect();
+        let mut levels: Vec<BidiLevel> = placed.iter().map(|p| p.level).collect();
+        reset_line_levels(classes.into_iter(), &mut levels, self.base.base_level());
+        for (p, level) in placed.iter_mut().zip(&levels) {
+            if !matches!(p.piece.kind, PieceKind::SpanEdge { .. }) {
+                p.level = *level;
+            }
+        }
+        for k in 0..placed.len() {
+            let PieceKind::SpanEdge { span, edge } = placed[k].piece.kind else {
+                continue;
+            };
+            let span = &self.ast.decoration_spans[span];
+            let is_item = |p: &&PlacedPiece| !matches!(p.piece.kind, PieceKind::SpanEdge { .. });
+            let neighbour = match edge {
+                SpanEdge::Leading => placed[k + 1..].iter().find(is_item),
+                SpanEdge::Trailing => placed[..k].iter().rev().find(is_item),
+            };
+            if let Some(n) = neighbour.filter(|n| {
+                !n.piece.bytes.is_empty() && span.byte_range.contains_range(n.piece.bytes)
+            }) {
+                placed[k].level = n.level;
+            }
+        }
     }
 
     fn collect_placed_pieces(&self, start: usize, last_piece: usize) -> Vec<PlacedPiece> {
@@ -150,6 +231,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                         gap,
                         x: 0.0,
                         width: 0.0,
+                        expansion: 0.0,
                         y_shift: 0.0,
                     });
                     gap = 0.0;
@@ -160,22 +242,27 @@ impl<'i, 'a> Layout<'i, 'a> {
         placed
     }
 
-    /// Trailing whitespace beyond the far edge (UAX #9 L1, HNG-3).
-    fn place_trailing_whitespace(&self, trailing: &mut [PlacedPiece], body_end: f32, rtl: bool) {
+    /// Trailing whitespace beyond the far edge `far_edge` (UAX #9 L1, HNG-3); synthetic
+    /// glue collapses there under both modes (WN-10, ST1-12).
+    fn place_trailing_whitespace(&self, trailing: &mut [PlacedPiece], far_edge: f32, rtl: bool) {
         let collapsible = self.options.whitespace == HangingWhitespaceMode::Collapsible;
-        let trailing_width = |w: f32| if collapsible { 0.0 } else { w };
+        let trailing_width = |p: &PlacedPiece| match p.piece.kind {
+            PieceKind::Glue { item } if self.glue(item).kind.is_synthetic() => 0.0,
+            _ if collapsible => 0.0,
+            _ => p.piece.width,
+        };
         if rtl {
-            let mut tx = 0.0;
+            let mut tx = far_edge;
             for p in trailing {
-                let w = trailing_width(p.piece.width);
+                let w = trailing_width(p);
                 tx -= w;
                 p.x = tx;
                 p.width = w;
             }
         } else {
-            let mut tx = body_end;
+            let mut tx = far_edge;
             for p in trailing {
-                let w = trailing_width(p.piece.width);
+                let w = trailing_width(p);
                 p.x = tx;
                 p.width = w;
                 tx += w;
@@ -191,7 +278,12 @@ impl<'i, 'a> Layout<'i, 'a> {
         let line_box = self.compute_line_box(state.placed, state.order, state.byte_range, slot)?;
         let alignment = self.align_line_content(&mut state, slot);
 
-        let visual_runs = self.build_visual_runs(state.placed, state.order);
+        let mut visual_runs = self.build_visual_runs(state.placed, state.order);
+        let content_edges = (
+            alignment.content_start,
+            alignment.content_start + alignment.content_width,
+        );
+        mark_hanging(&mut visual_runs, state.placed, state.hangs, content_edges);
         let (visual_boxes, tabs) = self.build_boxes_and_tabs(state.placed, slot);
         let span_ctx = SpanContext {
             placed: state.placed,
@@ -200,15 +292,20 @@ impl<'i, 'a> Layout<'i, 'a> {
             end_break: state.end_break,
             post: state.post,
             line_bytes: state.byte_range,
-            align_shift: alignment.align_shift,
         };
-        let span_fragments = self.span_fragments(&span_ctx);
+        let mut span_fragments = self.span_fragments(&span_ctx);
 
         let mut decorations: Vec<DecorationLine> = Vec::new();
         for kind in [DecorationKind::Underline, DecorationKind::Strikethrough] {
             self.decorations(kind, state.placed, state.order, &mut decorations)?;
         }
         let atomic_fragments = self.atomic_fragments(state.placed, state.order, state.byte_range);
+        clip_to_content(
+            state.hangs.physical(self.base.is_rtl()),
+            content_edges,
+            &mut span_fragments,
+            &mut decorations,
+        );
         let caret_stops = self.caret_stops(&CaretContext {
             index: state.index,
             placed: state.placed,
@@ -252,7 +349,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             ascent: line_box.ascent,
             descent: line_box.descent,
             line_height: line_box.line_height,
-            is_justified: false,
+            is_justified: state.is_justified,
             visual_runs,
             visual_boxes,
             tabs,
@@ -382,14 +479,15 @@ impl<'i, 'a> Layout<'i, 'a> {
                     if glyphs.is_empty() {
                         continue;
                     }
-                    let mut pen = p.x;
+                    let rtl_cluster = p.level.direction().is_rtl();
+                    let mut pen = p.x + if rtl_cluster { p.expansion } else { 0.0 };
                     let mut track_pen = |g: &RawShapedGlyph| {
                         if g.x_advance != 0.0 {
                             extend(pen, pen + g.x_advance);
                         }
                         pen += g.x_advance;
                     };
-                    if p.level.direction().is_rtl() {
+                    if rtl_cluster {
                         glyphs.iter().rev().for_each(&mut track_pen);
                     } else {
                         glyphs.iter().for_each(&mut track_pen);
@@ -402,7 +500,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     extend(p.x, p.x + p.width);
                     visible_end = visible_end.max(p.piece.bytes.end());
                 }
-                PieceKind::Glue | PieceKind::SpanEdge { .. } => {}
+                PieceKind::Glue { .. } | PieceKind::SpanEdge { .. } => {}
             }
         }
         let span_ctx = SpanContext {
@@ -412,18 +510,20 @@ impl<'i, 'a> Layout<'i, 'a> {
             end_break: state.end_break,
             post: state.post,
             line_bytes: state.byte_range,
-            align_shift: 0.0,
         };
-        self.for_each_span_group(&span_ctx, |_, x, width, _| extend(x, x + width));
+        self.span_fragment_extents(&span_ctx, &mut extend);
 
         let has_content = lo <= hi;
         let rtl = self.base.is_rtl();
+        // A hanging mark's protruding half lies outside the content (ST1-3).
+        let (hang_left, hang_right) = state.hangs.physical(rtl);
         let (content_lo_rel, content_width) = if !has_content {
             (if rtl { state.bounds.body_hi } else { 0.0 }, 0.0)
         } else if rtl {
-            (lo, hi.max(state.bounds.body_hi) - lo)
+            let lo = lo + hang_left;
+            (lo, hi.max(state.bounds.body_hi) - hang_right - lo)
         } else {
-            (0.0, hi)
+            (0.0, hi - hang_right)
         };
         // Alignment: the line start of the base direction.
         let content_start = if rtl && slot.end().is_finite() && content_width <= slot.width() {
@@ -441,7 +541,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             visible_end,
             content_start,
             content_width,
-            align_shift,
         }
     }
 
@@ -458,7 +557,10 @@ impl<'i, 'a> Layout<'i, 'a> {
             if glyphs.is_empty() {
                 continue;
             }
-            let mut pen = p.x;
+            // Justification after an RTL cluster lies before its first glyph
+            // in visual order, after an LTR one on its last glyph (ST3-2).
+            let rtl_cluster = p.level.direction().is_rtl();
+            let mut pen = p.x + if rtl_cluster { p.expansion } else { 0.0 };
             let mut make_glyph = |g: &RawShapedGlyph| {
                 let glyph = PositionedGlyph {
                     glyph_id: g.glyph_id,
@@ -472,11 +574,14 @@ impl<'i, 'a> Layout<'i, 'a> {
                 pen += g.x_advance;
                 glyph
             };
-            let positioned: Vec<PositionedGlyph> = if p.level.direction().is_rtl() {
+            let mut positioned: Vec<PositionedGlyph> = if rtl_cluster {
                 glyphs.iter().rev().map(&mut make_glyph).collect()
             } else {
                 glyphs.iter().map(&mut make_glyph).collect()
             };
+            if !rtl_cluster && let Some(last) = positioned.last_mut() {
+                last.advance += p.expansion;
+            }
             let level = p.level;
             let same_run = visual_runs.last_mut().filter(|v| {
                 v.font == c.font
@@ -544,68 +649,12 @@ impl<'i, 'a> Layout<'i, 'a> {
                     x: p.x,
                     width: p.width,
                 }),
-                PieceKind::Cluster { .. } | PieceKind::Glue | PieceKind::SpanEdge { .. } => {}
+                PieceKind::Cluster { .. } | PieceKind::Glue { .. } | PieceKind::SpanEdge { .. } => {
+                }
             }
         }
         (visual_boxes, tabs)
     }
-}
-
-/// UAX #9 L1: trailing whitespace, tabs and the whitespace before a tab take
-/// the paragraph level.
-fn apply_l1_trailing_levels(placed: &mut [PlacedPiece], body_len: usize, base_level: BidiLevel) {
-    let mut before_tab = false;
-    for k in (0..placed.len()).rev() {
-        let kind = placed[k].piece.kind;
-        let resets = match kind {
-            PieceKind::Tab => {
-                before_tab = true;
-                true
-            }
-            PieceKind::Glue => k >= body_len || before_tab,
-            _ => {
-                before_tab = false;
-                k >= body_len
-            }
-        };
-        if resets {
-            placed[k].level = base_level;
-        }
-    }
-}
-
-/// Visual indices of a line's pieces from their levels (UAX #9 L2): from
-/// the highest level to the lowest odd one, every maximal sequence at that
-/// level or above is reversed.
-pub(super) fn visual_order(placed: &[PlacedPiece]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..placed.len()).collect();
-    let Some(highest) = placed.iter().map(|p| p.level.get()).max() else {
-        return order;
-    };
-    let lowest_odd = placed
-        .iter()
-        .map(|p| p.level.get())
-        .filter(|l| l % 2 == 1)
-        .min()
-        .unwrap_or(highest + 1);
-    let mut level = highest;
-    while level >= lowest_odd && level > 0 {
-        let mut i = 0;
-        while i < order.len() {
-            if placed[order[i]].level.get() >= level {
-                let mut j = i;
-                while j < order.len() && placed[order[j]].level.get() >= level {
-                    j += 1;
-                }
-                order[i..j].reverse();
-                i = j;
-            } else {
-                i += 1;
-            }
-        }
-        level -= 1;
-    }
-    order
 }
 
 /// A font's offset of a named baseline from its alphabetic one, positive
@@ -641,4 +690,11 @@ fn object_shift(align: BaselineAlignment, strut: &FontMetrics) -> f32 {
         BaselineAlignment::Offset(offset) => offset,
         _ => baseline_offset(align, strut).unwrap_or(0.0),
     }
+}
+
+/// Visual indices of a line's pieces from their levels (UAX #9 L2, spec
+/// ST2-2), through the frontend's shared rule.
+pub(super) fn visual_order(placed: &[PlacedPiece]) -> Vec<usize> {
+    let levels: Vec<BidiLevel> = placed.iter().map(|p| p.level).collect();
+    bidi_order(&levels)
 }

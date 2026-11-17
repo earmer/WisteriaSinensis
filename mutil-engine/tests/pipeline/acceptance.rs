@@ -193,13 +193,17 @@ fn rm4_the_conformance_report_names_the_data_actually_used() {
     let r = conformance_report();
     let pinned = Some(UNICODE_DATA_VERSION);
     assert_eq!(
-        (r.grapheme, r.line_break, r.word, r.script, r.emoji),
-        (pinned, pinned, pinned, pinned, pinned)
+        (r.grapheme, r.bidi, r.line_break, r.word, r.script, r.emoji),
+        (pinned, pinned, pinned, pinned, pinned, pinned)
     );
-    // Bidi resolution is Phase 2: not installed, so not reported.
-    assert_eq!(r.bidi, None);
     // The conformance suites run against the same version (RM-1).
-    for file in ["GraphemeBreakTest", "WordBreakTest", "LineBreakTest"] {
+    for file in [
+        "GraphemeBreakTest",
+        "WordBreakTest",
+        "LineBreakTest",
+        "BidiTest",
+        "BidiCharacterTest",
+    ] {
         let path = format!("{}/tests/assets/ucd/{file}.txt", env!("CARGO_MANIFEST_DIR"));
         let data = std::fs::read_to_string(&path).unwrap();
         assert_eq!(

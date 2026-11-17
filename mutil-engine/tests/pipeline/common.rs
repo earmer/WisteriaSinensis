@@ -230,3 +230,162 @@ pub fn lay_out_in(
     }
     paragraph
 }
+
+/// The vendored right-to-left faces (`tests/assets/README.md`), registered
+/// by [`BIDI_SHAPER`] after the faces of [`SCRIPT_SHAPER`]: face `8 + i` is
+/// `RTL_FONTS[i]`.
+pub static RTL_FONTS: &[(&str, &[u8])] = &[
+    (
+        "Noto Sans Hebrew",
+        include_bytes!("../assets/NotoSansHebrew-Subset.ttf"),
+    ),
+    (
+        "Noto Naskh Arabic",
+        include_bytes!("../assets/NotoNaskhArabic-Subset.ttf"),
+    ),
+];
+
+pub const HEBREW: &str = "Noto Sans Hebrew";
+pub const ARABIC: &str = "Noto Naskh Arabic";
+pub const HEBREW_ID: FontId = FontId(8);
+pub const ARABIC_ID: FontId = FontId(9);
+
+/// A shaper over the faces of [`SCRIPT_SHAPER`] (ids 0 to 7) followed by
+/// [`RTL_FONTS`] (ids 8 and 9). [`SCRIPT_SHAPER`] itself is unchanged, so
+/// the last-resort fallback order of the Phase 1 tests stays as it was.
+pub static BIDI_SHAPER: LazyLock<HarfRustShaper> = LazyLock::new(|| {
+    let mut registry = FontRegistry::new();
+    let faces = std::iter::once((FAMILY, FONT_BYTES))
+        .chain(SCRIPT_FONTS.iter().copied())
+        .chain(RTL_FONTS.iter().copied());
+    for (i, (family, bytes)) in faces.enumerate() {
+        let id = registry
+            .add_face(
+                family.into(),
+                FontStyle::default(),
+                FontFace::new(FontBytes::from_static(bytes), 0),
+            )
+            .unwrap_or_else(|| panic!("{family} parses"));
+        assert_eq!(id, FontId(i as u32));
+    }
+    registry.set_generic(GenericFamily::Serif, "Noto Serif".into());
+    HarfRustShaper::new(Arc::new(registry))
+});
+
+/// Compiles `input` with [`BIDI_SHAPER`] under `options`.
+#[track_caller]
+pub fn compile_bidi_input(input: &ParagraphInput<'_>, options: &FrontendOptions) -> ParagraphAst {
+    compile_paragraph(input, options, &*BIDI_SHAPER)
+        .unwrap_or_else(|e| panic!("{:?}: {e}", input.text))
+}
+
+/// Compiles `text` in `families` at 10 units per em with [`BIDI_SHAPER`],
+/// the base direction detected (FE-8).
+#[track_caller]
+pub fn compile_bidi(text: &str, families: &[&str]) -> ParagraphAst {
+    let style = script_style(families, 10.0);
+    compile_bidi_input(&input(text, &style), &FrontendOptions::default())
+}
+
+/// Lays out `ast` with [`BIDI_SHAPER`] and passes the result through the
+/// output gate.
+#[track_caller]
+pub fn lay_out_bidi_ast(
+    ast: &ParagraphAst,
+    text: &str,
+    constraints: &LayoutConstraints,
+    options: &LayoutOptions,
+) -> PositionedParagraph {
+    let paragraph = layout_paragraph(ast, text, &*BIDI_SHAPER, constraints, options)
+        .unwrap_or_else(|e| panic!("{text:?}: {e}"));
+    if let Err((line, error)) = ValidatedLayout::new(&paragraph, text) {
+        panic!("{text:?} in {constraints:?}, {options:?}: line {line}: {error}\n{paragraph:#?}");
+    }
+    paragraph
+}
+
+/// Compiles and lays out `text` in `families` with [`BIDI_SHAPER`], and
+/// passes the result through the output gate.
+#[track_caller]
+pub fn lay_out_bidi(
+    text: &str,
+    families: &[&str],
+    constraints: &LayoutConstraints,
+    options: &LayoutOptions,
+) -> PositionedParagraph {
+    lay_out_bidi_ast(&compile_bidi(text, families), text, constraints, options)
+}
+
+/// The Japanese, serif and Thai faces of [`BIDI_SHAPER`], by family name.
+pub const JAPANESE: &str = "Noto Sans JP";
+pub const SERIF: &str = "Noto Serif";
+pub const THAI: &str = "Noto Sans Thai";
+
+/// The regional Chinese faces (`tests/assets/README.md`, *CJK routing
+/// fonts*), registered by [`SPACING_SHAPER`] after the faces of
+/// [`BIDI_SHAPER`]: face `10 + i` is `CHINESE_FONTS[i]`.
+pub static CHINESE_FONTS: &[(&str, &[u8])] = &[
+    (
+        "Noto Sans SC",
+        include_bytes!("../assets/NotoSansSC-Subset.ttf"),
+    ),
+    (
+        "Noto Sans TC",
+        include_bytes!("../assets/NotoSansTC-Subset.ttf"),
+    ),
+];
+
+pub const SIMPLIFIED: &str = "Noto Sans SC";
+pub const TRADITIONAL: &str = "Noto Sans TC";
+
+/// A shaper over the faces of [`BIDI_SHAPER`] (ids 0 to 9) followed by
+/// [`CHINESE_FONTS`] (ids 10 and 11), for the Phase 2 spacing tests.
+/// [`BIDI_SHAPER`] itself is unchanged.
+pub static SPACING_SHAPER: LazyLock<HarfRustShaper> = LazyLock::new(|| {
+    let mut registry = FontRegistry::new();
+    let faces = std::iter::once((FAMILY, FONT_BYTES))
+        .chain(SCRIPT_FONTS.iter().copied())
+        .chain(RTL_FONTS.iter().copied())
+        .chain(CHINESE_FONTS.iter().copied());
+    for (i, (family, bytes)) in faces.enumerate() {
+        let id = registry
+            .add_face(
+                family.into(),
+                FontStyle::default(),
+                FontFace::new(FontBytes::from_static(bytes), 0),
+            )
+            .unwrap_or_else(|| panic!("{family} parses"));
+        assert_eq!(id, FontId(i as u32));
+    }
+    registry.set_generic(GenericFamily::Serif, SERIF.into());
+    HarfRustShaper::new(Arc::new(registry))
+});
+
+/// `families` at `font_size` in `locale`.
+pub fn localized_style(families: &[&str], font_size: f32, locale: &str) -> TextStyle {
+    TextStyle {
+        locale: Some(LocaleTag::parse_lenient(locale).expect("a locale")),
+        ..script_style(families, font_size)
+    }
+}
+
+/// Every glue of `ast` of `kind`, by its offset.
+pub fn glues_of(ast: &ParagraphAst, kind: GlueKind) -> Vec<(usize, &GlueNode)> {
+    ast.items
+        .iter()
+        .filter_map(|item| match item {
+            WordNode::Glue(g) if g.kind == kind => Some((g.byte_range.start(), g)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The flags of the atom that starts at `offset`.
+#[track_caller]
+pub fn flags_at(ast: &ParagraphAst, offset: usize) -> AtomFlags {
+    ast.atoms
+        .iter()
+        .find(|a| a.byte_range.start() == offset)
+        .unwrap_or_else(|| panic!("no atom at {offset}"))
+        .flags
+}

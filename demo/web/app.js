@@ -12,6 +12,8 @@ const FONTS = [
   ['Noto Sans Lao', 'NotoSansLao[wdth,wght].ttf'],
   ['Noto Sans Khmer', 'NotoSansKhmer[wdth,wght].ttf'],
   ['Noto Sans Myanmar', 'NotoSansMyanmar[wdth,wght].ttf'],
+  ['Noto Sans Hebrew', 'NotoSansHebrew[wdth,wght].ttf'],
+  ['Noto Naskh Arabic', 'NotoNaskhArabic[wght].ttf'],
 ];
 
 const SAMPLES = {
@@ -32,7 +34,12 @@ const SAMPLES = {
     '<zh-CN>令你甘心。骨肉分离。</zh-CN> <zh-TW>令你甘心。骨肉分離。</zh-TW> <ja>令。骨肉分離。</ja>\n' +
     '<lang=zh-Hant>同一個字型堆疊，三種地區字形：「令」「骨」與置中的句號。標記只說明語言，字型由引擎依文字與語言挑選；未標記的漢字不作繁簡猜測。</lang>',
   rtl:
-    'هذا النص مكتوب من اليمين إلى اليسار. The engine should reject this paragraph today, because bidi resolution is not implemented yet.',
+    'هذا النص مكتوب من اليمين إلى اليسار، وفيه كلمات English وأرقام 2024 وأقواس (مرآة) «وعلامات» تتبع الخوارزمية الثنائية الاتجاه.\n' +
+    'עברית נכתבת מימין לשמאל: המנוע ממיין שורה אחר שורה, כולל קטע ABC 123 משמאל לימין בתוך פסקה עברית.\n' +
+    'Mixed English paragraph with עברית בתוך שורה and العربية too, wrapped and reordered per line.',
+  cjkJustify:
+    '日本語とEnglishが混ざる文章では、和欧間に自動でアキが入ります。「括弧」や句読点、句点。行末の約物はぶら下げ組みもできます。両端揃えでは、まず単語間、次に和欧間、それから字間の順に調整します。\n' +
+    '中文和English混排时，引擎会在中西文之间插入间距。标点挤压：“引号”（括号）。两端对齐按优先级逐级分配剩余空间，最后一行不对齐。',
 };
 
 const state = {
@@ -169,6 +176,20 @@ function splitParagraphs(text) {
     .filter((paragraph) => paragraph.trim() !== '');
 }
 
+/** The Phase 2 options packed as the demo's C ABI expects (`Phase2`). */
+function phase2Bits() {
+  const direction = { auto: 0, ltr: 1, rtl: 2 }[$('direction').value] ?? 0;
+  const start = { none: 0, first: 1, all: 2 }[$('hang-start').value] ?? 0;
+  const end = { none: 0, allow: 1, force: 2 }[$('hang-end').value] ?? 0;
+  return direction
+    | ($('justify').checked ? 1 << 2 : 0)
+    | (start << 3)
+    | (end << 5)
+    | ($('autospace').value === 'css' ? 1 << 7 : 0)
+    | ($('whitespace').value === 'preserved' ? 1 << 8 : 0)
+    | ($('compress-last').checked ? 1 << 9 : 0);
+}
+
 function currentSettings() {
   return {
     width: Number(widthInput.value),
@@ -177,6 +198,7 @@ function currentSettings() {
     locale: localeInput.value.trim(),
     cjkQuotes: quotesInput.value === 'cjk-aware',
     heuristics: policyInput.value === 'heuristics',
+    phase2: phase2Bits(),
     primary: faceInput.value,
     showBoxes: showBoxes.checked,
     showBaselines: showBaselines.checked,
@@ -201,6 +223,8 @@ function relayout() {
   const results = [];
   let lines = 0;
   let glyphs = 0;
+  let justified = 0;
+  let hanging = 0;
   for (const [index, paragraph] of paragraphs.entries()) {
     const result = state.engine.layout(
       paragraph,
@@ -211,19 +235,22 @@ function relayout() {
       settings.cjkQuotes,
       settings.primary || null,
       settings.heuristics,
+      settings.phase2,
     );
     if (!result.ok) {
       showEngineError(result, index, paragraphs.length);
       state.layout = null;
       gateChip.textContent = 'engine rejected the input';
       gateChip.className = 'chip bad';
-      stats.innerHTML = '';
+      stats.replaceChildren();
       drawPlaceholder(settings.width, 'Layout rejected — see message above.');
       return;
     }
     results.push(result);
     lines += result.lines.length;
     for (const line of result.lines) {
+      justified += line.justified ? 1 : 0;
+      hanging += (line.hang[0] > 0 ? 1 : 0) + (line.hang[1] > 0 ? 1 : 0);
       for (const run of line.runs) {
         glyphs += run.glyphs.length;
       }
@@ -234,14 +261,21 @@ function relayout() {
 
   gateChip.textContent = results.length === 0 ? 'nothing to draw' : 'output gate passed';
   gateChip.className = `chip ${results.length === 0 ? 'muted' : 'good'}`;
-  stats.innerHTML = results.length === 0
-    ? ''
-    : [
-        `<span><strong>${paragraphs.length}</strong> paragraph${paragraphs.length === 1 ? '' : 's'}</span>`,
-        `<span><strong>${lines}</strong> lines</span>`,
-        `<span><strong>${glyphs.toLocaleString()}</strong> glyphs</span>`,
-        `<span><strong>${elapsed.toFixed(1)}</strong> ms</span>`,
-      ].join('');
+  const figures = [
+    [paragraphs.length, paragraphs.length === 1 ? 'paragraph' : 'paragraphs'],
+    [lines, 'lines'],
+    [justified, 'justified'],
+    [hanging, 'hanging marks'],
+    [glyphs.toLocaleString(), 'glyphs'],
+    [elapsed.toFixed(1), 'ms'],
+  ];
+  stats.replaceChildren(...(results.length === 0 ? [] : figures.map(([value, label]) => {
+    const item = document.createElement('span');
+    const strong = document.createElement('strong');
+    strong.textContent = String(value);
+    item.append(strong, ` ${label}`);
+    return item;
+  })));
   draw(results, settings);
 }
 
@@ -433,7 +467,10 @@ textarea.addEventListener('input', () => {
   textTimer = setTimeout(relayout, 140);
 });
 
-for (const input of [widthInput, sizeInput, lineHeightInput, quotesInput, faceInput, policyInput]) {
+const phase2Inputs = ['direction', 'justify', 'compress-last', 'hang-start', 'hang-end', 'autospace', 'whitespace']
+  .map((id) => $(id));
+
+for (const input of [widthInput, sizeInput, lineHeightInput, quotesInput, faceInput, policyInput, ...phase2Inputs]) {
   input.addEventListener('input', () => {
     if (input === widthInput) {
       $('width-value').textContent = `${widthInput.value} px`;
@@ -488,7 +525,8 @@ const PRESETS = {
   zhHans: { locale: 'zh-CN', quotes: 'cjk-aware', face: 'Noto Sans' },
   regional: { locale: '', quotes: 'cjk-aware', face: 'Noto Sans' },
   indic: { locale: '', quotes: 'standard', face: 'Noto Sans' },
-  rtl: { locale: 'ar', quotes: 'standard', face: 'Noto Sans' },
+  rtl: { locale: '', quotes: 'standard', face: 'Noto Sans' },
+  cjkJustify: { locale: '', quotes: 'cjk-aware', face: 'Noto Sans' },
 };
 
 samples.addEventListener('change', () => {

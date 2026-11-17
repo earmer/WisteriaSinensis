@@ -59,7 +59,7 @@ error_messages! {
         InvalidTextWidth { item } => "text box {item} has a width that is not its clusters' total, or a cluster with an invalid width, font scale or glyph measurement",
         ItemNotSelfContained { item } => "text box {item} has no atoms, does not partition them into clusters, has inconsistent break-safety flags, or has ranges outside or out of order in its run",
         InvalidInlineBox { item } => "inline object {item} has a non-finite or negative size, an invalid baseline alignment, or no source bytes",
-        InvalidGlue { item } => "glue {item} has an invalid size, a compression pool that is not shrink only, or source bytes that do not match its kind",
+        InvalidGlue { item } => "glue {item} has an invalid size, a compression pool that is not shrink only or shrinks more than half its run's font size, is not collapsible, has the wrong original bidi class, or has source bytes that do not match its kind",
         InvalidDiscretionary { item } => "discretionary {item} has an invalid penalty, width, byte range or cloned-span list, or widths that do not match its action",
         InvalidHyphenOpportunity { item } => "item {item} is a hyphenation break that is not flagged, does not join two text boxes of one run at its offset, or has a cut off the atoms of its hyphen chain",
         InvalidSpanBoundary { item } => "span boundary {item} has an invalid range, width, anchor, bidi level or nesting order",
@@ -71,6 +71,7 @@ error_messages! {
         MissingSpanBoundary { span } => "decoration span {span} lacks a leading or trailing boundary",
         InvalidTab { item } => "tab {item} owns no source bytes",
         InvalidAtomicSpan { span } => "atomic span {span} is invalid, duplicated, out of order or overlapping",
+        InvalidBidiLevel { item } => "item {item} has a bidi level below the paragraph's base level",
     }
 }
 
@@ -124,6 +125,9 @@ error_messages! {
         TrailingWhitespaceMarkedHanging { run, glyph } => "trailing whitespace glyph {glyph} of run {run} is flagged as hanging",
         HangingNotAllowed { side } => "{side} hanging punctuation is not allowed by the hang mode",
         HangingWithoutOverflow { side } => "{side} hanging punctuation would have fitted the line, which the allow-end mode does not hang",
+        VisualRunsOutOfOrder { run } => "visual run {run} starts left of the end of the run before it",
+        TooManyHangingGlyphs { side } => "more than one character hangs on the {side} side",
+        HangingGlyphNotOutermost { run, glyph } => "hanging glyph {glyph} of run {run} is not the outermost glyph on its side",
     }
 }
 

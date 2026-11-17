@@ -256,8 +256,9 @@ pub enum SoftHyphenPolicy {
     Strip,
 }
 
-/// Tab-stop configuration: stops at every multiple of `step` from the
-/// flow-space origin, whatever the line's indent or slot (spec OPT-1, ST3-1).
+/// Tab-stop configuration: stops at every multiple of `step` along the line's
+/// inline progression, measured from the line-start edge of its slot (spec
+/// OPT-1, ST3-1).
 /// A uniform step is the minimal configuration.
 ///
 /// Parsed, not validated (spec §1.5, AX-3): [`new`](Self::new) refuses a step
@@ -284,7 +285,8 @@ impl TabStops {
         self.step
     }
 
-    /// The first stop strictly right of `x` (`x` on a stop moves to the next).
+    /// The first stop strictly beyond the distance `x` (`x` on a stop moves
+    /// to the next).
     /// Returns None when `x` is not finite or no finite forward stop is
     /// representable.
     #[must_use]
@@ -439,6 +441,11 @@ impl LayoutConstraints {
 pub struct LayoutOptions {
     /// Whether available elastic capacity is used to justify content.
     pub justify: bool,
+    /// Under `justify`, whether a line that ends the paragraph or at a hard
+    /// break may be fitted with shrink and compressed flush (spec ST1-7,
+    /// ST3-3). Such a line is never stretched; when this is off (the
+    /// default), a line that only shrink would fit ends at an earlier break.
+    pub compress_last_lines: bool,
     /// Optional line-count or block-size truncation policy; when set it must
     /// satisfy [`LineClampPolicy::is_valid`] (`InvalidLayoutOptions` otherwise).
     pub clamp: Option<LineClampPolicy>,

@@ -296,6 +296,25 @@ pub enum LineInvariantError {
         /// Edge concerned.
         side: HangSide,
     },
+    /// The first pen position of a visual run lies left of the last one of
+    /// the run before it: runs are in screen order (spec OUT-3).
+    VisualRunsOutOfOrder {
+        /// Index into `visual_runs` of the later run.
+        run: usize,
+    },
+    /// More than one character hangs on one side of the line (spec HNG-4).
+    TooManyHangingGlyphs {
+        /// Side concerned.
+        side: HangSide,
+    },
+    /// A body glyph reaches further towards the side a glyph hangs on, so
+    /// the hanging glyph is not the outermost one (spec HNG-4).
+    HangingGlyphNotOutermost {
+        /// Index into `visual_runs`.
+        run: usize,
+        /// Index into that run's `glyphs`.
+        glyph: usize,
+    },
 }
 
 /// Why a line's slots are invalid ([`LineInvariantError::InvalidSlots`]).

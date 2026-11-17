@@ -2,6 +2,7 @@
 
 use super::super::shaper_gate::{checked_font_metrics, checked_reshape_window, resolved_line_box};
 use super::super::{InlineSlotConstraint, LayoutInputError, StrutMetrics};
+use super::hanging::LineEdge;
 use super::{FIT_EPSILON, Layout, LineEnd, Piece, PieceKind, Reshaped, Token};
 use crate::frontend::{BoxNode, BoxOverflowPolicy, DiscretionaryNode, WordNode};
 use crate::types::{AtomFlags, FontInstanceRef, FontMetrics, RawShapedGlyph};
@@ -29,21 +30,30 @@ pub(super) fn ladder_tier(d: &DiscretionaryNode) -> usize {
     }
 }
 
+/// Where a line starts: its first token, the cloned padding before it and
+/// whether it is the paragraph's first line.
+#[derive(Clone, Copy)]
+pub(super) struct LineStart {
+    pub(super) token: usize,
+    pub(super) post: f32,
+    pub(super) first_line: bool,
+}
+
 impl<'i, 'a> Layout<'i, 'a> {
-    /// The next tab stop after the absolute pen position `pen` that lies
-    /// inside `slot`, if any (spec ST3-1): a stop beyond the slot's end is
-    /// not reachable from it.
-    pub(super) fn reachable_stop(&self, pen: f32, slot: InlineSlotConstraint) -> Option<f32> {
-        let slot_end = slot.end();
+    /// The next tab stop after `distance`, measured from the slot's
+    /// line-start edge along the base direction, if it lies inside `slot`
+    /// (spec ST3-1): a stop further than the slot's width is not reachable.
+    pub(super) fn reachable_stop(&self, distance: f32, slot: InlineSlotConstraint) -> Option<f32> {
+        let width = slot.width();
         self.inputs
             .constraints()
             .tab_stops
-            .next_stop(pen)
-            .filter(|&stop| stop <= slot_end + super::super::tolerance::tolerance(stop, slot_end))
+            .next_stop(distance)
+            .filter(|&stop| stop <= width + super::super::tolerance::tolerance(stop, width))
     }
 
-    /// The advance and the reach (rightmost pen end, relative to the start)
-    /// of a piece starting at the absolute pen position `pen` in `slot`.
+    /// The advance and the reach (furthest pen end, relative to the start)
+    /// of a piece whose start lies `pen` from the slot's line-start edge.
     pub(super) fn measure(
         &self,
         piece: &Piece,
@@ -112,15 +122,29 @@ impl<'i, 'a> Layout<'i, 'a> {
         (self.inputs.cluster_glyphs(c), c.natural_width)
     }
 
-    /// Greedy fitting (spec ST1-1, ST1-5, WN-1): the last break of the
-    /// lowest ladder tier that fits before the content overflows, a
+    /// Greedy fitting (spec ST1-1, ST1-5, ST1-7, WN-1): the last break of
+    /// the lowest ladder tier that fits before the content overflows, a
     /// mandatory break, or an emergency cluster break when nothing fits.
-    pub(super) fn fit(&mut self, start: usize, post: f32, slot: InlineSlotConstraint) -> LineEnd {
-        let available = slot.width();
-        let origin = slot.start();
+    /// Under `justify` a line fits while its width less the shrink of its
+    /// visible glue after the last tab fits; a mark that may hang is credited
+    /// with its protruding half (ST1-3).
+    pub(super) fn fit(&mut self, line: LineStart, slot: InlineSlotConstraint) -> LineEnd {
+        let available = slot.width() + FIT_EPSILON;
+        let LineStart {
+            token: start,
+            post,
+            first_line,
+        } = line;
         let mut pen = post;
         let mut body = post;
         let mut has_content = false;
+        // Whether a piece other than a zero-width span boundary has been
+        // seen: the start mark is the first such piece (ST1-3).
+        let mut has_visible = false;
+        // The shrink of the glue since the last tab, and of the visible part.
+        let (mut shrink, mut visible_shrink) = (0.0_f32, 0.0_f32);
+        // The protruding half of the last visible piece, if it may hang.
+        let mut end_hang = 0.0;
         // The last fitting break of each ladder tier.
         let mut fits: [Option<usize>; 3] = [None; 3];
         let best = |fits: &[Option<usize>; 3]| fits.iter().find_map(|&b| b);
@@ -128,17 +152,30 @@ impl<'i, 'a> Layout<'i, 'a> {
         loop {
             match &self.tokens[t] {
                 Token::Break(b) => {
+                    let hang = if b.pre == 0.0 { end_hang } else { 0.0 };
                     if b.mandatory {
-                        return LineEnd::At(t);
+                        // A line ending here is compressed only under
+                        // `compress_last_lines` (ST3-3): otherwise, if only
+                        // shrink would fit it, it ends at an earlier break.
+                        let shrink = if self.options.compress_last_lines {
+                            visible_shrink
+                        } else {
+                            0.0
+                        };
+                        let overflows = body + b.pre - hang - shrink > available;
+                        return match best(&fits).filter(|_| overflows) {
+                            Some(earlier) => LineEnd::At(earlier),
+                            None => LineEnd::At(t),
+                        };
                     }
-                    if body + b.pre <= available + FIT_EPSILON {
+                    if body + b.pre - hang - visible_shrink <= available {
                         fits[b.tier] = Some(t);
                     }
                     pen += b.no_break;
                 }
                 Token::Piece(piece)
                     if matches!(piece.kind, PieceKind::Tab)
-                        && self.reachable_stop(origin + pen, slot).is_none() =>
+                        && self.reachable_stop(pen, slot).is_none() =>
                 {
                     // No reachable stop (spec ST3-1, AX-6): break before the
                     // tab at an earlier opportunity, else consume it with no
@@ -153,10 +190,34 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 Token::Piece(piece) => {
                     let piece = *piece;
-                    let (advance, reach) = self.measure(&piece, origin + pen, slot);
+                    match piece.kind {
+                        PieceKind::Glue { item } if self.options.justify => {
+                            shrink += self.glue(item).max_shrink;
+                        }
+                        PieceKind::Tab => shrink = 0.0,
+                        _ => {}
+                    }
+                    if piece.is_content() {
+                        let is_bare_edge =
+                            matches!(piece.kind, PieceKind::SpanEdge { .. }) && piece.width == 0.0;
+                        if !has_visible && !is_bare_edge && post == 0.0 {
+                            pen -= self
+                                .hang_half(&piece, piece.level, LineEdge::Start, first_line)
+                                .unwrap_or(0.0);
+                        }
+                        has_visible |= !is_bare_edge;
+                        visible_shrink = shrink;
+                        end_hang = match piece.kind {
+                            _ if is_bare_edge => end_hang,
+                            _ => self
+                                .hang_half(&piece, piece.level, LineEdge::End, first_line)
+                                .unwrap_or(0.0),
+                        };
+                    }
+                    let (advance, reach) = self.measure(&piece, pen, slot);
                     if piece.is_content() {
                         let end = pen + reach.max(advance);
-                        if end > available + FIT_EPSILON {
+                        if end - end_hang - visible_shrink > available {
                             return match best(&fits) {
                                 Some(b) => LineEnd::At(b),
                                 None => self.emergency(start, t, post, slot),
@@ -176,7 +237,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn next_break_after(&self, t: usize) -> Option<usize> {
         let mut e = t + 1;
         while let Some(Token::Piece(p)) = self.tokens.get(e) {
-            if !matches!(p.kind, PieceKind::Glue) {
+            if !matches!(p.kind, PieceKind::Glue { .. }) {
                 return None;
             }
             e += 1;
@@ -305,14 +366,13 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// Where the content of a line from `start` ends when it stops before
     /// token `end`, measured as [`fit`](Self::fit) measures it.
     fn content_end(&self, start: usize, end: usize, post: f32, slot: InlineSlotConstraint) -> f32 {
-        let origin = slot.start();
         let mut pen = post;
         let mut body = post;
         for token in &self.tokens[start..end] {
             match token {
                 Token::Break(b) => pen += b.no_break,
                 Token::Piece(piece) => {
-                    let (advance, reach) = self.measure(piece, origin + pen, slot);
+                    let (advance, reach) = self.measure(piece, pen, slot);
                     if piece.is_content() {
                         body = pen + reach.max(advance);
                     }

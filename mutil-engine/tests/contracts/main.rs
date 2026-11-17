@@ -6,11 +6,13 @@
 mod annotations;
 mod api;
 mod badness;
+mod bidi_gates;
 mod common;
 mod data_versions;
 mod error_messages;
 mod gates;
 mod geometry;
+mod hanging_gates;
 mod host_contract;
 mod input_validation;
 mod line_validation;

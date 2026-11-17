@@ -231,6 +231,12 @@ pub enum LayoutInputError {
         /// Index into `ParagraphAst::atomic_spans`.
         span: usize,
     },
+    /// A text box's run, an inline object, a glue or a span boundary has a
+    /// bidi level below the paragraph's base level (spec AST-13).
+    InvalidBidiLevel {
+        /// Index into `ParagraphAst::items`.
+        item: usize,
+    },
 }
 
 /// `true` when `range` is well formed, inside `text` and on character

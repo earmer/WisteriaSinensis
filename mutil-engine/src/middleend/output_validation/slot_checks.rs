@@ -124,30 +124,8 @@ impl PositionedLine {
                 }
             }
         }
-        let (hanging_left, hanging_right) = self.hanging_extents(&occupied);
-        for (side, expected, slot) in [
-            (HangSide::Left, hanging_left, first),
-            (HangSide::Right, hanging_right, last),
-        ] {
-            if expected == 0.0 {
-                continue;
-            }
-            if !ctx
-                .hang_mode
-                .allows(side, ctx.base_direction, ctx.line_index == 0)
-            {
-                return Err(E::HangingNotAllowed { side });
-            }
-            // `Allow` hangs a mark only if it would otherwise wrap: put back
-            // into the body, it would not fit the slot it hangs from.
-            let at_line_end = !side.is_line_start(ctx.base_direction);
-            let capacity = slot.constraint.width();
-            let would_fit = capacity == f32::INFINITY
-                || slot.visual_width + expected <= capacity - tolerance(capacity, 0.0);
-            if at_line_end && ctx.hang_mode.end == HangEndMode::Allow && would_fit {
-                return Err(E::HangingWithoutOverflow { side });
-            }
-        }
+        self.check_hanging_marks((left, right), eps)?;
+        self.check_hanging_sides(ctx, occupied)?;
         for (index, b) in self.visual_boxes.iter().enumerate() {
             if !inside(b.x, b.x + b.width) {
                 return Err(E::InlineBoxOutsideBlock { index });
@@ -462,6 +440,95 @@ impl PositionedLine {
             && end <= origin + vw + tolerance(width, vw)
             && approx_eq(left, origin)
             && approx_eq(right - origin, vw)
+    }
+
+    /// HNG-2: each side with a hanging extent is one the mode allows, and
+    /// under `Allow` the line end hangs only where the mark would not fit.
+    fn check_hanging_sides(
+        &self,
+        ctx: &LineContext,
+        occupied: (usize, usize),
+    ) -> Result<(), LineInvariantError> {
+        let (hanging_left, hanging_right) = self.hanging_extents(&occupied);
+        for (side, expected, slot) in [
+            (HangSide::Left, hanging_left, &self.slots[occupied.0]),
+            (HangSide::Right, hanging_right, &self.slots[occupied.1]),
+        ] {
+            if expected == 0.0 {
+                continue;
+            }
+            if !ctx
+                .hang_mode
+                .allows(side, ctx.base_direction, ctx.line_index == 0)
+            {
+                return Err(LineInvariantError::HangingNotAllowed { side });
+            }
+            // `Allow` hangs a mark only if it would otherwise wrap: put back
+            // into the body, it would not fit the slot it hangs from.
+            let at_line_end = !side.is_line_start(ctx.base_direction);
+            let capacity = slot.constraint.width();
+            let would_fit = capacity == f32::INFINITY
+                || slot.visual_width + expected <= capacity - tolerance(capacity, 0.0);
+            if at_line_end && ctx.hang_mode.end == HangEndMode::Allow && would_fit {
+                return Err(LineInvariantError::HangingWithoutOverflow { side });
+            }
+        }
+        Ok(())
+    }
+
+    /// HNG-4: on each side at most one character hangs, and it is the
+    /// outermost glyph there: no other body glyph reaches further towards
+    /// that side. `(left, right)` are the body's edges.
+    fn check_hanging_marks(
+        &self,
+        (left, right): (f32, f32),
+        eps: f32,
+    ) -> Result<(), LineInvariantError> {
+        use LineInvariantError as E;
+        let glyphs = || {
+            self.visual_runs.iter().enumerate().flat_map(|(run, r)| {
+                r.glyphs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, g)| g.advance != 0.0 && !self.is_trailing_whitespace(g))
+                    .map(move |(glyph, g)| (run, glyph, g))
+            })
+        };
+        for side in [HangSide::Left, HangSide::Right] {
+            // How far a pen interval reaches towards `side`.
+            let reach = |g: &PositionedGlyph| {
+                let (lo, hi) = g.pen_interval();
+                if side == HangSide::Left { -lo } else { hi }
+            };
+            let edge = if side == HangSide::Left { -left } else { right };
+            let hanging: Vec<_> = glyphs()
+                .filter(|(_, _, g)| g.is_hanging && reach(g) > edge + eps)
+                .collect();
+            let Some(&(run, glyph, mark)) = hanging
+                .iter()
+                .max_by(|a, b| reach(a.2).total_cmp(&reach(b.2)))
+            else {
+                continue;
+            };
+            if hanging
+                .iter()
+                .any(|(_, _, g)| g.byte_range != mark.byte_range)
+            {
+                return Err(E::TooManyHangingGlyphs { side });
+            }
+            // Every other body glyph counts, zero-advance ones included; the
+            // mark's own glyphs do not.
+            let other_reaches_further = self.visual_runs.iter().flat_map(|r| &r.glyphs).any(|g| {
+                !g.is_hanging
+                    && g.byte_range != mark.byte_range
+                    && !self.is_trailing_whitespace(g)
+                    && reach(g) > reach(mark) + eps
+            });
+            if other_reaches_further {
+                return Err(E::HangingGlyphNotOutermost { run, glyph });
+            }
+        }
+        Ok(())
     }
 
     /// Span fragments (spec §2.6, Pass 5 (g)). Each fragment covers a part of

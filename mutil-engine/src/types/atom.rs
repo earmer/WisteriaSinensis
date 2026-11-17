@@ -121,7 +121,7 @@ pub enum LineBreakClass {
 /// Per-atom boolean properties, stored as a 16-bit mask (spec §2.2).
 ///
 /// Hand-rolled instead of depending on `bitflags`, to keep the dependency
-/// surface minimal. Ten of sixteen bits are assigned; the high six are
+/// surface minimal. Thirteen of sixteen bits are assigned; the high three are
 /// reserved and are masked off by [`AtomFlags::from_bits_truncate`] and `!`.
 /// Layout: 2 bytes, alignment 2.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -153,6 +153,16 @@ impl AtomFlags {
     pub const IS_APOSTROPHE: Self = Self(1 << 8);
     /// Continues an unbreakable FE-15 dash, ellipsis or middle-dot run (spec §3 Step 3, FE-15).
     pub const BINDS_TO_PREVIOUS: Self = Self(1 << 9);
+    /// UAX #9 L1 resets this atom with whitespace at a line end or before a
+    /// tab: its first code point has class WS, S, BN, an isolate initiator or
+    /// PDI, or an embedding or override control (spec FE-30, ST2-1).
+    pub const L1_RESETTABLE: Self = Self(1 << 10);
+    /// An opening mark that may hang at a line start: UAX #14 class OP, or
+    /// General Category Ps or Pi (spec ST1-3).
+    pub const HANGABLE_START: Self = Self(1 << 11);
+    /// A stop or comma that may hang at a line end: U+002C, U+002E, U+3001,
+    /// U+3002, U+FF0C or U+FF0E (spec ST1-3).
+    pub const HANGABLE_END: Self = Self(1 << 12);
 
     /// No flags set.
     pub const EMPTY: Self = Self(0);
@@ -168,10 +178,13 @@ impl AtomFlags {
             | Self::IS_CLOSE_PUNCT.0
             | Self::HAS_VARIATION_SELECTOR.0
             | Self::IS_APOSTROPHE.0
-            | Self::BINDS_TO_PREVIOUS.0,
+            | Self::BINDS_TO_PREVIOUS.0
+            | Self::L1_RESETTABLE.0
+            | Self::HANGABLE_START.0
+            | Self::HANGABLE_END.0,
     );
 
-    const NAMES: [(Self, &'static str); 10] = [
+    const NAMES: [(Self, &'static str); 13] = [
         (Self::IS_CJK_IDEOGRAPH, "IS_CJK_IDEOGRAPH"),
         (Self::ALLOW_CJK_JUSTIFY_AFTER, "ALLOW_CJK_JUSTIFY_AFTER"),
         (Self::NO_LETTER_SPACING, "NO_LETTER_SPACING"),
@@ -182,14 +195,19 @@ impl AtomFlags {
         (Self::HAS_VARIATION_SELECTOR, "HAS_VARIATION_SELECTOR"),
         (Self::IS_APOSTROPHE, "IS_APOSTROPHE"),
         (Self::BINDS_TO_PREVIOUS, "BINDS_TO_PREVIOUS"),
+        (Self::L1_RESETTABLE, "L1_RESETTABLE"),
+        (Self::HANGABLE_START, "HANGABLE_START"),
+        (Self::HANGABLE_END, "HANGABLE_END"),
     ];
 
     /// Flags a cluster takes only from its **first** atom.
-    pub const FIRST_ATOM_ONLY: Self = Self(Self::IS_OPEN_PUNCT.0 | Self::BINDS_TO_PREVIOUS.0);
+    pub const FIRST_ATOM_ONLY: Self =
+        Self(Self::IS_OPEN_PUNCT.0 | Self::BINDS_TO_PREVIOUS.0 | Self::HANGABLE_START.0);
     /// Flags a cluster takes only from its **last** atom: the justification
     /// opportunity *after* a ligature is the one after its last component, and
-    /// a closing mark closes at the end.
-    pub const LAST_ATOM_ONLY: Self = Self(Self::ALLOW_CJK_JUSTIFY_AFTER.0 | Self::IS_CLOSE_PUNCT.0);
+    /// a closing mark closes at the end, and a line-end mark hangs from it.
+    pub const LAST_ATOM_ONLY: Self =
+        Self(Self::ALLOW_CJK_JUSTIFY_AFTER.0 | Self::IS_CLOSE_PUNCT.0 | Self::HANGABLE_END.0);
 
     /// Aggregates the flags of the atoms a cluster covers (spec §2.3):
     /// [`FIRST_ATOM_ONLY`](Self::FIRST_ATOM_ONLY) from the first atom,

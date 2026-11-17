@@ -19,8 +19,10 @@ use harfrust::{
     Buffer, BufferFlags, Feature, GlyphInfo, GlyphPosition, Language, Script, ShapeOptions,
     ShaperFont, Tag,
 };
+use icu_normalizer::{ComposingNormalizerBorrowed, DecomposingNormalizerBorrowed};
 use read_fonts::model::Font;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -36,6 +38,10 @@ pub use registry::{CjkRegion, FaceProfile, FontRegistry};
 /// How many bytes of text on each side of a shaped segment reach HarfRust as
 /// context (spec SHP-3). HarfBuzz reads at most five code points.
 const CONTEXT_BYTES: usize = 32;
+
+/// The normalisations under which a face covers an atom (spec SHP-26).
+static NFC: ComposingNormalizerBorrowed<'static> = ComposingNormalizerBorrowed::new_nfc();
+static NFD: DecomposingNormalizerBorrowed<'static> = DecomposingNormalizerBorrowed::new_nfd();
 
 /// A variable instance, keyed by face and the bit patterns of its
 /// coordinates (spec FNT-1 makes them sound keys).
@@ -127,7 +133,8 @@ impl HarfRustShaper {
     /// no CJK face covers the atom. Every run then falls back to the first
     /// candidate that covers the whole atom, else the first that covers its
     /// first code point, else the first candidate, CJK faces first in a CJK
-    /// run.
+    /// run. A face covers an atom when it covers the atom as written or its
+    /// NFC or NFD form (SHP-26).
     fn face_for(
         &self,
         text: &str,
@@ -143,7 +150,20 @@ impl HarfRustShaper {
                     .face(id)
                     .is_some_and(|face| face.font.charmap().map_unicode(c).is_some())
         };
-        let covers_atom = |id: FontId| chars().all(|c| covers(id, c));
+        // The atom as written, then its NFC and NFD forms where they differ
+        // (SHP-26).
+        let written = &text[atom.byte_range.as_range()];
+        let mut forms: SmallVec<[Cow<'_, str>; 3]> = SmallVec::new();
+        for form in [
+            Cow::Borrowed(written),
+            NFC.normalize(written),
+            NFD.normalize(written),
+        ] {
+            if !forms.contains(&form) {
+                forms.push(form);
+            }
+        }
+        let covers_atom = |id: FontId| forms.iter().any(|form| form.chars().all(|c| covers(id, c)));
         let profile = |id: FontId| self.registry.profile(id).unwrap_or_default();
         let first = |pass: &dyn Fn(FontId) -> bool| candidates.iter().copied().find(|&id| pass(id));
         // ASCII keeps stack order even in a CJK run: FE-13 folds digits and
@@ -608,8 +628,8 @@ impl TextShaper for HarfRustShaper {
         glyph_id: u32,
         _direction: Direction,
     ) -> SmallVec<[f32; 4]> {
-        // GDEF caret coordinates run along the glyph's advance from its
-        // origin in either direction; INT-5 orders the sub-slots for RTL.
+        // GDEF caret coordinates increase in physical x from the glyph's
+        // left edge in either direction (SHP-7); INT-5 pairs them for RTL.
         let Some((font, units)) = self.instance(instance.font.font_id, instance.variations) else {
             return SmallVec::new();
         };

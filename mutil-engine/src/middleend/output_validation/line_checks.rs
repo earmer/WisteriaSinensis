@@ -244,8 +244,8 @@ impl PositionedLine {
     }
 
     /// Pass 3: source ownership. Every run, glyph, box, tab and decoration
-    /// refers to bytes of this line, the glyphs of a run are in screen order,
-    /// and `visible_byte_end` is a boundary of the line's content.
+    /// refers to bytes of this line, the runs and the glyphs of each run are
+    /// in screen order (OUT-3), and `visible_byte_end` is a boundary of the line's content.
     pub(super) fn check_sources(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
         let valid_glyph = |g: &PositionedGlyph| {
@@ -277,6 +277,13 @@ impl PositionedLine {
                     glyph: step + 1,
                 });
             }
+        }
+        // And across runs, from the last glyph of one to the first of the next.
+        if let Some(step) = self.visual_runs.windows(2).position(|w| {
+            let (end, start) = (w[0].glyphs[w[0].glyphs.len() - 1].x, w[1].glyphs[0].x);
+            start < end - tolerance(end, start)
+        }) {
+            return Err(E::VisualRunsOutOfOrder { run: step + 1 });
         }
         for (index, b) in self.visual_boxes.iter().enumerate() {
             if !b.baseline_align.is_valid()

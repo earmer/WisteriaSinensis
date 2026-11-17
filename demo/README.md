@@ -20,7 +20,7 @@ and a browser with `Path2D.addPath` (current Chrome, Firefox and Safari).
 
 `fetch-fonts.sh` downloads the variable faces used for Latin sans, serif and
 mono; Simplified Chinese, Traditional Chinese and Japanese; Devanagari, Thai, Lao, Khmer and
-Myanmar, checks them against `fonts.sha256`, and stores the OFL licence
+Myanmar; Hebrew and Arabic, checks them against `fonts.sha256`, and stores the OFL licence
 beside them. The files are not committed.
 
 ## How it works
@@ -40,11 +40,13 @@ beside them. The files are not committed.
   decoration: they are passed to `TextStyle` and `FrontendOptions` unchanged.
 
 The harness deliberately offers no control the engine does not implement.
-Justification, hanging punctuation, hyphenation, clamping, bidi, vertical
-writing and the balanced/publication breaking strategies are absent; the
-scope panel on the page says so. Pasted Arabic or Hebrew is rejected by the
-frontend, and the page shows that error verbatim rather than drawing text in
-the wrong order.
+Phase 2's controls are there: the base direction (from the text, or forced
+LTR or RTL), justification (and whether lines that end the paragraph or at a
+hard break may be compressed), the hang modes at each line edge, the autospace
+profile and the trailing-whitespace mode. The bidi and CJK samples exercise
+them, and the statistics count justified lines and hanging marks.
+Hyphenation, clamping, vertical writing and the balanced/publication
+breaking strategies are absent; the scope panel on the page says so.
 
 ## Locales and CJK faces
 

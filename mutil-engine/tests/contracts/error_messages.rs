@@ -85,7 +85,7 @@ fn layout_input_error_messages() {
         ),
         (
             LayoutInputError::InvalidGlue { item: 2 },
-            "glue 2 has an invalid size, a compression pool that is not shrink only, or source bytes that do not match its kind",
+            "glue 2 has an invalid size, a compression pool that is not shrink only or shrinks more than half its run's font size, is not collapsible, has the wrong original bidi class, or has source bytes that do not match its kind",
         ),
         (
             LayoutInputError::InvalidDiscretionary { item: 2 },

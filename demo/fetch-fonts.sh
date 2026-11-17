@@ -30,6 +30,8 @@ fetch notosansthai 'NotoSansThai[wdth,wght].ttf' 'NotoSansThai[wdth,wght].ttf'
 fetch notosanslao 'NotoSansLao[wdth,wght].ttf' 'NotoSansLao[wdth,wght].ttf'
 fetch notosanskhmer 'NotoSansKhmer[wdth,wght].ttf' 'NotoSansKhmer[wdth,wght].ttf'
 fetch notosansmyanmar 'NotoSansMyanmar[wdth,wght].ttf' 'NotoSansMyanmar[wdth,wght].ttf'
+fetch notosanshebrew 'NotoSansHebrew[wdth,wght].ttf' 'NotoSansHebrew[wdth,wght].ttf'
+fetch notonaskharabic 'NotoNaskhArabic[wght].ttf' 'NotoNaskhArabic[wght].ttf'
 fetch notosans 'OFL.txt' 'OFL.txt'
 
 if command -v shasum >/dev/null; then

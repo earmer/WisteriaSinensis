@@ -180,35 +180,16 @@ fn an_objects_bytes_take_no_part_in_direction() {
     // A letter, not U+FFFC, so UAX #14 puts no break beside it.
     assert_eq!(shape_of(&ast, text), "[a]O[b]$");
     passes_the_input_gate(&ast, text);
-    // Outside an object the same letter is still refused.
-    let plain = compile_paragraph(
-        &super::common::input(text, &base),
-        &FrontendOptions::default(),
-        &*SHAPER,
-    );
-    assert!(plain.is_err());
+    assert_eq!(ast.base_direction, BidiDirection::Ltr);
 }
 
 #[test]
-fn what_phase_1_does_not_compile_is_refused() {
+fn what_the_crate_does_not_compile_is_refused() {
     let base = style(10.0);
-    let options = FrontendOptions::default();
     let refused = |input: &ParagraphInput<'_>, options: &FrontendOptions| {
         compile_paragraph(input, options, &*SHAPER).unwrap_err()
     };
     let unsupported = |feature| FrontendError::Unsupported { feature };
-    assert_eq!(
-        refused(&input("\u{5d0}", &base), &options),
-        unsupported(FrontendFeature::RtlBaseDirection)
-    );
-    let ltr = FrontendOptions {
-        base_direction: Some(BidiDirection::Ltr),
-        ..Default::default()
-    };
-    assert_eq!(
-        refused(&input("a \u{5d0}", &base), &ltr),
-        unsupported(FrontendFeature::BidiText)
-    );
     let vertical = FrontendOptions {
         writing_mode: WritingMode::VerticalRl,
         ..Default::default()

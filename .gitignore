@@ -29,3 +29,6 @@ __pycache__/
 
 # Composed specification (scripts/build_full_spec.py)
 dist/
+
+# Temporary git worktrees of Claude Code sub-agents
+.claude/worktrees/

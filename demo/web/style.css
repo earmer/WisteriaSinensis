@@ -410,3 +410,10 @@ code {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+.check-field > span:last-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+}
