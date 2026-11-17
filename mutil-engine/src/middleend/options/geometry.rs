@@ -1,8 +1,8 @@
 //! Container geometry (spec §5 Stage 1.3, GEO-3, GEO-4): the constraints the
 //! layout must fit into, the per-line slots and the obstacle-aware provider.
 
-use crate::middleend::LayoutInputError;
 use crate::middleend::tolerance::tolerance;
+use crate::middleend::{LayoutInputError, SlotSource};
 use crate::types::is_measurement;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -121,15 +121,10 @@ impl LayoutConstraints {
         if let Some(provider) = &self.geometry_provider {
             return provider.query_line_geometry(line_index, block_start, block_end);
         }
-        let start = if line_index == 0 {
-            self.first_line_indent
-        } else {
-            self.hanging_indent
-        };
-        // An indent that leaves no well-formed slot (which
-        // `LayoutConstraints::is_valid` rejects) leaves no slot at all.
+        // An indent `is_valid` rejects leaves no slot at all.
         LineGeometry {
-            slots: InlineSlotConstraint::new(start, self.wrap_width)
+            slots: SlotSource::of(self)
+                .standard_slot(line_index, self.wrap_width)
                 .into_iter()
                 .collect(),
             next_feature_block_offset: None,
