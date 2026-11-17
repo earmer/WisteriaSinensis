@@ -12,22 +12,27 @@ use crate::types::{
 };
 use smallvec::SmallVec;
 
-/// One glyph placed on a line (spec §2.6). `x` is the pen position, not the
-/// drawing origin (OUT-1); renderers take the physical origin from
-/// [`PlacedRun::glyphs`](super::PlacedRun::glyphs) (HST-4).
+/// One glyph placed on a line (spec §2.6). `x` is line-local (OUT-1; `0` at
+/// every line's envelope start, SLT-1, GEO-3) and is the pen position, not the
+/// drawing origin: the flow-space origin is `x + x_offset` and
+/// `baseline_y - y_offset`, except in `VerticalLr` (OUT-1, ORI-2). Renderers
+/// take the physical origin from [`PlacedRun::glyphs`](super::PlacedRun::glyphs)
+/// (HST-4).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedGlyph {
     /// Backend glyph index in the run's font.
     pub glyph_id: u32,
     /// Pen position from the line's left edge.
     pub x: f32,
-    /// Inline drawing offset, positive towards the inline end.
+    /// Inline drawing offset, positive towards the inline end (SHP-19).
     pub x_offset: f32,
-    /// Drawing offset towards line-over, unclamped.
+    /// Drawing offset towards line-over, unclamped (SHP-19); its block
+    /// direction depends on the writing mode (ORI-2).
     pub y_offset: f32,
     /// Advance width; may be negative.
     pub advance: f32,
-    /// Non-empty source bytes; `None` exactly for synthesized glyphs (AX-1).
+    /// Non-empty source bytes; `None` exactly for synthesized and annotation
+    /// glyphs, which claim no body bytes (spec §1.5, AX-1).
     pub byte_range: Option<TextRange>,
     /// Punctuation hanging outside the text block (§5 Stage 1.3).
     pub is_hanging: bool,

@@ -40,13 +40,21 @@ impl LineBreakStrategy {
     /// Number of candidate paths kept alive (`K`).
     #[must_use]
     pub const fn beam_width(self) -> usize {
-        [1, 2, 8][self as usize]
+        match self {
+            Self::Greedy => 1,
+            Self::Balanced => 2,
+            Self::Publication => 8,
+        }
     }
 
     /// Lines of lookahead before the oldest is committed (`W`).
     #[must_use]
     pub const fn window_depth(self) -> usize {
-        [1, 2, 6][self as usize]
+        match self {
+            Self::Greedy => 1,
+            Self::Balanced => 2,
+            Self::Publication => 6,
+        }
     }
 }
 
@@ -215,14 +223,18 @@ impl LineHeight {
         } else {
             [font.ascent, font.descent, font.line_gap]
         };
-        let (half_leading, line_gap) = match self {
-            Self::Normal => (0.0, line_gap),
-            Self::Fixed(multiplier) => ((multiplier * size - (ascent + descent)) / 2.0, 0.0),
+        let Self::Fixed(multiplier) = self else {
+            return StrutMetrics {
+                ascent,
+                descent,
+                line_gap,
+            };
         };
+        let half_leading = (multiplier * size - (ascent + descent)) / 2.0;
         StrutMetrics {
             ascent: ascent + half_leading,
             descent: descent + half_leading,
-            line_gap,
+            line_gap: 0.0,
         }
     }
 }
@@ -355,7 +367,8 @@ impl LayoutConstraints {
 
     /// [`resolve_line_geometry`](Self::resolve_line_geometry), validating a provider's
     /// untrusted answer, optionally against the `previous` smaller envelope (spec GEO-3,
-    /// AX-3). The envelope must be finite and non-empty (debug-asserted only).
+    /// AX-3). The envelope must be finite and non-empty (debug-asserted only: it is
+    /// built from gated measurements, spec MSR-1).
     ///
     /// # Errors
     /// `InvalidLineGeometry` for an answer outside the envelope, out of order or

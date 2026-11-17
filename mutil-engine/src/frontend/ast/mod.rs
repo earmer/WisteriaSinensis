@@ -266,8 +266,8 @@ impl ParagraphAst {
             .into_iter()
             .filter_map(|index| {
                 let HyphenSeam { before, after, .. } = self.hyphen_seam(index)?;
-                let unsafe_seam = after.clusters.first()?.safe_to_concat_before;
-                (!unsafe_seam).then(|| ReshapeWindow::spanning(&before, &after))
+                let safe = after.clusters.first()?.safe_to_concat_before;
+                (!safe).then(|| ReshapeWindow::spanning(&before, &after))
             })
             .collect();
         windows.sort_by_key(|window| window.byte_range.start());

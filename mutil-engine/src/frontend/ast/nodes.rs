@@ -154,7 +154,10 @@ pub enum BoxNode {
 ///
 /// **Invariant:** a line may end only at a [`WordNode::Discretionary`] (bar
 /// the emergency cluster break). A breakable space is `[Box, Glue,
-/// Discretionary]`; a space bound to the next word is `[Box, Glue]`.
+/// Discretionary]`: the discretionary follows the glue, so on a break the
+/// spaces stay on line `k` (spec §2.6: `byte_range` includes trailing
+/// whitespace, `visible_byte_end` does not). A space bound to the next word is
+/// `[Box, Glue]`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum WordNode {
     /// A rigid item.
@@ -165,7 +168,8 @@ pub enum WordNode {
     Discretionary(DiscretionaryNode),
     /// A tab; width is `TabStops::next_stop(x) - x`.
     Tab {
-        /// Source bytes. A tab has the paragraph level (UAX #9 L1).
+        /// Source bytes. A tab stores no level: UAX #9 L1 resets it to the
+        /// paragraph level (spec §1.5, AX-2).
         byte_range: TextRange,
     },
 }
@@ -199,8 +203,12 @@ impl WordNode {
 pub enum BreakAction {
     /// Zero-cost break between words, Han ideographs or Thai words.
     Direct,
-    /// Mandatory line termination: U+2028 (a non-empty `byte_range`) or the
-    /// paragraph-end sentinel (see [`DiscretionaryNode::is_paragraph_end`]).
+    /// Mandatory line termination; the node's `byte_range` tells which, so the
+    /// action stores nothing (spec §1.5, AX-2). Non-empty: exactly the three
+    /// bytes of U+2028 (`\n`, `\r\n` end the paragraph and are rejected
+    /// inside one). Empty: the end-of-paragraph sentinel
+    /// ([`DiscretionaryNode::is_paragraph_end`]); text ending in U+2028 ends
+    /// with a real hard break followed by the sentinel.
     HardBreak,
     /// Hyphenation; both neighbouring text boxes share one run. See
     /// [`ParagraphAst::break_window`](super::ParagraphAst::break_window) and

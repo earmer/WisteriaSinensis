@@ -285,6 +285,9 @@ pub extern "C" fn demo_alloc(len: u32) -> *mut u8 {
 /// `ptr` must come from this module and `len` must be its exact length.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn demo_free(ptr: *mut u8, len: u32) {
+    if ptr.is_null() {
+        return;
+    }
     // SAFETY: both producers hand out boxed byte slices of exactly `len`.
     drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len as usize)) });
 }
