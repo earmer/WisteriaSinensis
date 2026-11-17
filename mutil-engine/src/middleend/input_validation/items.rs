@@ -387,7 +387,7 @@ impl<'a> ItemChecks<'a> {
         {
             return false;
         }
-        let Some((before, _)) = self.ast.hyphen_seam(item) else {
+        let Some(before) = self.ast.hyphen_seam(item).map(|seam| seam.before) else {
             return false;
         };
         let offset = before.byte_range.end();
