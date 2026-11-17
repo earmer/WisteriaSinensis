@@ -2,7 +2,7 @@
 //! 1.6.5).
 
 use super::{BreakAction, DiscretionaryNode, ParagraphAst, ReshapeWindow, TextBoxView, WordNode};
-use crate::types::{ByteIndex, HyphenOpportunity};
+use crate::types::HyphenOpportunity;
 use core::iter::successors;
 use smallvec::SmallVec;
 
@@ -12,8 +12,6 @@ use smallvec::SmallVec;
 pub(crate) struct HyphenSeam<'a> {
     /// The seam's hyphenation opportunity.
     pub(crate) opportunity: &'a HyphenOpportunity,
-    /// The break offset: where `before` ends and `after` starts.
-    pub(crate) offset: ByteIndex,
     /// The text box ending at the seam (`items[index - 1]`).
     pub(crate) before: TextBoxView<'a>,
     /// The text box starting at the seam (`items[index + 1]`).
@@ -57,7 +55,6 @@ impl ParagraphAst {
             && byte_range.end() == after.byte_range.start())
         .then_some(HyphenSeam {
             opportunity,
-            offset: byte_range.start(),
             before,
             after,
         })
@@ -66,7 +63,9 @@ impl ParagraphAst {
     /// The text box before `items[item]` in its hyphen chain, with its index.
     fn chain_predecessor(&self, item: usize) -> Option<(usize, TextBoxView<'_>)> {
         let seam = item.checked_sub(1)?;
-        Some((seam - 1, self.hyphen_seam(seam)?.before))
+        // `hyphen_seam` rejects `seam == 0`, so `seam - 1` cannot underflow.
+        let before = self.hyphen_seam(seam)?.before;
+        Some((seam - 1, before))
     }
 
     /// The text box after `items[item]` in its hyphen chain, with its index.
@@ -93,10 +92,10 @@ impl ParagraphAst {
     pub fn break_window(&self, index: usize) -> Option<ReshapeWindow> {
         let HyphenSeam {
             opportunity,
-            offset,
             before,
             after,
         } = self.hyphen_seam(index)?;
+        let offset = before.byte_range.end();
         // The first and the last original byte the break's edits touch. An
         // edit without a cut still touches the neighbouring box: the hyphen
         // attaches to the last cluster before the break.
