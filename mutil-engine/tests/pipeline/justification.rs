@@ -461,6 +461,43 @@ fn st3_3_compression_spends_tier_0_before_tier_1() {
     }
 }
 
+#[test]
+fn crt1_crt3_compressed_cjk_seam_has_no_false_split_caret() {
+    let text = "漢、「漢漢b漢漢abcdefghijkl";
+    let style = localized_style(&[SERIF, JAPANESE], 10.0, "ja");
+    let ast = compile_bidi_input(&input(text, &style), &FrontendOptions::default());
+    let probe = lay_out_bidi_ast(&ast, text, &column(1000.0), &LayoutOptions::default());
+    let wide = &probe.lines[0];
+    let natural = x_of(wide, 19) + glyph_at(wide, 19).advance;
+
+    for shortfall in [4.0, 6.0] {
+        let p = lay_out_bidi_ast(&ast, text, &column(natural - shortfall), &justified());
+        assert!(ValidatedLayout::new(&p, text).is_ok(), "{shortfall}");
+        let line = &p.lines[0];
+        assert!(line.is_justified, "{shortfall}");
+
+        // CRT-1: stops are in non-decreasing visual order, within the line's bytes,
+        // and carry the line's index.
+        assert!(line.caret_stops.windows(2).all(|w| w[0].x <= w[1].x));
+        assert!(line.caret_stops.iter().all(|s| s.line == 0
+            && s.offset >= line.byte_range.start()
+            && s.offset <= line.byte_range.end()));
+
+        // CRT-3: no false split caret at the compressed seam (byte 6); there is
+        // a single CaretStop at offset 6 strictly between offsets 3 and 9.
+        let stops_at_6: Vec<&CaretStop> =
+            line.caret_stops.iter().filter(|s| s.offset == 6).collect();
+        assert_eq!(stops_at_6.len(), 1, "{shortfall}: {stops_at_6:?}");
+        let stop_3 = line.caret_stops.iter().find(|s| s.offset == 3).unwrap();
+        let stop_6 = stops_at_6[0];
+        let stop_9 = line.caret_stops.iter().find(|s| s.offset == 9).unwrap();
+        assert!(
+            stop_3.x < stop_6.x && stop_6.x < stop_9.x,
+            "{shortfall}: {stop_3:?} {stop_6:?} {stop_9:?}"
+        );
+    }
+}
+
 /// `justify` with `compress_last_lines` (ST1-7, ST3-3).
 fn compressing() -> LayoutOptions {
     LayoutOptions {
@@ -802,4 +839,47 @@ fn st3_2_clusters_separated_only_by_objects_offer_no_level_3_capacity() {
         assert_close(object.width, OBJECT);
     }
     assert!(glyphs(line).all(|g| (g.advance - CHAR).abs() < 1e-3));
+}
+
+#[test]
+fn crt1_a_word_space_shrunk_below_zero_keeps_its_caret_stops() {
+    // A caller's WordSpace may shrink by more than its width (WN-10 bounds
+    // only the compression pool): squeezed past zero, its source bytes still
+    // take caret stops on both sides.
+    // The stop inside the two-space gap (offset 3) comes from the glue alone.
+    let text = "ab  cd ef";
+    let mut ast = compile(text);
+    for item in &mut ast.items {
+        if let WordNode::Glue(glue) = item
+            && glue.kind == GlueKind::WordSpace
+        {
+            glue.max_shrink = 3.0 * glue.natural_width;
+        }
+    }
+    // "ab  cd" is 6 characters; the gap must give 14 of its 12 units.
+    let width = 6.0 * CHAR - 14.0;
+    let p = layout_paragraph(&ast, text, &*SHAPER, &column(width), &justified()).unwrap();
+    if let Err((line, error)) = ValidatedLayout::new(&p, text) {
+        panic!("line {line}: {error}\n{p:#?}");
+    }
+    assert_eq!(line_texts(&p, text)[0], "ab  cd ");
+    let line = &p.lines[0];
+    assert!(
+        line.caret_stops.iter().any(|s| s.offset == 3),
+        "no stop inside the gap: {:?}",
+        line.caret_stops
+    );
+    let edges: Vec<f32> = [2, 4]
+        .map(|offset| {
+            line.caret_stops
+                .iter()
+                .find(|s| s.offset == offset)
+                .unwrap_or_else(|| panic!("no stop at {offset}: {:?}", line.caret_stops))
+                .x
+        })
+        .to_vec();
+    assert!(
+        edges[1] < edges[0],
+        "the space is squeezed below zero: {edges:?}"
+    );
 }

@@ -27,10 +27,11 @@ pub(crate) fn url_ranges(text: &str) -> Vec<TextRange> {
             continue;
         }
         let at_word_start = i == 0
-            || text[..i]
-                .chars()
-                .next_back()
-                .is_some_and(char::is_whitespace);
+            || text[..i].chars().next_back().is_some_and(|c| {
+                c.is_whitespace()
+                    || (super::spacing::is_punctuation(c)
+                        && !matches!(c, '.' | '-' | '_' | '@' | '/' | ':'))
+            });
         let start = if at_word_start
             && bytes[i..]
                 .get(..4)
@@ -80,6 +81,9 @@ pub(crate) fn url_ranges(text: &str) -> Vec<TextRange> {
                 ')' => paren += 1,
                 ']' => square += 1,
                 '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' => {}
+                // Closing quotes and non-ASCII sentence punctuation (`”`,
+                // `’`, `»`, `」`, `。`) end the sentence, not the URL.
+                c if !c.is_ascii() && super::spacing::is_punctuation(c) => {}
                 _ => break,
             }
             end -= c.len_utf8();

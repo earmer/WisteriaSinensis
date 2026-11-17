@@ -310,6 +310,37 @@ fn a_hyphen_cut_one_byte_past_the_chain_end_is_rejected() {
 }
 
 #[test]
+fn g1_hyphen_replacement_with_line_or_paragraph_separator_is_rejected() {
+    for sep in [
+        "\n", "\r", "\u{b}", "\u{c}", "\u{85}", "\u{1c}", "\u{1d}", "\u{1e}", "\u{2028}",
+        "\u{2029}",
+    ] {
+        for is_prefix in [true, false] {
+            let (t, mut a) = hyphen_chain_ast(2, |_, _| (0, 0));
+            // Item 3 is the Hyphenate discretionary between the two 'a' boxes
+            // (0: 'x', 1: Direct, 2: 'a', 3: Hyphenate, 4: 'a', 5: end).
+            let WordNode::Discretionary(ref mut d) = a.items[3] else {
+                panic!("expected Discretionary at item 3");
+            };
+            let BreakAction::Hyphenate(ref mut opp) = d.action else {
+                panic!("expected Hyphenate at item 3");
+            };
+            let bad: ReplacementText = format!("x{sep}y").into();
+            if is_prefix {
+                opp.prefix_replacement = Some(bad);
+            } else {
+                opp.suffix_replacement = Some(bad);
+            }
+            assert_eq!(
+                check(&a, &t),
+                Err(LayoutInputError::InvalidHyphenOpportunity { item: 3 }),
+                "sep={sep:?} is_prefix={is_prefix}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_non_finite_variation_cannot_be_built() {
     for bad in [f32::NAN, f32::INFINITY] {
         assert_eq!(FontVariation::new(*b"wght", bad), None);

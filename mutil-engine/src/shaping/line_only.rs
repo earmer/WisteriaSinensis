@@ -190,22 +190,18 @@ impl<B: LineShaper> LineOnlyShaper<B> {
                     .next_back()
                     .is_some_and(char::is_whitespace)
         };
-        // Split by face at atom boundaries: a face change inside an atom
-        // keeps the atom's first face (the backend contract forbids one).
-        // Entries store `(first atom, font, first glyph)`.
-        let mut segments: Vec<(usize, FontId, usize)> = Vec::new();
-        for (i, (atom, font, _)) in kept.iter().enumerate() {
-            match segments.last() {
-                Some((_, last_font, _)) if last_font == font => {}
-                Some((first, _, _)) if *atom <= *first => {}
-                _ => segments.push((*atom, *font, i)),
-            }
-        }
-        segments[0].0 = range.start;
-        for (k, &(first_atom, font, first_glyph)) in segments.iter().enumerate() {
-            let (end_atom, end_glyph) = segments
-                .get(k + 1)
-                .map_or((range.end, kept.len()), |&(a, _, g)| (a, g));
+        let segments = face_segments(run, range.clone(), &mut kept);
+        for (k, segment) in segments.iter().enumerate() {
+            let FaceSegment {
+                first_atom,
+                font,
+                first_glyph,
+                ..
+            } = *segment;
+            let (end_atom, end_glyph) =
+                segments.get(k + 1).map_or((range.end, kept.len()), |next| {
+                    (next.first_atom, next.first_glyph)
+                });
             let tagged: Vec<(usize, RawShapedGlyph, bool, bool)> = kept[first_glyph..end_glyph]
                 .iter()
                 .map(|&(atom, _, glyph)| {
@@ -225,6 +221,79 @@ impl<B: LineShaper> LineOnlyShaper<B> {
         }
         (leading, trailing, fallback)
     }
+}
+
+/// A run of kept glyphs shaped by one face, over the atoms
+/// `first_atom..=last_atom`, starting at `kept[first_glyph]`.
+#[derive(Clone, Copy, Debug)]
+struct FaceSegment {
+    first_atom: usize,
+    last_atom: usize,
+    font: FontId,
+    first_glyph: usize,
+}
+
+/// Splits the kept `(atom, face, glyph)` triples of `atoms[range]` by face at
+/// atom boundaries. Segments partition the atoms in ascending order and every
+/// glyph's atom lies in the segment that emits it: a face change inside an
+/// atom, or atom ranges that overlap because the glyphs are not monotonic,
+/// merge into the earlier segment and keep its face. A tate-chu-yoko run is
+/// one segment, as SHP-5 makes it one cluster.
+///
+/// A glyph left in a segment of another face becomes the segment face's
+/// `.notdef` (glyph 0), with its advance kept: its id means nothing in the
+/// cluster's face (SHP-5, SHP-24).
+fn face_segments(
+    run: &ShapingRun,
+    range: core::ops::Range<usize>,
+    kept: &mut [(usize, FontId, RawShapedGlyph)],
+) -> Vec<FaceSegment> {
+    let mut segments: Vec<FaceSegment> = Vec::new();
+    if run.orientation == GlyphOrientation::HorizontalInVertical {
+        segments.push(FaceSegment {
+            first_atom: range.start,
+            last_atom: range.end - 1,
+            font: kept[0].1,
+            first_glyph: 0,
+        });
+    } else {
+        for (i, &(atom, font, _)) in kept.iter().enumerate() {
+            match segments.last_mut() {
+                Some(last) if last.font == font || atom <= last.last_atom => {
+                    last.first_atom = last.first_atom.min(atom);
+                    last.last_atom = last.last_atom.max(atom);
+                    // Absorb earlier segments this one now overlaps.
+                    while let [.., prev, cur] = segments.as_mut_slice() {
+                        if cur.first_atom > prev.last_atom {
+                            break;
+                        }
+                        prev.first_atom = prev.first_atom.min(cur.first_atom);
+                        prev.last_atom = prev.last_atom.max(cur.last_atom);
+                        segments.pop();
+                    }
+                }
+                _ => segments.push(FaceSegment {
+                    first_atom: atom,
+                    last_atom: atom,
+                    font,
+                    first_glyph: i,
+                }),
+            }
+        }
+        segments[0].first_atom = range.start;
+    }
+    for (k, segment) in segments.iter().enumerate() {
+        let end = segments
+            .get(k + 1)
+            .map_or(kept.len(), |next| next.first_glyph);
+        for (_, font, glyph) in &mut kept[segment.first_glyph..end] {
+            if *font != segment.font {
+                *font = segment.font;
+                glyph.glyph_id = 0;
+            }
+        }
+    }
+    segments
 }
 
 impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {

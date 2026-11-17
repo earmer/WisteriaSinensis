@@ -231,6 +231,114 @@ fn int13_arrows_exit_by_the_visual_stops_not_by_offsets() {
     );
 }
 
+#[test]
+fn int13_visual_arrows_across_soft_wrap_with_bidi_boundary_advance() {
+    // Wrap right before an RTL run ("אבג") or an LTR run ("abc") so the
+    // second line begins at a bidi direction boundary. Stepping Right from
+    // start to end and Left from end to start must never stall on coincident
+    // stops and must cross the wrap cleanly.
+    for (text, wrap_width, expected_lines) in [
+        ("abc אבג", 25.0, ["abc ", "אבג"].as_slice()),
+        ("abc אבג def", 25.0, ["abc ", "אבג ", "def"].as_slice()),
+        ("אבג abc", 25.0, ["אבג ", "abc"].as_slice()),
+        ("אבג abc דהו", 25.0, ["אבג ", "abc ", "דהו"].as_slice()),
+    ] {
+        let p = lay_out_bidi(
+            text,
+            &[HEBREW],
+            &column(wrap_width),
+            &LayoutOptions::default(),
+        );
+        assert_eq!(line_texts(&p, text), expected_lines, "{text:?}");
+        let l = ValidatedLayout::new(&p, text).unwrap();
+
+        let total_stops: usize = p.lines.iter().map(|line| line.caret_stops.len()).sum();
+        let stops_of = |line: &PositionedLine| -> Vec<CursorPosition> {
+            line.caret_stops
+                .iter()
+                .map(|s| pos(s.offset, s.affinity))
+                .collect()
+        };
+        // Visual order across the paragraph, left to right: the lines in
+        // turn in an LTR paragraph, from the last one in an RTL paragraph.
+        let mut lines: Vec<&PositionedLine> = p.lines.iter().collect();
+        if p.base_direction == BidiDirection::Rtl {
+            lines.reverse();
+        }
+        let rightwards: Vec<CursorPosition> = lines.into_iter().flat_map(stops_of).collect();
+        let leftwards: Vec<CursorPosition> = rightwards.iter().rev().copied().collect();
+        // Each walk starts at the paragraph's far side, so it must cross every
+        // wrap, visiting every stop in visual order, before it exits.
+        for (motion, expected) in [(Motion::Right, &rightwards), (Motion::Left, &leftwards)] {
+            let mut cur = expected[0];
+            let mut seen = vec![cur];
+            let mut exited = false;
+            for _ in 0..=total_stops {
+                match l.move_cursor(cur, motion, None) {
+                    CursorMove::Moved(next) => {
+                        assert!(
+                            !seen.contains(&next),
+                            "{text:?}: {motion:?} stalled or looped at {next:?} (history: {seen:?})"
+                        );
+                        seen.push(next);
+                        cur = next;
+                    }
+                    CursorMove::Exited { .. } => {
+                        exited = true;
+                        break;
+                    }
+                }
+            }
+            assert!(exited, "{text:?}: {motion:?} did not exit: {seen:?}");
+            assert_eq!(&seen, expected, "{text:?}: {motion:?}");
+        }
+    }
+}
+
+#[test]
+fn int16_selection_geometry_across_bidi_boundary_uses_non_zero_width_slot_level() {
+    // LTR base (level 0) + RTL Hebrew (level 1): boundary at byte 3.
+    let text = "abcאבג";
+    let p = lay_out_bidi(text, &[HEBREW], &column(100.0), &LayoutOptions::default());
+    let l = ValidatedLayout::new(&p, text).unwrap();
+
+    // Selecting only the RTL side starting at the boundary (3..9) must carry level 1,
+    // not a zero-width boundary slot's level 0.
+    let rtl_rects =
+        l.selection_geometry(&*BIDI_SHAPER, TextRange::new(3, 9), BoxHeightStyle::Tight);
+    assert_eq!(rtl_rects.len(), 1, "{rtl_rects:?}");
+    assert_eq!(rtl_rects[0].level.get(), 1);
+    assert!(rtl_rects[0].rect.width > 0.0);
+
+    // Selecting only the LTR side ending at the boundary (0..3) must carry level 0.
+    let ltr_rects =
+        l.selection_geometry(&*BIDI_SHAPER, TextRange::new(0, 3), BoxHeightStyle::Tight);
+    assert_eq!(ltr_rects.len(), 1, "{ltr_rects:?}");
+    assert_eq!(ltr_rects[0].level.get(), 0);
+    assert!(ltr_rects[0].rect.width > 0.0);
+
+    // Selecting across the boundary (2..5 = "cא"): visually separated into two
+    // non-zero-width pieces ("c" at level 0 and "א" at level 1).
+    let cross_rects =
+        l.selection_geometry(&*BIDI_SHAPER, TextRange::new(2, 5), BoxHeightStyle::Tight);
+    assert_eq!(cross_rects.len(), 2, "{cross_rects:?}");
+    let levels: Vec<u8> = cross_rects.iter().map(|r| r.level.get()).collect();
+    assert_eq!(levels, [0, 1]);
+
+    // RTL base (level 1) + embedded LTR (level 2): boundary at byte 6.
+    let rtl_text = "אבגabc";
+    let p2 = lay_out_bidi(
+        rtl_text,
+        &[HEBREW],
+        &column(100.0),
+        &LayoutOptions::default(),
+    );
+    let l2 = ValidatedLayout::new(&p2, rtl_text).unwrap();
+    let emb_ltr = l2.selection_geometry(&*BIDI_SHAPER, TextRange::new(6, 9), BoxHeightStyle::Tight);
+    assert_eq!(emb_ltr.len(), 1, "{emb_ltr:?}");
+    assert_eq!(emb_ltr[0].level.get(), 2);
+}
+
 fn moved(m: CursorMove) -> usize {
     match m {
         CursorMove::Moved(p) => p.byte_offset,

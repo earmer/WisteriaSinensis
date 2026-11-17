@@ -7,7 +7,7 @@
 - [docs/host-integration.md](docs/host-integration.md): non-normative notes for renderers.
 - [CONTRIBUTION.md](CONTRIBUTION.md): how to contribute.
 - [demo/](demo/README.md): a browser harness that draws the engine's
-  validated output; it shows what Phase 1 actually does, including the
+  validated output; it shows what Phase 2 actually does, including the
   features it rejects.
 
 ## Build

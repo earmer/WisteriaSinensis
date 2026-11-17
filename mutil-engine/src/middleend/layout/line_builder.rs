@@ -8,7 +8,7 @@ use super::super::{
 };
 use super::hanging::{LineHangs, clip_to_content, mark_hanging};
 use super::line_artifacts::{CaretContext, SpanContext};
-use super::{Break, FIT_EPSILON, Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Token};
+use super::{Break, Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Token};
 use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_order};
 use crate::frontend::{BoxNode, SpanEdge, WordNode};
 use crate::types::{
@@ -129,7 +129,9 @@ impl<'i, 'a> Layout<'i, 'a> {
         } else {
             0.0
         };
-        let fits_without = distance + pre - shrink <= slot.width() + FIT_EPSILON;
+        let needed = distance + pre - shrink;
+        let fits_without =
+            needed <= slot.width() + super::super::tolerance::tolerance(needed, slot.width());
         let end = self.end_hang(&placed[..body_len], first_line, pre, start, fits_without);
         let hangs = LineHangs { start, end };
         // The visible width `W`, hanging halves outside (ST3-2).
@@ -206,16 +208,16 @@ impl<'i, 'a> Layout<'i, 'a> {
                 continue;
             };
             let span = &self.ast.decoration_spans[span];
-            let is_item = |p: &&PlacedPiece| !matches!(p.piece.kind, PieceKind::SpanEdge { .. });
+            let is_item = |p: &&PlacedPiece| {
+                !matches!(p.piece.kind, PieceKind::SpanEdge { .. }) && !p.piece.bytes.is_empty()
+            };
             let neighbour = match edge {
                 SpanEdge::Leading => placed[k + 1..].iter().find(is_item),
                 SpanEdge::Trailing => placed[..k].iter().rev().find(is_item),
             };
-            if let Some(n) = neighbour.filter(|n| {
-                !n.piece.bytes.is_empty() && span.byte_range.contains_range(n.piece.bytes)
-            }) {
-                placed[k].level = n.level;
-            }
+            placed[k].level = neighbour
+                .filter(|n| span.byte_range.contains_range(n.piece.bytes))
+                .map_or_else(|| self.base.base_level(), |n| n.level);
         }
     }
 
@@ -247,8 +249,14 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn place_trailing_whitespace(&self, trailing: &mut [PlacedPiece], far_edge: f32, rtl: bool) {
         let collapsible = self.options.whitespace == HangingWhitespaceMode::Collapsible;
         let trailing_width = |p: &PlacedPiece| match p.piece.kind {
-            PieceKind::Glue { item } if self.glue(item).kind.is_synthetic() => 0.0,
-            _ if collapsible => 0.0,
+            PieceKind::Glue { item } => {
+                let glue = self.glue(item);
+                if glue.kind.is_synthetic() || (collapsible && glue.is_collapsible) {
+                    0.0
+                } else {
+                    p.piece.width
+                }
+            }
             _ => p.piece.width,
         };
         if rtl {

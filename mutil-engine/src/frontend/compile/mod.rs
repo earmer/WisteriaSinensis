@@ -398,6 +398,7 @@ impl<'a> Compiler<'a> {
             .iter()
             .enumerate()
             .map(|(index, atom)| script::ScriptAtom {
+                byte_range: atom.byte_range,
                 text: &text[atom.byte_range.as_range()],
                 explicit: self.styles[self.atom_styles[index]].script,
                 is_emoji: atom.flags.contains(AtomFlags::IS_EMOJI_SEQUENCE),
@@ -459,7 +460,16 @@ impl<'a> Compiler<'a> {
         ) else {
             return false;
         };
-        let word_start = i < 2 || !matches!(self.units[i - 2], Unit::Atom(_));
+        let word_start = self.units[..i - 1]
+            .iter()
+            .rev()
+            .find(|u| {
+                !matches!(
+                    u,
+                    Unit::Atom(p) if self.atoms[*p].flags.contains(AtomFlags::IS_OPEN_PUNCT)
+                )
+            })
+            .is_none_or(|u| !matches!(u, Unit::Atom(_)));
         let letter = &self.text[self.atoms[a].byte_range.as_range()];
         let language = primary_language(&self.atom_locales[a]);
         let mut chars = letter.chars();

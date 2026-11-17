@@ -8,6 +8,7 @@ use super::super::{
 };
 use super::line_builder::LineBounds;
 use super::{Break, Layout, Piece, PieceKind, PlacedPiece};
+use crate::frontend::GlueKind;
 use crate::frontend::InlineDecorationSpan;
 use crate::types::{AtomFlags, BidiLevel, FontInstanceRef, TextRange};
 
@@ -135,6 +136,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             if groups.iter().any(|g| !g.is_bare_boundary) {
                 groups.retain(|g| !g.is_bare_boundary);
             }
+            let trailing_edge = if rtl { line_lo } else { line_hi };
+            self.attach_trailing_bytes(ctx, &is_member, trailing_edge, &mut groups);
             if groups.is_empty() {
                 continue;
             }
@@ -208,6 +211,38 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
+    /// Gives a span's bytes in the line's collapsed trailing white space,
+    /// which has no visual order, to its last group by bytes, or to an empty
+    /// group at `edge`, the line end, when it has none on the line (ST2-3).
+    fn attach_trailing_bytes(
+        &self,
+        ctx: &SpanContext<'_>,
+        is_member: &impl Fn(&Piece) -> bool,
+        edge: f32,
+        groups: &mut Vec<VisualGroup>,
+    ) {
+        let Some(bytes) = ctx.placed[ctx.order.len()..]
+            .iter()
+            .filter(|p| is_member(&p.piece) && !p.piece.bytes.is_empty())
+            .map(|p| p.piece.bytes)
+            .reduce(|a, b| a.cover(b))
+        else {
+            return;
+        };
+        if let Some(last) = groups.iter_mut().max_by_key(|g| g.bytes.end()) {
+            last.bytes = last.bytes.cover(bytes);
+            last.is_bare_boundary = false;
+        } else {
+            groups.push(VisualGroup {
+                lo: edge,
+                hi: edge,
+                bytes,
+                level: self.base.base_level(),
+                is_bare_boundary: false,
+            });
+        }
+    }
+
     /// The left and right edges of the decoration span fragments on the line.
     pub(super) fn span_fragment_extents(
         &self,
@@ -261,6 +296,9 @@ impl<'i, 'a> Layout<'i, 'a> {
             let n = groups.len();
             let mut covered = part_start;
             for (i, g) in groups.into_iter().enumerate() {
+                if covered >= part_end {
+                    break;
+                }
                 let end = if i + 1 == n {
                     part_end
                 } else {
@@ -316,6 +354,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     }
                     continue;
                 }
+                PieceKind::SpanEdge { .. } => continue,
                 _ => {
                     out.extend(open.take());
                     pending_glue = None;
@@ -362,6 +401,14 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// INT-5 sub-slots of a ligature between them.
     fn push_piece_stops(&self, placed_piece: PlacedPiece, raw: &mut Vec<RawStop>) {
         let p = placed_piece.piece;
+        // A compression pool squeezed below zero overlaps its neighbours and
+        // owns no bytes: its edges would only duplicate theirs (CRT-3).
+        if placed_piece.width < 0.0
+            && matches!(p.kind, PieceKind::Glue { item }
+                if self.glue(item).kind == GlueKind::CjkPunctCompression)
+        {
+            return;
+        }
         let (a, b) = (placed_piece.x, placed_piece.x + placed_piece.width);
         let rtl = placed_piece.level.direction().is_rtl();
         // A glyph-less piece lends no level of its own (spec CRT-2).
@@ -513,6 +560,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             }
         }
         stops.sort_by(|a, b| a.x.total_cmp(&b.x));
+        collapse_same_level_overlaps(&mut stops);
         let split = split_offsets(&stops);
         let mut out: Vec<CaretStop> = stops
             .iter()
@@ -562,6 +610,52 @@ struct RawStop {
     offset: usize,
     edge: PieceEdge,
     level: Option<BidiLevel>,
+}
+
+/// Merges stops at the same `offset` that share the same bidi level (e.g.
+/// when negative-width `CjkPunctCompression` overlaps two adjacent clusters)
+/// into one stop at their midpoint, so `split_offsets` only splits genuine
+/// direction boundaries (CRT-3).
+fn collapse_same_level_overlaps(stops: &mut Vec<RawStop>) {
+    let mut by_offset: Vec<usize> = (0..stops.len()).collect();
+    by_offset.sort_by_key(|&i| stops[i].offset);
+    let mut remove = vec![false; stops.len()];
+    let mut updates: Vec<(usize, f32)> = Vec::new();
+    for same in by_offset.chunk_by(|&i, &j| stops[i].offset == stops[j].offset) {
+        if same.len() < 2 {
+            continue;
+        }
+        let first_level = stops[same[0]].level;
+        if first_level.is_none() || same.iter().any(|&i| stops[i].level != first_level) {
+            continue;
+        }
+        let min_x = same
+            .iter()
+            .map(|&i| stops[i].x)
+            .fold(f32::INFINITY, f32::min);
+        let max_x = same
+            .iter()
+            .map(|&i| stops[i].x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        if approx_eq(min_x, max_x) {
+            continue;
+        }
+        updates.push((same[0], (min_x + max_x) / 2.0));
+        for &i in &same[1..] {
+            remove[i] = true;
+        }
+    }
+    if !updates.is_empty() {
+        for (i, x) in updates {
+            stops[i].x = x;
+        }
+        *stops = core::mem::take(stops)
+            .into_iter()
+            .zip(remove)
+            .filter_map(|(stop, removed)| (!removed).then_some(stop))
+            .collect();
+        stops.sort_by(|a, b| a.x.total_cmp(&b.x));
+    }
 }
 
 /// For each stop, whether its offset has stops at two positions on the line:

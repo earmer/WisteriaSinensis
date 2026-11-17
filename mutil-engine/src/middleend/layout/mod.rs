@@ -224,6 +224,7 @@ impl Piece {
     /// Content (as opposed to whitespace): what ends a line's visible part.
     pub(super) fn is_content(&self) -> bool {
         !matches!(self.kind, PieceKind::Glue { .. })
+            && !(matches!(self.kind, PieceKind::SpanEdge { .. }) && self.width == 0.0)
     }
 }
 

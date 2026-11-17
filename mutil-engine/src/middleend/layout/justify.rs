@@ -67,6 +67,9 @@ impl Layout<'_, '_> {
                     capacity
                 }
                 PieceKind::Cluster { run, cluster } if cluster_follows => {
+                    if self.cluster_glyphs(cluster).0.is_empty() {
+                        return Capacity::default();
+                    }
                     let run = &self.ast.runs[run];
                     let flags = self.ast.clusters[cluster].flags;
                     let mut capacity = Capacity::default();

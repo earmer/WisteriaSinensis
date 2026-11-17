@@ -372,6 +372,21 @@ impl<'a> ItemChecks<'a> {
 
     /// Whether the hyphenation discretionary at `items[item]` is well formed.
     fn hyphen_is_valid(&self, item: usize, opportunity: &HyphenOpportunity) -> bool {
+        let has_line_break = |s: &str| {
+            s.chars()
+                .any(crate::frontend::is_line_or_paragraph_separator)
+        };
+        if opportunity
+            .prefix_replacement
+            .as_deref()
+            .is_some_and(has_line_break)
+            || opportunity
+                .suffix_replacement
+                .as_deref()
+                .is_some_and(has_line_break)
+        {
+            return false;
+        }
         let Some((before, _)) = self.ast.hyphen_seam(item) else {
             return false;
         };

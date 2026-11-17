@@ -121,9 +121,14 @@ impl ValidatedLayout<'_> {
             .position(|s| s == entry)
             .unwrap_or_default();
         let next = if rightwards {
-            target_stops.get(at + 1)
+            target_stops[at + 1..]
+                .iter()
+                .find(|s| !approx_eq(s.x, entry.x))
         } else {
-            at.checked_sub(1).and_then(|n| target_stops.get(n))
+            target_stops[..at]
+                .iter()
+                .rev()
+                .find(|s| !approx_eq(s.x, entry.x))
         };
         CursorMove::Moved(stop_position(next.unwrap_or(entry)))
     }
