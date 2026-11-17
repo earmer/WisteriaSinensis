@@ -29,7 +29,8 @@ pub(crate) fn url_ranges(text: &str) -> Vec<TextRange> {
         let at_word_start = i == 0
             || text[..i].chars().next_back().is_some_and(|c| {
                 c.is_whitespace()
-                    || (super::spacing::is_punctuation(c) && !matches!(c, '.' | '-' | '_'))
+                    || (super::spacing::is_punctuation(c)
+                        && !matches!(c, '.' | '-' | '_' | '@' | '/' | ':'))
             });
         let start = if at_word_start
             && bytes[i..]

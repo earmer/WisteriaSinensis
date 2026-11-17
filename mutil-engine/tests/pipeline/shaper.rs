@@ -133,3 +133,72 @@ fn shp5_horizontal_in_vertical_shapes_into_one_valid_cluster() {
     check_layout_inputs(&ast, text, &column(100.0), &LayoutOptions::default())
         .expect("G1 accepts HorizontalInVertical cluster");
 }
+
+/// The atoms and run of a tate-chu-yoko group: one atom per character of
+/// `text`, set in `families`.
+pub(crate) fn tate_chu_yoko(text: &str, families: &[&str]) -> (Vec<GraphemeAtom>, ShapingRun) {
+    let atoms: Vec<GraphemeAtom> = text
+        .char_indices()
+        .map(|(at, c)| GraphemeAtom {
+            orientation: GlyphOrientation::HorizontalInVertical,
+            byte_range: TextRange::new(at, at + c.len_utf8()),
+            script: ScriptTag::LATIN,
+            bidi_level: BidiLevel::LTR,
+            linebreak_class: LineBreakClass::Nu,
+            flags: AtomFlags::EMPTY,
+        })
+        .collect();
+    let run = ShapingRun {
+        baseline_align: BaselineAlignment::Auto,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        orientation: GlyphOrientation::HorizontalInVertical,
+        features: FontFeatures::default(),
+        byte_range: TextRange::new(0, text.len()),
+        families: families
+            .iter()
+            .map(|f| FontFamily::Named((*f).into()))
+            .collect(),
+        font_size: 10.0,
+        style: FontStyle::default(),
+        script: ScriptTag::LATIN,
+        locale: LocaleTag::und(),
+        bidi_level: BidiLevel::LTR,
+        decoration: TextDecoration::default(),
+        atom_range: 0..atoms.len(),
+        cluster_range: 0..1,
+    };
+    (atoms, run)
+}
+
+#[test]
+fn shp5_horizontal_in_vertical_takes_one_face_that_covers_the_whole_group() {
+    // The monospace face maps "…" but not "漢"; Noto Sans JP maps both.
+    let text = "…漢";
+    let japanese = SCRIPT_FONTS
+        .iter()
+        .find(|(family, _)| *family == JAPANESE)
+        .unwrap()
+        .1;
+    assert!(glyph_for(FONT_BYTES, '…').is_some());
+    assert!(glyph_for(FONT_BYTES, '漢').is_none());
+    assert!(glyph_for(japanese, '…').is_some() && glyph_for(japanese, '漢').is_some());
+
+    let (atoms, run) = tate_chu_yoko(text, &[FAMILY, JAPANESE]);
+    let mut clusters = Vec::new();
+    let mut glyphs = Vec::new();
+    SCRIPT_SHAPER.shape_run(text, &run, &atoms, &mut clusters, &mut glyphs);
+
+    assert_eq!(clusters.len(), 1, "{clusters:?}");
+    let jp_id = FontId(
+        1 + SCRIPT_FONTS
+            .iter()
+            .position(|(f, _)| *f == JAPANESE)
+            .unwrap() as u32,
+    );
+    assert_eq!(clusters[0].font.font_id, jp_id);
+    // Both characters found a glyph in that face: no .notdef.
+    assert_eq!(glyphs.len(), 2, "{glyphs:?}");
+    assert!(glyphs.iter().all(|g| g.glyph_id != 0), "{glyphs:?}");
+    assert_eq!(glyphs[1].glyph_id, glyph_for(japanese, '漢').unwrap());
+}

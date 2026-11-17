@@ -311,7 +311,10 @@ fn a_hyphen_cut_one_byte_past_the_chain_end_is_rejected() {
 
 #[test]
 fn g1_hyphen_replacement_with_line_or_paragraph_separator_is_rejected() {
-    for sep in ["\n", "\u{2028}", "\u{2029}"] {
+    for sep in [
+        "\n", "\r", "\u{b}", "\u{c}", "\u{85}", "\u{1c}", "\u{1d}", "\u{1e}", "\u{2028}",
+        "\u{2029}",
+    ] {
         for is_prefix in [true, false] {
             let (t, mut a) = hyphen_chain_ast(2, |_, _| (0, 0));
             // Item 3 is the Hyphenate discretionary between the two 'a' boxes

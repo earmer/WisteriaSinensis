@@ -8,6 +8,7 @@ use super::super::{
 };
 use super::line_builder::LineBounds;
 use super::{Break, Layout, Piece, PieceKind, PlacedPiece};
+use crate::frontend::GlueKind;
 use crate::frontend::InlineDecorationSpan;
 use crate::types::{AtomFlags, BidiLevel, FontInstanceRef, TextRange};
 
@@ -387,7 +388,12 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// INT-5 sub-slots of a ligature between them.
     fn push_piece_stops(&self, placed_piece: PlacedPiece, raw: &mut Vec<RawStop>) {
         let p = placed_piece.piece;
-        if matches!(p.kind, PieceKind::Glue { .. }) && placed_piece.width < 0.0 {
+        // A compression pool squeezed below zero overlaps its neighbours and
+        // owns no bytes: its edges would only duplicate theirs (CRT-3).
+        if placed_piece.width < 0.0
+            && matches!(p.kind, PieceKind::Glue { item }
+                if self.glue(item).kind == GlueKind::CjkPunctCompression)
+        {
             return;
         }
         let (a, b) = (placed_piece.x, placed_piece.x + placed_piece.width);
@@ -630,12 +636,11 @@ fn collapse_same_level_overlaps(stops: &mut Vec<RawStop>) {
         for (i, x) in updates {
             stops[i].x = x;
         }
-        let mut idx = 0;
-        stops.retain(|_| {
-            let keep = !remove[idx];
-            idx += 1;
-            keep
-        });
+        *stops = core::mem::take(stops)
+            .into_iter()
+            .zip(remove)
+            .filter_map(|(stop, removed)| (!removed).then_some(stop))
+            .collect();
         stops.sort_by(|a, b| a.x.total_cmp(&b.x));
     }
 }

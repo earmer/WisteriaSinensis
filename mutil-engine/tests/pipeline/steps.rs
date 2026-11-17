@@ -258,6 +258,21 @@ fn fe22_www_url_after_opening_punctuation_gains_url_opportunities() {
 }
 
 #[test]
+fn fe22_an_email_domain_is_not_a_www_url() {
+    for text in ["mail name@www.example.com now", "see a/www.example.com now"] {
+        let ast = compile(text);
+        let url_band = DiscretionaryNode::URL_PENALTY_MIN..=DiscretionaryNode::URL_PENALTY_MAX;
+        let in_band: Vec<usize> = discretionaries(&ast)
+            .iter()
+            .filter(|d| url_band.contains(&d.penalty))
+            .map(|d| d.byte_offset())
+            .collect();
+        assert!(in_band.is_empty(), "{text:?}: URL breaks at {in_band:?}");
+        passes_the_input_gate(&ast, text);
+    }
+}
+
+#[test]
 fn czech_one_letter_words_bind_to_the_next_word() {
     let text = "jdu v les a k nám";
     let base = style(10.0);

@@ -360,3 +360,24 @@ fn shp5_line_only_horizontal_in_vertical_shapes_into_one_valid_cluster() {
     check_layout_inputs(&ast, text, &column(100.0), &LayoutOptions::default())
         .expect("G1 accepts LineOnly HorizontalInVertical cluster");
 }
+
+#[test]
+fn shp5_line_only_horizontal_in_vertical_across_faces_keeps_one_face() {
+    // The backend sets "1" in the monospace face and "漢" in Noto Sans JP; the
+    // one cluster takes the first face, and the other face's glyph becomes
+    // that face's .notdef rather than an id read in the wrong face.
+    let text = "1漢";
+    let (atoms, run) = crate::shaper::tate_chu_yoko(text, &[FAMILY]);
+    let mut clusters = Vec::new();
+    let mut glyphs = Vec::new();
+    LINES.shape_run(text, &run, &atoms, &mut clusters, &mut glyphs);
+
+    assert_eq!(clusters.len(), 1, "{clusters:?}");
+    assert_eq!(clusters[0].font.font_id, FontId(0));
+    assert_eq!(clusters[0].glyph_range, 0..glyphs.len());
+    assert_eq!(
+        glyphs.iter().map(|g| g.glyph_id).collect::<Vec<_>>(),
+        [glyph_for(FONT_BYTES, '1').unwrap(), 0]
+    );
+    assert!(glyphs[1].x_advance > 0.0, "{glyphs:?}");
+}

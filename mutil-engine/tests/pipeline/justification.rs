@@ -840,3 +840,46 @@ fn st3_2_clusters_separated_only_by_objects_offer_no_level_3_capacity() {
     }
     assert!(glyphs(line).all(|g| (g.advance - CHAR).abs() < 1e-3));
 }
+
+#[test]
+fn crt1_a_word_space_shrunk_below_zero_keeps_its_caret_stops() {
+    // A caller's WordSpace may shrink by more than its width (WN-10 bounds
+    // only the compression pool): squeezed past zero, its source bytes still
+    // take caret stops on both sides.
+    // The stop inside the two-space gap (offset 3) comes from the glue alone.
+    let text = "ab  cd ef";
+    let mut ast = compile(text);
+    for item in &mut ast.items {
+        if let WordNode::Glue(glue) = item
+            && glue.kind == GlueKind::WordSpace
+        {
+            glue.max_shrink = 3.0 * glue.natural_width;
+        }
+    }
+    // "ab  cd" is 6 characters; the gap must give 14 of its 12 units.
+    let width = 6.0 * CHAR - 14.0;
+    let p = layout_paragraph(&ast, text, &*SHAPER, &column(width), &justified()).unwrap();
+    if let Err((line, error)) = ValidatedLayout::new(&p, text) {
+        panic!("line {line}: {error}\n{p:#?}");
+    }
+    assert_eq!(line_texts(&p, text)[0], "ab  cd ");
+    let line = &p.lines[0];
+    assert!(
+        line.caret_stops.iter().any(|s| s.offset == 3),
+        "no stop inside the gap: {:?}",
+        line.caret_stops
+    );
+    let edges: Vec<f32> = [2, 4]
+        .map(|offset| {
+            line.caret_stops
+                .iter()
+                .find(|s| s.offset == offset)
+                .unwrap_or_else(|| panic!("no stop at {offset}: {:?}", line.caret_stops))
+                .x
+        })
+        .to_vec();
+    assert!(
+        edges[1] < edges[0],
+        "the space is squeezed below zero: {edges:?}"
+    );
+}

@@ -143,27 +143,9 @@ impl HarfRustShaper {
         candidates: &[FontId],
     ) -> Option<FontId> {
         let chars = || text[atom.byte_range.as_range()].chars();
-        let covers = |id: FontId, c: char| {
-            is_coverage_exempt(c)
-                || self
-                    .registry
-                    .face(id)
-                    .is_some_and(|face| face.font.charmap().map_unicode(c).is_some())
-        };
-        // The atom as written, then its NFC and NFD forms where they differ
-        // (SHP-26).
-        let written = &text[atom.byte_range.as_range()];
-        let mut forms: SmallVec<[Cow<'_, str>; 3]> = SmallVec::new();
-        for form in [
-            Cow::Borrowed(written),
-            NFC.normalize(written),
-            NFD.normalize(written),
-        ] {
-            if !forms.contains(&form) {
-                forms.push(form);
-            }
-        }
-        let covers_atom = |id: FontId| forms.iter().any(|form| form.chars().all(|c| covers(id, c)));
+        let covers = |id: FontId, c: char| self.covers_char(id, c);
+        let forms = atom_forms(&text[atom.byte_range.as_range()]);
+        let covers_atom = |id: FontId| self.covers_forms(id, &forms);
         let profile = |id: FontId| self.registry.profile(id).unwrap_or_default();
         let first = |pass: &dyn Fn(FontId) -> bool| candidates.iter().copied().find(|&id| pass(id));
         // ASCII keeps stack order even in a CJK run: FE-13 folds digits and
@@ -202,6 +184,50 @@ impl HarfRustShaper {
             .or_else(|| candidates.first().copied())
     }
 
+    /// Whether face `id` maps `c`, or `c` needs no glyph of its own.
+    fn covers_char(&self, id: FontId, c: char) -> bool {
+        is_coverage_exempt(c)
+            || self
+                .registry
+                .face(id)
+                .is_some_and(|face| face.font.charmap().map_unicode(c).is_some())
+    }
+
+    /// Whether face `id` covers one of an atom's `forms` (SHP-26).
+    fn covers_forms(&self, id: FontId, forms: &[Cow<'_, str>]) -> bool {
+        forms
+            .iter()
+            .any(|form| form.chars().all(|c| self.covers_char(id, c)))
+    }
+
+    /// The one face that shapes a tate-chu-yoko group `atoms` (SHP-5): the
+    /// face of its first atom when that covers every atom, else the first
+    /// face, among those chosen for its atoms and then the candidates, that
+    /// does, else the first atom's face.
+    fn face_for_group(
+        &self,
+        text: &str,
+        run: &ShapingRun,
+        atoms: &[GraphemeAtom],
+        candidates: &[FontId],
+    ) -> Option<FontId> {
+        let lead = self.face_for(text, run, atoms.first()?, candidates)?;
+        let forms: Vec<_> = atoms
+            .iter()
+            .map(|atom| atom_forms(&text[atom.byte_range.as_range()]))
+            .collect();
+        let covers_all = |id: FontId| forms.iter().all(|f| self.covers_forms(id, f));
+        core::iter::once(lead)
+            .chain(
+                atoms[1..]
+                    .iter()
+                    .filter_map(|atom| self.face_for(text, run, atom, candidates)),
+            )
+            .chain(candidates.iter().copied())
+            .find(|&id| covers_all(id))
+            .or(Some(lead))
+    }
+
     /// Shapes the atoms `target.atoms[range]` of `target.run`, all contiguous
     /// in bytes, appending clusters and glyphs. `cut_before` marks a seam the
     /// caller made: the first cluster is then not safe to concatenate (CLU-8).
@@ -213,12 +239,23 @@ impl HarfRustShaper {
         cut_before: bool,
     ) {
         let mut start = range.start;
-        let mut current_font = (start < range.end)
-            .then(|| self.face_for(target.text, target.run, &target.atoms[start], candidates));
+        let group = target.run.orientation == GlyphOrientation::HorizontalInVertical;
+        let mut current_font = (start < range.end).then(|| {
+            if group {
+                self.face_for_group(
+                    target.text,
+                    target.run,
+                    &target.atoms[range.clone()],
+                    candidates,
+                )
+            } else {
+                self.face_for(target.text, target.run, &target.atoms[start], candidates)
+            }
+        });
         while let Some(font) = current_font {
             let mut end = start + 1;
             let mut next_font = None;
-            if target.run.orientation == GlyphOrientation::HorizontalInVertical {
+            if group {
                 end = range.end;
             } else {
                 while end < range.end {
@@ -423,6 +460,22 @@ fn flow_offsets(pos: &GlyphPosition, k: f32, vertical: bool) -> (f32, f32, f32) 
 
 /// Code points shaped by whatever face shapes the rest of their atom:
 /// joiners and variation selectors, which faces rarely map.
+/// An atom's text as written, then its NFC and NFD forms where they differ
+/// (SHP-26).
+fn atom_forms(written: &str) -> SmallVec<[Cow<'_, str>; 3]> {
+    let mut forms: SmallVec<[Cow<'_, str>; 3]> = SmallVec::new();
+    for form in [
+        Cow::Borrowed(written),
+        NFC.normalize(written),
+        NFD.normalize(written),
+    ] {
+        if !forms.contains(&form) {
+            forms.push(form);
+        }
+    }
+    forms
+}
+
 fn is_coverage_exempt(c: char) -> bool {
     matches!(c, '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
 }

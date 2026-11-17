@@ -253,6 +253,25 @@ fn int13_visual_arrows_across_soft_wrap_with_bidi_boundary_advance() {
         let l = ValidatedLayout::new(&p, text).unwrap();
 
         let total_stops: usize = p.lines.iter().map(|line| line.caret_stops.len()).sum();
+        let stops_of = |line: &PositionedLine| -> Vec<CursorPosition> {
+            line.caret_stops
+                .iter()
+                .map(|s| pos(s.offset, s.affinity))
+                .collect()
+        };
+        let ltr = p.lines[0].caret_stops[0].level == BidiLevel::LTR;
+        let (expected_right, expected_left): (Vec<_>, Vec<_>) = if ltr {
+            let all: Vec<_> = p.lines.iter().flat_map(stops_of).collect();
+            (all.clone(), all.into_iter().rev().collect())
+        } else {
+            (
+                stops_of(&p.lines[0]),
+                stops_of(p.lines.last().unwrap())
+                    .into_iter()
+                    .rev()
+                    .collect(),
+            )
+        };
         let line0_start = p.lines[0].caret_stops.first().copied().unwrap();
         let mut cur = pos(line0_start.offset, line0_start.affinity);
         let mut seen = vec![cur];
@@ -274,7 +293,10 @@ fn int13_visual_arrows_across_soft_wrap_with_bidi_boundary_advance() {
             }
         }
         assert!(exited_right, "{text:?}: Right did not exit: {seen:?}");
-        assert!(seen.len() >= 2, "{text:?}: too few stops visited");
+        // Every stop is visited, in visual order: an LTR paragraph crosses
+        // each line in turn; in an RTL one, Right runs to the paragraph start
+        // and exits on the first line.
+        assert_eq!(seen, expected_right, "{text:?}: Right");
 
         let last_line = p.lines.last().unwrap();
         let last_stop = last_line.caret_stops.last().copied().unwrap();
@@ -298,7 +320,7 @@ fn int13_visual_arrows_across_soft_wrap_with_bidi_boundary_advance() {
             }
         }
         assert!(exited_left, "{text:?}: Left did not exit: {seen:?}");
-        assert!(seen.len() >= 2, "{text:?}: too few stops visited");
+        assert_eq!(seen, expected_left, "{text:?}: Left");
     }
 }
 
