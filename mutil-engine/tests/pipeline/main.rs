@@ -11,6 +11,7 @@ mod common;
 mod fonts;
 mod frontend;
 mod hanging;
+mod hanging_regressions;
 mod justification;
 mod layout;
 mod line_only;
