@@ -37,9 +37,12 @@ fn a_long_unbreakable_word_lays_out_and_passes_the_output_gate() {
 
 #[test]
 fn wn6_text_width_is_the_left_to_right_f32_sum_of_its_clusters() {
-    for n in [2000usize, 5000] {
+    for (n, font_size) in [2000usize, 5000]
+        .into_iter()
+        .flat_map(|n| [FONT_SIZE, 14.5, 13.37, 7.77].map(|size| (n, size)))
+    {
         let text = "a".repeat(n);
-        let ast = compile_at(&text, FONT_SIZE);
+        let ast = compile_at(&text, font_size);
         let mut texts = 0;
         for item in &ast.items {
             let WordNode::Box(BoxNode::Text {
@@ -55,7 +58,7 @@ fn wn6_text_width_is_the_left_to_right_f32_sum_of_its_clusters() {
             for cluster in &ast.clusters[cluster_range.clone()] {
                 sum += cluster.natural_width;
             }
-            assert_eq!(*natural_width, sum, "n = {n}");
+            assert_eq!(*natural_width, sum, "n = {n}, font size {font_size}");
         }
         assert!(texts > 0);
     }
