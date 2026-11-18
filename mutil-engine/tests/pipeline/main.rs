@@ -14,6 +14,7 @@ mod hanging;
 mod justification;
 mod layout;
 mod line_only;
+mod long_word;
 mod queries;
 mod shaper;
 mod spacing_frontend;
