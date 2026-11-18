@@ -1,4 +1,5 @@
 import { Engine } from './wasm.js';
+import { motionFor, orderedSelection, position, step } from './selection.js';
 
 const FONTS = [
   ['Noto Sans', 'NotoSans[wdth,wght].ttf'],
@@ -42,13 +43,18 @@ const SAMPLES = {
     '中文和English混排时，引擎会在中西文之间插入间距。标点挤压：“引号”（括号）。两端对齐按优先级逐级分配剩余空间，最后一行不对齐。',
 };
 
+/** Canvas geometry the layout and the hit test must agree on. */
+const PAGE = Object.freeze({ pad: 32, paragraphGap: 14 });
+
 const state = {
   engine: null,
   fonts: new Map(), // font id -> { upem, family }
   missing: [],
   glyphs: new Map(), // "font:gid" -> Path2D | null
-  layout: null, // last successful results
-  paraLayouts: [], // [{ id, y, blockSize, utf16Start, utf16End, rawText }]
+  // The last successful layout, or null: `text` is the textarea value it was
+  // laid out from, `results` the engine's paragraphs each extended with
+  // { y, rawText, utf16Start, utf16End }.
+  view: null,
   selection: {
     anchor: null, // { paraId, byteOffset, affinity }
     focus: null, // { paraId, byteOffset, affinity }
@@ -104,8 +110,6 @@ let frame = 0;
 function applySample(key) {
   const preset = PRESETS[key];
   textarea.value = SAMPLES[key] ?? '';
-  // A new sample is new text: the old selection's offsets mean nothing in it.
-  clearSelection();
   if (preset) {
     localeInput.value = preset.locale;
     quotesInput.value = preset.quotes;
@@ -195,22 +199,13 @@ function renderEngineStatus(report) {
 }
 
 function splitParagraphs(text) {
-  const re = /\r\n|[\r\n\u2029]/g;
-  const out = [];
-  let start = 0;
-  let match;
-  while ((match = re.exec(text)) !== null) {
-    const slice = text.slice(start, match.index);
-    if (slice.trim() !== '') {
-      out.push({ rawText: slice, utf16Start: start, utf16End: match.index });
-    }
-    start = match.index + match[0].length;
-  }
-  const tail = text.slice(start);
-  if (tail.trim() !== '') {
-    out.push({ rawText: tail, utf16Start: start, utf16End: text.length });
-  }
-  return out;
+  return [...text.matchAll(/[^\r\n\u2029]+/g)]
+    .filter((match) => match[0].trim() !== '')
+    .map((match) => ({
+      rawText: match[0],
+      utf16Start: match.index,
+      utf16End: match.index + match[0].length,
+    }));
 }
 
 /** The Phase 2 options packed as the demo's C ABI expects (`Phase2`). */
@@ -243,10 +238,6 @@ function currentSettings() {
     wordSpacing: Number(wordSpacingInput.value),
     firstLineIndent: Number(firstIndentInput.value),
     hangingIndent: Number(hangingIndentInput.value),
-    selectionHeight: Number(selectionHeightInput.value),
-    showBoxes: showBoxes.checked,
-    showBaselines: showBaselines.checked,
-    showCarets: showCarets.checked,
   };
 }
 
@@ -259,7 +250,15 @@ function relayout() {
     return;
   }
   const settings = currentSettings();
-  const paragraphs = splitParagraphs(textarea.value);
+  const text = textarea.value;
+  const paragraphs = splitParagraphs(text);
+  // One rule for every way the text can change (typing, IME, a new sample):
+  // a selection holds offsets into the text it was made in, so it survives
+  // only a relayout of that same text. A click during the input debounce
+  // selects in the old layout; the relayout of the new text drops it.
+  if (state.view?.text !== text) {
+    clearSelection();
+  }
   state.lastError = null;
   hideError();
 
@@ -277,10 +276,7 @@ function relayout() {
 
   const started = performance.now();
   const results = [];
-  const paraLayouts = [];
-  const pad = 32;
-  const paragraphGap = 14;
-  let y = pad;
+  let y = PAGE.pad;
   let lines = 0;
   let glyphs = 0;
   let justified = 0;
@@ -299,10 +295,8 @@ function relayout() {
     );
     if (!result.ok) {
       showEngineError(result, index, paragraphs.length);
-      state.layout = null;
-      state.paraLayouts = [];
-      state.selection.anchor = null;
-      state.selection.focus = null;
+      state.view = null;
+      clearSelection();
       gateChip.textContent = 'engine rejected the input';
       gateChip.className = 'chip bad';
       stats.replaceChildren();
@@ -310,16 +304,8 @@ function relayout() {
       updateCursorStatus();
       return;
     }
-    results.push(result);
-    paraLayouts.push({
-      id: result.id,
-      y,
-      blockSize: result.blockSize,
-      utf16Start: para.utf16Start,
-      utf16End: para.utf16End,
-      rawText: para.rawText,
-    });
-    y += result.blockSize + paragraphGap;
+    results.push(Object.assign(result, para, { y }));
+    y += result.blockSize + PAGE.paragraphGap;
     lines += result.lines.length;
     for (const line of result.lines) {
       justified += line.justified ? 1 : 0;
@@ -330,13 +316,7 @@ function relayout() {
     }
   }
   const elapsed = performance.now() - started;
-  state.layout = { results, settings };
-  state.paraLayouts = paraLayouts;
-
-  if (state.selection.focus && state.selection.focus.paraId >= results.length) {
-    state.selection.anchor = null;
-    state.selection.focus = null;
-  }
+  state.view = { text, width: settings.width, results };
 
   gateChip.textContent = results.length === 0 ? 'nothing to draw' : 'output gate passed';
   gateChip.className = `chip ${results.length === 0 ? 'muted' : 'good'}`;
@@ -355,27 +335,32 @@ function relayout() {
     item.append(strong, ` ${label}`);
     return item;
   })));
-  draw(results, settings);
+  draw();
 }
 
-function draw(results, settings) {
-  const pad = 32;
-  const paragraphGap = 14;
-  const block = results.reduce((sum, result) => sum + result.blockSize, 0);
-  const gaps = Math.max(0, results.length - 1) * paragraphGap;
-  const cssWidth = settings.width + pad * 2;
-  const cssHeight = Math.max(block + gaps + pad * 2, 200);
+function sizeCanvas(cssWidth, cssHeight) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
-
   canvas.width = Math.round(cssWidth * dpr);
   canvas.height = Math.round(cssHeight * dpr);
   canvas.style.width = `${cssWidth}px`;
   canvas.style.height = `${cssHeight}px`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssWidth, cssHeight);
-
   ctx.fillStyle = '#fffdf7';
   ctx.fillRect(0, 0, cssWidth, cssHeight);
+}
+
+function draw() {
+  const view = state.view;
+  if (!view) {
+    return;
+  }
+  const { results } = view;
+  const last = results.at(-1);
+  sizeCanvas(
+    view.width + PAGE.pad * 2,
+    Math.max((last ? last.y + last.blockSize : PAGE.pad) + PAGE.pad, 200),
+  );
 
   if (results.length === 0) {
     hint.textContent = 'Paste text to lay it out.';
@@ -385,19 +370,18 @@ function draw(results, settings) {
   }
   hint.hidden = true;
 
-  const selBounds = orderedSelection();
+  const selBounds = orderedSelection(state.selection);
   const imeRange = resolveImeParagraphRange();
 
-  let y = pad;
   for (const paragraph of results) {
     ctx.save();
-    ctx.translate(pad, y);
-    drawLineGuides(paragraph, settings);
+    ctx.translate(PAGE.pad, paragraph.y);
+    drawLineGuides(paragraph);
     if (selBounds) {
-      drawSelection(paragraph.id, selBounds, settings.selectionHeight);
+      drawSelection(paragraph.id, selBounds);
     }
     drawGlyphs(paragraph);
-    drawCaretStops(paragraph, settings);
+    drawCaretStops(paragraph);
     if (imeRange && imeRange.paraId === paragraph.id) {
       drawImeOverlay(paragraph.id, imeRange.startByte, imeRange.endByte);
     }
@@ -405,7 +389,6 @@ function draw(results, settings) {
       drawActiveCaret(state.selection.focus);
     }
     ctx.restore();
-    y += paragraph.blockSize + paragraphGap;
   }
   updateCursorStatus(selBounds, imeRange);
 }
@@ -445,12 +428,12 @@ function glyphPath(fontId, glyphId) {
   return path;
 }
 
-function drawLineGuides(paragraph, settings) {
-  if (!settings.showBoxes && !settings.showBaselines) {
+function drawLineGuides(paragraph) {
+  if (!showBoxes.checked && !showBaselines.checked) {
     return;
   }
   for (const line of paragraph.lines) {
-    if (settings.showBoxes) {
+    if (showBoxes.checked) {
       // The slot's available interval, dashed: a hanging mark protrudes
       // past it, while the solid content box below stops at the body.
       ctx.save();
@@ -473,14 +456,14 @@ function drawLineGuides(paragraph, settings) {
       }
     }
     for (const [start, end] of line.slots) {
-      if (settings.showBoxes) {
+      if (showBoxes.checked) {
         ctx.fillStyle = 'rgba(79, 112, 189, 0.06)';
         ctx.fillRect(start, line.top, end - start, line.height);
         ctx.strokeStyle = 'rgba(79, 112, 189, 0.35)';
         ctx.lineWidth = 1;
         ctx.strokeRect(start + 0.5, line.top + 0.5, end - start - 1, line.height - 1);
       }
-      if (settings.showBaselines) {
+      if (showBaselines.checked) {
         ctx.save();
         ctx.setLineDash([3, 3]);
         ctx.strokeStyle = 'rgba(79, 112, 189, 0.5)';
@@ -495,8 +478,8 @@ function drawLineGuides(paragraph, settings) {
   }
 }
 
-function drawCaretStops(paragraph, settings) {
-  if (!settings.showCarets) {
+function drawCaretStops(paragraph) {
+  if (!showCarets.checked) {
     return;
   }
   ctx.strokeStyle = 'rgba(27, 122, 90, 0.55)';
@@ -511,21 +494,7 @@ function drawCaretStops(paragraph, settings) {
   }
 }
 
-function orderedSelection() {
-  const { anchor, focus } = state.selection;
-  if (!anchor || !focus) {
-    return null;
-  }
-  if (anchor.paraId === focus.paraId && anchor.byteOffset === focus.byteOffset) {
-    return null;
-  }
-  const forward =
-    anchor.paraId < focus.paraId ||
-    (anchor.paraId === focus.paraId && anchor.byteOffset <= focus.byteOffset);
-  return forward ? { start: anchor, end: focus } : { start: focus, end: anchor };
-}
-
-function drawSelection(paraId, selBounds, heightStyle) {
+function drawSelection(paraId, selBounds) {
   if (paraId < selBounds.start.paraId || paraId > selBounds.end.paraId) {
     return;
   }
@@ -534,7 +503,7 @@ function drawSelection(paraId, selBounds, heightStyle) {
   if (lo >= hi) {
     return;
   }
-  const rects = state.engine.selectionGeometry(paraId, lo, hi, heightStyle);
+  const rects = state.engine.selectionGeometry(paraId, lo, hi, Number(selectionHeightInput.value));
   if (!rects || rects.length === 0) {
     return;
   }
@@ -580,7 +549,7 @@ function resolveImeParagraphRange() {
   }
   const startUtf16 = state.ime.startUtf16;
   const endUtf16 = startUtf16 + state.ime.text.length;
-  const para = state.paraLayouts.find(
+  const para = state.view.results.find(
     (p) => startUtf16 >= p.utf16Start && startUtf16 <= p.utf16End,
   );
   if (!para) {
@@ -668,23 +637,13 @@ function updateCursorStatus(selBounds, imeRange) {
 }
 
 function drawPlaceholder(width, message) {
-  const pad = 32;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
-  const cssWidth = width + pad * 2;
-  const cssHeight = 200;
-  canvas.width = Math.round(cssWidth * dpr);
-  canvas.height = Math.round(cssHeight * dpr);
-  canvas.style.width = `${cssWidth}px`;
-  canvas.style.height = `${cssHeight}px`;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, cssWidth, cssHeight);
-  ctx.fillStyle = '#fffdf7';
-  ctx.fillRect(0, 0, cssWidth, cssHeight);
+  const cssWidth = width + PAGE.pad * 2;
+  sizeCanvas(cssWidth, 200);
   ctx.fillStyle = '#8a8378';
   ctx.font = '14px ui-sans-serif, system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(message, cssWidth / 2, cssHeight / 2, cssWidth - pad * 2);
+  ctx.fillText(message, cssWidth / 2, 100, width);
   hint.hidden = true;
 }
 
@@ -747,7 +706,7 @@ textarea.addEventListener('compositionupdate', (event) => {
   state.ime.text = event.data ?? '';
 });
 
-/** Drops the canvas selection: its offsets belong to the text before an edit. */
+/** Drops the canvas selection; `relayout` calls it when the text changed. */
 function clearSelection() {
   state.selection.anchor = null;
   state.selection.focus = null;
@@ -757,13 +716,11 @@ function clearSelection() {
 textarea.addEventListener('compositionend', () => {
   state.ime.active = false;
   state.ime.text = '';
-  clearSelection();
   clearTimeout(textTimer);
   relayout();
 });
 
 textarea.addEventListener('input', (event) => {
-  clearSelection();
   clearTimeout(textTimer);
   if (event.isComposing || state.ime.active) {
     relayout();
@@ -788,92 +745,69 @@ const layoutInputs = [
   hangingIndentInput,
 ];
 
-for (const input of layoutInputs) {
-  input.addEventListener('input', () => {
-    if (input === widthInput) {
-      $('width-value').textContent = `${widthInput.value} px`;
-    } else if (input === sizeInput) {
-      $('size-value').textContent = `${sizeInput.value} px`;
-    } else if (input === letterSpacingInput) {
-      $('letter-spacing-value').textContent = `${letterSpacingInput.value} px`;
-    } else if (input === wordSpacingInput) {
-      $('word-spacing-value').textContent = `${wordSpacingInput.value} px`;
-    } else if (input === firstIndentInput) {
-      $('first-indent-value').textContent = `${firstIndentInput.value} px`;
-    } else if (input === hangingIndentInput) {
-      $('hanging-indent-value').textContent = `${hangingIndentInput.value} px`;
-    }
-    schedule();
-  });
+function showValue(input) {
+  const output = $(`${input.id}-value`);
+  if (output) {
+    output.textContent = `${input.value} px`;
+  }
 }
 
-selectionHeightInput.addEventListener('change', () => {
-  if (state.layout) {
-    const { results, settings } = state.layout;
-    settings.selectionHeight = Number(selectionHeightInput.value);
-    draw(results, settings);
-  }
-});
+for (const input of layoutInputs) {
+  input.addEventListener('input', () => {
+    showValue(input);
+    schedule();
+  });
+  showValue(input);
+}
+
+/** True when there is a layout with at least one paragraph to point at. */
+function hasParagraphs() {
+  return (state.view?.results.length ?? 0) > 0;
+}
 
 function canvasPointToParagraph(clientX, clientY) {
-  if (state.paraLayouts.length === 0) {
-    return null;
-  }
+  const { results } = state.view;
   const rect = canvas.getBoundingClientRect();
   const cx = clientX - rect.left;
   const cy = clientY - rect.top;
-  const pad = 32;
-  const paragraphGap = 14;
-  let target = state.paraLayouts[state.paraLayouts.length - 1];
-  for (const para of state.paraLayouts) {
-    if (cy < para.y + para.blockSize + paragraphGap * 0.5) {
-      target = para;
-      break;
-    }
-  }
-  return { paraId: target.id, x: cx - pad, y: cy - target.y };
+  const target =
+    results.find((para) => cy < para.y + para.blockSize + PAGE.paragraphGap * 0.5) ?? results.at(-1);
+  return { paraId: target.id, x: cx - PAGE.pad, y: cy - target.y };
+}
+
+/** The caret position under a pointer event, or `null` when the engine finds none. */
+function hitPosition(event) {
+  const pt = canvasPointToParagraph(event.clientX, event.clientY);
+  const hit = state.engine.hitTest(pt.paraId, pt.x, pt.y);
+  return hit && position(pt.paraId, hit);
 }
 
 canvas.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0 || !state.layout || state.paraLayouts.length === 0) {
+  if (event.button !== 0 || !hasParagraphs()) {
     return;
   }
   canvas.focus({ preventScroll: true });
   canvas.setPointerCapture(event.pointerId);
-  const pt = canvasPointToParagraph(event.clientX, event.clientY);
-  if (!pt) {
+  const pos = hitPosition(event);
+  if (!pos) {
     return;
   }
-  const hit = state.engine.hitTest(pt.paraId, pt.x, pt.y);
-  if (!hit) {
-    return;
-  }
-  const pos = { paraId: pt.paraId, byteOffset: hit.byteOffset, affinity: hit.affinity };
-  if (event.shiftKey && state.selection.anchor) {
-    state.selection.focus = pos;
-  } else {
-    state.selection.anchor = pos;
-    state.selection.focus = pos;
-  }
+  state.selection.anchor = event.shiftKey && state.selection.anchor ? state.selection.anchor : pos;
+  state.selection.focus = pos;
   state.selection.preferredInline = null;
   state.selection.dragging = true;
-  draw(state.layout.results, state.layout.settings);
+  draw();
 });
 
 canvas.addEventListener('pointermove', (event) => {
-  if (!state.selection.dragging || !state.layout || state.paraLayouts.length === 0) {
+  if (!state.selection.dragging || !hasParagraphs()) {
     return;
   }
-  const pt = canvasPointToParagraph(event.clientX, event.clientY);
-  if (!pt) {
-    return;
+  const pos = hitPosition(event);
+  if (pos) {
+    state.selection.focus = pos;
+    draw();
   }
-  const hit = state.engine.hitTest(pt.paraId, pt.x, pt.y);
-  if (!hit) {
-    return;
-  }
-  state.selection.focus = { paraId: pt.paraId, byteOffset: hit.byteOffset, affinity: hit.affinity };
-  draw(state.layout.results, state.layout.settings);
 });
 
 for (const evName of ['pointerup', 'pointercancel']) {
@@ -882,138 +816,25 @@ for (const evName of ['pointerup', 'pointercancel']) {
   });
 }
 
-function isRtl(paraId) {
-  return state.layout?.results[paraId]?.direction === 'rtl';
-}
-
-/**
- * Collapses a selection to its visual edge on `side` ('left' or 'right'), as
- * an unshifted Left or Right does before it moves; `false` when there is none
- * to collapse.
- */
-function collapseSelection(side) {
-  const bounds = orderedSelection();
-  if (!bounds) {
-    return false;
-  }
-  const { start, end } = bounds;
-  const caret = (pos) => state.engine.caretGeometry(pos.paraId, pos.byteOffset, pos.affinity)?.primary;
-  const a = caret(start);
-  const b = caret(end);
-  // Each end says where `side` points from it: in an LTR paragraph Left is
-  // backwards, so the start is the left edge; in an RTL one it is the end.
-  const startOnSide = (side === 'left') !== isRtl(start.paraId);
-  const endOnSide = (side === 'left') === isRtl(end.paraId);
-  const sameLine = a && b && start.paraId === end.paraId && Math.abs(a.y - b.y) < 1;
-  let edge;
-  if (!sameLine && startOnSide !== endOnSide) {
-    // Exactly one end is on `side`, as across lines of one direction.
-    edge = startOnSide ? start : end;
-  } else if (a && b) {
-    // On one line, or when mixed directions put both ends or neither on
-    // `side`, the edge on `side` is the visual one.
-    edge = (a.x <= b.x) === (side === 'left') ? start : end;
-  } else {
-    edge = start;
-  }
-  state.selection.anchor = edge;
-  state.selection.focus = edge;
-  state.selection.preferredInline = null;
-  return true;
-}
-
-/** The motion code (`demo_move_cursor`) a key asks for, if any. */
-function motionFor(event) {
-  const word = event.altKey || event.ctrlKey;
-  const motionMap = {
-    ArrowLeft: word ? 6 : 0,
-    ArrowRight: word ? 7 : 1,
-    ArrowUp: 2,
-    ArrowDown: 3,
-    Home: 4,
-    End: 5,
-    // Logical order (Motion::Previous / Motion::Next), by key position so
-    // Shift still extends.
-    BracketLeft: 8,
-    BracketRight: 9,
-  };
-  return motionMap[event.key] ?? motionMap[event.code];
-}
-
-/**
- * Where a caret that left paragraph `paraId` at `moved.edge` lands in the
- * neighbouring paragraph, or `null` at the first or last one. With no column
- * to keep it lands on the neighbour's logical end or start, whose side
- * depends on that paragraph's direction.
- */
-function crossParagraph(paraId, moved) {
-  if (moved.edge === 'start' && paraId > 0) {
-    const prevId = paraId - 1;
-    const inlineX = moved.inlinePosition ?? (isRtl(prevId) ? -1e9 : 1e9);
-    const hit = state.engine.hitTestOnLine(prevId, 0xffffffff, inlineX);
-    return hit && { paraId: prevId, byteOffset: hit.byteOffset, affinity: hit.affinity };
-  }
-  if (moved.edge === 'end' && paraId + 1 < state.paraLayouts.length) {
-    const nextId = paraId + 1;
-    const inlineX = moved.inlinePosition ?? (isRtl(nextId) ? 1e9 : -1e9);
-    const hit = state.engine.hitTestOnLine(nextId, 0, inlineX);
-    return hit && { paraId: nextId, byteOffset: hit.byteOffset, affinity: hit.affinity };
-  }
-  return null;
-}
-
 canvas.addEventListener('keydown', (event) => {
-  if (!state.layout || state.paraLayouts.length === 0) {
-    return;
-  }
   const motion = motionFor(event);
-  if (motion === undefined) {
+  if (!hasParagraphs() || motion === undefined) {
     return;
   }
   event.preventDefault();
-  if (!event.shiftKey && (motion === 0 || motion === 1)
-      && collapseSelection(motion === 0 ? 'left' : 'right')) {
-    draw(state.layout.results, state.layout.settings);
-    return;
-  }
-  if (!state.selection.focus) {
-    const start = { paraId: 0, byteOffset: 0, affinity: 'downstream' };
-    state.selection.anchor = start;
-    state.selection.focus = start;
-  }
-  const focus = state.selection.focus;
-  if (motion !== 2 && motion !== 3) {
-    state.selection.preferredInline = null;
-  } else if (state.selection.preferredInline === null) {
-    const caret = state.engine.caretGeometry(focus.paraId, focus.byteOffset, focus.affinity);
-    state.selection.preferredInline = caret?.primary.x ?? null;
-  }
-  const moved = state.engine.moveCursor(
-    focus.paraId,
-    focus.byteOffset,
-    focus.affinity,
-    motion,
-    state.selection.preferredInline,
-  );
-  if (!moved) {
-    return;
-  }
-  const nextPos = moved.kind === 'moved'
-    ? { paraId: focus.paraId, byteOffset: moved.byteOffset, affinity: moved.affinity }
-    : crossParagraph(focus.paraId, moved);
-  if (nextPos) {
-    state.selection.focus = nextPos;
-    if (!event.shiftKey) {
-      state.selection.anchor = nextPos;
-    }
-    draw(state.layout.results, state.layout.settings);
-  }
+  const context = {
+    engine: state.engine,
+    paraCount: state.view.results.length,
+    isRtl: (paraId) => state.view.results[paraId]?.direction === 'rtl',
+  };
+  Object.assign(state.selection, step(context, state.selection, motion, event.shiftKey));
+  draw();
 });
 
 for (const evName of ['focus', 'blur']) {
   canvas.addEventListener(evName, () => {
-    if (state.layout && state.selection.focus) {
-      draw(state.layout.results, state.layout.settings);
+    if (state.selection.focus) {
+      draw();
     }
   });
 }
@@ -1042,16 +863,10 @@ localePresets.addEventListener('click', (event) => {
   relayout();
 });
 
-for (const input of [showBoxes, showBaselines, showCarets]) {
-  input.addEventListener('change', () => {
-    if (state.layout) {
-      const { results, settings } = state.layout;
-      settings.showBoxes = showBoxes.checked;
-      settings.showBaselines = showBaselines.checked;
-      settings.showCarets = showCarets.checked;
-      draw(results, settings);
-    }
-  });
+// The overlays and the selection height are read from these where they are
+// drawn, so a change only needs a redraw.
+for (const input of [showBoxes, showBaselines, showCarets, selectionHeightInput]) {
+  input.addEventListener('change', draw);
 }
 
 const PRESETS = {
@@ -1069,8 +884,5 @@ samples.addEventListener('change', () => {
   applySample(samples.value);
   relayout();
 });
-
-$('width-value').textContent = `${widthInput.value} px`;
-$('size-value').textContent = `${sizeInput.value} px`;
 
 void boot();
