@@ -3,7 +3,7 @@
 use super::super::shaper_gate::{checked_font_metrics, checked_reshape_window, resolved_line_box};
 use super::super::{InlineSlotConstraint, LayoutInputError, StrutMetrics};
 use super::hanging::LineEdge;
-use super::{FIT_EPSILON, Layout, LineEnd, Piece, PieceKind, Reshaped, Token};
+use super::{Layout, LineEnd, Piece, PieceKind, Reshaped, Token};
 use crate::frontend::{BoxNode, BoxOverflowPolicy, DiscretionaryNode, WordNode};
 use crate::types::{AtomFlags, FontMetrics, RawShapedGlyph};
 use smallvec::SmallVec;
@@ -28,6 +28,50 @@ pub(super) fn ladder_tier(d: &DiscretionaryNode) -> usize {
         }
         _ => 0,
     }
+}
+
+/// The running measure of a line prefix: its pen, where its content ends,
+/// the shrink of its glue and the protrusion of its last mark (ST1-3).
+#[derive(Clone, Copy)]
+struct LineWalk {
+    pen: f32,
+    body: f32,
+    has_start: bool,
+    has_content: bool,
+    shrink: f32,
+    visible_shrink: f32,
+    end_hang: f32,
+}
+
+impl LineWalk {
+    fn new(post: f32) -> Self {
+        Self {
+            pen: post,
+            body: post,
+            has_start: false,
+            has_content: false,
+            shrink: 0.0,
+            visible_shrink: 0.0,
+            end_hang: 0.0,
+        }
+    }
+
+    /// The width the line uses if it stops here.
+    fn used(&self) -> f32 {
+        self.body - self.end_hang - self.visible_shrink
+    }
+
+    /// The width used if the line ends at a break whose cloned padding is
+    /// `pre`; a hang needs no padding behind it.
+    fn used_at_break(&self, pre: f32, shrinks: bool) -> f32 {
+        let hang = if pre == 0.0 { self.end_hang } else { 0.0 };
+        self.body + pre - hang - if shrinks { self.visible_shrink } else { 0.0 }
+    }
+}
+
+/// `used` fits `limit` within the fitting tolerance.
+fn within(used: f32, limit: f32) -> bool {
+    used <= limit + super::super::tolerance::tolerance(used, limit)
 }
 
 /// Where a line starts: its first token, the cloned padding before it and
@@ -130,60 +174,39 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// with its protrusion (ST1-3).
     pub(super) fn fit(&mut self, line: LineStart, slot: InlineSlotConstraint) -> LineEnd {
         let slot_width = slot.width();
-        let LineStart {
-            token: start,
-            post,
-            first_line,
-        } = line;
-        let mut pen = post;
-        let mut body = post;
-        let mut has_content = false;
-        // Whether a piece other than a zero-width span boundary has been
-        // seen: the start mark is the first such piece (ST1-3).
-        let mut has_visible = false;
-        // The shrink of the glue since the last tab, and of the visible part.
-        let (mut shrink, mut visible_shrink) = (0.0_f32, 0.0_f32);
-        // The protrusion of the last visible piece, if it may hang.
-        let mut end_hang = 0.0;
+        let mut walk = LineWalk::new(line.post);
         // The last fitting break of each ladder tier.
         let mut fits: [Option<usize>; 3] = [None; 3];
         let best = |fits: &[Option<usize>; 3]| fits.iter().find_map(|&b| b);
-        let mut t = start;
+        let mut t = line.token;
         loop {
             match &self.tokens[t] {
                 Token::Break(b) => {
-                    let hang = if b.pre == 0.0 { end_hang } else { 0.0 };
                     if b.mandatory {
                         // A line ending here is compressed only under
                         // `compress_last_lines` (ST3-3): otherwise, if only
                         // shrink would fit it, it ends at an earlier break.
-                        let shrink = if self.options.compress_last_lines {
-                            visible_shrink
-                        } else {
-                            0.0
-                        };
-                        let used = body + b.pre - hang - shrink;
-                        let overflows = used
-                            > slot_width + super::super::tolerance::tolerance(used, slot_width);
-                        return match best(&fits).filter(|_| overflows) {
+                        let used = walk.used_at_break(b.pre, self.options.compress_last_lines);
+                        return match best(&fits).filter(|_| !within(used, slot_width)) {
                             Some(earlier) => LineEnd::At(earlier),
                             None => LineEnd::At(t),
                         };
                     }
-                    let used = body + b.pre - hang - visible_shrink;
-                    if used <= slot_width + super::super::tolerance::tolerance(used, slot_width) {
+                    if within(walk.used_at_break(b.pre, true), slot_width) {
                         fits[b.tier] = Some(t);
                     }
-                    pen += b.no_break;
+                    walk.pen += b.no_break;
                 }
                 Token::Piece(piece)
                     if matches!(piece.kind, PieceKind::Tab)
-                        && self.reachable_stop(pen, slot).is_none() =>
+                        && self.reachable_stop(walk.pen, slot).is_none() =>
                 {
                     // No reachable stop (spec ST3-1, AX-6): break before the
                     // tab at an earlier opportunity, else consume it with no
                     // advance and end the line right after it.
-                    if has_content && let Some(b) = best(&fits) {
+                    if walk.has_content
+                        && let Some(b) = best(&fits)
+                    {
                         return LineEnd::At(b);
                     }
                     return match self.tokens.get(t + 1) {
@@ -193,44 +216,58 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 Token::Piece(piece) => {
                     let piece = *piece;
-                    match piece.kind {
-                        PieceKind::Glue { item } if self.options.justify => {
-                            shrink += self.glue(item).max_shrink;
-                        }
-                        PieceKind::Tab => shrink = 0.0,
-                        _ => {}
+                    if !within(self.walk_piece(&mut walk, &piece, line, slot), slot_width)
+                        && piece.is_content()
+                    {
+                        return match best(&fits) {
+                            Some(b) => LineEnd::At(b),
+                            None => self.emergency(line, t, slot),
+                        };
                     }
-                    if piece.is_content() {
-                        if !has_visible && post == 0.0 {
-                            pen -= self
-                                .hang_protrusion(&piece, piece.level, LineEdge::Start, first_line)
-                                .unwrap_or(0.0);
-                        }
-                        has_visible = true;
-                        visible_shrink = shrink;
-                        end_hang = self
-                            .hang_protrusion(&piece, piece.level, LineEdge::End, first_line)
-                            .unwrap_or(0.0);
-                    }
-                    let (advance, reach) = self.measure(&piece, pen, slot);
-                    if piece.is_content() {
-                        let end = pen + reach.max(advance);
-                        let used = end - end_hang - visible_shrink;
-                        if used > slot_width + super::super::tolerance::tolerance(used, slot_width)
-                        {
-                            return match best(&fits) {
-                                Some(b) => LineEnd::At(b),
-                                None => self.emergency(start, t, post, slot),
-                            };
-                        }
-                        body = end;
-                        has_content = true;
-                    }
-                    pen += advance;
                 }
             }
             t += 1;
         }
+    }
+
+    /// Advances `walk` over `piece`, the one place that decides what a piece
+    /// does to a line's measure (shrink, start and end hang, tab pen, reach),
+    /// and returns the line's used width up to and including it.
+    fn walk_piece(
+        &self,
+        walk: &mut LineWalk,
+        piece: &Piece,
+        line: LineStart,
+        slot: InlineSlotConstraint,
+    ) -> f32 {
+        match piece.kind {
+            PieceKind::Glue { item } if self.options.justify => {
+                walk.shrink += self.glue(item).max_shrink;
+            }
+            PieceKind::Tab => walk.shrink = 0.0,
+            _ => {}
+        }
+        if !walk.has_start && !piece.is_edge_transparent() {
+            walk.has_start = true;
+            if line.post == 0.0 {
+                walk.pen -= self
+                    .hang_protrusion(piece, piece.level, LineEdge::Start, line.first_line)
+                    .unwrap_or(0.0);
+            }
+        }
+        if piece.is_content() {
+            walk.visible_shrink = walk.shrink;
+            walk.end_hang = self
+                .hang_protrusion(piece, piece.level, LineEdge::End, line.first_line)
+                .unwrap_or(0.0);
+        }
+        let (advance, reach) = self.measure(piece, walk.pen, slot);
+        if piece.is_content() {
+            walk.body = walk.pen + reach;
+            walk.has_content = true;
+        }
+        walk.pen += advance;
+        walk.used()
     }
 
     /// The break token right after `t` and its trailing glue, if any.
@@ -250,13 +287,8 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// visible precedes it, else after `t` alone (one indivisible entity on
     /// its own overflowing line, SLT-5), together with the break right after
     /// it if only glue separates them.
-    fn emergency(
-        &mut self,
-        start: usize,
-        t: usize,
-        post: f32,
-        slot: InlineSlotConstraint,
-    ) -> LineEnd {
+    fn emergency(&mut self, line: LineStart, t: usize, slot: InlineSlotConstraint) -> LineEnd {
+        let start = line.token;
         let first_content =
             (start..t).find(|&k| matches!(&self.tokens[k], Token::Piece(p) if p.is_content()));
         if let Some(first) = first_content {
@@ -276,9 +308,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     t = run_start;
                 }
                 let added = self.repair_seam(t);
-                if t <= first + 1
-                    || self.content_end(start, t, post, slot) <= available + FIT_EPSILON
-                {
+                if t <= first + 1 || within(self.used_before(line, t, slot), available) {
                     return LineEnd::Before(t);
                 }
                 for c in added {
@@ -363,24 +393,19 @@ impl<'i, 'a> Layout<'i, 'a> {
         added
     }
 
-    /// Where the content of a line from `start` ends when it stops before
-    /// token `end`, measured as [`fit`](Self::fit) measures it.
-    fn content_end(&self, start: usize, end: usize, post: f32, slot: InlineSlotConstraint) -> f32 {
-        let mut pen = post;
-        let mut body = post;
-        for token in &self.tokens[start..end] {
+    /// The used width of a line from `line.token` that stops before token
+    /// `end`, measured exactly as [`fit`](Self::fit) measures it.
+    fn used_before(&self, line: LineStart, end: usize, slot: InlineSlotConstraint) -> f32 {
+        let mut walk = LineWalk::new(line.post);
+        for token in &self.tokens[line.token..end] {
             match token {
-                Token::Break(b) => pen += b.no_break,
+                Token::Break(b) => walk.pen += b.no_break,
                 Token::Piece(piece) => {
-                    let (advance, reach) = self.measure(piece, pen, slot);
-                    if piece.is_content() {
-                        body = pen + reach.max(advance);
-                    }
-                    pen += advance;
+                    self.walk_piece(&mut walk, piece, line, slot);
                 }
             }
         }
-        body
+        walk.used()
     }
 
     /// The line box of a cluster's font instance (spec MET-1, MET-2), through

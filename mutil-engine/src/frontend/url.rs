@@ -16,6 +16,12 @@ use crate::types::TextRange;
 /// The length from which a piece between URL breaks may break anywhere.
 const LONG_PIECE: usize = 16;
 
+/// The length of `www`, the `www.` marker without its dot. Sentence-punctuation
+/// trimming removes the dot of a bare `www.`, leaving this much or less, so a
+/// trimmed URL no longer than it is dropped. FE-22 is silent on an empty
+/// host or body, so a bare `scheme://` still counts as a URL.
+const WWW_STEM_LEN: usize = 3;
+
 /// The URLs of `text`, ascending and disjoint.
 pub(crate) fn url_ranges(text: &str) -> Vec<TextRange> {
     let bytes = text.as_bytes();
@@ -88,7 +94,7 @@ pub(crate) fn url_ranges(text: &str) -> Vec<TextRange> {
             }
             end -= c.len_utf8();
         }
-        if end > start + 3 {
+        if end > start + WWW_STEM_LEN {
             out.push(TextRange::new(start, end));
         }
         i = end.max(i + 1);
