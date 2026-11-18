@@ -20,18 +20,18 @@ mod line_artifacts;
 mod line_box;
 mod line_builder;
 
-use breaking::LineStart;
-
-use super::shaper_gate::checked_line_box;
-use super::{
+use crate::frontend::{
+    AnnotationSide, BoxNode, DiscretionaryNode, GlueNode, InlineObjectBox,
+    MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge, WordNode,
+};
+use crate::middleend::shaper_gate::checked_line_box;
+use crate::middleend::{
     LayoutConstraints, LayoutInputError, LayoutOptions, LineGeometry, LineHeight, PositionedLine,
     PositionedParagraph, StrutMetrics, ValidatedInputs,
 };
-use crate::frontend::{
-    AnnotationSide, BoxNode, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge, WordNode,
-};
 use crate::shaping::TextShaper;
 use crate::types::{BidiDirection, BidiLevel, FontMetrics, RawShapedGlyph, TextRange};
+use breaking::{LineFit, within};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
@@ -43,9 +43,6 @@ const MAX_CLEARANCE_PROBES: usize = 1024;
 /// slots before layout gives up (spec GEO-6: an explicit failure, not a
 /// clipped line).
 const MAX_ENVELOPE_REFITS: usize = 16;
-
-/// The fitting tolerance (spec ST1-8's `FIT_EPSILON`).
-const FIT_EPSILON: f32 = super::FIT_EPSILON;
 
 /// Lays out one paragraph (spec §5).
 ///
@@ -147,9 +144,9 @@ fn tallest_first_line(
         .map_or(usize::MAX, |node| node.byte_span().start);
     let mut content_height = strut_height;
     for (item, node) in ast.items[..first_break].iter().enumerate() {
-        if let WordNode::Box(BoxNode::InlineObject {
+        if let WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             ascent, descent, ..
-        }) = node
+        })) = node
         {
             content_height = content_height.max(ascent + descent);
         }
@@ -181,23 +178,19 @@ fn tallest_first_line(
     Ok(content_height + over + under)
 }
 
-/// One placeable unit of the item sequence, in logical order.
+/// One placeable unit of the item sequence, in logical order. Nodes of the
+/// AST are borrowed; clusters stay indexes, because an emergency re-shape
+/// replaces their glyphs in [`Layout::reshaped`] (ADR-0003, rule 5).
 #[derive(Clone, Copy, Debug)]
-pub(super) enum PieceKind {
+pub(super) enum PieceKind<'a> {
     /// Paragraph-level cluster index and its run.
     Cluster {
         run: usize,
         cluster: usize,
     },
-    /// Index into `ParagraphAst::items`.
-    Object {
-        item: usize,
-    },
+    Object(&'a InlineObjectBox),
     Tab,
-    /// Index into `ParagraphAst::items` of a `Glue`.
-    Glue {
-        item: usize,
-    },
+    Glue(&'a GlueNode),
     /// A decoration span edge: its padding is advance no glyph covers.
     SpanEdge {
         /// Index into `ParagraphAst::decoration_spans`.
@@ -207,18 +200,18 @@ pub(super) enum PieceKind {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Piece {
-    pub(super) kind: PieceKind,
+pub(super) struct Piece<'a> {
+    pub(super) kind: PieceKind<'a>,
     pub(super) bytes: TextRange,
     pub(super) level: BidiLevel,
     /// Natural advance (a tab's is resolved at placement).
     pub(super) width: f32,
 }
 
-impl Piece {
+impl Piece<'_> {
     /// Content (as opposed to whitespace): what ends a line's visible part.
     pub(super) fn is_content(&self) -> bool {
-        !matches!(self.kind, PieceKind::Glue { .. }) && !self.is_edge_transparent()
+        !matches!(self.kind, PieceKind::Glue(_)) && !self.is_edge_transparent()
     }
 
     /// A zero-width span boundary: the only piece that may lie between a
@@ -228,32 +221,32 @@ impl Piece {
     }
 }
 
-/// A break opportunity: a `Discretionary` item.
-#[derive(Clone, Debug)]
-pub(super) struct Break {
-    pub(super) bytes: TextRange,
-    pub(super) mandatory: bool,
-    pub(super) pre: f32,
-    pub(super) post: f32,
-    pub(super) no_break: f32,
-    pub(super) cloned: SmallVec<[u64; 2]>,
-    /// The break's tier on the overflow ladder (spec ST1-1): 0 for an
-    /// untailored opportunity, 1 for a URL break at punctuation, 2 for one
-    /// inside a long URL piece.
-    pub(super) tier: usize,
+/// One element of the line-breaking sequence: a piece, or a break
+/// opportunity (a `Discretionary` item).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Token<'a> {
+    Piece(Piece<'a>),
+    Break(&'a DiscretionaryNode),
 }
 
-#[derive(Clone, Debug)]
-pub(super) enum Token {
-    Piece(Piece),
-    Break(Break),
+impl Token<'_> {
+    /// The source bytes the token owns.
+    pub(super) fn bytes(&self) -> TextRange {
+        match self {
+            Self::Piece(piece) => piece.bytes,
+            Self::Break(brk) => brk.byte_range,
+        }
+    }
 }
 
 /// Where a line ends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LineEnd {
+#[derive(Clone, Copy, Debug)]
+pub(super) enum LineEnd<'a> {
     /// At the break token with this index, inclusive.
-    At(usize),
+    At {
+        token: usize,
+        brk: &'a DiscretionaryNode,
+    },
     /// Before the piece token with this index: an emergency cluster break.
     Before(usize),
 }
@@ -265,24 +258,27 @@ pub(super) struct Reshaped {
     pub(super) width: f32,
 }
 
+/// Emergency re-shapes by paragraph-level cluster index.
+pub(super) type Reshapes = HashMap<usize, Reshaped>;
+
 pub(super) struct Layout<'i, 'a> {
     pub(super) inputs: &'i ValidatedInputs<'a>,
     pub(super) ast: &'a ParagraphAst,
     pub(super) shaper: &'i dyn TextShaper,
     pub(super) options: &'a LayoutOptions,
-    pub(super) tokens: Vec<Token>,
+    pub(super) tokens: Vec<Token<'a>>,
     pub(super) strut: StrutMetrics,
     pub(super) base: BidiDirection,
     pub(super) metrics: HashMap<(u32, u32, usize), FontMetrics>,
-    pub(super) reshaped: HashMap<usize, Reshaped>,
+    pub(super) reshaped: Reshapes,
 }
 
 /// One piece of the current line, its level resolved by UAX #9 L1 in
 /// `piece.level`, with its preceding no-break gap, horizontal placement and
 /// baseline shift.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct PlacedPiece {
-    pub(super) piece: Piece,
+pub(super) struct PlacedPiece<'a> {
+    pub(super) piece: Piece<'a>,
     pub(super) gap: f32,
     pub(super) x: f32,
     pub(super) width: f32,
@@ -291,12 +287,55 @@ pub(super) struct PlacedPiece {
     pub(super) y_shift: f32,
 }
 
-/// Cursor tracking the current line's position in tokens, bytes, and block space.
+/// Where the next line starts: its first token, the cloned padding before
+/// it, its first source byte, its block offset and its index.
 pub(super) struct LineCursor {
     pub(super) token_start: usize,
     pub(super) post_break_width: f32,
     pub(super) byte_start: usize,
     pub(super) block_top: f32,
+    pub(super) index: usize,
+}
+
+impl LineCursor {
+    fn paragraph_start() -> Self {
+        Self {
+            token_start: 0,
+            post_break_width: 0.0,
+            byte_start: 0,
+            block_top: 0.0,
+            index: 0,
+        }
+    }
+
+    pub(super) fn first_line(&self) -> bool {
+        self.index == 0
+    }
+
+    /// Moves past the line that ended at `end` and was `line_height` tall.
+    fn advance(&mut self, end: LineEnd<'_>, tokens: &[Token<'_>], line_height: f32) {
+        self.block_top += line_height;
+        self.index += 1;
+        match end {
+            LineEnd::At { token, brk } => {
+                self.post_break_width = brk.post_break_width;
+                self.byte_start = brk.byte_range.end();
+                self.token_start = token + 1;
+            }
+            LineEnd::Before(token) => {
+                self.post_break_width = 0.0;
+                self.byte_start = tokens[token].bytes().start();
+                self.token_start = token;
+            }
+        }
+    }
+
+    /// Whether no token is left. Only the paragraph's final break ends a
+    /// line with none left (every other line ends before it), so this is
+    /// the end of the paragraph.
+    fn is_paragraph_end(&self, tokens: &[Token<'_>]) -> bool {
+        self.token_start >= tokens.len()
+    }
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
@@ -325,16 +364,11 @@ impl<'i, 'a> Layout<'i, 'a> {
                         }));
                     }
                 }
-                WordNode::Box(BoxNode::InlineObject {
-                    byte_range,
-                    width,
-                    bidi_level,
-                    ..
-                }) => tokens.push(Token::Piece(Piece {
-                    kind: PieceKind::Object { item: index },
-                    bytes: *byte_range,
-                    level: *bidi_level,
-                    width: *width,
+                WordNode::Box(BoxNode::InlineObject(object)) => tokens.push(Token::Piece(Piece {
+                    kind: PieceKind::Object(object),
+                    bytes: object.byte_range,
+                    level: object.bidi_level,
+                    width: object.width,
                 })),
                 WordNode::Box(BoxNode::SpanBoundary {
                     byte_range,
@@ -361,7 +395,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     }));
                 }
                 WordNode::Glue(glue) => tokens.push(Token::Piece(Piece {
-                    kind: PieceKind::Glue { item: index },
+                    kind: PieceKind::Glue(glue),
                     bytes: glue.byte_range,
                     level: glue.bidi_level,
                     width: glue.natural_width,
@@ -372,15 +406,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     level: ast.base_direction.base_level(),
                     width: 0.0,
                 })),
-                WordNode::Discretionary(d) => tokens.push(Token::Break(Break {
-                    bytes: d.byte_range,
-                    mandatory: d.is_mandatory(),
-                    pre: d.pre_break_width,
-                    post: d.post_break_width,
-                    no_break: d.no_break_width,
-                    cloned: d.cloned_spans.clone(),
-                    tier: breaking::ladder_tier(d),
-                })),
+                WordNode::Discretionary(d) => tokens.push(Token::Break(d)),
             }
         }
         Self {
@@ -398,33 +424,13 @@ impl<'i, 'a> Layout<'i, 'a> {
 
     fn run(mut self) -> Result<PositionedParagraph, LayoutInputError> {
         let mut lines: Vec<PositionedLine> = Vec::new();
-        let mut cursor = LineCursor {
-            token_start: 0,
-            post_break_width: 0.0,
-            byte_start: 0,
-            block_top: 0.0,
-        };
+        let mut cursor = LineCursor::paragraph_start();
         loop {
-            let (line, end) = self.place_next_line(lines.len(), &mut cursor)?;
-            cursor.block_top += line.line_height;
+            let (line, end) = self.place_next_line(&mut cursor)?;
+            cursor.advance(end, &self.tokens, line.line_height);
             lines.push(line);
-            match end {
-                LineEnd::At(token_idx) => {
-                    let Token::Break(brk) = &self.tokens[token_idx] else {
-                        unreachable!("a line ends at a break token")
-                    };
-                    cursor.post_break_width = brk.post;
-                    cursor.byte_start = brk.bytes.end();
-                    cursor.token_start = token_idx + 1;
-                    if cursor.token_start >= self.tokens.len() {
-                        break;
-                    }
-                }
-                LineEnd::Before(token_idx) => {
-                    cursor.post_break_width = 0.0;
-                    cursor.byte_start = self.piece(token_idx).bytes.start();
-                    cursor.token_start = token_idx;
-                }
+            if cursor.is_paragraph_end(&self.tokens) {
+                break;
             }
         }
         Ok(PositionedParagraph {
@@ -439,16 +445,15 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// Probes geometry and refits until the line fits its envelope (spec GEO-3–6).
     fn place_next_line(
         &mut self,
-        index: usize,
         cursor: &mut LineCursor,
-    ) -> Result<(PositionedLine, LineEnd), LayoutInputError> {
+    ) -> Result<(PositionedLine, LineEnd<'a>), LayoutInputError> {
         let strut_height = self.strut.line_height();
         let has_provider = self.inputs.constraints().geometry_provider.is_some();
         let mut obstructed = 0;
         'place: loop {
             let mut envelope = strut_height;
             let mut geometry = self.inputs.line_geometry(
-                index,
+                cursor.index,
                 cursor.block_top,
                 cursor.block_top + envelope,
                 None,
@@ -459,25 +464,15 @@ impl<'i, 'a> Layout<'i, 'a> {
             }
             for _ in 0..MAX_ENVELOPE_REFITS {
                 let slot = geometry.slots[0];
-                let saved_reshaped = has_provider.then(|| self.reshaped.clone());
-                let end = self.fit(
-                    LineStart {
-                        token: cursor.token_start,
-                        post: cursor.post_break_width,
-                        first_line: index == 0,
-                    },
-                    slot,
-                );
-                let line = self.place(index, cursor, end, &geometry)?;
-                if line.line_height
-                    <= envelope + super::tolerance::tolerance(line.line_height, envelope)
-                    || !has_provider
-                {
+                let LineFit { end, reshapes } = self.fit(cursor, slot);
+                let added = self.commit_reshapes(reshapes);
+                let line = self.place(cursor, end, &geometry)?;
+                if within(line.line_height, envelope) || !has_provider {
                     return Ok((line, end));
                 }
                 envelope = line.line_height;
                 let expanded = self.inputs.line_geometry(
-                    index,
+                    cursor.index,
                     cursor.block_top,
                     cursor.block_top + envelope,
                     Some(&geometry),
@@ -485,11 +480,9 @@ impl<'i, 'a> Layout<'i, 'a> {
                 if expanded == geometry {
                     return Ok((line, end));
                 }
-                // This attempt was not committed: discard speculative seam
-                // re-shapes before refitting in `expanded` or relocating.
-                if let Some(saved) = saved_reshaped {
-                    self.reshaped = saved;
-                }
+                // This attempt was not committed: discard its speculative
+                // seam re-shapes before refitting in `expanded` or relocating.
+                self.discard_reshapes(&added);
                 if expanded.slots.is_empty() {
                     cursor.block_top = advance_clearance(&mut obstructed, &expanded)?;
                     continue 'place;
@@ -497,13 +490,6 @@ impl<'i, 'a> Layout<'i, 'a> {
                 geometry = expanded;
             }
             return Err(LayoutInputError::InvalidLineGeometry);
-        }
-    }
-
-    pub(super) fn piece(&self, token: usize) -> &Piece {
-        match &self.tokens[token] {
-            Token::Piece(piece) => piece,
-            Token::Break(_) => unreachable!("token {token} is a piece"),
         }
     }
 }

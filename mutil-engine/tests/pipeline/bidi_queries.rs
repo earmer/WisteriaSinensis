@@ -442,9 +442,16 @@ fn the_input_gate_rejects_levels_below_the_rtl_base_level() {
         check(&a),
         Err(LayoutInputError::InvalidBidiLevel { item: glue })
     );
-    let object = find(&|n| matches!(n, WordNode::Box(BoxNode::InlineObject { .. })));
+    let object = find(&|n| {
+        matches!(
+            n,
+            WordNode::Box(BoxNode::InlineObject(InlineObjectBox { .. }))
+        )
+    });
     let mut a = ast.clone();
-    let WordNode::Box(BoxNode::InlineObject { bidi_level, .. }) = &mut a.items[object] else {
+    let WordNode::Box(BoxNode::InlineObject(InlineObjectBox { bidi_level, .. })) =
+        &mut a.items[object]
+    else {
         unreachable!()
     };
     *bidi_level = BidiLevel::LTR;

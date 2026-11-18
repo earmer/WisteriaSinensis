@@ -273,11 +273,19 @@ pub enum WordNode {
 pub enum BoxNode {
     Text { run_index: usize, byte_range: TextRange, atom_range: Range<usize>,
            cluster_range: Range<usize>, natural_width: f32 },
-    InlineObject { baseline_align: BaselineAlignment, byte_range: TextRange, box_id: u64,
-                   width: f32, ascent: f32, descent: f32,
-                   overflow_policy: BoxOverflowPolicy, bidi_level: BidiLevel },
+    InlineObject(InlineObjectBox),
     SpanBoundary { byte_range: TextRange, span_id: u64, edge: SpanEdge,
                    width: f32, bidi_level: BidiLevel },
+}
+pub struct InlineObjectBox {
+    pub baseline_align: BaselineAlignment,
+    pub byte_range: TextRange,
+    pub box_id: u64,
+    pub width: f32,
+    pub ascent: f32,
+    pub descent: f32,
+    pub overflow_policy: BoxOverflowPolicy,
+    pub bidi_level: BidiLevel,
 }
 pub enum SpanEdge { Leading, Trailing }
 pub enum BoxOverflowPolicy { Clip, AllowOverflow, ScaleToFit }

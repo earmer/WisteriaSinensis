@@ -522,10 +522,9 @@ fn object_holding(ast: &crate::frontend::ParagraphAst, byte: ByteIndex) -> Optio
         .items
         .partition_point(|item| item.byte_span().end <= byte);
     match ast.items.get(i)? {
-        crate::frontend::WordNode::Box(crate::frontend::BoxNode::InlineObject {
-            byte_range,
-            ..
-        }) if byte_range.contains(byte) => Some(*byte_range),
+        crate::frontend::WordNode::Box(crate::frontend::BoxNode::InlineObject(
+            crate::frontend::InlineObjectBox { byte_range, .. },
+        )) if byte_range.contains(byte) => Some(*byte_range),
         _ => None,
     }
 }

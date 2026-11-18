@@ -32,7 +32,7 @@ fn every_level_of_the_body_lies_at_or_above_the_base_level() {
         rebuild_items(&mut a, |b| {
             vec![
                 boxed(b, 0, 1),
-                WordNode::Box(BoxNode::InlineObject {
+                WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
                     bidi_level: object,
                     baseline_align: BaselineAlignment::Auto,
                     byte_range: TextRange::new(1, 4),
@@ -41,7 +41,7 @@ fn every_level_of_the_body_lies_at_or_above_the_base_level() {
                     ascent: 1.0,
                     descent: 1.0,
                     overflow_policy: BoxOverflowPolicy::Clip,
-                }),
+                })),
                 WordNode::Glue(GlueNode {
                     original_bidi_class: BidiClass::Ws,
                     bidi_level: glue,

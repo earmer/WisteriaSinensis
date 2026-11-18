@@ -5,8 +5,8 @@ use super::storage::{TextBoxes, check_text_payload};
 use super::{LayoutInputError, fits, in_byte_order, is_range_edge};
 use crate::frontend::{
     BoxDecorationBreak, BoxNode, BreakAction, DiscretionaryNode, GlueKind, GlueNode,
-    HyphenOpportunity, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge,
-    WordNode, is_word_space,
+    HyphenOpportunity, InlineDecorationSpan, InlineObjectBox, MAX_DECORATION_NESTING_DEPTH,
+    ParagraphAst, SpanEdge, WordNode, is_word_space,
 };
 use crate::middleend::tolerance::{approx_eq, approx_eq_f64, tolerance};
 use crate::types::{BidiClass, BidiLevel, TextRange, is_extent, is_measurement};
@@ -154,7 +154,8 @@ impl<'a> ItemChecks<'a> {
                 Some(self.ast.runs[*run_index].bidi_level)
             }
             WordNode::Box(
-                BoxNode::InlineObject { bidi_level, .. } | BoxNode::SpanBoundary { bidi_level, .. },
+                BoxNode::InlineObject(InlineObjectBox { bidi_level, .. })
+                | BoxNode::SpanBoundary { bidi_level, .. },
             )
             | WordNode::Glue(GlueNode { bidi_level, .. }) => Some(*bidi_level),
             WordNode::Discretionary(_) | WordNode::Tab { .. } => None,
@@ -181,14 +182,14 @@ impl<'a> ItemChecks<'a> {
                 let base = view.atom_start - run.atom_range.start;
                 check_text_payload(self.text, run, view, &self.ast.glyphs, base, item)
             }
-            WordNode::Box(BoxNode::InlineObject {
+            WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
                 baseline_align,
                 byte_range,
                 width,
                 ascent,
                 descent,
                 ..
-            }) => {
+            })) => {
                 // An object owns the bytes carets and selections address it by.
                 if byte_range.is_empty()
                     || !baseline_align.is_valid()

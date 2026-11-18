@@ -402,7 +402,7 @@ fn an_inline_object_is_at_a_representable_level() {
         rebuild_items(&mut a, |b| {
             vec![
                 boxed(b, 0, 2),
-                WordNode::Box(BoxNode::InlineObject {
+                WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
                     bidi_level,
                     baseline_align: BaselineAlignment::Auto,
                     byte_range: TextRange::new(2, 5),
@@ -411,7 +411,7 @@ fn an_inline_object_is_at_a_representable_level() {
                     ascent: 8.0,
                     descent: 2.0,
                     overflow_policy: BoxOverflowPolicy::Clip,
-                }),
+                })),
                 end(5),
             ]
         });
@@ -447,7 +447,7 @@ fn every_text_box_and_inline_object_owns_source_bytes() {
     assert!(!a.is_self_contained(0));
     // An inline object without bytes: nothing for a caret to address.
     let object = |start, end| {
-        WordNode::Box(BoxNode::InlineObject {
+        WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(start, end),
@@ -456,7 +456,7 @@ fn every_text_box_and_inline_object_owns_source_bytes() {
             ascent: 8.0,
             descent: 2.0,
             overflow_policy: BoxOverflowPolicy::Clip,
-        })
+        }))
     };
     let mut a = ast("ab\u{fffc}");
     rebuild_items(&mut a, |b| vec![boxed(b, 0, 2), object(2, 5), end(5)]);

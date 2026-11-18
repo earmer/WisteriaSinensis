@@ -287,7 +287,7 @@ fn an_isolate_may_cover_only_a_hard_break() {
         vec![
             boxed(b, 0, 1),
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4))),
-            WordNode::Box(BoxNode::InlineObject {
+            WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
                 bidi_level: BidiLevel::LTR,
                 baseline_align: BaselineAlignment::Auto,
                 byte_range: TextRange::new(4, 5),
@@ -296,7 +296,7 @@ fn an_isolate_may_cover_only_a_hard_break() {
                 ascent: 1.0,
                 descent: 1.0,
                 overflow_policy: BoxOverflowPolicy::Clip,
-            }),
+            })),
             end(5),
         ]
     });

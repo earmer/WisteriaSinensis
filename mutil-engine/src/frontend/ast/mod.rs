@@ -4,7 +4,7 @@ mod nodes;
 
 pub use nodes::{
     BoxNode, BoxOverflowPolicy, BreakAction, DiscretionaryNode, GlueKind, GlueNode, GlueTier,
-    RepeatedOperator, SpanEdge, WordNode,
+    InlineObjectBox, RepeatedOperator, SpanEdge, WordNode,
 };
 
 use super::{AnnotationSpan, AtomicEditSpan, ExplicitBidiSpan, InlineDecorationSpan, ShapingRun};

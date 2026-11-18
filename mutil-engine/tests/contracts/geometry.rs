@@ -165,7 +165,7 @@ fn provider_monotonicity_clearance_and_snapshots() {
         ..Default::default()
     };
     let mut a = ast("a");
-    a.items[0] = WordNode::Box(BoxNode::InlineObject {
+    a.items[0] = WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
         bidi_level: BidiLevel::LTR,
         baseline_align: BaselineAlignment::Auto,
         byte_range: TextRange::new(0, 1),
@@ -174,7 +174,7 @@ fn provider_monotonicity_clearance_and_snapshots() {
         ascent: 20.0,
         descent: 2.0,
         overflow_policy: BoxOverflowPolicy::Clip,
-    });
+    }));
     clear_text(&mut a);
     assert_eq!(
         layout_paragraph(
@@ -228,7 +228,7 @@ fn probe_ignores_tall_input_after_first_break() {
         vec![
             boxed(b, 0, 1),
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4))),
-            WordNode::Box(BoxNode::InlineObject {
+            WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
                 bidi_level: BidiLevel::LTR,
                 baseline_align: BaselineAlignment::Auto,
                 byte_range: TextRange::new(4, 5),
@@ -237,7 +237,7 @@ fn probe_ignores_tall_input_after_first_break() {
                 ascent: 20.0,
                 descent: 2.0,
                 overflow_policy: BoxOverflowPolicy::Clip,
-            }),
+            })),
             end(5),
         ]
     });

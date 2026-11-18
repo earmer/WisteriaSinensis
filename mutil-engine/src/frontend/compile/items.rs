@@ -6,7 +6,7 @@ use super::units::{Unit, Units};
 use super::{Compiler, Shaped};
 use crate::frontend::{
     BoxDecorationBreak, BoxNode, DiscretionaryNode, GlueKind, GlueNode, InlineDecorationSpan,
-    MAX_DECORATION_NESTING_DEPTH, SpanEdge, WordNode, bidi,
+    InlineObjectBox, MAX_DECORATION_NESTING_DEPTH, SpanEdge, WordNode, bidi,
 };
 use crate::types::{
     BidiClass, BidiLevel, FontInstanceRef, FontRef, GlyphOrientation, GraphemeAtom, ScriptTag,
@@ -161,7 +161,7 @@ impl Compiler<'_> {
     /// An inline object's box, at the level of its bytes.
     fn object_node(&self, index: usize, levels: &bidi::TextLevels) -> WordNode {
         let o = &self.input.inline_objects[index];
-        WordNode::Box(BoxNode::InlineObject {
+        WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             baseline_align: o.baseline_align,
             byte_range: o.byte_range,
             box_id: o.box_id,
@@ -170,7 +170,7 @@ impl Compiler<'_> {
             descent: o.descent,
             overflow_policy: o.overflow_policy,
             bidi_level: levels.at(o.byte_range.start()),
-        })
+        }))
     }
 
     /// The levels of each decoration span's leading and trailing boundary:

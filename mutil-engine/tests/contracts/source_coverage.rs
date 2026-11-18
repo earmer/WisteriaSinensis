@@ -43,7 +43,7 @@ fn source_cannot_overlap() {
 fn reject_separator_in_source(sep: &str) {
     let t = format!("a{sep}b");
     let mut a = ast(&t);
-    a.items[0] = WordNode::Box(BoxNode::InlineObject {
+    a.items[0] = WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
         bidi_level: BidiLevel::LTR,
         baseline_align: BaselineAlignment::Auto,
         byte_range: TextRange::new(0, t.len()),
@@ -52,7 +52,7 @@ fn reject_separator_in_source(sep: &str) {
         ascent: 8.,
         descent: 2.,
         overflow_policy: BoxOverflowPolicy::Clip,
-    });
+    }));
     clear_text(&mut a);
     assert_eq!(
         check(&a, &t),

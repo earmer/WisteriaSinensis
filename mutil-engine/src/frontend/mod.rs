@@ -33,7 +33,8 @@ pub use annotation::{
 pub(crate) use ast::text_is_self_contained;
 pub use ast::{
     BoxNode, BoxOverflowPolicy, BreakAction, DiscretionaryNode, GlueKind, GlueNode, GlueTier,
-    ParagraphAst, RepeatedOperator, ReshapeWindow, SpanEdge, TextBoxView, WordNode,
+    InlineObjectBox, ParagraphAst, RepeatedOperator, ReshapeWindow, SpanEdge, TextBoxView,
+    WordNode,
 };
 pub use compile::{FrontendError, FrontendFeature, compile_paragraph};
 pub use input::{AnnotationInput, InlineObjectInput, ParagraphInput, StyleSpan, TextStyle};

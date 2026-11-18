@@ -119,7 +119,7 @@ fn paragraph_ast() -> ParagraphAst {
             max_shrink: 1.0,
         }),
         WordNode::Discretionary(DiscretionaryNode::direct(8)),
-        WordNode::Box(BoxNode::InlineObject {
+        WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(8, 11),
@@ -128,7 +128,7 @@ fn paragraph_ast() -> ParagraphAst {
             ascent: 10.0,
             descent: 2.0,
             overflow_policy: BoxOverflowPolicy::Clip,
-        }),
+        })),
         WordNode::Tab {
             byte_range: TextRange::new(11, 12),
         },

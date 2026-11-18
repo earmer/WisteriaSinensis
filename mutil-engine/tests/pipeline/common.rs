@@ -94,7 +94,7 @@ pub fn shape_of(ast: &ParagraphAst, text: &str) -> String {
             WordNode::Box(BoxNode::Text { byte_range, .. }) => {
                 format!("[{}]", &text[byte_range.as_range()])
             }
-            WordNode::Box(BoxNode::InlineObject { .. }) => "O".into(),
+            WordNode::Box(BoxNode::InlineObject(InlineObjectBox { .. })) => "O".into(),
             WordNode::Box(BoxNode::SpanBoundary { .. }) => "S".into(),
             WordNode::Glue(_) => "_".into(),
             WordNode::Tab { .. } => "T".into(),

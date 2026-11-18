@@ -3,13 +3,13 @@
 
 mod carets;
 
-use super::super::tolerance::tolerance;
-use super::super::{
-    AtomicFragment, DecorationKind, DecorationLine, LayoutInputError, PositionedSpanFragment,
-};
-use super::line_builder::LineBuildState;
+use super::line_builder::{AlignedLine, PlacedLine};
 use super::{Layout, Piece, PieceKind, PlacedPiece};
 use crate::frontend::InlineDecorationSpan;
+use crate::middleend::tolerance::tolerance;
+use crate::middleend::{
+    AtomicFragment, DecorationKind, DecorationLine, LayoutInputError, PositionedSpanFragment,
+};
 use crate::types::{BidiLevel, FontMetrics, TextDecoration, TextRange};
 
 /// One group of a span's pieces on a line: contiguous in visual order and in
@@ -31,9 +31,9 @@ pub(super) struct VisualGroup {
 /// are also adjacent among the members in logical order, `placed` being in
 /// logical order.
 fn visual_groups(
-    placed: &[PlacedPiece],
+    placed: &[PlacedPiece<'_>],
     order: &[usize],
-    is_member: impl Fn(&Piece) -> bool,
+    is_member: impl Fn(&Piece<'_>) -> bool,
 ) -> Vec<VisualGroup> {
     let mut rank = vec![None; placed.len()];
     for (r, k) in (0..placed.len())
@@ -93,7 +93,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// bytes stay inside its span and the line.
     pub(super) fn for_each_span_group(
         &self,
-        line: &LineBuildState<'_>,
+        line: &PlacedLine<'_>,
         mut emit: impl FnMut(&InlineDecorationSpan, &VisualGroup),
     ) {
         let bytes = line.byte_range;
@@ -102,11 +102,11 @@ impl<'i, 'a> Layout<'i, 'a> {
             if range.end() < bytes.start() || range.start() > bytes.end() {
                 continue;
             }
-            let is_member = |p: &Piece| match p.kind {
+            let is_member = |p: &Piece<'_>| match p.kind {
                 PieceKind::SpanEdge { span, .. } => span == index,
                 _ => !p.bytes.is_empty() && range.contains_range(p.bytes),
             };
-            let mut groups = visual_groups(line.placed, line.order, is_member);
+            let mut groups = visual_groups(&line.placed, &line.order, is_member);
             if groups.iter().any(|g| !g.is_bare_boundary) {
                 groups.retain(|g| !g.is_bare_boundary);
             }
@@ -132,9 +132,9 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// offset on that side (ST2-3, AX-5).
     fn attach_padding(
         &self,
-        line: &LineBuildState<'_>,
+        line: &PlacedLine<'_>,
         span: &InlineDecorationSpan,
-        is_member: &impl Fn(&Piece) -> bool,
+        is_member: &impl Fn(&Piece<'_>) -> bool,
         groups: &mut Vec<VisualGroup>,
     ) {
         let rtl = self.base.is_rtl();
@@ -148,8 +148,8 @@ impl<'i, 'a> Layout<'i, 'a> {
         let at_end = PaddingSide {
             cloned: line
                 .end_break
-                .is_some_and(|b| b.cloned.contains(&span.span_id)),
-            width: line.end_break.map_or(0.0, |b| b.pre),
+                .is_some_and(|b| b.cloned_spans.contains(&span.span_id)),
+            width: line.end_break.map_or(0.0, |b| b.pre_break_width),
             bytes: TextRange::empty_at(line.byte_range.end()),
         };
         let (left, right) = if rtl {
@@ -165,7 +165,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             level: self.base.base_level(),
             is_bare_boundary: false,
         };
-        if let Some(bytes) = line.placed[line.order.len()..]
+        if let Some(bytes) = line.placed[line.body_len()..]
             .iter()
             .filter(|p| is_member(&p.piece) && !p.piece.bytes.is_empty())
             .map(|p| p.piece.bytes)
@@ -213,7 +213,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// One fragment per visual group of each decoration span on the line
     /// (spec ST2-3, FRG-1), padding included; a span cloned across this
     /// line's breaks reaches the line's edge.
-    pub(super) fn span_fragments(&self, line: &LineBuildState<'_>) -> Vec<PositionedSpanFragment> {
+    pub(super) fn span_fragments(&self, line: &AlignedLine<'_>) -> Vec<PositionedSpanFragment> {
         let mut fragments = Vec::new();
         let (ascent, descent) = (self.strut.ascent.max(0.0), self.strut.descent.max(0.0));
         self.for_each_span_group(line, |span, g| {
@@ -235,7 +235,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// FRG-3), together covering exactly the part of the span on the line:
     /// each group takes the bytes from where the previous one stopped to its
     /// own end, at least one byte, and the last takes the rest.
-    pub(super) fn atomic_fragments(&self, line: &LineBuildState<'_>) -> Vec<AtomicFragment> {
+    pub(super) fn atomic_fragments(&self, line: &AlignedLine<'_>) -> Vec<AtomicFragment> {
         let mut out = Vec::new();
         for span in &self.ast.atomic_spans {
             let full = span.byte_range;
@@ -244,7 +244,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             if covered >= part_end {
                 continue;
             }
-            let mut groups = visual_groups(line.placed, line.order, |p| {
+            let mut groups = visual_groups(&line.placed, &line.order, |p| {
                 !p.bytes.is_empty() && p.bytes.start() < full.end() && p.bytes.end() > full.start()
             });
             groups.sort_by_key(|g| g.bytes.start());
@@ -278,7 +278,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     pub(super) fn decorations(
         &mut self,
         kind: DecorationKind,
-        line: &LineBuildState<'_>,
+        line: &AlignedLine<'_>,
         out: &mut Vec<DecorationLine>,
     ) -> Result<(), LayoutInputError> {
         let drawn: fn(TextDecoration) -> bool = match kind {
@@ -292,7 +292,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut open: Option<DecorationLine> = None;
         // Glue after the open segment joins only if a decorated cluster follows.
         let mut pending_glue: Option<TextRange> = None;
-        for &k in line.order {
+        for &k in &line.order {
             let p = line.placed[k];
             let bytes = p.piece.bytes;
             match p.piece.kind {
@@ -321,10 +321,10 @@ impl<'i, 'a> Layout<'i, 'a> {
                         segment.thickness = thickness;
                     }
                 }
-                PieceKind::Glue { .. } if open.is_some() => {
+                PieceKind::Glue(_) if open.is_some() => {
                     pending_glue = Some(pending_glue.map_or(bytes, |glue| glue.cover(bytes)));
                 }
-                PieceKind::Glue { .. } | PieceKind::SpanEdge { .. } => {}
+                PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => {}
                 _ => {
                     out.extend(open.take());
                     pending_glue = None;

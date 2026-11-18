@@ -6,9 +6,9 @@ use super::storage::{
 };
 use super::{LayoutInputError, fits, in_byte_order, is_range_edge};
 use crate::frontend::{
-    AnnotationKind, AnnotationSide, AnnotationSpan, BoxNode, GlueKind, MAX_BIDI_SPAN_DEPTH,
-    MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge, TextBoxView, WordNode,
-    is_line_or_paragraph_separator,
+    AnnotationKind, AnnotationSide, AnnotationSpan, BoxNode, GlueKind, InlineObjectBox,
+    MAX_BIDI_SPAN_DEPTH, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge, TextBoxView,
+    WordNode, is_line_or_paragraph_separator,
 };
 use crate::types::{BidiLevel, GlyphOrientation, TextRange, WritingMode, is_extent};
 use smallvec::SmallVec;
@@ -192,7 +192,9 @@ fn concrete_content(ast: &ParagraphAst, boxes: &TextBoxes<'_>) -> Vec<TextRange>
     for (item, node) in ast.items.iter().enumerate() {
         if let Some(view) = boxes.get(item) {
             out.extend(view.atoms.iter().map(|a| a.byte_range));
-        } else if let WordNode::Box(BoxNode::InlineObject { byte_range, .. }) = node {
+        } else if let WordNode::Box(BoxNode::InlineObject(InlineObjectBox { byte_range, .. })) =
+            node
+        {
             out.push(*byte_range);
         }
     }
@@ -319,11 +321,11 @@ impl SpanIndex {
                     .map(|a| (a.byte_range, a.bidi_level))
                     .collect(),
                 (
-                    WordNode::Box(BoxNode::InlineObject {
+                    WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
                         byte_range,
                         bidi_level,
                         ..
-                    }),
+                    })),
                     None,
                 ) => smallvec::smallvec![(*byte_range, *bidi_level)],
                 _ => SmallVec::new(),
