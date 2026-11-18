@@ -1,6 +1,5 @@
 //! Storage, presentation, text payload, and source-coverage checks for input validation.
 
-use super::super::tolerance::approx_eq_f64;
 use super::{LayoutInputError, fits};
 use crate::frontend::{
     BoxNode, ParagraphAst, ShapingRun, TextBoxView, WordNode, text_is_self_contained,
@@ -260,12 +259,11 @@ pub(super) fn check_text_payload(
     {
         return Err(E::ItemOutsideRun { item });
     }
-    let total: f64 = clusters.iter().map(|c| f64::from(c.natural_width)).sum();
     if !clusters
         .iter()
         .all(|c| cluster_measurements_are_valid(c, glyphs))
         || !natural_width.is_finite()
-        || !approx_eq_f64(f64::from(natural_width), total)
+        || natural_width != ShapedCluster::total_width(clusters)
     {
         return Err(E::InvalidTextWidth { item });
     }
