@@ -82,7 +82,7 @@ fn the_shaper_gate_rejects_invalid_metrics() {
     let options = LayoutOptions::default();
     assert_eq!(
         layout_paragraph(&a, "a", &NoopShaper, &constraints, &options).map(drop),
-        Err(LayoutInputError::InvalidFontMetrics)
+        Err(LayoutInputError::InvalidShaperMetrics)
     );
     assert!(layout_paragraph(&a, "a", &TEST_SHAPER, &constraints, &options).is_ok());
 }

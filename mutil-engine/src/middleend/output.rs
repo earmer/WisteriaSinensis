@@ -444,7 +444,10 @@ impl LayoutPolicySnapshot {
     ///
     /// # Errors
     /// `InvalidConstraints`, `InvalidLayoutOptions`, `InvalidStrut` or
-    /// `InvalidFontMetrics` for inputs no policy can be resolved from.
+    /// `InvalidFontMetrics` for inputs no policy can be resolved from. Raw
+    /// strut metrics fail as `InvalidStrut` (the strut's own ascent, descent
+    /// and line gap) or `InvalidFontMetrics` (the rest), never as the shaper
+    /// gate's `InvalidShaperMetrics`.
     pub fn resolve(
         ast: &ParagraphAst,
         constraints: &LayoutConstraints,

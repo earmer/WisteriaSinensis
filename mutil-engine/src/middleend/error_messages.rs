@@ -38,6 +38,7 @@ error_messages! {
     LayoutInputError {
         OrientationMismatch => "orientation does not match writing mode or bidi level",
         InvalidFontMetrics => "invalid font metrics",
+        InvalidShaperMetrics => "the shaper answered invalid font metrics",
         InvalidSpacing => "invalid explicit spacing",
         InvalidBidiSpan { span } => "explicit bidi span {span} is invalid",
         InvalidAnnotationSpan { annotation } => "annotation {annotation} is invalid",

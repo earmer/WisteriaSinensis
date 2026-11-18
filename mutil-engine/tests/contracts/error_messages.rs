@@ -10,6 +10,10 @@ fn layout_input_error_messages() {
             "orientation does not match writing mode or bidi level",
         ),
         (LayoutInputError::InvalidFontMetrics, "invalid font metrics"),
+        (
+            LayoutInputError::InvalidShaperMetrics,
+            "the shaper answered invalid font metrics",
+        ),
         (LayoutInputError::InvalidSpacing, "invalid explicit spacing"),
         (
             LayoutInputError::InvalidBidiSpan { span: 3 },
