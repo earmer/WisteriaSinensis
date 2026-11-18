@@ -32,3 +32,5 @@ dist/
 
 # Temporary git worktrees of Claude Code sub-agents
 .claude/worktrees/
+.DS_Store
+SCAN_TEMP.md
