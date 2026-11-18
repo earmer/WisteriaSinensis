@@ -53,7 +53,7 @@ pub struct Fonts {
 impl Fonts {
     /// Registers `bytes` under `family` and returns the face id and its
     /// units per em, or `None` for a family already registered or bytes
-    /// that hold no font.
+    /// that hold no font (a zero units-per-em included).
     pub fn add(&mut self, family: &str, bytes: Vec<u8>) -> Option<(u32, u16)> {
         if self.faces.iter().any(|face| *face.family == *family) {
             return None;
@@ -62,6 +62,9 @@ impl Fonts {
             .ok()?
             .metrics(Size::unscaled(), LocationRef::default())
             .units_per_em;
+        if upem == 0 {
+            return None;
+        }
         self.faces.push(FaceEntry {
             family: Arc::from(family),
             bytes: FontBytes::new(bytes),

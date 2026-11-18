@@ -145,7 +145,8 @@ pub enum BoxNode {
         edge: SpanEdge,
         /// `start_padding` or `end_padding` of the span.
         width: f32,
-        /// Level of the span's first (`Leading`) or last (`Trailing`) atom.
+        /// Level of the span's first (`Leading`) or last (`Trailing`) inline
+        /// entity, a text atom or `InlineObject`, else the base level (WN-8).
         bidi_level: BidiLevel,
     },
 }

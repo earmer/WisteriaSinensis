@@ -279,6 +279,9 @@ impl ParagraphAst {
             }
             overlaps
         });
+        if windows.len() <= windows.inline_size() {
+            windows.shrink_to_fit();
+        }
         windows
     }
 }

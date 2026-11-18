@@ -134,7 +134,9 @@ pub struct PositionedTab {
     pub byte_range: TextRange,
     /// Left edge, line-local.
     pub x: f32,
-    /// Non-negative width, `TabStops::next_stop(x) - x`.
+    /// Non-negative width, `TabStops::next_stop(d) - d` where `d` is the tab's
+    /// distance from the slot's line-start edge (not `x`); zero when no stop
+    /// is reachable (ST3-1).
     pub width: f32,
 }
 
@@ -194,7 +196,9 @@ pub struct CaretStop {
     pub offset: ByteIndex,
     /// Affinity this stop represents.
     pub affinity: CaretAffinity,
-    /// Level of a visual run whose glyph bytes contain or touch `offset`.
+    /// Level of a glyph's visual run, inline box or tab (paragraph level)
+    /// touching `offset`; otherwise the paragraph level or that of the
+    /// nearest entity, as on an empty line (CRT-2).
     pub level: BidiLevel,
     /// Index into `PositionedParagraph::lines`.
     pub line: usize,
@@ -280,7 +284,8 @@ pub struct PositionedLine {
     pub atomic_fragments: Vec<AtomicFragment>,
     /// Source bytes, trailing whitespace included.
     pub byte_range: TextRange,
-    /// End of the last visible cluster; trailing whitespace starts here.
+    /// End of the visible content (clusters, inline boxes, tabs); trailing
+    /// whitespace starts here.
     pub visible_byte_end: ByteIndex,
     /// Baseline y within the paragraph.
     pub baseline_y: f32,
@@ -484,7 +489,10 @@ impl LayoutPolicySnapshot {
         })
     }
 
-    /// `true` when [`resolve`](Self::resolve) could have produced the snapshot.
+    /// The PAR-1 field checks: a valid strut, line height and clamp, a
+    /// positive wrap width and standard indents in `[0, wrap_width)`. Every
+    /// snapshot [`resolve`](Self::resolve) produces passes; passing does not
+    /// prove `resolve` produced it.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         let indents_are_valid = match self.slot_source {

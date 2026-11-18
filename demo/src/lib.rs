@@ -17,9 +17,9 @@ use std::sync::Mutex;
 use mutil_engine::{
     AutospaceProfile, BaselineAlignment, BidiDirection, BoxHeightStyle, CaretAffinity,
     CursorPosition, FontStyle, FrontendOptions, HangEndMode, HangMode, HangStartMode,
-    HangingWhitespaceMode, HarfRustShaper, LayoutConstraints, LayoutOptions, LineBreakStrictness,
-    LineHeight, LocalePolicy, LocaleTag, Motion, ParagraphInput, Point, PositionedParagraph,
-    QuotePolicy, StyleSpan, TextDecoration, TextRange, TextStyle, ValidatedLayout, WordBreakOption,
+    HangingWhitespaceMode, LayoutConstraints, LayoutOptions, LineBreakStrictness, LineHeight,
+    LocalePolicy, LocaleTag, Motion, ParagraphInput, Point, PositionedParagraph, QuotePolicy,
+    StyleSpan, TextDecoration, TextRange, TextStyle, ValidatedLayout, WordBreakOption,
     compile_paragraph, layout_paragraph,
 };
 
@@ -61,7 +61,7 @@ pub struct LayoutRequest<'a> {
 /// (0 none, 1 allow, 2 force), bit 7 the `CssCompat` autospace profile, bit 8
 /// preserved trailing whitespace and bit 9 `compress_last_lines`.
 #[derive(Clone, Copy, Default)]
-pub struct Phase2(u32);
+pub struct Phase2(pub u32);
 
 impl Phase2 {
     /// Decodes the two-bit field at `shift` through `table` (see [`pick`]).
@@ -105,6 +105,11 @@ impl Demo {
 
     pub fn add_font(&mut self, family: &str, bytes: Vec<u8>) -> Option<(u32, u16)> {
         self.fonts.add(family, bytes)
+    }
+
+    /// Drops every laid-out paragraph, keeping the registered faces.
+    pub fn clear_paragraphs(&mut self) {
+        self.paragraphs.clear();
     }
 
     /// The outline of `glyph` in `font` as SVG path data, empty when there
@@ -229,12 +234,11 @@ fn with_demo<T>(f: impl FnOnce(&mut Demo) -> T) -> Option<T> {
 fn query(
     fallback: &str,
     para_id: u32,
-    answer: impl FnOnce(&ValidatedLayout<'_>, &HarfRustShaper) -> String,
+    answer: impl FnOnce(&ValidatedLayout<'_>, &mut Fonts) -> String,
 ) -> u64 {
     let json = with_demo(|demo| {
-        let shaper = demo.fonts.shaper();
         let layout = demo.paragraphs.get(para_id as usize)?.borrow_dependent();
-        Some(answer(layout, shaper))
+        Some(answer(layout, &mut demo.fonts))
     });
     leak(json.flatten().unwrap_or_else(|| fallback.to_owned()))
 }
@@ -273,10 +277,16 @@ fn clamped_range(layout: &ValidatedLayout<'_>, start: u32, end: u32) -> TextRang
     TextRange::new(start.min(end), start.max(end))
 }
 
-/// Allocates `len` bytes for the page to write into; free with [`demo_free`].
+/// Allocates `len` bytes for the page to write into, or returns null when
+/// memory runs out; free with [`demo_free`].
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_alloc(len: u32) -> *mut u8 {
-    Box::into_raw(vec![0u8; len as usize].into_boxed_slice()).cast()
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(len as usize).is_err() {
+        return std::ptr::null_mut();
+    }
+    bytes.resize(len as usize, 0);
+    Box::into_raw(bytes.into_boxed_slice()).cast()
 }
 
 /// Releases a buffer from [`demo_alloc`] or a result from any call below.
@@ -379,7 +389,7 @@ pub extern "C" fn demo_conformance() -> u64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_clear_paragraphs() {
-    with_demo(|demo| demo.paragraphs.clear());
+    with_demo(Demo::clear_paragraphs);
 }
 
 #[unsafe(no_mangle)]
@@ -463,9 +473,9 @@ pub extern "C" fn demo_move_cursor(
 pub extern "C" fn demo_selection_geometry(para_id: u32, start: u32, end: u32, height: u32) -> u64 {
     use BoxHeightStyle::{Max, Strut, Tight};
     let height = pick(height, &[Tight, Max, Strut]);
-    query("[]", para_id, |layout, shaper| {
+    query("[]", para_id, |layout, fonts| {
         let range = clamped_range(layout, start, end);
-        let rects = layout.selection_geometry(shaper, range, height);
+        let rects = layout.selection_geometry(fonts.shaper(), range, height);
         rects_json(rects.iter().map(|selected| selected.rect))
     })
 }

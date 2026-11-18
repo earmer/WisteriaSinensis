@@ -49,14 +49,18 @@ impl Layout<'_, '_> {
                 level: None,
             });
         }
-        let mut trailing: Vec<usize> = (line.body_len..line.placed.len()).collect();
-        if hides_trailing {
-            trailing.clear();
-        } else if self.base.is_rtl() {
-            trailing.reverse();
-        }
-        for &k in line.order.iter().chain(&trailing) {
-            self.push_piece_stops(line.placed[k], &mut raw);
+        let trailing = if hides_trailing {
+            &[][..]
+        } else {
+            &line.placed[line.body_len..]
+        };
+        let (forward, backward) = match self.base.is_rtl() {
+            false => (trailing, &[][..]),
+            true => (&[][..], trailing),
+        };
+        let body = line.order.iter().map(|&k| &line.placed[k]);
+        for &piece in body.chain(forward).chain(backward.iter().rev()) {
+            self.push_piece_stops(piece, &mut raw);
         }
         // A hard break's own bytes start the next line.
         let drops_end = !line.soft_wrap
