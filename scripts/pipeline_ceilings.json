@@ -1,8 +1,8 @@
 {
   "unreachable_in_layout": 8,
-  "mut_self_in_compile": 11,
-  "empty_ast_placeholder": 1,
-  "super_super_imports": 33,
+  "mut_self_in_compile": 0,
+  "empty_ast_placeholder": 0,
+  "super_super_imports": 28,
   "too_many_arguments": 1,
   "occupied_slots_calls": 1,
   "is_hanging_field_uses": 10,
