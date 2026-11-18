@@ -218,8 +218,13 @@ pub(super) struct Piece {
 impl Piece {
     /// Content (as opposed to whitespace): what ends a line's visible part.
     pub(super) fn is_content(&self) -> bool {
-        !matches!(self.kind, PieceKind::Glue { .. })
-            && !(matches!(self.kind, PieceKind::SpanEdge { .. }) && self.width == 0.0)
+        !matches!(self.kind, PieceKind::Glue { .. }) && !self.is_edge_transparent()
+    }
+
+    /// A zero-width span boundary: the only piece that may lie between a
+    /// hanging mark and its line edge (ST1-3).
+    pub(super) fn is_edge_transparent(&self) -> bool {
+        matches!(self.kind, PieceKind::SpanEdge { .. }) && self.width == 0.0
     }
 }
 

@@ -18,5 +18,5 @@ if ! "$CARGO" build --release --target wasm32-unknown-unknown; then
 fi
 
 mkdir -p web/pkg
-cp target/wasm32-unknown-unknown/release/mutil_demo.wasm web/pkg/
+cp "${CARGO_TARGET_DIR:-target}"/wasm32-unknown-unknown/release/mutil_demo.wasm web/pkg/
 echo "built web/pkg/mutil_demo.wasm"

@@ -74,10 +74,7 @@ impl Layout<'_, '_> {
     /// The index of the first or last visible piece of `body`: only
     /// zero-width span boundaries may lie between a mark and its edge.
     fn outermost(body: &[PlacedPiece], edge: LineEdge) -> Option<usize> {
-        let visible = |k: &usize| {
-            let p = &body[*k].piece;
-            !(matches!(p.kind, PieceKind::SpanEdge { .. }) && p.width == 0.0)
-        };
+        let visible = |k: &usize| !body[*k].piece.is_edge_transparent();
         match edge {
             LineEdge::Start => (0..body.len()).find(visible),
             LineEdge::End => (0..body.len()).rev().find(visible),
