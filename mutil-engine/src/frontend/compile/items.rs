@@ -44,13 +44,12 @@ impl TextBoxes<'_> {
             self.cluster += 1;
         }
         let c0 = self.cluster;
-        let mut natural_width = 0.0;
         while self.cluster < run.cluster_range.end
             && run.atom_range.start + clusters[self.cluster].atom_range.start < end_atom
         {
-            natural_width += clusters[self.cluster].natural_width;
             self.cluster += 1;
         }
+        let natural_width = ShapedCluster::total_width(&clusters[c0..self.cluster]);
         items.push(WordNode::Box(BoxNode::Text {
             run_index: self.run,
             byte_range: TextRange::new(

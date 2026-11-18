@@ -125,6 +125,13 @@ pub struct ShapedCluster {
 }
 
 impl ShapedCluster {
+    /// The sum of the clusters' `natural_width`, in `f32`, in slice order. The
+    /// frontend stores it as a text box's `natural_width` and G1 recomputes it
+    /// with this same function, so the cache (WN-6) is compared bit for bit.
+    pub(crate) fn total_width(clusters: &[Self]) -> f32 {
+        clusters.iter().map(|c| c.natural_width).sum()
+    }
+
     /// Number of atoms covered (`K`). Assumes a validated cluster
     /// (`atom_range.start <= atom_range.end`); an inverted range counts as 0
     /// rather than panicking or wrapping.
