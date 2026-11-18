@@ -3,7 +3,7 @@
 
 use super::super::{
     BoxDecorationBreak, BoxNode, DiscretionaryNode, GlueKind, GlueNode, InlineDecorationSpan,
-    MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge, WordNode,
+    InlineObjectBox, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge, WordNode,
 };
 use super::{Compiler, Unit};
 use crate::types::{
@@ -168,7 +168,7 @@ impl Compiler<'_> {
     /// An inline object's box, at the level of its bytes.
     fn object_node(&self, index: usize) -> WordNode {
         let o = &self.input.inline_objects[index];
-        WordNode::Box(BoxNode::InlineObject {
+        WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             baseline_align: o.baseline_align,
             byte_range: o.byte_range,
             box_id: o.box_id,
@@ -177,7 +177,7 @@ impl Compiler<'_> {
             descent: o.descent,
             overflow_policy: o.overflow_policy,
             bidi_level: self.levels.at(o.byte_range.start()),
-        })
+        }))
     }
 
     /// The levels of each decoration span's leading and trailing boundary:

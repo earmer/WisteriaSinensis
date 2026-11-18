@@ -1,8 +1,8 @@
 //! A line's caret stops (spec §6.1, CRT-1 to CRT-3, INT-4 to INT-6, INT-9).
 
-use super::super::line_builder::LineBuildState;
-use super::super::{Layout, PieceKind, PlacedPiece};
 use crate::frontend::GlueKind;
+use crate::middleend::layout::line_builder::AlignedLine;
+use crate::middleend::layout::{Layout, PieceKind, PlacedPiece};
 use crate::middleend::tolerance::approx_eq;
 use crate::middleend::{
     CaretAffinity, CaretStop, HangingWhitespaceMode, PositionedInlineBox, VisualGlyphRun,
@@ -27,9 +27,8 @@ impl Layout<'_, '_> {
     /// content starts, and its glyph runs and boxes.
     pub(in crate::middleend::layout) fn caret_stops(
         &self,
-        line: &LineBuildState<'_>,
+        line: &AlignedLine<'_>,
         visible_end: usize,
-        content_start: f32,
         runs: &[VisualGlyphRun],
         boxes: &[PositionedInlineBox],
     ) -> Vec<CaretStop> {
@@ -39,11 +38,11 @@ impl Layout<'_, '_> {
         // sits beyond the far edge of the base direction (HNG-3), so the end
         // of a hard-broken line or of the paragraph stays reachable.
         let hides_trailing =
-            line.soft_wrap && self.options.whitespace == HangingWhitespaceMode::Collapsible;
+            line.soft_wrap() && self.options.whitespace == HangingWhitespaceMode::Collapsible;
         let mut raw = Vec::new();
-        if bytes.is_empty() || line.body_len == 0 && (line.placed.is_empty() || hides_trailing) {
+        if bytes.is_empty() || line.body_len() == 0 && (line.placed.is_empty() || hides_trailing) {
             raw.push(RawStop {
-                x: content_start,
+                x: line.content.start,
                 offset: bytes.start(),
                 affinity: CaretAffinity::Downstream,
                 level: None,
@@ -52,7 +51,7 @@ impl Layout<'_, '_> {
         let trailing = if hides_trailing {
             &[][..]
         } else {
-            &line.placed[line.body_len..]
+            &line.placed[line.body_len()..]
         };
         let (forward, backward) = match self.base.is_rtl() {
             false => (trailing, &[][..]),
@@ -63,11 +62,11 @@ impl Layout<'_, '_> {
             self.push_piece_stops(piece, &mut raw);
         }
         // A hard break's own bytes start the next line.
-        let drops_end = !line.soft_wrap
+        let drops_end = !line.soft_wrap()
             && !bytes.is_empty()
             && line
                 .end_break
-                .is_some_and(|b| b.mandatory && !b.bytes.is_empty());
+                .is_some_and(|b| b.is_mandatory() && !b.byte_range.is_empty());
         let belongs_here = |offset: usize| {
             bytes.start() <= offset
                 && offset <= bytes.end()
@@ -89,7 +88,7 @@ impl Layout<'_, '_> {
                 stops.push(stop);
             }
         }
-        resolve_shared_offsets(&mut stops, line.soft_wrap);
+        resolve_shared_offsets(&mut stops, line.soft_wrap());
         // The level of an entity touching `offset`, else the paragraph's.
         let level_at = |offset: usize| {
             let glyphs = runs.iter().flat_map(|r| {
@@ -117,19 +116,19 @@ impl Layout<'_, '_> {
     /// positions, none for a single atom or an emoji sequence. Positions
     /// increase from the left edge (SHP-7); in RTL they pair with the atoms
     /// in reverse logical order, and the justification lies before the glyphs.
-    fn push_piece_stops(&self, placed: PlacedPiece, raw: &mut Vec<RawStop>) {
+    fn push_piece_stops(&self, placed: PlacedPiece<'_>, raw: &mut Vec<RawStop>) {
         let p = placed.piece;
         // A compression pool squeezed below zero overlaps its neighbours and
         // owns no bytes: its edges would only duplicate theirs (CRT-3).
         if placed.width < 0.0
-            && matches!(p.kind, PieceKind::Glue { item }
-                if self.glue(item).kind == GlueKind::CjkPunctCompression)
+            && matches!(p.kind, PieceKind::Glue(glue)
+                if glue.kind == GlueKind::CjkPunctCompression)
         {
             return;
         }
         // A glyph-less piece lends no level of its own (spec CRT-2).
         let level = match p.kind {
-            PieceKind::Glue { .. } | PieceKind::SpanEdge { .. } => None,
+            PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => None,
             _ => Some(p.level),
         };
         let edge = |x: f32, affinity: CaretAffinity| RawStop {

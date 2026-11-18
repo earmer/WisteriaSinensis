@@ -354,16 +354,18 @@ fn inline_objects_must_have_finite_non_negative_sizes() {
         (1.0, -1.0, 1.0),
         (1.0, 1.0, f32::INFINITY),
     ] {
-        let a = with_items(vec![WordNode::Box(BoxNode::InlineObject {
-            bidi_level: BidiLevel::LTR,
-            baseline_align: crate::types::BaselineAlignment::Auto,
-            byte_range: TextRange::new(0, 1),
-            box_id: 1,
-            width: w,
-            ascent: a,
-            descent: d,
-            overflow_policy: BoxOverflowPolicy::AllowOverflow,
-        })]);
+        let a = with_items(vec![WordNode::Box(BoxNode::InlineObject(
+            InlineObjectBox {
+                bidi_level: BidiLevel::LTR,
+                baseline_align: crate::types::BaselineAlignment::Auto,
+                byte_range: TextRange::new(0, 1),
+                box_id: 1,
+                width: w,
+                ascent: a,
+                descent: d,
+                overflow_policy: BoxOverflowPolicy::AllowOverflow,
+            },
+        ))]);
         assert_eq!(
             check_layout_inputs(&a, "abcd", &constraints(), &o),
             Err(LayoutInputError::InvalidInlineBox { item: 0 })
@@ -1977,7 +1979,7 @@ fn atomic_spans_wrap_content_not_whitespace() {
     // An inline object's edges count.
     let mut a = with_items(vec![
         text_box(vec![atom(0, 1)]),
-        WordNode::Box(BoxNode::InlineObject {
+        WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             bidi_level: BidiLevel::LTR,
             baseline_align: crate::types::BaselineAlignment::Auto,
             byte_range: TextRange::new(1, 3),
@@ -1986,7 +1988,7 @@ fn atomic_spans_wrap_content_not_whitespace() {
             ascent: 1.0,
             descent: 0.0,
             overflow_policy: BoxOverflowPolicy::Clip,
-        }),
+        })),
     ]);
     a.atomic_spans = vec![AtomicEditSpan {
         span_id: 1,

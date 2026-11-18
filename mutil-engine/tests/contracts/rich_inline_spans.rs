@@ -342,7 +342,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     // $a + b = c$ -> a + | b = | c: top-level relations 500, binary operators 700;
     // everything inside braces, fractions or radicals would stay one object.
     let obj = |id: u64, at: usize| {
-        WordNode::Box(BoxNode::InlineObject {
+        WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(at, at + 1),
@@ -351,7 +351,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
             ascent: 9.0,
             descent: 2.0,
             overflow_policy: BoxOverflowPolicy::AllowOverflow,
-        })
+        }))
     };
     let op_break = |offset: usize, penalty: i32| {
         WordNode::Discretionary(DiscretionaryNode {

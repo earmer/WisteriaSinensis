@@ -1,10 +1,12 @@
 //! Hanging punctuation (spec ST1-3, HNG-1 to HNG-4): which mark hangs at
 //! each edge of a line, by [`HANG_FRACTION`] of its advance.
 
-use super::super::tolerance::tolerance;
-use super::super::{DecorationLine, HangEndMode, HangSide, PositionedSpanFragment, VisualGlyphRun};
-use super::{Layout, Piece, PieceKind, PlacedPiece};
-use crate::types::{AtomFlags, BidiLevel};
+use super::{Layout, Piece, PieceKind, PlacedPiece, Reshapes};
+use crate::middleend::tolerance::tolerance;
+use crate::middleend::{
+    DecorationLine, HangEndMode, HangSide, PositionedSpanFragment, VisualGlyphRun,
+};
+use crate::types::AtomFlags;
 
 /// The part of a hanging mark's advance that protrudes past the content
 /// block (ST1-3). A full-width CJK mark keeps its ink in one half of its em
@@ -43,14 +45,15 @@ impl LineHangs {
 impl Layout<'_, '_> {
     /// The protruding part of `piece` if it may hang at `edge` of a line
     /// (the first line when `first_line`): a mark of the edge's class whose
-    /// post-L1 `level` is the paragraph's, on a side the mode allows (ST1-3, HNG-2). Whether
-    /// anything lies between it and the edge is the caller's to judge.
+    /// post-L1 level is the paragraph's, on a side the mode allows (ST1-3,
+    /// HNG-2). Whether anything lies between it and the edge is the caller's
+    /// to judge. `pending` re-shapes, not yet committed, apply to its width.
     pub(super) fn hang_protrusion(
         &self,
-        piece: &Piece,
-        level: BidiLevel,
+        piece: &Piece<'_>,
         edge: LineEdge,
         first_line: bool,
+        pending: Option<&Reshapes>,
     ) -> Option<f32> {
         let PieceKind::Cluster { cluster, .. } = piece.kind else {
             return None;
@@ -60,20 +63,21 @@ impl Layout<'_, '_> {
             LineEdge::End => AtomFlags::HANGABLE_END,
         };
         let rtl = self.base.is_rtl();
-        let side = match (edge == LineEdge::Start) != rtl {
-            true => HangSide::Left,
-            false => HangSide::Right,
+        let side = if (edge == LineEdge::Start) != rtl {
+            HangSide::Left
+        } else {
+            HangSide::Right
         };
         let c = &self.ast.clusters[cluster];
         (c.flags.contains(flag)
-            && level == self.base.base_level()
+            && piece.level == self.base.base_level()
             && self.options.hang_mode.allows(side, self.base, first_line))
-        .then(|| self.cluster_glyphs(cluster).1 * HANG_FRACTION)
+        .then(|| self.cluster_glyphs_over(pending, cluster).1 * HANG_FRACTION)
     }
 
     /// The index of the first or last visible piece of `body`: only
     /// zero-width span boundaries may lie between a mark and its edge.
-    fn outermost(body: &[PlacedPiece], edge: LineEdge) -> Option<usize> {
+    fn outermost(body: &[PlacedPiece<'_>], edge: LineEdge) -> Option<usize> {
         let visible = |k: &usize| !body[*k].piece.is_edge_transparent();
         match edge {
             LineEdge::Start => (0..body.len()).find(visible),
@@ -81,20 +85,31 @@ impl Layout<'_, '_> {
         }
     }
 
+    /// The mark at `edge` of `body` and its protrusion, if the index of the
+    /// outermost visible piece passes `allowed`.
+    fn hang_at(
+        &self,
+        body: &[PlacedPiece<'_>],
+        edge: LineEdge,
+        first_line: bool,
+        allowed: impl FnOnce(usize) -> bool,
+    ) -> Option<(usize, f32)> {
+        let k = Self::outermost(body, edge).filter(|&k| allowed(k))?;
+        Some((
+            k,
+            self.hang_protrusion(&body[k].piece, edge, first_line, None)?,
+        ))
+    }
+
     /// The mark hanging at the start of a line whose body is `body`, with
     /// no cloned padding (`post`) before it (ST1-3).
     pub(super) fn start_hang(
         &self,
-        body: &[PlacedPiece],
+        body: &[PlacedPiece<'_>],
         first_line: bool,
         post: f32,
     ) -> Option<(usize, f32)> {
-        let k = Self::outermost(body, LineEdge::Start).filter(|_| post == 0.0)?;
-        let p = &body[k];
-        Some((
-            k,
-            self.hang_protrusion(&p.piece, p.piece.level, LineEdge::Start, first_line)?,
-        ))
+        self.hang_at(body, LineEdge::Start, first_line, |_| post == 0.0)
     }
 
     /// The mark hanging at the end of a line whose body is `body`, with no
@@ -102,22 +117,17 @@ impl Layout<'_, '_> {
     /// only when the line does not fit without it (`fits_without`, ST1-3).
     pub(super) fn end_hang(
         &self,
-        body: &[PlacedPiece],
+        body: &[PlacedPiece<'_>],
         first_line: bool,
         pre: f32,
         start: Option<(usize, f32)>,
         fits_without: bool,
     ) -> Option<(usize, f32)> {
-        let k = Self::outermost(body, LineEdge::End).filter(|&k| {
+        self.hang_at(body, LineEdge::End, first_line, |k| {
             pre == 0.0
                 && start.is_none_or(|(s, _)| s != k)
                 && (self.options.hang_mode.end == HangEndMode::Force || !fits_without)
-        })?;
-        let p = &body[k];
-        Some((
-            k,
-            self.hang_protrusion(&p.piece, p.piece.level, LineEdge::End, first_line)?,
-        ))
+        })
     }
 }
 
@@ -125,7 +135,7 @@ impl Layout<'_, '_> {
 /// `(left, right)` beyond tolerance (OUT-4, HNG-1).
 pub(super) fn mark_hanging(
     runs: &mut [VisualGlyphRun],
-    placed: &[PlacedPiece],
+    placed: &[PlacedPiece<'_>],
     hangs: LineHangs,
     (left, right): (f32, f32),
 ) {

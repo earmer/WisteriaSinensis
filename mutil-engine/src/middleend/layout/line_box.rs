@@ -1,9 +1,8 @@
 //! The line box (spec §5 Stage 4, BAS-1): the line's ascent and descent
 //! from the strut and the items on it, and each item's baseline shift.
 
-use super::super::{InlineSlotConstraint, LayoutInputError, LineHeight, StrutMetrics};
 use super::{Layout, PieceKind, PlacedPiece};
-use crate::frontend::{BoxNode, WordNode};
+use crate::middleend::{InlineSlotConstraint, LayoutInputError, LineHeight, StrutMetrics};
 use crate::types::{BaselineAlignment, FontMetrics, TextRange};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,7 +42,7 @@ impl Layout<'_, '_> {
     /// (spec §5 Stage 4, BAS-1).
     pub(super) fn compute_line_box(
         &mut self,
-        placed: &mut [PlacedPiece],
+        placed: &mut [PlacedPiece<'_>],
         order: &[usize],
         byte_range: TextRange,
         slot: InlineSlotConstraint,
@@ -54,37 +53,30 @@ impl Layout<'_, '_> {
         let mut line_relative: Vec<LineRelativeItem> = Vec::new();
         for &k in order {
             let piece = placed[k].piece;
-            // The shift is only read for an item on the baseline.
-            let (align, item_above, item_below, shift, is_object) = match piece.kind {
+            // The extent counts under `Normal`, for objects, and for items
+            // placed against the line box; the shift only for items on the
+            // baseline.
+            let (align, extent, shift) = match piece.kind {
                 PieceKind::Cluster { run, cluster } => {
                     let align = self.ast.runs[run].baseline_align;
-                    let edge = LineRelativeEdge::of(align);
-                    let (a, d) = if normal || edge.is_some() {
-                        half(self.cluster_box(run, cluster)?)
+                    let extent = if normal || LineRelativeEdge::of(align).is_some() {
+                        Some(half(self.cluster_box(run, cluster)?))
                     } else {
-                        (0.0, 0.0)
+                        None
                     };
-                    let shift = match edge {
-                        None => {
-                            let own = self.cluster_metrics(run, cluster)?;
-                            baseline_shift(align, &self.ast.strut_metrics, Some(&own))
-                        }
-                        Some(_) => 0.0,
-                    };
-                    (align, a, d, shift, false)
+                    let own = self.cluster_metrics(run, cluster)?;
+                    let shift = baseline_shift(align, &self.ast.strut_metrics, Some(&own));
+                    (align, extent, shift)
                 }
-                PieceKind::Object { item } => {
-                    let WordNode::Box(BoxNode::InlineObject { baseline_align, .. }) =
-                        &self.ast.items[item]
-                    else {
-                        unreachable!("an object piece names an object item")
-                    };
-                    let (_, a, d) = self.fitted_object(item, slot);
-                    let shift = baseline_shift(*baseline_align, &self.ast.strut_metrics, None);
-                    (*baseline_align, a, d, shift, true)
+                PieceKind::Object(object) => {
+                    let (_, a, d) = Self::fitted_object(object, slot);
+                    let shift =
+                        baseline_shift(object.baseline_align, &self.ast.strut_metrics, None);
+                    (object.baseline_align, Some((a, d)), shift)
                 }
                 _ => continue,
             };
+            let (item_above, item_below) = extent.unwrap_or_default();
             match LineRelativeEdge::of(align) {
                 Some(edge) => line_relative.push(LineRelativeItem {
                     piece_index: k,
@@ -94,7 +86,7 @@ impl Layout<'_, '_> {
                 }),
                 None => {
                     placed[k].y_shift = shift;
-                    if normal || is_object {
+                    if extent.is_some() {
                         above = above.max(item_above + shift);
                         below = below.max(item_below - shift);
                     }

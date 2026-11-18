@@ -194,7 +194,9 @@ fn fe12_objects_are_neutrals_and_word_spaces_take_their_resolved_level() {
             .items
             .iter()
             .find_map(|n| match n {
-                WordNode::Box(BoxNode::InlineObject { bidi_level, .. }) => Some(*bidi_level),
+                WordNode::Box(BoxNode::InlineObject(InlineObjectBox { bidi_level, .. })) => {
+                    Some(*bidi_level)
+                }
                 _ => None,
             })
             .unwrap();

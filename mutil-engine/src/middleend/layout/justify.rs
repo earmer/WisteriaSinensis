@@ -1,8 +1,9 @@
 //! Stage 3 justification (spec ST3-2 to ST3-5): the priority ladder that
 //! spends a line's slack on its glue and inter-cluster gaps.
 
-use super::{FIT_EPSILON, Layout, PieceKind, PlacedPiece};
-use crate::frontend::{GlueNode, GlueTier, WordNode};
+use super::{Layout, PieceKind, PlacedPiece};
+use crate::frontend::GlueTier;
+use crate::middleend::FIT_EPSILON;
 use crate::types::{AtomFlags, ScriptTag};
 
 /// The inter-character stretch of an `ALLOW_CJK_JUSTIFY_AFTER` gap, per
@@ -15,12 +16,13 @@ const LETTER_GAP_STRETCH: f32 = 0.125;
 /// Level 3.
 const LEVELS: usize = 4;
 
-/// What one piece offers each level.
+/// What one piece offers: it takes part in exactly one level. Only glue
+/// (Levels 0 and 1) shrinks.
 #[derive(Clone, Copy, Default)]
 struct Capacity {
-    stretch: [f32; LEVELS],
-    /// Shrink of glue Tiers 0 and 1.
-    shrink: [f32; 2],
+    level: usize,
+    stretch: f32,
+    shrink: f32,
 }
 
 /// Scripts that expand at word separators only (ST3-5).
@@ -29,18 +31,10 @@ fn expands_at_words_only(script: ScriptTag) -> bool {
 }
 
 impl Layout<'_, '_> {
-    /// The glue node a glue piece names.
-    pub(super) fn glue(&self, item: usize) -> &GlueNode {
-        let WordNode::Glue(glue) = &self.ast.items[item] else {
-            unreachable!("a glue piece names a glue item")
-        };
-        glue
-    }
-
     /// The capacities of the pieces after the line's last tab (ST3-1): glue
     /// by its tier, and the gap after each cluster that another cluster
     /// follows, with no inline object between them (ST1-7, ST3-2).
-    fn capacities(&self, body: &[PlacedPiece]) -> Vec<Capacity> {
+    fn capacities(&self, body: &[PlacedPiece<'_>]) -> Vec<Capacity> {
         // Whether the next cluster or object after each piece is a cluster.
         let mut cluster_follows = vec![false; body.len()];
         let mut next_is_cluster = false;
@@ -55,53 +49,56 @@ impl Layout<'_, '_> {
         body.iter()
             .zip(cluster_follows)
             .map(|(p, cluster_follows)| match p.piece.kind {
-                PieceKind::Glue { item } => {
-                    let glue = self.glue(item);
-                    let tier = match glue.kind.tier() {
-                        GlueTier::Tier0 => 0,
-                        _ => 1,
-                    };
-                    let mut capacity = Capacity::default();
-                    capacity.stretch[tier] = glue.max_stretch;
-                    capacity.shrink[tier] = glue.max_shrink;
-                    capacity
-                }
+                PieceKind::Glue(glue) => Capacity {
+                    level: usize::from(glue.kind.tier() != GlueTier::Tier0),
+                    stretch: glue.max_stretch,
+                    shrink: glue.max_shrink,
+                },
                 PieceKind::Cluster { run, cluster } if cluster_follows => {
                     if self.cluster_glyphs(cluster).0.is_empty() {
                         return Capacity::default();
                     }
                     let run = &self.ast.runs[run];
                     let flags = self.ast.clusters[cluster].flags;
-                    let mut capacity = Capacity::default();
                     if flags.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER) {
-                        capacity.stretch[2] = CJK_GAP_STRETCH * run.font_size;
+                        Capacity {
+                            level: 2,
+                            stretch: CJK_GAP_STRETCH * run.font_size,
+                            shrink: 0.0,
+                        }
                     } else if !flags.contains(AtomFlags::NO_LETTER_SPACING)
                         && !expands_at_words_only(run.script)
                     {
-                        capacity.stretch[3] = LETTER_GAP_STRETCH * run.font_size;
+                        Capacity {
+                            level: 3,
+                            stretch: LETTER_GAP_STRETCH * run.font_size,
+                            shrink: 0.0,
+                        }
+                    } else {
+                        Capacity::default()
                     }
-                    capacity
                 }
                 _ => Capacity::default(),
             })
             .collect()
     }
 
-    /// The pieces of `body` after its last tab, which alone take part in
-    /// justification (ST3-1).
-    fn after_last_tab(body: &mut [PlacedPiece]) -> &mut [PlacedPiece] {
-        let first = body
-            .iter()
+    /// The index of the first piece of `body` after its last tab; only
+    /// those take part in justification (ST3-1).
+    fn after_last_tab(body: &[PlacedPiece<'_>]) -> usize {
+        body.iter()
             .rposition(|p| matches!(p.piece.kind, PieceKind::Tab))
-            .map_or(0, |tab| tab + 1);
-        &mut body[first..]
+            .map_or(0, |tab| tab + 1)
     }
 
     /// `Z`: how much the glue after the line's last tab can shrink (ST1-7).
-    pub(super) fn shrink_capacity(&self, body: &mut [PlacedPiece]) -> f32 {
-        self.capacities(Self::after_last_tab(body))
+    pub(super) fn shrink_capacity(body: &[PlacedPiece<'_>]) -> f32 {
+        body[Self::after_last_tab(body)..]
             .iter()
-            .map(|c| c.shrink.iter().sum::<f32>())
+            .map(|p| match p.piece.kind {
+                PieceKind::Glue(glue) => glue.max_shrink,
+                _ => 0.0,
+            })
             .sum()
     }
 
@@ -110,18 +107,17 @@ impl Layout<'_, '_> {
     /// ST3-3). Expansion after a cluster widens it; the cluster's glyphs
     /// place it by direction. Returns whether the line came out flush
     /// (ST3-4).
-    pub(super) fn justify(&self, body: &mut [PlacedPiece], slack: f32) -> bool {
-        let body = Self::after_last_tab(body);
+    pub(super) fn justify(&self, body: &mut [PlacedPiece<'_>], slack: f32) -> bool {
+        let first = Self::after_last_tab(body);
+        let body = &mut body[first..];
         let capacities = self.capacities(body);
         let mut remaining = slack.abs();
         let level_count = if slack < 0.0 { 2 } else { LEVELS };
         for level in 0..level_count {
-            let offered = |c: &Capacity| {
-                if slack < 0.0 {
-                    c.shrink[level]
-                } else {
-                    c.stretch[level]
-                }
+            let offered = |c: &Capacity| match (c.level == level, slack < 0.0) {
+                (false, _) => 0.0,
+                (true, true) => c.shrink,
+                (true, false) => c.stretch,
             };
             let total: f32 = capacities.iter().map(offered).sum();
             if remaining <= FIT_EPSILON || total <= 0.0 {

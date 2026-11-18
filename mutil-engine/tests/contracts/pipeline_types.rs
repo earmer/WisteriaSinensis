@@ -253,7 +253,7 @@ fn every_word_node_variant_is_constructible() {
     let mut ast = crate::common::ast("");
     let nodes = [
         word(&mut ast, TextRange::new(0, 5)),
-        WordNode::Box(BoxNode::InlineObject {
+        WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(7, 8),
@@ -262,7 +262,7 @@ fn every_word_node_variant_is_constructible() {
             ascent: 10.0,
             descent: 2.0,
             overflow_policy: BoxOverflowPolicy::ScaleToFit,
-        }),
+        })),
         WordNode::Box(BoxNode::SpanBoundary {
             byte_range: TextRange::empty_at(5),
             span_id: 3,
@@ -292,7 +292,7 @@ fn every_word_node_variant_is_constructible() {
         match n {
             WordNode::Box(b) => match b {
                 BoxNode::Text { .. }
-                | BoxNode::InlineObject { .. }
+                | BoxNode::InlineObject(InlineObjectBox { .. })
                 | BoxNode::SpanBoundary { .. } => {}
             },
             WordNode::Glue(_) | WordNode::Discretionary(_) | WordNode::Tab { .. } => {}

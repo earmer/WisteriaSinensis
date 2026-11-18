@@ -6,8 +6,8 @@ use super::storage::check_text_payload;
 use super::{LayoutInputError, in_byte_order, is_atom_boundary};
 use crate::frontend::{
     BoxDecorationBreak, BoxNode, BreakAction, DiscretionaryNode, GlueKind, GlueNode,
-    HyphenOpportunity, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge,
-    WordNode, is_word_space,
+    HyphenOpportunity, InlineDecorationSpan, InlineObjectBox, MAX_DECORATION_NESTING_DEPTH,
+    ParagraphAst, SpanEdge, WordNode, is_word_space,
 };
 use crate::types::{BidiClass, BidiLevel, TextRange, is_extent, is_measurement};
 
@@ -122,7 +122,8 @@ impl<'a> ItemChecks<'a> {
                 Some(self.ast.runs[*run_index].bidi_level)
             }
             WordNode::Box(
-                BoxNode::InlineObject { bidi_level, .. } | BoxNode::SpanBoundary { bidi_level, .. },
+                BoxNode::InlineObject(InlineObjectBox { bidi_level, .. })
+                | BoxNode::SpanBoundary { bidi_level, .. },
             )
             | WordNode::Glue(GlueNode { bidi_level, .. }) => Some(*bidi_level),
             WordNode::Discretionary(_) | WordNode::Tab { .. } => None,
@@ -132,14 +133,14 @@ impl<'a> ItemChecks<'a> {
         }
         match node {
             WordNode::Box(BoxNode::Text { .. }) => self.check_text_box(item),
-            WordNode::Box(BoxNode::InlineObject {
+            WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
                 baseline_align,
                 byte_range,
                 width,
                 ascent,
                 descent,
                 ..
-            }) => {
+            })) => {
                 // An object owns the bytes carets and selections address it by.
                 if byte_range.is_empty()
                     || !baseline_align.is_valid()
