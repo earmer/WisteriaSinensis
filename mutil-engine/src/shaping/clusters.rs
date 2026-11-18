@@ -7,16 +7,6 @@ use crate::types::{
 };
 use smallvec::SmallVec;
 
-#[inline]
-pub(crate) fn finite_or_zero(v: f32) -> f32 {
-    if v.is_finite() { v } else { 0.0 }
-}
-
-#[inline]
-pub(crate) fn finite_nonnegative(v: f32) -> f32 {
-    if v.is_finite() { v.max(0.0) } else { 0.0 }
-}
-
 /// Appends one glyph-less cluster per atom in `atoms[range]`, or one merged
 /// cluster for `HorizontalInVertical` (spec SHP-5).
 pub(crate) fn push_empty_clusters(
@@ -66,16 +56,45 @@ pub(crate) fn push_empty_clusters(
     }
 }
 
-/// Groups glyphs, each tagged with the atom holding its cluster value, into
-/// clusters of whole atoms (spec SHP-13): a glyph that reaches back into an
-/// earlier cluster merges the two, and an atom with no glyph of its own (a
-/// ligature component) joins the cluster before it.
+/// One shaped glyph with what cluster reconstruction needs to place it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TaggedGlyph {
+    /// The atom holding the glyph's cluster value.
+    pub(crate) atom: usize,
+    /// The face the glyph's id belongs to.
+    pub(crate) font: FontId,
+    pub(crate) glyph: RawShapedGlyph,
+    pub(crate) unsafe_break: bool,
+    pub(crate) unsafe_concat: bool,
+}
+
+/// The atom of `atoms[range]` whose byte range starts last at or before
+/// `byte`; the range's first atom when `byte` lies before all of them.
+pub(crate) fn atom_containing(
+    atoms: &[GraphemeAtom],
+    range: core::ops::Range<usize>,
+    byte: usize,
+) -> usize {
+    range.start
+        + atoms[range]
+            .partition_point(|a| a.byte_range.start() <= byte)
+            .saturating_sub(1)
+}
+
+/// Groups glyphs into clusters of whole atoms (spec SHP-13): a glyph that
+/// reaches back into an earlier cluster merges the two, and an atom with no
+/// glyph of its own (a ligature component) joins the cluster before it.
+///
+/// A cluster has one face, its first glyph's (`fallback_font` when there is
+/// no glyph at all). A later glyph of another face has no meaning in that
+/// face, so it becomes the face's `.notdef` (glyph 0) with its advance kept
+/// (spec SHP-5, SHP-24).
 pub(crate) fn push_clusters(
     run: &ShapingRun,
     atoms: &[GraphemeAtom],
     range: core::ops::Range<usize>,
-    font: FontRef,
-    glyphs: &[(usize, RawShapedGlyph, bool, bool)],
+    glyphs: &[TaggedGlyph],
+    fallback_font: FontId,
     output_clusters: &mut Vec<ShapedCluster>,
     output_glyphs: &mut Vec<RawShapedGlyph>,
 ) {
@@ -99,8 +118,8 @@ pub(crate) fn push_clusters(
             glyphs: 0..glyphs.len(),
         });
     } else {
-        for (index, (atom, ..)) in glyphs.iter().enumerate() {
-            let atom = *atom;
+        for (index, tagged) in glyphs.iter().enumerate() {
+            let atom = tagged.atom;
             match groups.last_mut() {
                 Some(last) if atom >= last.min_atom && atom <= last.max_atom => {
                     last.glyphs.end = index + 1;
@@ -145,9 +164,19 @@ pub(crate) fn push_clusters(
         let end = groups.get(k + 1).map_or(range.end, |next| next.min_atom);
         let first = output_glyphs.len();
         let slice = &glyphs[group.glyphs.clone()];
-        output_glyphs.extend(slice.iter().map(|g| g.1));
-        let (unsafe_break, unsafe_concat) = slice.first().map_or((false, false), |g| (g.2, g.3));
-        let natural_width = slice.iter().map(|g| g.1.x_advance).sum::<f32>().max(0.0);
+        let font = slice.first().map_or(fallback_font, |g| g.font);
+        output_glyphs.extend(slice.iter().map(|g| RawShapedGlyph {
+            glyph_id: if g.font == font { g.glyph.glyph_id } else { 0 },
+            ..g.glyph
+        }));
+        let (unsafe_break, unsafe_concat) = slice
+            .first()
+            .map_or((false, false), |g| (g.unsafe_break, g.unsafe_concat));
+        let natural_width = slice
+            .iter()
+            .map(|g| g.glyph.x_advance)
+            .sum::<f32>()
+            .max(0.0);
         output_clusters.push(ShapedCluster {
             orientation: run.orientation,
             byte_range: TextRange::new(
@@ -155,7 +184,7 @@ pub(crate) fn push_clusters(
                 atoms[end - 1].byte_range.end(),
             ),
             atom_range: start..end,
-            font,
+            font: FontRef::unscaled(font),
             bidi_level: run.bidi_level,
             flags: AtomFlags::for_cluster(&atoms[start..end]),
             glyph_range: first..output_glyphs.len(),
@@ -173,37 +202,7 @@ pub(crate) struct WindowPlan<'a> {
     pub(crate) kept_start: usize,
     pub(crate) kept_end: usize,
     pub(crate) leading_text: &'a str,
-    pub(crate) trailing_text: TrailingText,
-}
-
-/// Replacement text for a trailing hyphenation edit, kept inline when a single
-/// hyphen character.
-pub(crate) enum TrailingText {
-    None,
-    Char { buf: [u8; 4], len: u8 },
-    Owned(String),
-}
-
-impl TrailingText {
-    fn from_char(c: char) -> Self {
-        let mut buf = [0u8; 4];
-        let len = u8::try_from(c.encode_utf8(&mut buf).len()).unwrap_or(4);
-        Self::Char { buf, len }
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        match self {
-            Self::None => "",
-            Self::Char { buf, len } => {
-                core::str::from_utf8(&buf[..usize::from(*len)]).unwrap_or("")
-            }
-            Self::Owned(s) => s,
-        }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.as_str().is_empty()
-    }
+    pub(crate) trailing_text: String,
 }
 
 /// Resolves the window atom bounds, kept range, and edge replacement text for
@@ -227,20 +226,20 @@ pub(crate) fn plan_window<'a>(
         } => (*cut_bytes as usize, &**replacement),
     };
     let (trailing_cut, trailing_text) = match trailing_edit {
-        TrailingEdit::None => (0, TrailingText::None),
-        TrailingEdit::AppendHyphen { hyphen } => (0, TrailingText::from_char(*hyphen)),
+        TrailingEdit::None => (0, String::new()),
+        TrailingEdit::AppendHyphen { hyphen } => (0, hyphen.to_string()),
         TrailingEdit::ReplacePrefix {
             replacement,
             cut_bytes,
             hyphen,
         } => {
             let text = if replacement.is_empty() {
-                TrailingText::from_char(*hyphen)
+                hyphen.to_string()
             } else {
                 let mut s = String::with_capacity(replacement.len() + hyphen.len_utf8());
                 s.push_str(replacement);
                 s.push(*hyphen);
-                TrailingText::Owned(s)
+                s
             };
             (*cut_bytes as usize, text)
         }
@@ -291,6 +290,66 @@ pub(crate) fn attach_synthesized(
                 cluster.glyph_range.start + count..cluster.glyph_range.end + count;
         }
     }
+}
+
+/// The faces the empty clusters at the two cut edges of a window take: the
+/// face of the shaped text beside each.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EdgeFonts {
+    pub(crate) first: FontId,
+    pub(crate) last: FontId,
+}
+
+/// The reshape-window skeleton both backends share (spec SHP-6): the cut
+/// atoms keep empty clusters, so the window's atoms stay partitioned; the
+/// kept atoms are shaped by `shape_kept`, which appends their clusters and
+/// reports the edge faces and whatever `synthesize` needs; the edge clusters
+/// then take those faces BEFORE `synthesize` shapes the edit text in them,
+/// and the head is marked unsafe to concatenate (CLU-8) and, with a leading
+/// edit, unsafe to break before.
+pub(crate) fn finish_window<S>(
+    run: &ShapingRun,
+    atoms: &[GraphemeAtom],
+    plan: &WindowPlan<'_>,
+    output_clusters: &mut Vec<ShapedCluster>,
+    output_glyphs: &mut Vec<RawShapedGlyph>,
+    shape_kept: impl FnOnce(&mut Vec<ShapedCluster>, &mut Vec<RawShapedGlyph>) -> (EdgeFonts, S),
+    synthesize: impl FnOnce(S, EdgeFonts) -> (Vec<RawShapedGlyph>, Vec<RawShapedGlyph>),
+) {
+    let first_cluster = output_clusters.len();
+    push_empty_clusters(
+        run,
+        atoms,
+        plan.first..plan.kept_start,
+        FontId::default(),
+        output_clusters,
+        output_glyphs,
+    );
+    let kept_first = output_clusters.len();
+    let (edges, shaped) = shape_kept(output_clusters, output_glyphs);
+    for cluster in &mut output_clusters[first_cluster..kept_first] {
+        cluster.font = FontRef::unscaled(edges.first);
+    }
+    push_empty_clusters(
+        run,
+        atoms,
+        plan.kept_end..plan.end,
+        edges.last,
+        output_clusters,
+        output_glyphs,
+    );
+    let Some(head) = output_clusters.get_mut(first_cluster) else {
+        return;
+    };
+    head.safe_to_concat_before = false;
+    head.safe_to_break_before &= plan.leading_text.is_empty();
+    let (leading, trailing) = synthesize(shaped, edges);
+    attach_synthesized(
+        &mut output_clusters[first_cluster..],
+        output_glyphs,
+        leading,
+        trailing,
+    );
 }
 
 #[cfg(test)]
@@ -345,15 +404,30 @@ mod tests {
         }
     }
 
+    fn tag(
+        atom: usize,
+        glyph: RawShapedGlyph,
+        unsafe_break: bool,
+        unsafe_concat: bool,
+    ) -> TaggedGlyph {
+        TaggedGlyph {
+            atom,
+            font: FontId(1),
+            glyph,
+            unsafe_break,
+            unsafe_concat,
+        }
+    }
+
     #[test]
     fn push_clusters_merges_out_of_order_and_empty_atom_ranges() {
         let run = sample_run();
         let atoms = sample_atoms(4);
         let tagged = [
-            (0, glyph(10, 4.0), false, false),
-            (2, glyph(20, 5.0), true, false),
-            (3, glyph(30, 6.0), false, true),
-            (1, glyph(40, 2.0), false, false),
+            tag(0, glyph(10, 4.0), false, false),
+            tag(2, glyph(20, 5.0), true, false),
+            tag(3, glyph(30, 6.0), false, true),
+            tag(1, glyph(40, 2.0), false, false),
         ];
         let mut clusters = Vec::new();
         let mut glyphs = Vec::new();
@@ -361,8 +435,8 @@ mod tests {
             &run,
             &atoms,
             0..4,
-            FontRef::unscaled(FontId(1)),
             &tagged,
+            FontId(1),
             &mut clusters,
             &mut glyphs,
         );
@@ -387,10 +461,10 @@ mod tests {
         // `[2, 0, 3, 1]`: `2` and `0` merge into `0..=2`, `3` starts `3..=3`,
         // then `1` falls inside `0..=2` and merges all four into `0..4`.
         let tagged = [
-            (2, glyph(10, 1.0), false, false),
-            (0, glyph(20, 2.0), false, false),
-            (3, glyph(30, 3.0), false, false),
-            (1, glyph(40, 4.0), false, false),
+            tag(2, glyph(10, 1.0), false, false),
+            tag(0, glyph(20, 2.0), false, false),
+            tag(3, glyph(30, 3.0), false, false),
+            tag(1, glyph(40, 4.0), false, false),
         ];
         let mut clusters = Vec::new();
         let mut glyphs = Vec::new();
@@ -398,8 +472,8 @@ mod tests {
             &run,
             &atoms,
             0..4,
-            FontRef::unscaled(FontId(1)),
             &tagged,
+            FontId(1),
             &mut clusters,
             &mut glyphs,
         );
@@ -410,10 +484,10 @@ mod tests {
         // `[0, 3, 1, 2]`: `1` merges with `3` (`1..=3`), then `2` stays in
         // `1..=3` without splitting `0..1` or creating an overlapping range.
         let tagged = [
-            (0, glyph(10, 1.0), false, false),
-            (3, glyph(20, 2.0), false, false),
-            (1, glyph(30, 3.0), false, false),
-            (2, glyph(40, 4.0), false, false),
+            tag(0, glyph(10, 1.0), false, false),
+            tag(3, glyph(20, 2.0), false, false),
+            tag(1, glyph(30, 3.0), false, false),
+            tag(2, glyph(40, 4.0), false, false),
         ];
         clusters.clear();
         glyphs.clear();
@@ -421,8 +495,8 @@ mod tests {
             &run,
             &atoms,
             0..4,
-            FontRef::unscaled(FontId(1)),
             &tagged,
+            FontId(1),
             &mut clusters,
             &mut glyphs,
         );
@@ -452,7 +526,7 @@ mod tests {
         assert_eq!(plan.kept_start, 3);
         assert_eq!(plan.kept_end, 3);
         assert_eq!(plan.leading_text, "x");
-        assert_eq!(plan.trailing_text.as_str(), "y-");
+        assert_eq!(plan.trailing_text, "y-");
     }
 
     #[test]
@@ -466,8 +540,8 @@ mod tests {
             &run,
             &atoms,
             1..2,
-            FontRef::unscaled(FontId(1)),
-            &[(1, glyph(5, 3.0), false, false)],
+            &[tag(1, glyph(5, 3.0), false, false)],
+            FontId(1),
             &mut clusters,
             &mut glyphs,
         );
@@ -488,15 +562,5 @@ mod tests {
             glyphs.iter().map(|g| g.glyph_id).collect::<Vec<_>>(),
             [100, 5, 200]
         );
-    }
-
-    #[test]
-    fn finite_helpers_sanitize_non_finite_values() {
-        assert_eq!(finite_or_zero(-2.5), -2.5);
-        assert_eq!(finite_or_zero(f32::NAN), 0.0);
-        assert_eq!(finite_or_zero(f32::INFINITY), 0.0);
-        assert_eq!(finite_nonnegative(-2.5), 0.0);
-        assert_eq!(finite_nonnegative(3.5), 3.5);
-        assert_eq!(finite_nonnegative(f32::NEG_INFINITY), 0.0);
     }
 }

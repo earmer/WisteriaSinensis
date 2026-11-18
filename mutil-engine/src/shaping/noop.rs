@@ -3,11 +3,9 @@
 
 use super::{LeadingEdit, TextShaper, TrailingEdit};
 use crate::types::{
-    Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
-    GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster,
-    ShapingRun, TextRange,
+    FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation, GlyphOrientation,
+    GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster, ShapingRun, TextRange,
 };
-use smallvec::SmallVec;
 
 /// Returns empty data and all-zero metrics. Performs no shaping, measurement or
 /// font selection: every request reports "no glyphs, no ligature carets,
@@ -54,15 +52,6 @@ impl TextShaper for NoopShaper {
         _output_clusters: &mut Vec<ShapedCluster>,
         _output_glyphs: &mut Vec<RawShapedGlyph>,
     ) {
-    }
-
-    fn ligature_carets(
-        &self,
-        _instance: FontInstanceRef<'_>,
-        _glyph_id: u32,
-        _direction: Direction,
-    ) -> SmallVec<[f32; 4]> {
-        SmallVec::new()
     }
 
     fn space_advance(&self, _instance: FontInstanceRef<'_>, _orientation: GlyphOrientation) -> f32 {
