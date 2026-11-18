@@ -465,3 +465,142 @@ fn shp24_out_of_order_glyphs_across_faces_stay_on_their_own_atoms() {
     assert_eq!(home.font.font_id, FontId(1));
     assert!(!glyphs.iter().any(|g| g.glyph_id == 30), "{glyphs:?}");
 }
+
+/// The glyph ids of `glyphs` that fall in `cluster`.
+fn glyph_ids(cluster: &ShapedCluster, glyphs: &[RawShapedGlyph]) -> Vec<u32> {
+    glyphs[cluster.glyph_range.clone()]
+        .iter()
+        .map(|g| g.glyph_id)
+        .collect()
+}
+
+#[test]
+fn shp6_line_only_horizontal_in_vertical_leading_cut_takes_the_first_kept_face() {
+    // Window "a1漢" with the leading atom "a" cut away. The kept "1" is set in
+    // face 1 and "漢" in face 2: each kept cluster keeps its own face, and the
+    // cut atom's empty cluster takes the face of the first kept cluster (the
+    // stack's first face, face 0, is not the answer).
+    let text = "a1漢";
+    let (atoms, run) = crate::shaper::tate_chu_yoko(text, &[FAMILY]);
+    // The string shaped is the (empty) replacement plus the kept text "1漢".
+    let shaper = LineOnlyShaper::new(ScriptedLines(vec![(0, 1, 10), (1, 2, 20)]));
+    let mut clusters = Vec::new();
+    let mut glyphs = Vec::new();
+    shaper.reshape_window(
+        text,
+        &run,
+        &atoms,
+        TextRange::new(0, text.len()),
+        LeadingEdit::ReplaceSuffix {
+            replacement: "".into(),
+            cut_bytes: 1,
+        },
+        TrailingEdit::None,
+        &mut clusters,
+        &mut glyphs,
+    );
+
+    // The clusters partition the window's atoms, in order.
+    let mut next = 0;
+    for c in &clusters {
+        assert_eq!(c.atom_range.start, next, "{clusters:?}");
+        assert!(c.atom_range.end > c.atom_range.start, "{clusters:?}");
+        next = c.atom_range.end;
+    }
+    assert_eq!(next, atoms.len(), "{clusters:?}");
+
+    let cut = clusters
+        .iter()
+        .find(|c| c.atom_range.contains(&0))
+        .expect("a cluster for the cut atom");
+    assert!(cut.glyph_range.is_empty(), "{clusters:?}");
+    assert_eq!(cut.font.font_id, FontId(1), "{clusters:?}");
+
+    let one = clusters
+        .iter()
+        .find(|c| c.atom_range.contains(&1))
+        .expect("a cluster for \"1\"");
+    assert_eq!(one.font.font_id, FontId(1), "{clusters:?}");
+    assert_eq!(glyphs[one.glyph_range.start].glyph_id, 10, "{glyphs:?}");
+    // The spec is silent on whether a reshaped tate-chu-yoko window stays one
+    // group (SHP-5) or splits per face; either way a glyph is its face's own
+    // id or that face's glyph 0, never an id read in the wrong face.
+    let han = clusters
+        .iter()
+        .find(|c| c.atom_range.contains(&2))
+        .expect("a cluster for \"漢\"");
+    let expected = if han.font.font_id == FontId(2) { 20 } else { 0 };
+    assert_eq!(
+        *glyph_ids(han, &glyphs).last().unwrap(),
+        expected,
+        "{clusters:?} {glyphs:?}"
+    );
+}
+
+#[test]
+fn shp13_shp24_two_faces_in_one_cluster_keep_the_first_face_and_notdef_the_rest() {
+    // Atom 0 gets two glyphs, the first from face 1 and the second from face
+    // 2: the cluster takes face 1, and the face-2 glyph becomes glyph 0 with
+    // its advance (5.0) kept. Atom 1 is untouched.
+    let text = "ab";
+    let (mut atoms, mut run) = crate::shaper::tate_chu_yoko(text, &[FAMILY]);
+    run.orientation = GlyphOrientation::Horizontal;
+    for atom in &mut atoms {
+        atom.orientation = GlyphOrientation::Horizontal;
+    }
+    let shaper = LineOnlyShaper::new(ScriptedLines(vec![(0, 1, 10), (0, 2, 20), (1, 1, 30)]));
+    let mut clusters = Vec::new();
+    let mut glyphs = Vec::new();
+    shaper.shape_run(text, &run, &atoms, &mut clusters, &mut glyphs);
+
+    assert_eq!(clusters.len(), 2, "{clusters:?}");
+    assert_eq!(clusters[0].atom_range, 0..1);
+    assert_eq!(clusters[0].font.font_id, FontId(1));
+    assert_eq!(glyph_ids(&clusters[0], &glyphs), [10, 0], "{glyphs:?}");
+    let kept = &glyphs[clusters[0].glyph_range.clone()];
+    assert_eq!(kept[1].x_advance, 5.0, "{glyphs:?}");
+    assert_eq!(clusters[0].natural_width, 10.0, "{clusters:?}");
+    assert_eq!(clusters[1].atom_range, 1..2);
+    assert_eq!(clusters[1].font.font_id, FontId(1));
+    assert_eq!(glyph_ids(&clusters[1], &glyphs), [30], "{glyphs:?}");
+}
+
+#[test]
+fn shp13_backward_atom_order_across_faces_lays_out_and_validates() {
+    // The backend returns the glyphs of "abc" backwards, in two faces.
+    let text = "abc";
+    let shaper = LineOnlyShaper::new(ScriptedLines(vec![(2, 2, 30), (1, 1, 20), (0, 2, 10)]));
+    let style = script_style(&[FAMILY], 10.0);
+    let ast = compile_paragraph(&input(text, &style), &FrontendOptions::default(), &shaper)
+        .expect("the frontend accepts backward glyph order");
+
+    // ShapedCluster invariants: the clusters partition the atoms in order,
+    // each byte range runs from its first atom's start to its last atom's
+    // end, the glyph ranges tile the glyph buffer, and flags aggregate.
+    let (mut next_atom, mut next_glyph) = (0, 0);
+    for c in &ast.clusters {
+        assert_eq!(c.atom_range.start, next_atom, "{:?}", ast.clusters);
+        assert!(!c.atom_range.is_empty(), "{:?}", ast.clusters);
+        let atoms = &ast.atoms[c.atom_range.clone()];
+        assert_eq!(c.byte_range.start(), atoms[0].byte_range.start());
+        assert_eq!(c.byte_range.end(), atoms[atoms.len() - 1].byte_range.end());
+        assert_eq!(c.flags, AtomFlags::for_cluster(atoms));
+        assert_eq!(c.glyph_range.start, next_glyph, "{:?}", ast.clusters);
+        next_atom = c.atom_range.end;
+        next_glyph = c.glyph_range.end;
+    }
+    assert_eq!(next_atom, ast.atoms.len());
+    assert_eq!(next_glyph, ast.glyphs.len());
+
+    let p = layout_paragraph(
+        &ast,
+        text,
+        &shaper,
+        &column(200.0),
+        &LayoutOptions::default(),
+    )
+    .expect("the paragraph lays out");
+    if let Err((line, error)) = ValidatedLayout::new(&p, text) {
+        panic!("line {line}: {error}\n{p:#?}");
+    }
+}
