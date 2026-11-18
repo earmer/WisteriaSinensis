@@ -4,6 +4,7 @@ use super::{LayoutInputError, fits};
 use crate::frontend::{
     BoxNode, ParagraphAst, ShapingRun, TextBoxView, WordNode, text_is_self_contained,
 };
+use crate::middleend::shaper_gate::glyph_is_measured;
 use crate::types::{
     AtomFlags, GlyphOrientation, GraphemeAtom, RawShapedGlyph, ShapedCluster, WritingMode,
     is_extent, is_measurement,
@@ -42,7 +43,7 @@ pub(super) fn check_glyph_ranges(
 /// * the clusters' `glyph_range`s tile `ast.glyphs`, in cluster order;
 /// * in item order, the text boxes of one run take consecutive ranges inside
 ///   the run's own, and together cover them exactly.
-pub(super) fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
+pub(super) fn check_storage(ast: &ParagraphAst) -> Result<TextBoxes<'_>, LayoutInputError> {
     use LayoutInputError as E;
     let (mut atom_at, mut cluster_at) = (0, 0);
     for (run, r) in ast.runs.iter().enumerate() {
@@ -72,6 +73,7 @@ pub(super) fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> 
         .iter()
         .map(|r| (r.atom_range.start, r.cluster_range.start))
         .collect();
+    let mut boxes = Vec::with_capacity(ast.items.len());
     for (item, node) in ast.items.iter().enumerate() {
         let WordNode::Box(BoxNode::Text {
             run_index,
@@ -80,6 +82,7 @@ pub(super) fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> 
             ..
         }) = node
         else {
+            boxes.push(None);
             continue;
         };
         let run = ast
@@ -97,13 +100,16 @@ pub(super) fn check_storage(ast: &ParagraphAst) -> Result<(), LayoutInputError> 
             return Err(E::ItemNotSelfContained { item });
         }
         (*next_atom, *next_cluster) = (atom_range.end, cluster_range.end);
+        boxes.push(Some(
+            ast.text_box(item).ok_or(E::ItemNotSelfContained { item })?,
+        ));
     }
     for (run, (r, (atom_end, cluster_end))) in ast.runs.iter().zip(next).enumerate() {
         if atom_end != r.atom_range.end || cluster_end != r.cluster_range.end {
             return Err(E::InvalidRunStorage { run });
         }
     }
-    Ok(())
+    Ok(TextBoxes(boxes))
 }
 
 /// A run's own shaping settings: its bytes fit `text`, its size is positive,
@@ -123,6 +129,21 @@ pub(super) fn check_run(
         && run.features.is_normalized())
     {
         return Err(E::InvalidShapingRun { run: index });
+    }
+    Ok(())
+}
+
+/// Every run on its own ([`check_run`]), then the body runs progress through
+/// the text (`prev.end <= next.start`); `check_run` proves each range ordered
+/// and inside `text`.
+pub(super) fn check_runs(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
+    let mut previous_end = 0;
+    for (run, r) in ast.runs.iter().enumerate() {
+        check_run(r, text, run)?;
+        if r.byte_range.start() < previous_end {
+            return Err(LayoutInputError::InvalidShapingRun { run });
+        }
+        previous_end = r.byte_range.end();
     }
     Ok(())
 }
@@ -179,32 +200,23 @@ pub(super) fn check_text_presentation(
 /// Writing-mode rules of the body: every run and every text box presents
 /// consistently, and a tate-chu-yoko run is one cluster in one text box that
 /// spans the whole run (so no break can fall inside it).
-pub(super) fn check_presentation(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
-    use LayoutInputError as E;
+pub(super) fn check_presentation(
+    ast: &ParagraphAst,
+    boxes: &TextBoxes<'_>,
+) -> Result<(), LayoutInputError> {
     for run in &ast.runs {
         check_run_presentation(run, ast.writing_mode)?;
     }
-    for (item, node) in ast.items.iter().enumerate() {
-        let WordNode::Box(BoxNode::Text {
-            run_index,
-            atom_range,
-            cluster_range,
-            ..
-        }) = node
-        else {
-            continue;
-        };
-        // `check_storage` proved the run index and the box's ranges.
-        let run = &ast.runs[*run_index];
-        let view = ast
-            .text_box(item)
-            .expect("check_storage resolves every text box");
+    for view in boxes.iter() {
+        let run = &ast.runs[view.run_index];
+        // The box lies inside its run (`check_storage`), so equal lengths
+        // mean it spans the whole run.
         if run.orientation == GlyphOrientation::HorizontalInVertical
             && (view.clusters.len() != 1
-                || *atom_range != run.atom_range
-                || *cluster_range != run.cluster_range)
+                || view.atoms.len() != run.atom_range.len()
+                || view.clusters.len() != run.cluster_range.len())
         {
-            return Err(E::OrientationMismatch);
+            return Err(LayoutInputError::OrientationMismatch);
         }
         check_text_presentation(run, view.atoms, view.clusters, ast.writing_mode)?;
     }
@@ -219,9 +231,24 @@ fn cluster_measurements_are_valid(cluster: &ShapedCluster, glyphs: &[RawShapedGl
     is_measurement(cluster.font.scale)
         && cluster.font.scale > 0.0
         && is_extent(cluster.natural_width)
-        && glyphs.iter().all(|g| {
-            is_measurement(g.x_advance) && is_measurement(g.x_offset) && is_measurement(g.y_offset)
-        })
+        && glyphs.iter().all(glyph_is_measured)
+}
+
+/// The text boxes of an AST whose storage `check_storage` proved: one entry per
+/// item, `Some` exactly for the items that are text boxes. Later phases read
+/// boxes from here and never resolve them again.
+pub(super) struct TextBoxes<'a>(Vec<Option<TextBoxView<'a>>>);
+
+impl<'a> TextBoxes<'a> {
+    /// The text box at `items[item]`, or `None` if that item is not one.
+    pub(super) fn get(&self, item: usize) -> Option<&TextBoxView<'a>> {
+        self.0.get(item)?.as_ref()
+    }
+
+    /// Every text box, in item order.
+    pub(super) fn iter(&self) -> impl Iterator<Item = &TextBoxView<'a>> {
+        self.0.iter().flatten()
+    }
 }
 
 /// Checks one text payload (a text box, or an annotation's text) against its

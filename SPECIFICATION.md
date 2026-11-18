@@ -485,6 +485,7 @@ pub struct ValidatedInputs<'a> { .. }   // inputs that passed the input gate, wi
 pub enum LayoutInputError {
     OrientationMismatch,
     InvalidFontMetrics,
+    InvalidShaperMetrics,
     InvalidSpacing,
     InvalidBidiSpan { span: usize },
     InvalidAnnotationSpan { annotation: usize },
@@ -527,7 +528,8 @@ pub enum LayoutInputError {
 | Variant | Raised when | Enforces |
 |---|---|---|
 | `OrientationMismatch` | a run's, atom's or cluster's orientation disagrees with its run or does not suit the writing mode or its level, or a tate-chu-yoko run is not one cluster in one text box spanning the run | AST-5, ORI-3, ORI-4 |
-| `InvalidFontMetrics` | the raw strut metrics are not valid `FontMetrics` | AST-6 |
+| `InvalidFontMetrics` | the raw strut metrics are not valid `FontMetrics` although the strut's own ascent, descent and line gap pass (otherwise `InvalidStrut`) | AST-6, FNT-4 |
+| `InvalidShaperMetrics` | the metrics a shaper answers at layout time are not valid `FontMetrics`, or resolve under the line height to an invalid line box (G2) | SHP-9, FNT-4, MET-1 |
 | `InvalidSpacing` | a run's spacing or baseline shift is not a measurement (MSR-1), or a letter-spaced run holds a `NO_LETTER_SPACING` atom | AST-5 |
 | `InvalidBidiSpan { span }` | an explicit bidi span breaks §2.8 | BID-2 |
 | `InvalidAnnotationSpan { annotation }` | an annotation breaks §2.9 | ANN-2, ANN-3 |
@@ -536,7 +538,7 @@ pub enum LayoutInputError {
 | `NonMonotonicGeometry` | an expanded block envelope introduced inline space | GEO-4 |
 | `InvalidConstraints` | a non-positive or NaN wrap width, a non-finite indent, or (without a provider) an indent outside `[0, wrap_width)` | GEO-2 |
 | `ParagraphSeparatorInText` | the text holds a paragraph separator | AST-2 |
-| `InvalidStrut` | the strut font size or a `LineHeight::Fixed` multiplier is not finite and positive, or the resolved strut is invalid | AST-6, MET-1 |
+| `InvalidStrut` | the strut's own ascent, descent or line gap, the strut font size or a `LineHeight::Fixed` multiplier is not valid, or the resolved strut is invalid | AST-6, MET-1 |
 | `RunOutsideText { run }` | a run's range exceeds the text or splits a UTF-8 sequence | AST-5 |
 | `InvalidShapingRun { run }` | a run's size is not a positive measurement, its script is unresolved, its features are not canonical, or a body run starts before the previous one ends | AST-5, FNT-2, MSR-1 |
 | `InvalidRunStorage { run }` | the runs do not tile the atoms or clusters, or a run's text boxes do not cover its atoms and clusters | AST-4 |
@@ -1253,7 +1255,7 @@ pub enum ShaperProfile { FullContract, LineOnly }
 
 **[SHP-8] Metrics.** `font_metrics` returns the unadjusted metrics of an instance. `resolve_primary_font_metrics` returns the primary face and its complete `FontMetrics` (FNT-4), vertical and baseline metrics included, for the requested variation instance; the frontend stores the result unchanged as the raw strut.
 
-**[SHP-9]** `NoopShaper` is a non-rendering, zero-metric implementation that closes the interface for tests. Its zero metrics are not valid (FNT-4), so layout that asks it for metrics stops at the shaper gate with `InvalidFontMetrics`. Its space advance is 0.
+**[SHP-9]** `NoopShaper` is a non-rendering, zero-metric implementation that closes the interface for tests. Its zero metrics are not valid (FNT-4), so layout that asks it for metrics stops at the shaper gate with `InvalidShaperMetrics`. Its space advance is 0.
 
 **[SHP-20] `space_advance`** returns the nominal advance of U+0020 in a font instance along the inline axis of `orientation`: the horizontal advance, or the vertical one for `GlyphOrientation::VerticalUpright`. It is in layout units with `font_size · font.scale` applied, finite and non-negative. No OpenType feature, letter spacing or word spacing enters it, and it is never measured by shaping a space (SHP-5): the frontend adds the style's `word_spacing` itself (FE-27). A face without a space glyph answers `0.25 · font_size · font.scale`. The frontend is its only caller, so the value reaches layout as a glue width, which the input gate checks (WN-10, AX-3); the shaper gate, which checks answers given at layout time, has no part in it.
 

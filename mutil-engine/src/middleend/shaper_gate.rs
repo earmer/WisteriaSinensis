@@ -16,18 +16,15 @@ use crate::types::{
 /// FNT-4 before layout uses them.
 ///
 /// # Errors
-/// `InvalidFontMetrics` when any metric or line-gap relation fails
+/// `InvalidShaperMetrics` when any metric or line-gap relation fails
 /// [`FontMetrics::is_valid`].
 pub(crate) fn checked_font_metrics(
     shaper: &dyn TextShaper,
     instance: FontInstanceRef<'_>,
 ) -> Result<FontMetrics, LayoutInputError> {
-    let metrics = shaper.font_metrics(instance);
-    if metrics.is_valid() {
-        Ok(metrics)
-    } else {
-        Err(LayoutInputError::InvalidFontMetrics)
-    }
+    Some(shaper.font_metrics(instance))
+        .filter(FontMetrics::is_valid)
+        .ok_or(LayoutInputError::InvalidShaperMetrics)
 }
 
 /// The line box of one font instance under `line_height`: the shaper's
@@ -35,7 +32,7 @@ pub(crate) fn checked_font_metrics(
 /// paragraph strut and checked again as a strut.
 ///
 /// # Errors
-/// `InvalidFontMetrics` when the shaper's metrics are invalid or resolve to an
+/// `InvalidShaperMetrics` when the shaper's metrics are invalid or resolve to an
 /// invalid line box.
 pub(crate) fn checked_line_box(
     shaper: &dyn TextShaper,
@@ -52,19 +49,23 @@ pub(crate) fn checked_line_box(
 /// the paragraph strut, checked again as a strut.
 ///
 /// # Errors
-/// `InvalidFontMetrics` when the metrics resolve to an invalid line box.
+/// `InvalidShaperMetrics` when the metrics resolve to an invalid line box.
 pub(crate) fn resolved_line_box(
     metrics: &FontMetrics,
     font_size: f32,
     line_height: LineHeight,
     mode: WritingMode,
 ) -> Result<StrutMetrics, LayoutInputError> {
-    let line_box = line_height.resolve_strut(metrics, font_size, mode);
-    if line_box.is_valid() {
-        Ok(line_box)
-    } else {
-        Err(LayoutInputError::InvalidFontMetrics)
-    }
+    Some(line_height.resolve_strut(metrics, font_size, mode))
+        .filter(StrutMetrics::is_valid)
+        .ok_or(LayoutInputError::InvalidShaperMetrics)
+}
+
+/// Whether every measurement of `glyph` is a measurement (MSR-1).
+pub(crate) fn glyph_is_measured(glyph: &RawShapedGlyph) -> bool {
+    [glyph.x_advance, glyph.x_offset, glyph.y_offset]
+        .into_iter()
+        .all(is_measurement)
 }
 
 /// Re-shape one cluster window with no edits and verify the shaper's reply
@@ -97,13 +98,11 @@ pub(crate) fn checked_reshape_window(
     let [only] = clusters.as_slice() else {
         return None;
     };
-    let valid_glyphs = only.atom_range == expected_atom_range
-        && only.glyph_range == (0..glyphs.len())
-        && is_extent(only.natural_width)
-        && glyphs.iter().all(|g| {
-            is_measurement(g.x_advance) && is_measurement(g.x_offset) && is_measurement(g.y_offset)
-        });
-    if !valid_glyphs {
+    if only.atom_range != expected_atom_range
+        || only.glyph_range != (0..glyphs.len())
+        || !is_extent(only.natural_width)
+        || !glyphs.iter().all(glyph_is_measured)
+    {
         return None;
     }
     let advance: f32 = glyphs.iter().map(|g| g.x_advance).sum();

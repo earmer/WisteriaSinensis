@@ -1,8 +1,9 @@
-use super::super::{LayoutConstraints, LayoutOptions};
-use super::spans::{SpanIndex, check_boundary_order};
+use super::spans::{check_boundary_order, check_spans};
+use super::storage::check_storage;
 use super::*;
 use crate::frontend::RepeatedOperator;
 use crate::frontend::*;
+use crate::middleend::{LayoutConstraints, LayoutOptions};
 use crate::middleend::{LineHeight, TabStops};
 use crate::types::*;
 use crate::types::{BidiDirection, FontMetrics, TextRange};
@@ -1129,8 +1130,10 @@ fn span_boundaries_nest_in_lifo_order_and_equal_ranges_follow_the_slice_order() 
     let mut nested = ast([(1, L, 1), (2, L, 1), (2, T, 3), (1, T, 3)]);
     nested.decoration_spans[1].byte_range = TextRange::new(1, 3);
     nested.decoration_spans[0].byte_range = TextRange::new(1, 4);
+    let boxes = check_storage(&nested).unwrap();
+    let ids = check_spans(&nested, "abcd", &boxes).unwrap();
     assert_eq!(
-        check_boundary_order(&nested, &SpanIndex::new(&nested)),
+        check_boundary_order(&nested, &ids),
         Ok(()),
         "inner span closes first"
     );
