@@ -9,7 +9,7 @@ Operational guide for coding agents working in `WisteriaSinensis`.
   - `mutil-engine/tests/contracts/` — Contract tests.
   - `mutil-engine/tests/pipeline/` — End-to-end pipeline tests.
 - `scripts/check_spec.py` — Verifies that `SPECIFICATION.md` and `mutil-engine` public types/members/rule IDs match.
-- `docs/adr/` — Architecture Decision Records.
+- `docs/adr/` — Architecture Decision Records (ADR-0001 test authoring, ADR-0002 public API).
 - `.github/agents/` — Specialized review/verification agent definitions.
 
 ## Required Verification Commands
@@ -37,6 +37,11 @@ python3 scripts/check_spec.py
 
 2. **Run the Axiom Checker on your diff (`.github/agents/axiom-checker.md`).**
    - Before finishing a feature or PR, run a sub-agent with `.github/agents/axiom-checker.md` against your `git diff` (especially newly added files) to verify `AX-1`–`AX-7` compliance.
+
+3. **The public API is not frozen (`docs/adr/0002-public-api-is-not-frozen.md`).**
+   - Public types, members, functions, variants, rule IDs, the demo's C ABI and its JSON may be renamed, removed or reshaped at any time. No deprecation, compatibility shim or semver bump is needed.
+   - Do not keep an awkward interface only to avoid changing it. Choose the better design, and do not leave aliases or wrappers for old callers.
+   - In the same change, update every caller, the tests, `SPECIFICATION.md` (so `scripts/check_spec.py` passes) and `demo/web/`.
 
 ## Code Taste & Local Clarity Rules
 
