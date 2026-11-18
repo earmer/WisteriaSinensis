@@ -1,52 +1,164 @@
-//! Layout options (spec §5 Stage 1.3 and Stage 4).
+//! Layout policy and container geometry (spec §5 Stage 1.3, Stage 4, §6.6).
 
-use super::tolerance::tolerance;
-use super::{HangSide, LayoutInputError};
 use crate::frontend::is_line_or_paragraph_separator;
+use crate::middleend::tolerance::tolerance;
+use crate::middleend::{HangSide, LayoutInputError, SlotSource};
 use crate::types::{Direction, FontMetrics, WritingMode, is_measurement};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
-/// Hanging at the trailing edge of a line (spec §5 Stage 1.3; CSS Text 4
-/// `hanging-punctuation: force-end | allow-end` `[W2]`).
+/// Trailing whitespace at a soft wrap (spec §5 Stage 1.7; CSS `white-space` `[W1]`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum HangingWhitespaceMode {
+    /// CSS `normal`: trailing `WordSpace`/`CjkAutospace` collapse to zero width but stay
+    /// in `PositionedLine::byte_range` (`visible_byte_end` marks the last visible cluster).
+    #[default]
+    Collapsible,
+    /// CSS `pre-wrap`: trailing spaces hang outside the line yet keep caret slots.
+    Preserved,
+}
+
+/// Line-breaking strategy (spec §5 Stage 1.6.1): one beam-lookahead machine `[L3][L6]`.
+///
+/// | Profile | `beam_width` | `window_depth` | Use |
+/// |---|---|---|---|
+/// | `Greedy` | 1 | 1 | monospace code, logs, UAX #14 oracle tests |
+/// | `Balanced` (default) | 2 | 2 | interactive rich-text editing |
+/// | `Publication` | 8 | 6 | static reading view, print export |
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LineBreakStrategy {
+    /// First-fit with the overflow ladder; each line depends only on its start.
+    Greedy,
+    /// The engine default; stack-only state.
+    #[default]
+    Balanced,
+    /// Knuth-Plass quality over a bounded window, with dominator pruning.
+    Publication,
+}
+
+impl LineBreakStrategy {
+    /// Number of candidate paths kept alive (`K`).
+    #[must_use]
+    pub const fn beam_width(self) -> usize {
+        match self {
+            Self::Greedy => 1,
+            Self::Balanced => 2,
+            Self::Publication => 8,
+        }
+    }
+
+    /// Lines of lookahead before the oldest is committed (`W`).
+    #[must_use]
+    pub const fn window_depth(self) -> usize {
+        match self {
+            Self::Greedy => 1,
+            Self::Balanced => 2,
+            Self::Publication => 6,
+        }
+    }
+}
+
+/// Copy policy for a source U+00AD (spec §6.6); a generated hyphen is never copied.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SoftHyphenPolicy {
+    /// Copy U+00AD as in the source (Firefox `[C4]`).
+    #[default]
+    Keep,
+    /// Drop U+00AD from copied text.
+    Strip,
+}
+
+/// Layout policy (spec §5, §6.6); the geometry is [`LayoutConstraints`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LayoutOptions {
+    /// Whether elastic capacity is used to justify content.
+    pub justify: bool,
+    /// Under `justify`, whether a paragraph-final or hard-broken line may shrink to fit
+    /// (spec ST1-7, ST3-3); it never stretches. Off: it breaks earlier instead.
+    pub compress_last_lines: bool,
+    /// Optional truncation; must satisfy [`LineClampPolicy::is_valid`].
+    pub clamp: Option<LineClampPolicy>,
+    /// Line-breaking strategy.
+    pub strategy: LineBreakStrategy,
+    /// Hanging punctuation at both edges.
+    pub hang_mode: HangMode,
+    /// Line-height policy; must satisfy [`LineHeight::is_valid`].
+    pub line_height: LineHeight,
+    /// Trailing-whitespace handling at a soft wrap.
+    pub whitespace: HangingWhitespaceMode,
+    /// Clipboard policy for a source U+00AD.
+    pub soft_hyphen: SoftHyphenPolicy,
+}
+
+/// Truncation limits; at least one must be set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineClampPolicy {
+    /// Maximum number of lines: at least 1.
+    pub max_lines: Option<usize>,
+    /// Maximum block extent: finite and positive; one line is always kept.
+    pub max_block_size: Option<f32>,
+    /// Synthesized suffix; empty means silent truncation.
+    pub ellipsis: Box<str>,
+}
+
+impl LineClampPolicy {
+    /// Truncates after `n` lines, with the ellipsis `"…"`.
+    #[must_use]
+    pub fn max_lines(n: usize) -> Self {
+        Self::with_ellipsis(Some(n), None)
+    }
+
+    /// Truncates once the block extent would exceed `h`, with the ellipsis `"…"`.
+    #[must_use]
+    pub fn max_block_size(h: f32) -> Self {
+        Self::with_ellipsis(None, Some(h))
+    }
+
+    fn with_ellipsis(max_lines: Option<usize>, max_block_size: Option<f32>) -> Self {
+        Self {
+            max_lines,
+            max_block_size,
+            ellipsis: "…".into(),
+        }
+    }
+
+    /// Checks the limits and that the ellipsis has no line separator.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        (self.max_lines.is_some() || self.max_block_size.is_some())
+            && self.max_lines != Some(0)
+            && self.max_block_size.is_none_or(|h| h.is_finite() && h > 0.0)
+            && !self.ellipsis.chars().any(is_line_or_paragraph_separator)
+    }
+}
+
+/// Hanging at the end edge of a line (CSS Text 4 `hanging-punctuation` `[W2]`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum HangEndMode {
-    /// Nothing hangs at the line end.
+    /// Nothing hangs.
     #[default]
     None,
-    /// A stop or comma hangs only if it would otherwise have to move to the
-    /// next line (JLReq 2.5.1 `[W4]`; CSS `allow-end`).
+    /// A stop or comma hangs only instead of wrapping (JLReq `[W4]`; CSS `allow-end`).
     Allow,
-    /// A stop or comma at the line end always hangs outside the text block,
-    /// even if the line could have fitted it (CSS `force-end`).
+    /// A stop or comma at the line end always hangs (CSS `force-end`).
     Force,
 }
 
-/// Hanging at the leading edge of a line (spec §5 Stage 1.3; CSS Text 4
-/// `hanging-punctuation: first` `[W2]`).
+/// Hanging at the start edge of a line (CSS Text 4 `hanging-punctuation` `[W2]`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum HangStartMode {
-    /// Nothing hangs at the line start.
+    /// Nothing hangs.
     #[default]
     None,
-    /// An opening mark may hang at the start of the **first line of the
-    /// paragraph** only (CSS `first`). "First line" is line index 0; a line
-    /// after a hard break is not a first line.
+    /// An opening mark may hang on line index 0 only (CSS `first`), not after a hard break.
     FirstLine,
-    /// An opening mark may hang at the start of **every** line.
+    /// An opening mark may hang on every line.
     AllLines,
 }
 
-/// Hanging punctuation configuration (spec §5 Stage 1.3; JLReq 2.5.1, CSS Text
-/// 4 `hanging-punctuation` `[W4][W2]`). At most one character hangs at each
-/// edge.
-///
-/// The two edges are independent. They are **logical** (start and end of the
-/// line in the paragraph's base direction), whereas
-/// `PositionedLine::hanging_left()` and `hanging_right()` are **physical**: the
-/// start edge is the left one for an LTR paragraph and the right one for an RTL
-/// paragraph, the end edge the opposite. [`HangMode::allows`] is that mapping
-/// (plus the first-line rule), and `PositionedLine::validate` enforces it.
+/// Hanging punctuation (spec §5 Stage 1.3; JLReq 2.5.1, CSS Text 4 `[W4][W2]`): at most
+/// one character per logical edge. [`HangMode::allows`] maps the edges to the physical
+/// `PositionedLine::hanging_left()`/`hanging_right()` (`PositionedLine::validate`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct HangMode {
     /// Hanging at the start of a line.
@@ -63,18 +175,14 @@ impl HangMode {
     };
 
     /// Whether punctuation may hang at the physical `side` of a line in a
-    /// paragraph of the given base `direction`; `is_first_line` is whether the
-    /// line is the paragraph's first (line index 0).
+    /// `direction` paragraph; `is_first_line` is whether it is line index 0.
     #[must_use]
     pub const fn allows(self, side: HangSide, direction: Direction, is_first_line: bool) -> bool {
-        if side.is_line_start(direction) {
-            match self.start {
-                HangStartMode::None => false,
-                HangStartMode::FirstLine => is_first_line,
-                HangStartMode::AllLines => true,
-            }
-        } else {
-            !matches!(self.end, HangEndMode::None)
+        match self.start {
+            _ if !side.is_line_start(direction) => !matches!(self.end, HangEndMode::None),
+            HangStartMode::None => false,
+            HangStartMode::FirstLine => is_first_line,
+            HangStartMode::AllLines => true,
         }
     }
 }
@@ -82,18 +190,16 @@ impl HangMode {
 /// Line height policy (spec §5 Stage 4.1; CSS Inline Layout 3 `[B7]`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum LineHeight {
-    /// `line-height: normal`: the union of the glyph bounds of every font used,
-    /// plus the font line gap.
+    /// CSS `normal`: the union of every used font's glyph bounds, plus the line gap.
     #[default]
     Normal,
-    /// A multiple of the font size taken from the first available font only;
-    /// fallback glyphs may overflow the line box (standard CSS behaviour). The
-    /// multiplier must be finite and positive ([`LineHeight::is_valid`]).
+    /// A finite, positive multiple of the font size (first available font; fallbacks may
+    /// overflow the line box).
     Fixed(f32),
 }
 
 impl LineHeight {
-    /// `true` for `Normal`, and for `Fixed(m)` when `m` is finite and positive.
+    /// `true` for `Normal` and for a finite, positive `Fixed` multiplier.
     #[must_use]
     pub fn is_valid(self) -> bool {
         match self {
@@ -102,63 +208,45 @@ impl LineHeight {
         }
     }
 
-    /// Resolves the paragraph strut from the raw metrics of `font` at
-    /// `font_size`, for text set in `mode` (spec §5 Stage 4.1). A vertical
-    /// mode reads the font's vertical ascent, descent and line gap.
-    ///
-    /// * `Normal`: the font's own ascent, descent and line gap.
-    /// * `Fixed(m)`: total height `m * font_size`; the leading
-    ///   `total - (ascent + descent)` (possibly negative) is split in half above
-    ///   and below, and the line gap becomes 0 (CSS half-leading).
-    ///
-    /// [`StrutMetrics::line_height`] of the result is the height of an empty
-    /// line.
+    /// Resolves the paragraph strut from `font` at `size`, from the vertical metrics in a
+    /// vertical `mode` (spec §5 Stage 4.1). `Fixed(m)` splits the possibly negative leading
+    /// `m * size - (ascent + descent)` evenly above and below and zeroes the line gap (CSS
+    /// half-leading).
     #[must_use]
-    pub fn resolve_strut(
-        self,
-        font: &FontMetrics,
-        font_size: f32,
-        mode: WritingMode,
-    ) -> StrutMetrics {
-        let (ascent, descent, line_gap) = if mode.is_vertical() {
-            (
+    pub fn resolve_strut(self, font: &FontMetrics, size: f32, mode: WritingMode) -> StrutMetrics {
+        let [ascent, descent, line_gap] = if mode.is_vertical() {
+            [
                 font.vertical_ascent,
                 font.vertical_descent,
                 font.vertical_line_gap,
-            )
+            ]
         } else {
-            (font.ascent, font.descent, font.line_gap)
+            [font.ascent, font.descent, font.line_gap]
         };
-        match self {
-            Self::Normal => StrutMetrics {
+        let Self::Fixed(multiplier) = self else {
+            return StrutMetrics {
                 ascent,
                 descent,
                 line_gap,
-            },
-            Self::Fixed(multiplier) => {
-                let half_leading = (multiplier * font_size - (ascent + descent)) / 2.0;
-                StrutMetrics {
-                    ascent: ascent + half_leading,
-                    descent: descent + half_leading,
-                    line_gap: 0.0,
-                }
-            }
+            };
+        };
+        let half_leading = (multiplier * size - (ascent + descent)) / 2.0;
+        StrutMetrics {
+            ascent: ascent + half_leading,
+            descent: descent + half_leading,
+            line_gap: 0.0,
         }
     }
 }
 
-/// The resolved paragraph strut: the line box every line has at least
-/// (`LineHeight::Normal`) or exactly (`LineHeight::Fixed`), produced by
-/// [`LineHeight::resolve_strut`] (spec §5 Stage 4.1).
-///
-/// Distinct from the raw [`FontMetrics`] it is resolved from: half-leading is
-/// folded into `ascent` and `descent`, so under a tight `Fixed` multiplier
-/// either may be **negative**, which raw font metrics never are.
+/// The resolved paragraph strut (spec §5 Stage 4.1): the minimum (`Normal`) or exact (`Fixed`)
+/// line box. With half-leading folded in, `ascent`/`descent` may be negative (raw
+/// [`FontMetrics`] never are).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StrutMetrics {
-    /// Extent of the strut toward line-over, half-leading included.
+    /// Extent toward line-over, half-leading included.
     pub ascent: f32,
-    /// Extent of the strut toward line-under, half-leading included.
+    /// Extent toward line-under, half-leading included.
     pub descent: f32,
     /// Font line gap; zero under `LineHeight::Fixed`.
     pub line_gap: f32,
@@ -171,8 +259,7 @@ impl StrutMetrics {
         self.ascent + self.descent + self.line_gap
     }
 
-    /// `true` when every field and the line height are measurements
-    /// (spec MSR-1) and the line height is positive.
+    /// Every field and the line height are measurements (spec MSR-1); the height is positive.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         let height = self.line_height();
@@ -183,86 +270,8 @@ impl StrutMetrics {
     }
 }
 
-/// Trailing whitespace handling at a soft wrap (spec §5 Stage 1.7).
-/// **[Design decision]** in the spec; CSS Text 3 `white-space` is the model `[W1]`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum HangingWhitespaceMode {
-    /// CSS `normal`-like: trailing `WordSpace` and `CjkAutospace` collapse to
-    /// zero visual width. They stay in `PositionedLine::byte_range`;
-    /// `visible_byte_end` marks the last visible cluster.
-    #[default]
-    Collapsible,
-    /// CSS `pre-wrap`-like: trailing spaces hang outside the line width but keep
-    /// selectable, caret-reachable slots. An editor normally uses this on the
-    /// line containing the caret.
-    Preserved,
-}
-
-/// Line-breaking strategy (spec §5 Stage 1.6.1): a **profile** of one
-/// parameterised beam-lookahead state machine, not a choice between code paths.
-///
-/// | Profile | `beam_width` | `window_depth` | Use |
-/// |---|---|---|---|
-/// | `Greedy` | 1 | 1 | monospace code, logs, UAX #14 oracle tests |
-/// | `Balanced` (default) | 2 | 2 | interactive rich-text editing |
-/// | `Publication` | 8 | 6 | static reading view, print export |
-///
-/// The pair (Typst `Simple`/`Optimized`, Android `SIMPLE`/`HIGH_QUALITY`) is the
-/// standard dichotomy `[L3][L6]`; here it is the two ends of a continuum.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum LineBreakStrategy {
-    /// Beam 1, window 1: first-fit with the overflow ladder. Each line depends
-    /// only on its start, which allows resynchronising incremental relayout.
-    Greedy,
-    /// Beam 2, window 2: the engine default. Stack-only state.
-    #[default]
-    Balanced,
-    /// Beam 8, window 6, with dominator pruning: Knuth-Plass quality over a
-    /// bounded window.
-    Publication,
-}
-
-impl LineBreakStrategy {
-    /// Number of candidate paths kept alive (`K`).
-    #[must_use]
-    pub const fn beam_width(self) -> usize {
-        match self {
-            Self::Greedy => 1,
-            Self::Balanced => 2,
-            Self::Publication => 8,
-        }
-    }
-
-    /// Number of lines a candidate is looked ahead before the oldest is
-    /// committed (`W`).
-    #[must_use]
-    pub const fn window_depth(self) -> usize {
-        match self {
-            Self::Greedy => 1,
-            Self::Balanced => 2,
-            Self::Publication => 6,
-        }
-    }
-}
-
-/// Clipboard policy for an actual U+00AD in the source text (spec §6.6, the
-/// `copy_soft_hyphen` flag). The *generated* hyphen is never copied regardless.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum SoftHyphenPolicy {
-    /// Copy U+00AD as it is in the source (Firefox's behaviour `[C4]`).
-    #[default]
-    Keep,
-    /// Drop U+00AD from copied text.
-    Strip,
-}
-
-/// Tab-stop configuration: stops at every multiple of `step` along the line's
-/// inline progression, measured from the line-start edge of its slot (spec
-/// OPT-1, ST3-1).
-/// A uniform step is the minimal configuration.
-///
-/// Parsed, not validated (spec §1.5, AX-3): [`new`](Self::new) refuses a step
-/// that is not finite and positive, so a `TabStops` that exists is usable.
+/// Tab stops at every multiple of `step` from the line-start edge of the slot
+/// (spec OPT-1, ST3-1). Parsed, not validated (spec §1.5, AX-3).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabStops {
     step: f32,
@@ -272,8 +281,7 @@ impl TabStops {
     /// Stops every 8 layout units, the default of [`LayoutConstraints`].
     pub const DEFAULT: Self = Self { step: 8.0 };
 
-    /// Stops every `step` layout units, or `None` unless `step` is finite and
-    /// positive.
+    /// Stops every `step` units, or `None` unless `step` is finite and positive.
     #[must_use]
     pub fn new(step: f32) -> Option<Self> {
         (step.is_finite() && step > 0.0).then_some(Self { step })
@@ -285,43 +293,30 @@ impl TabStops {
         self.step
     }
 
-    /// The first stop strictly beyond the distance `x` (`x` on a stop moves
-    /// to the next).
-    /// Returns None when `x` is not finite or no finite forward stop is
-    /// representable.
+    /// The first stop strictly beyond `x`, or `None` if no finite one is representable.
     #[must_use]
     pub fn next_stop(&self, x: f32) -> Option<f32> {
-        if !x.is_finite() {
-            return None;
-        }
+        // Where the product rounds back to `x` or overflows, try `x + step`.
         let next = ((x / self.step).floor() + 1.0) * self.step;
-        // On precision exhaustion (e.g. x=1e10, step=8 rounds back) or
-        // overflow, fall back to x+step; if that also fails, signal exhaustion.
         [next, x + self.step]
             .into_iter()
             .find(|&stop| stop.is_finite() && stop > x)
     }
 }
 
-/// Geometric constraints of the container: what the layout must fit into, as
-/// opposed to the policy ([`LayoutOptions`]) deciding how.
+/// Container geometry: what layout must fit into (the policy is [`LayoutOptions`]).
 #[derive(Clone, Debug)]
 pub struct LayoutConstraints {
-    /// Inline offset of the first line's standard slot. Without a geometry
-    /// provider it must lie in `[0, wrap_width)`; a provider ignores it, and
-    /// then it need only be finite.
+    /// Inline start of the first line's standard slot: in `[0, wrap_width)`,
+    /// or merely finite with a geometry provider (which ignores it).
     pub first_line_indent: f32,
-    /// Inline offset of the standard slot of the subsequent lines. Same range
-    /// as `first_line_indent`.
+    /// Same, for the subsequent lines.
     pub hanging_indent: f32,
     /// Optional obstacle-aware container geometry.
     pub geometry_provider: Option<Arc<dyn LineGeometryProvider>>,
-    /// Positive container inline width; positive infinity disables wrapping.
-    /// Indentation changes slot capacity, not this unobstructed reference width.
-    /// When finite, the inline envelope of every line is `[0, wrap_width]` and
-    /// every slot, standard or provider-supplied, lies inside it.
+    /// Positive inline width (infinity disables wrapping); slots lie in `[0, wrap_width]`.
     pub wrap_width: f32,
-    /// Tab stops: `step` finite and positive.
+    /// Tab stops.
     pub tab_stops: TabStops,
 }
 
@@ -338,28 +333,19 @@ impl Default for LayoutConstraints {
 }
 
 impl LayoutConstraints {
-    /// Checks the width and the indents (tab stops are valid by construction).
-    ///
-    /// * `wrap_width` is positive and not NaN (positive infinity is allowed);
-    /// * both indents are finite;
-    /// * without a geometry provider the standard slot starts at the indent and
-    ///   must lie in the wrap envelope `[0, wrap_width]`, so each indent is in
-    ///   `[0, wrap_width)`; negative indentation is not representable.
+    /// Positive `wrap_width`, finite indents, each in `[0, wrap_width)` without a provider.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        let indent_is_in_envelope = |indent: f32| indent >= 0.0 && indent < self.wrap_width;
+        let in_envelope = |indent: f32| indent >= 0.0 && indent < self.wrap_width;
         self.wrap_width > 0.0
             && self.first_line_indent.is_finite()
             && self.hanging_indent.is_finite()
             && (self.geometry_provider.is_some()
-                || (indent_is_in_envelope(self.first_line_indent)
-                    && indent_is_in_envelope(self.hanging_indent)))
+                || (in_envelope(self.first_line_indent) && in_envelope(self.hanging_indent)))
     }
 
-    /// The geometry of line `line_index` over the block envelope
-    /// `[block_start, block_end)`: the provider's answer, or the standard
-    /// column `[indent, wrap_width]`. The response is not validated; see
-    /// [`query_checked_geometry`](Self::query_checked_geometry).
+    /// Line `line_index`'s unvalidated geometry over `[block_start, block_end)`: the
+    /// provider's answer, or the standard slot `[indent, wrap_width]` (none if malformed).
     #[must_use]
     pub fn resolve_line_geometry(
         &self,
@@ -370,37 +356,23 @@ impl LayoutConstraints {
         if let Some(provider) = &self.geometry_provider {
             return provider.query_line_geometry(line_index, block_start, block_end);
         }
-        let start = if line_index == 0 {
-            self.first_line_indent
-        } else {
-            self.hanging_indent
-        };
-        // An indent that leaves no well-formed slot (which
-        // `LayoutConstraints::is_valid` rejects) leaves no slot at all.
         LineGeometry {
-            slots: InlineSlotConstraint::new(start, self.wrap_width)
+            slots: SlotSource::of(self)
+                .standard_slot(line_index, self.wrap_width)
                 .into_iter()
                 .collect(),
             next_feature_block_offset: None,
         }
     }
 
-    /// Queries the geometry of a line. A provider's answer is untrusted and is
-    /// validated, optionally against an earlier smaller envelope; the built-in
-    /// geometry derives from constraints the gate accepted
-    /// ([`is_valid`](Self::is_valid)) and is returned as is (spec GEO-3, AX-3).
-    ///
-    /// # Precondition
-    /// `block_start` and `block_end` are finite and `block_end > block_start`.
-    /// Layout computes the envelope from gated measurements (spec MSR-1), so it
-    /// is not checked at run time (spec AX-3, GEO-3); a violation is a bug in
-    /// the caller and is caught by a debug assertion, with or without a
-    /// provider.
+    /// [`resolve_line_geometry`](Self::resolve_line_geometry), validating a provider's
+    /// untrusted answer, optionally against the `previous` smaller envelope (spec GEO-3,
+    /// AX-3). The envelope must be finite and non-empty (debug-asserted only: it is
+    /// built from gated measurements, spec MSR-1).
     ///
     /// # Errors
-    /// `InvalidLineGeometry` for a provider answer outside the envelope, out
-    /// of order or stalling, and `NonMonotonicGeometry` for one that breaks
-    /// monotonicity against `previous`.
+    /// `InvalidLineGeometry` for an answer outside the envelope, out of order or
+    /// stalling; `NonMonotonicGeometry` for one not within `previous`.
     pub fn query_checked_geometry(
         &self,
         line_index: usize,
@@ -416,16 +388,7 @@ impl LayoutConstraints {
         if self.geometry_provider.is_none() {
             return Ok(geometry);
         }
-        if !geometry.is_valid(block_start, self.wrap_width) {
-            return Err(LayoutInputError::InvalidLineGeometry);
-        }
-        // Any fully obstructed answer must point at least `MIN_CLEARANCE_STEP`
-        // ahead, so layout always progresses (spec GEO-4, G3).
-        let stalls = geometry.slots.is_empty()
-            && geometry
-                .next_feature_block_offset
-                .is_none_or(|next| next - block_start < MIN_CLEARANCE_STEP);
-        if stalls {
+        if !geometry.is_valid(block_start, self.wrap_width) || geometry.stalls(block_start) {
             return Err(LayoutInputError::InvalidLineGeometry);
         }
         if previous.is_some_and(|p| !geometry.is_subset_of(p)) {
@@ -435,84 +398,7 @@ impl LayoutConstraints {
     }
 }
 
-/// Layout **policy** (spec §5, §6.6): a pure collection of strategies. The
-/// geometry lives in [`LayoutConstraints`].
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct LayoutOptions {
-    /// Whether available elastic capacity is used to justify content.
-    pub justify: bool,
-    /// Under `justify`, whether a line that ends the paragraph or at a hard
-    /// break may be fitted with shrink and compressed flush (spec ST1-7,
-    /// ST3-3). Such a line is never stretched; when this is off (the
-    /// default), a line that only shrink would fit ends at an earlier break.
-    pub compress_last_lines: bool,
-    /// Optional line-count or block-size truncation policy; when set it must
-    /// satisfy [`LineClampPolicy::is_valid`] (`InvalidLayoutOptions` otherwise).
-    pub clamp: Option<LineClampPolicy>,
-    /// Line-breaking strategy.
-    pub strategy: LineBreakStrategy,
-    /// Hanging punctuation at both edges.
-    pub hang_mode: HangMode,
-    /// Line-height policy; a `Fixed` multiplier must be finite and positive
-    /// ([`LineHeight::is_valid`], `InvalidStrut` otherwise).
-    pub line_height: LineHeight,
-    /// Trailing-whitespace handling at a soft wrap.
-    pub whitespace: HangingWhitespaceMode,
-    /// Clipboard policy for an actual U+00AD in the source.
-    pub soft_hyphen: SoftHyphenPolicy,
-}
-
-/// Truncation limits; at least one limit must be configured when enabled.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LineClampPolicy {
-    /// Maximum number of output lines: at least 1.
-    pub max_lines: Option<usize>,
-    /// Maximum block extent: finite and positive, except that one line is
-    /// mandatory.
-    pub max_block_size: Option<f32>,
-    /// Synthesized suffix; empty means silent truncation.
-    pub ellipsis: Box<str>,
-}
-
-impl LineClampPolicy {
-    /// Truncates after `n` lines, with the ellipsis `"…"`.
-    #[must_use]
-    pub fn max_lines(n: usize) -> Self {
-        Self {
-            max_lines: Some(n),
-            max_block_size: None,
-            ellipsis: "…".into(),
-        }
-    }
-
-    /// Truncates once the block extent would exceed `h`, with the ellipsis `"…"`.
-    #[must_use]
-    pub fn max_block_size(h: f32) -> Self {
-        Self {
-            max_lines: None,
-            max_block_size: Some(h),
-            ellipsis: "…".into(),
-        }
-    }
-
-    /// Checks configured limits and the suffix source.
-    #[must_use]
-    pub fn is_valid(&self) -> bool {
-        (self.max_lines.is_some() || self.max_block_size.is_some())
-            && self.max_lines != Some(0)
-            && self.max_block_size.is_none_or(|h| h.is_finite() && h > 0.0)
-            && !self.ellipsis.chars().any(is_line_or_paragraph_separator)
-    }
-}
-
-/// One available inline interval; only its end may be positive infinity.
-///
-/// Parsed, not validated (spec §1.5, AX-3): [`new`](Self::new) accepts only a
-/// finite start, an end strictly beyond it and a finite width (or an end of
-/// positive infinity), so a constraint that exists is well formed. Whether it
-/// suits a particular line, inside that line's inline envelope, depends on
-/// the container and is checked there
-/// ([`lies_in_envelope`](Self::lies_in_envelope)).
+/// An available inline interval `[start, end)`; parsed, not validated (spec §1.5, AX-3).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InlineSlotConstraint {
     start: f32,
@@ -520,25 +406,21 @@ pub struct InlineSlotConstraint {
 }
 
 impl InlineSlotConstraint {
-    /// The interval `[start, end)`, or `None` unless `start` is finite, `end`
-    /// lies strictly beyond it, and `end` is finite with a finite width or is
-    /// positive infinity.
+    /// `[start, end)`, or `None` unless `start` is finite and `end` lies beyond
+    /// it, at a finite distance or at positive infinity.
     #[must_use]
     pub fn new(start: f32, end: f32) -> Option<Self> {
-        let is_well_formed = start.is_finite()
-            && end > start
-            && (end == f32::INFINITY || (end.is_finite() && (end - start).is_finite()));
-        is_well_formed.then_some(Self { start, end })
+        (start.is_finite() && end > start && (end == f32::INFINITY || (end - start).is_finite()))
+            .then_some(Self { start, end })
     }
 
-    /// Finite inline start; `>= 0` within the line's envelope.
+    /// Finite inline start.
     #[must_use]
     pub const fn start(self) -> f32 {
         self.start
     }
 
-    /// End strictly beyond the start, possibly positive infinity (only when
-    /// the wrap width is infinite); `<= wrap_width` within the line's envelope.
+    /// End beyond the start; infinite only under an infinite wrap width.
     #[must_use]
     pub const fn end(self) -> f32 {
         self.end
@@ -550,10 +432,8 @@ impl InlineSlotConstraint {
         self.end - self.start
     }
 
-    /// Whether the slot lies in the inline envelope of a line whose wrap width
-    /// is `wrap_width`: `0 <= start` and, when `wrap_width` is finite,
-    /// `end <= wrap_width`, both within the crate's geometry tolerance. With an
-    /// infinite `wrap_width` only the lower bound applies.
+    /// Whether the slot lies in the envelope `[0, wrap_width]` within the
+    /// geometry tolerance (only `start >= 0` for an infinite `wrap_width`).
     #[must_use]
     pub fn lies_in_envelope(self, wrap_width: f32) -> bool {
         self.start >= -tolerance(self.start, 0.0)
@@ -563,34 +443,27 @@ impl InlineSlotConstraint {
     }
 }
 
-/// `true` when `slots` are the slots of one line of a container `wrap_width`
-/// wide: each inside the envelope `[0, wrap_width]`, in
-/// ascending order and pairwise disjoint.
+/// Whether `slots` lie in the envelope `[0, wrap_width]`, sorted and disjoint.
 pub(super) fn slots_are_valid(slots: &[InlineSlotConstraint], wrap_width: f32) -> bool {
     slots.iter().all(|s| s.lies_in_envelope(wrap_width))
         && slots.windows(2).all(|w| w[0].end <= w[1].start)
 }
 
-/// The least block progress an obstructed provider answer must offer
-/// (spec GEO-4).
-pub(super) const MIN_CLEARANCE_STEP: f32 = 1e-4;
+/// The least block progress a fully obstructed answer must offer (spec GEO-4).
+const MIN_CLEARANCE_STEP: f32 = 1e-4;
 
 /// Available slots for one block-axis envelope.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LineGeometry {
-    /// Sorted, nonoverlapping available intervals; empty when the envelope is
-    /// fully obstructed.
+    /// Sorted, disjoint intervals; empty when fully obstructed.
     pub slots: SmallVec<[InlineSlotConstraint; 2]>,
     /// Next block start at which geometry may change.
     pub next_feature_block_offset: Option<f32>,
 }
 
 impl LineGeometry {
-    /// Checks a provider response at the given query start, for a container of
-    /// inline width `wrap_width`: every slot lies in the
-    /// envelope `[0, wrap_width]` ([`InlineSlotConstraint::lies_in_envelope`]),
-    /// the slots are sorted and disjoint, and the next feature lies ahead by
-    /// at most [`MAX_MEASUREMENT`](crate::types::MAX_MEASUREMENT) (spec MSR-1).
+    /// Checks a provider answer at `block_start`: valid slots for `wrap_width`, and the
+    /// next feature ahead by a measurement (spec MSR-1).
     #[must_use]
     pub fn is_valid(&self, block_start: f32, wrap_width: f32) -> bool {
         slots_are_valid(&self.slots, wrap_width)
@@ -599,23 +472,26 @@ impl LineGeometry {
                 .is_none_or(|v| v > block_start && is_measurement(v - block_start))
     }
 
-    /// Checks that an expanded block envelope introduced no new inline area.
+    /// Whether every slot lies in a slot of `previous`, i.e. growth added no inline area.
     #[must_use]
     pub fn is_subset_of(&self, previous: &Self) -> bool {
-        let mut at = 0;
-        for slot in &self.slots {
-            while at < previous.slots.len() && previous.slots[at].end < slot.end {
-                at += 1;
-            }
-            if !previous
-                .slots
-                .get(at)
+        // Both sorted: the only candidate container is the first one not ending earlier.
+        let mut candidates = previous.slots.iter().peekable();
+        self.slots.iter().all(|slot| {
+            while candidates.next_if(|p| p.end < slot.end).is_some() {}
+            candidates
+                .peek()
                 .is_some_and(|p| slot.start >= p.start && slot.end <= p.end)
-            {
-                return false;
-            }
-        }
-        true
+        })
+    }
+
+    /// Whether a fully obstructed answer fails to advance at least
+    /// `MIN_CLEARANCE_STEP` past `block_start` (spec GEO-4, G3).
+    fn stalls(&self, block_start: f32) -> bool {
+        self.slots.is_empty()
+            && self
+                .next_feature_block_offset
+                .is_none_or(|next| next - block_start < MIN_CLEARANCE_STEP)
     }
 }
 
@@ -634,6 +510,70 @@ pub trait LineGeometryProvider: std::fmt::Debug + Send + Sync {
 mod tests {
     use super::*;
     use smallvec::smallvec;
+
+    #[test]
+    fn strategy_profiles_map_to_beam_parameters() {
+        use LineBreakStrategy as S;
+        assert_eq!((S::Greedy.beam_width(), S::Greedy.window_depth()), (1, 1));
+        assert_eq!(
+            (S::Balanced.beam_width(), S::Balanced.window_depth()),
+            (2, 2)
+        );
+        assert_eq!(
+            (S::Publication.beam_width(), S::Publication.window_depth()),
+            (8, 6)
+        );
+    }
+
+    #[test]
+    fn a_line_limit_takes_the_field_type() {
+        let policy = LineClampPolicy::max_lines(usize::MAX);
+        assert_eq!(policy.max_lines, Some(usize::MAX));
+        assert!(policy.is_valid());
+        assert!(!LineClampPolicy::max_lines(0).is_valid());
+    }
+
+    #[test]
+    fn hang_mode_grades_start_and_end_independently() {
+        use Direction::{Ltr, Rtl};
+        const L: HangSide = HangSide::Left;
+        const R: HangSide = HangSide::Right;
+        let mode = |start, end| HangMode { start, end };
+        use HangEndMode as E;
+        use HangStartMode as S;
+        // (mode, direction, first line?) -> (left allowed, right allowed)
+        let cases = [
+            (HangMode::NONE, Ltr, true, (false, false)),
+            (mode(S::FirstLine, E::None), Ltr, true, (true, false)),
+            (mode(S::FirstLine, E::None), Ltr, false, (false, false)),
+            (mode(S::FirstLine, E::None), Rtl, true, (false, true)),
+            (mode(S::FirstLine, E::None), Rtl, false, (false, false)),
+            (mode(S::AllLines, E::None), Ltr, false, (true, false)),
+            (mode(S::AllLines, E::None), Rtl, false, (false, true)),
+            // The end edge ignores the line index.
+            (mode(S::None, E::Allow), Ltr, false, (false, true)),
+            (mode(S::None, E::Force), Rtl, false, (true, false)),
+            // Both edges at once.
+            (mode(S::FirstLine, E::Force), Ltr, true, (true, true)),
+            (mode(S::FirstLine, E::Force), Ltr, false, (false, true)),
+            (mode(S::AllLines, E::Allow), Rtl, false, (true, true)),
+        ];
+        for (m, d, first, (left, right)) in cases {
+            assert_eq!(
+                m.allows(L, d, first),
+                left,
+                "{m:?} {d:?} first={first} left"
+            );
+            assert_eq!(
+                m.allows(R, d, first),
+                right,
+                "{m:?} {d:?} first={first} right"
+            );
+        }
+        assert_ne!(HangEndMode::Allow, HangEndMode::Force);
+        assert_eq!(HangEndMode::default(), HangEndMode::None);
+        assert_eq!(HangStartMode::default(), HangStartMode::None);
+    }
 
     #[test]
     fn strut_resolution_folds_half_leading() {
@@ -692,76 +632,12 @@ mod tests {
     }
 
     #[test]
-    fn strategy_profiles_map_to_beam_parameters() {
-        use LineBreakStrategy as S;
-        assert_eq!((S::Greedy.beam_width(), S::Greedy.window_depth()), (1, 1));
-        assert_eq!(
-            (S::Balanced.beam_width(), S::Balanced.window_depth()),
-            (2, 2)
-        );
-        assert_eq!(
-            (S::Publication.beam_width(), S::Publication.window_depth()),
-            (8, 6)
-        );
-    }
-
-    #[test]
-    fn hang_mode_grades_start_and_end_independently() {
-        use Direction::{Ltr, Rtl};
-        const L: HangSide = HangSide::Left;
-        const R: HangSide = HangSide::Right;
-        let mode = |start, end| HangMode { start, end };
-        use HangEndMode as E;
-        use HangStartMode as S;
-        // (mode, direction, first line?) -> (left allowed, right allowed)
-        let cases = [
-            (HangMode::NONE, Ltr, true, (false, false)),
-            (mode(S::FirstLine, E::None), Ltr, true, (true, false)),
-            (mode(S::FirstLine, E::None), Ltr, false, (false, false)),
-            (mode(S::FirstLine, E::None), Rtl, true, (false, true)),
-            (mode(S::FirstLine, E::None), Rtl, false, (false, false)),
-            (mode(S::AllLines, E::None), Ltr, false, (true, false)),
-            (mode(S::AllLines, E::None), Rtl, false, (false, true)),
-            // The end edge ignores the line index.
-            (mode(S::None, E::Allow), Ltr, false, (false, true)),
-            (mode(S::None, E::Force), Rtl, false, (true, false)),
-            // Both edges at once.
-            (mode(S::FirstLine, E::Force), Ltr, true, (true, true)),
-            (mode(S::FirstLine, E::Force), Ltr, false, (false, true)),
-            (mode(S::AllLines, E::Allow), Rtl, false, (true, true)),
-        ];
-        for (m, d, first, (left, right)) in cases {
-            assert_eq!(
-                m.allows(L, d, first),
-                left,
-                "{m:?} {d:?} first={first} left"
-            );
-            assert_eq!(
-                m.allows(R, d, first),
-                right,
-                "{m:?} {d:?} first={first} right"
-            );
-        }
-        assert_ne!(HangEndMode::Allow, HangEndMode::Force);
-        assert_eq!(HangEndMode::default(), HangEndMode::None);
-        assert_eq!(HangStartMode::default(), HangStartMode::None);
-    }
-
-    #[test]
     fn line_height_multipliers_must_be_finite_and_positive() {
         assert!(LineHeight::Normal.is_valid());
         assert!(LineHeight::Fixed(1.5).is_valid());
         for bad in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             assert!(!LineHeight::Fixed(bad).is_valid(), "{bad}");
         }
-    }
-
-    #[test]
-    fn a_line_limit_takes_the_field_type() {
-        let policy = LineClampPolicy::max_lines(usize::MAX);
-        assert_eq!(policy.max_lines, Some(usize::MAX));
-        assert!(policy.is_valid());
-        assert!(!LineClampPolicy::max_lines(0).is_valid());
     }
 
     fn constraints(first: f32, hanging: f32, wrap_width: f32) -> LayoutConstraints {

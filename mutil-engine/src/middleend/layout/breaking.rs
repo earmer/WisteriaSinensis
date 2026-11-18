@@ -5,7 +5,7 @@ use super::super::{InlineSlotConstraint, LayoutInputError, StrutMetrics};
 use super::hanging::LineEdge;
 use super::{FIT_EPSILON, Layout, LineEnd, Piece, PieceKind, Reshaped, Token};
 use crate::frontend::{BoxNode, BoxOverflowPolicy, DiscretionaryNode, WordNode};
-use crate::types::{AtomFlags, FontInstanceRef, FontMetrics, RawShapedGlyph};
+use crate::types::{AtomFlags, FontMetrics, RawShapedGlyph};
 use smallvec::SmallVec;
 
 /// The tier of a discretionary on the overflow ladder (spec ST1-1): its
@@ -410,15 +410,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         if let Some(found) = self.metrics.get(&key) {
             return Ok(*found);
         }
-        let r = &self.ast.runs[run];
-        let metrics = checked_font_metrics(
-            self.shaper,
-            FontInstanceRef {
-                font,
-                font_size: r.font_size,
-                variations: r.features.variations(),
-            },
-        )?;
+        let metrics = checked_font_metrics(self.shaper, self.ast.runs[run].font_instance(font))?;
         self.metrics.insert(key, metrics);
         Ok(metrics)
     }

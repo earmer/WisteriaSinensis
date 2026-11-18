@@ -1,99 +1,79 @@
-//! Minimal JSON serialization for the browser harness boundary.
+//! The JSON the page reads. Every value is an engine number, an id or a short
+//! string, so a few `Display` helpers stand in for a serializer.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Display, Write as _};
 
 use mutil_engine::{
-    CaretAffinity, CaretVisual, ConformanceReport, CursorMove, CursorPosition, HitResult,
-    ParagraphEdge, PositionedLine, Rect, SelectionRect, ValidatedLayout,
+    CaretAffinity, CaretVisual, CursorMove, CursorPosition, HitResult, ParagraphEdge,
+    PositionedLine, Rect, ValidatedLayout,
 };
 
-/// Minimal JSON writer. Every value written here is an engine output number,
-/// an id, or a string from an error, so only strings need escaping.
-pub struct Out(String);
+/// A number, or `null` when it is not finite.
+struct Num(f32);
 
-impl Out {
-    pub fn new() -> Self {
-        Self(String::with_capacity(4096))
-    }
-
-    pub fn raw(&mut self, text: &str) {
-        self.0.push_str(text);
-    }
-
-    pub fn number(&mut self, value: f32) {
-        if value.is_finite() {
-            let _ = write!(self.0, "{value}");
+impl Display for Num {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_finite() {
+            write!(f, "{}", self.0)
         } else {
-            self.0.push_str("null");
+            f.write_str("null")
         }
-    }
-
-    pub fn uint(&mut self, value: usize) {
-        let _ = write!(self.0, "{value}");
-    }
-
-    pub fn u32(&mut self, value: u32) {
-        let _ = write!(self.0, "{value}");
-    }
-
-    pub fn string(&mut self, text: &str) {
-        self.0.push('"');
-        for c in text.chars() {
-            match c {
-                '"' => self.0.push_str("\\\""),
-                '\\' => self.0.push_str("\\\\"),
-                '\n' => self.0.push_str("\\n"),
-                '\r' => self.0.push_str("\\r"),
-                '\t' => self.0.push_str("\\t"),
-                c if (c as u32) < 0x20 => {
-                    let _ = write!(self.0, "\\u{:04x}", c as u32);
-                }
-                c => self.0.push(c),
-            }
-        }
-        self.0.push('"');
-    }
-
-    pub fn finish(self) -> String {
-        self.0
     }
 }
 
-pub fn error_json(stage: &str, message: &str, line: Option<usize>) -> String {
-    let mut out = Out::new();
-    out.raw("{\"ok\":false,\"stage\":");
-    out.string(stage);
-    out.raw(",\"error\":");
-    out.string(message);
-    out.raw(",\"line\":");
-    match line {
-        Some(line) => out.uint(line),
-        None => out.raw("null"),
+/// A quoted, escaped string.
+struct Str<'a>(&'a str);
+
+impl Display for Str<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_char('"')?;
+        for c in self.0.chars() {
+            match c {
+                '"' | '\\' => write!(f, "\\{c}")?,
+                c if c < ' ' => write!(f, "\\u{:04x}", u32::from(c))?,
+                c => f.write_char(c)?,
+            }
+        }
+        f.write_char('"')
     }
-    out.raw("}");
-    out.finish()
+}
+
+fn opt(value: Option<impl Display>) -> String {
+    value.map_or_else(|| "null".to_owned(), |value| value.to_string())
+}
+
+fn list<T>(items: impl IntoIterator<Item = T>, item: impl FnMut(T) -> String) -> String {
+    let items: Vec<String> = items.into_iter().map(item).collect();
+    format!("[{}]", items.join(","))
+}
+
+fn interval(start: f32, end: f32) -> String {
+    format!("[{},{}]", Num(start), Num(end))
+}
+
+fn rect(rect: Rect) -> String {
+    let [x, y, w, h] = [rect.x, rect.y, rect.width, rect.height].map(Num);
+    format!("{{\"x\":{x},\"y\":{y},\"w\":{w},\"h\":{h}}}")
+}
+
+pub fn error_json(stage: &str, message: impl Display) -> String {
+    let message = message.to_string();
+    let (stage, message) = (Str(stage), Str(&message));
+    format!("{{\"ok\":false,\"stage\":{stage},\"error\":{message}}}")
 }
 
 pub fn font_json(registered: Option<(u32, u16)>) -> String {
-    match registered {
-        Some((id, upem)) => {
-            let mut out = Out::new();
-            out.raw("{\"id\":");
-            out.u32(id);
-            out.raw(",\"upem\":");
-            out.uint(upem as usize);
-            out.raw("}");
-            out.finish()
-        }
-        None => "{\"id\":null}".to_string(),
-    }
+    let face = registered.map(|(id, upem)| format!("{id},\"upem\":{upem}"));
+    format!("{{\"id\":{}}}", opt(face))
 }
 
-pub fn conformance_json(unicode_version: &str, report: &ConformanceReport) -> String {
-    let mut out = Out::new();
-    out.raw("{\"unicode\":");
-    out.string(unicode_version);
-    for (name, value) in [
+/// The components the engine itself reports as installed (spec SCO-8); a
+/// `null` version is one not implemented.
+pub fn conformance_json() -> String {
+    let report = mutil_engine::conformance_report();
+    let unicode_version = mutil_engine::UNICODE_DATA_VERSION;
+    let mut out = format!("{{\"unicode\":{}", Str(unicode_version));
+    for (name, version) in [
         ("grapheme", report.grapheme),
         ("bidi", report.bidi),
         ("lineBreak", report.line_break),
@@ -101,284 +81,111 @@ pub fn conformance_json(unicode_version: &str, report: &ConformanceReport) -> St
         ("script", report.script),
         ("emoji", report.emoji),
     ] {
-        out.raw(",\"");
-        out.raw(name);
-        out.raw("\":");
-        match value {
-            Some(version) => out.string(version),
-            None => out.raw("null"),
-        }
+        let _ = write!(out, ",\"{name}\":{}", opt(version.map(Str)));
     }
-    out.raw("}");
-    out.finish()
+    out + "}"
 }
 
 /// The engine's own verdict on the paragraph: every line, its slots and
 /// carets, and every placed glyph origin (spec HST-3/HST-4).
-struct RunJson {
-    line: usize,
-    font: u32,
-    size: f32,
-    glyphs: Vec<(u32, f32, f32)>,
-}
-
-pub fn layout_json(layout: &ValidatedLayout<'_>, font_size: f32, width: f32, id: usize) -> String {
+pub fn layout_json(layout: &ValidatedLayout<'_>, id: usize) -> String {
     let paragraph = layout.paragraph();
-    let runs: Vec<RunJson> = layout
+    let runs: Vec<(usize, String)> = layout
         .glyph_runs()
-        .map(|run| RunJson {
-            line: run.line(),
-            font: run.font().font_id.0,
-            size: run.font_size() * run.font().scale,
-            glyphs: run
-                .glyphs()
-                .map(|glyph| (glyph.glyph_id, glyph.origin.x, glyph.origin.y))
-                .collect(),
+        .map(|run| {
+            let glyphs = list(run.glyphs(), |glyph| {
+                let origin = glyph.origin;
+                format!("[{},{},{}]", glyph.glyph_id, Num(origin.x), Num(origin.y))
+            });
+            let size = Num(run.font_size() * run.font().scale);
+            let font = run.font().font_id.0;
+            let json = format!("{{\"font\":{font},\"size\":{size},\"glyphs\":{glyphs}}}");
+            (run.line(), json)
         })
         .collect();
-
-    let mut out = Out::new();
-    out.raw("{\"ok\":true,\"id\":");
-    out.uint(id);
-    out.raw(",\"blockSize\":");
-    out.number(paragraph.total_block_size);
-    out.raw(",\"fontSize\":");
-    out.number(font_size);
-    out.raw(",\"width\":");
-    out.number(width);
-    out.raw(",\"lineCount\":");
-    out.uint(paragraph.lines.len());
-    out.raw(",\"lineHeight\":");
-    out.number(paragraph.lines.first().map_or(0.0, |line| line.line_height));
-    out.raw(if paragraph.base_direction.is_rtl() {
-        ",\"direction\":\"rtl\""
-    } else {
-        ",\"direction\":\"ltr\""
+    let lines = list(paragraph.lines.iter().enumerate(), |(index, line)| {
+        let line_runs = runs.iter().filter(|(run_line, _)| *run_line == index);
+        line_json(line, list(line_runs, |(_, json)| json.clone()))
     });
-    out.raw(",\"lines\":[");
-    for (index, line) in paragraph.lines.iter().enumerate() {
-        if index > 0 {
-            out.raw(",");
-        }
-        write_line(&mut out, line, runs.iter().filter(|run| run.line == index));
-    }
-    out.raw("]}");
-    out.finish()
-}
-
-fn write_line<'a>(out: &mut Out, line: &PositionedLine, runs: impl Iterator<Item = &'a RunJson>) {
-    out.raw("{\"top\":");
-    out.number(line.baseline_y - line.ascent);
-    out.raw(",\"baseline\":");
-    out.number(line.baseline_y);
-    out.raw(",\"ascent\":");
-    out.number(line.ascent);
-    out.raw(",\"descent\":");
-    out.number(line.descent);
-    out.raw(",\"height\":");
-    out.number(line.line_height);
-    out.raw(",\"visibleEnd\":");
-    out.uint(line.visible_byte_end);
-    out.raw(if line.is_justified {
-        ",\"justified\":true"
+    let direction = if paragraph.base_direction.is_rtl() {
+        "rtl"
     } else {
-        ",\"justified\":false"
+        "ltr"
+    };
+    format!(
+        "{{\"ok\":true,\"id\":{id},\"blockSize\":{},\"direction\":\"{direction}\",\"lines\":{lines}}}",
+        Num(paragraph.total_block_size)
+    )
+}
+
+/// One line: its box, the content and available interval of each slot (a
+/// hanging mark protrudes from the latter, spec HNG-1), the pen interval of
+/// each hanging glyph, its caret stops and its `runs`.
+fn line_json(line: &PositionedLine, runs: String) -> String {
+    let slots = list(&line.slots, |slot| {
+        interval(slot.content_start, slot.content_end())
     });
-    out.raw(",\"hang\":[");
-    out.number(line.hanging_left());
-    out.raw(",");
-    out.number(line.hanging_right());
-    out.raw("]");
-    out.raw(",\"slots\":[");
-    for (slot_index, slot) in line.slots.iter().enumerate() {
-        if slot_index > 0 {
-            out.raw(",");
-        }
-        out.raw("[");
-        out.number(slot.content_start);
-        out.raw(",");
-        out.number(slot.content_end());
-        out.raw("]");
-    }
-    // The available interval of each slot, which a hanging mark protrudes
-    // from (spec HNG-1).
-    out.raw("],\"columns\":[");
-    for (slot_index, slot) in line.slots.iter().enumerate() {
-        if slot_index > 0 {
-            out.raw(",");
-        }
-        out.raw("[");
-        out.number(slot.constraint.start());
-        out.raw(",");
-        out.number(slot.constraint.end());
-        out.raw("]");
-    }
-    // The pen interval of each hanging glyph.
-    out.raw("],\"hangs\":[");
-    let hanging = line
-        .visual_runs
-        .iter()
-        .flat_map(|run| run.glyphs.iter())
-        .filter(|glyph| glyph.is_hanging);
-    for (index, glyph) in hanging.enumerate() {
-        if index > 0 {
-            out.raw(",");
-        }
-        out.raw("[");
-        out.number(glyph.x);
-        out.raw(",");
-        out.number(glyph.x + glyph.advance);
-        out.raw("]");
-    }
-    out.raw("],\"carets\":[");
-    for (caret_index, stop) in line.caret_stops.iter().enumerate() {
-        if caret_index > 0 {
-            out.raw(",");
-        }
-        out.number(stop.x);
-    }
-    out.raw("],\"runs\":[");
-    for (run_index, run) in runs.enumerate() {
-        if run_index > 0 {
-            out.raw(",");
-        }
-        write_run(out, run);
-    }
-    out.raw("]}");
+    let columns = list(&line.slots, |slot| {
+        interval(slot.constraint.start(), slot.constraint.end())
+    });
+    let hanging = line.visual_runs.iter().flat_map(|run| &run.glyphs);
+    let hangs = list(hanging.filter(|glyph| glyph.is_hanging), |glyph| {
+        interval(glyph.x, glyph.x + glyph.advance)
+    });
+    let carets = list(&line.caret_stops, |stop| Num(stop.x).to_string());
+    format!(
+        "{{\"top\":{},\"baseline\":{},\"height\":{},\"justified\":{},\"hang\":{},\
+         \"slots\":{slots},\"columns\":{columns},\"hangs\":{hangs},\"carets\":{carets},\"runs\":{runs}}}",
+        Num(line.baseline_y - line.ascent),
+        Num(line.baseline_y),
+        Num(line.line_height),
+        line.is_justified,
+        interval(line.hanging_left(), line.hanging_right()),
+    )
 }
 
-fn write_run(out: &mut Out, run: &RunJson) {
-    out.raw("{\"font\":");
-    out.u32(run.font);
-    out.raw(",\"size\":");
-    out.number(run.size);
-    out.raw(",\"glyphs\":[");
-    for (glyph_index, (glyph, x, y)) in run.glyphs.iter().enumerate() {
-        if glyph_index > 0 {
-            out.raw(",");
-        }
-        out.raw("[");
-        out.u32(*glyph);
-        out.raw(",");
-        out.number(*x);
-        out.raw(",");
-        out.number(*y);
-        out.raw("]");
-    }
-    out.raw("]}");
-}
-
-fn write_affinity(out: &mut Out, affinity: CaretAffinity) {
-    out.string(match affinity {
+fn position_json(prefix: &str, pos: CursorPosition) -> String {
+    let affinity = match pos.affinity {
         CaretAffinity::Downstream => "downstream",
         CaretAffinity::Upstream => "upstream",
-    });
-}
-
-fn write_position_fields(out: &mut Out, pos: CursorPosition) {
-    out.raw("\"byteOffset\":");
-    out.uint(pos.byte_offset);
-    out.raw(",\"affinity\":");
-    write_affinity(out, pos.affinity);
-}
-
-fn write_rect(out: &mut Out, rect: Rect) {
-    out.raw("{\"x\":");
-    out.number(rect.x);
-    out.raw(",\"y\":");
-    out.number(rect.y);
-    out.raw(",\"w\":");
-    out.number(rect.width);
-    out.raw(",\"h\":");
-    out.number(rect.height);
-    out.raw("}");
+    };
+    format!(
+        "{{{prefix}\"byteOffset\":{},\"affinity\":\"{affinity}\"}}",
+        pos.byte_offset
+    )
 }
 
 pub fn hit_json(hit: HitResult) -> String {
-    let mut out = Out::new();
-    out.raw("{");
-    write_position_fields(&mut out, hit.position);
-    out.raw(",\"inside\":");
-    out.raw(if hit.inside { "true" } else { "false" });
-    out.raw("}");
-    out.finish()
+    position_json("", hit.position)
 }
 
 pub fn caret_json(caret: CaretVisual) -> String {
-    let mut out = Out::new();
-    out.raw("{\"primary\":");
-    write_rect(&mut out, caret.primary_rect);
-    out.raw(",\"secondary\":");
-    match caret.secondary_rect {
-        Some(rect) => write_rect(&mut out, rect),
-        None => out.raw("null"),
-    }
-    out.raw("}");
-    out.finish()
+    format!(
+        "{{\"primary\":{},\"secondary\":{}}}",
+        rect(caret.primary_rect),
+        opt(caret.secondary_rect.map(rect))
+    )
 }
 
 pub fn cursor_move_json(moved: CursorMove) -> String {
-    let mut out = Out::new();
     match moved {
-        CursorMove::Moved(pos) => {
-            out.raw("{\"kind\":\"moved\",");
-            write_position_fields(&mut out, pos);
-            out.raw("}");
-        }
+        CursorMove::Moved(pos) => position_json("\"kind\":\"moved\",", pos),
         CursorMove::Exited {
             edge,
             inline_position,
         } => {
-            out.raw("{\"kind\":\"exited\",\"edge\":");
-            out.string(match edge {
+            let edge = match edge {
                 ParagraphEdge::Start => "start",
                 ParagraphEdge::End => "end",
-            });
-            out.raw(",\"inlinePosition\":");
-            match inline_position {
-                Some(x) => out.number(x),
-                None => out.raw("null"),
-            }
-            out.raw("}");
+            };
+            let inline_position = opt(inline_position.map(Num));
+            format!(
+                "{{\"kind\":\"exited\",\"edge\":\"{edge}\",\"inlinePosition\":{inline_position}}}"
+            )
         }
     }
-    out.finish()
 }
 
-pub fn selection_rects_json(rects: &[SelectionRect]) -> String {
-    let mut out = Out::new();
-    out.raw("[");
-    for (index, item) in rects.iter().enumerate() {
-        if index > 0 {
-            out.raw(",");
-        }
-        out.raw("{\"x\":");
-        out.number(item.rect.x);
-        out.raw(",\"y\":");
-        out.number(item.rect.y);
-        out.raw(",\"w\":");
-        out.number(item.rect.width);
-        out.raw(",\"h\":");
-        out.number(item.rect.height);
-        out.raw(",\"line\":");
-        out.uint(item.line);
-        out.raw(",\"level\":");
-        out.u32(u32::from(item.level.get()));
-        out.raw("}");
-    }
-    out.raw("]");
-    out.finish()
-}
-
-pub fn range_rects_json(rects: &[Rect]) -> String {
-    let mut out = Out::new();
-    out.raw("[");
-    for (index, rect) in rects.iter().enumerate() {
-        if index > 0 {
-            out.raw(",");
-        }
-        write_rect(&mut out, *rect);
-    }
-    out.raw("]");
-    out.finish()
+pub fn rects_json(rects: impl IntoIterator<Item = Rect>) -> String {
+    list(rects, rect)
 }

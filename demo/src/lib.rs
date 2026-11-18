@@ -1,79 +1,34 @@
-//! A browser harness for `mutil-engine`.
+//! A browser harness for `mutil-engine`. The engine compiles, breaks and
+//! validates each paragraph; this crate only registers font faces, turns a
+//! validated layout into numbers a canvas can draw (spec HST-3/HST-4) and
+//! draws glyph outlines from the same bytes with `skrifa`.
 //!
-//! Nothing here lays out text itself. The engine compiles, breaks and
-//! validates the paragraph; this crate only
-//!
-//! * registers font faces and keeps their bytes for outline extraction,
-//! * turns a validated layout into numbers a canvas can draw
-//!   (`ValidatedLayout::glyph_runs`, spec HST-3/HST-4), and
-//! * pulls glyph outlines out of the same bytes with `skrifa` for the
-//!   renderer.
-//!
-//! The boundary is a small C ABI so the page needs no JS package manager:
-//! strings and byte arrays are copied through exported `alloc`/`free`, and
-//! every call returns a length-prefixed, packed pointer to UTF-8 JSON (or an
-//! SVG path). The demo is compiled to `wasm32-unknown-unknown`; the crate is
-//! also a plain `rlib` so `cargo test` can exercise it natively.
+//! The boundary is a small C ABI, so the page needs no JS package manager:
+//! strings and bytes are copied through `demo_alloc`/`demo_free`, enums travel
+//! as integer codes, and results come back as packed pointers to UTF-8 JSON
+//! (or SVG path data). The crate is also an `rlib` so `cargo test` runs natively.
 
+mod fonts;
 mod json;
 mod markup;
 
-use std::fmt::Write as _;
-use std::sync::Arc;
 use std::sync::Mutex;
 
 use mutil_engine::{
     AutospaceProfile, BaselineAlignment, BidiDirection, BoxHeightStyle, CaretAffinity,
-    CursorPosition, FontBytes, FontFace, FontFamily, FontFeatures, FontRegistry, FontStyle,
-    FontVariation, FrontendOptions, HangEndMode, HangMode, HangStartMode, HangingWhitespaceMode,
-    HarfRustShaper, LayoutConstraints, LayoutOptions, LineBreakStrictness, LineHeight,
+    CursorPosition, FontStyle, FrontendOptions, HangEndMode, HangMode, HangStartMode,
+    HangingWhitespaceMode, LayoutConstraints, LayoutOptions, LineBreakStrictness, LineHeight,
     LocalePolicy, LocaleTag, Motion, ParagraphInput, Point, PositionedParagraph, QuotePolicy,
     StyleSpan, TextDecoration, TextRange, TextStyle, ValidatedLayout, WordBreakOption,
-    compile_paragraph, conformance_report, layout_paragraph,
-};
-use skrifa::outline::DrawSettings;
-use skrifa::prelude::{LocationRef, Size};
-use skrifa::{FontRef as SkrifaFont, GlyphId, MetadataProvider};
-
-use json::{
-    caret_json, conformance_json, cursor_move_json, error_json, font_json, hit_json, layout_json,
-    range_rects_json, selection_rects_json,
+    compile_paragraph, layout_paragraph,
 };
 
-/// The registered families in the order every paragraph's stack lists them
-/// after the chosen face.
-const FIXED_STACK: [&str; 13] = [
-    "Noto Sans",
-    "Noto Serif",
-    "JetBrains Mono",
-    "Noto Sans SC",
-    "Noto Sans TC",
-    "Noto Sans JP",
-    "Noto Sans Devanagari",
-    "Noto Sans Thai",
-    "Noto Sans Lao",
-    "Noto Sans Khmer",
-    "Noto Sans Myanmar",
-    "Noto Sans Hebrew",
-    "Noto Naskh Arabic",
-];
+use fonts::Fonts;
+use json::{caret_json, cursor_move_json, error_json, hit_json, layout_json, rects_json};
 
-/// The harness asks for Regular. Noto Sans JP's variable font defaults to
-/// `wght=100`, so the setting is explicit and applied to shaping and drawing
-/// alike; an outline drawn at a different instance than the layout would be a
-/// renderer bug, not a design choice.
-const WEIGHT: f32 = 400.0;
-
-struct FaceEntry {
-    family: Arc<str>,
-    bytes: FontBytes,
-}
-
-/// A laid-out paragraph as the page drew it: its text without the locale
-/// markup, the tags removed from its source, and the paragraph.
+/// A laid-out paragraph and its source with the locale markup stripped.
 struct StoredParagraph {
-    text: String,
-    removed: Vec<core::ops::Range<usize>>,
+    marked: markup::Marked,
     paragraph: PositionedParagraph,
 }
 
@@ -87,203 +42,107 @@ self_cell::self_cell!(
     }
 );
 
-#[derive(Clone, Copy, Default)]
-struct ExtraOptions {
-    line_break: LineBreakStrictness,
-    word_break: WordBreakOption,
-    letter_spacing: f32,
-    word_spacing: f32,
-    first_line_indent: f32,
-    hanging_indent: f32,
+/// One `demo_layout` call.
+pub struct LayoutRequest<'a> {
+    pub text: &'a str,
+    pub width: f32,
+    pub font_size: f32,
+    pub line_height: f32,
+    pub locale: Option<&'a str>,
+    pub cjk_quotes: bool,
+    pub primary: Option<&'a str>,
+    pub heuristics: bool,
+    pub phase2: Phase2,
 }
 
-/// The registered faces and the shaper built over them. The registry is
-/// rebuilt only when a face is added, which the page does before laying out.
-struct Demo {
-    faces: Vec<FaceEntry>,
-    shaper: Option<HarfRustShaper>,
+/// The Phase 2 options packed into one `u32` across the C ABI: bits 0-1 the
+/// base direction (0 from the text, 1 LTR, 2 RTL), bit 2 `justify`, bits 3-4
+/// the start hang (0 none, 1 first line, 2 all lines), bits 5-6 the end hang
+/// (0 none, 1 allow, 2 force), bit 7 the `CssCompat` autospace profile, bit 8
+/// preserved trailing whitespace and bit 9 `compress_last_lines`.
+#[derive(Clone, Copy, Default)]
+pub struct Phase2(pub u32);
+
+impl Phase2 {
+    /// Decodes the two-bit field at `shift` through `table` (see [`pick`]).
+    fn field<T: Copy>(self, shift: u32, table: &[T]) -> T {
+        pick((self.0 >> shift) & 0b11, table)
+    }
+
+    fn flag(self, bit: u32) -> bool {
+        self.0 & (1 << bit) != 0
+    }
+}
+
+/// Decodes an ABI enum code: `table[code]`, or `table[0]` for an unknown one.
+fn pick<T: Copy>(code: impl Into<u32>, table: &[T]) -> T {
+    let code: u32 = code.into();
+    table.get(code as usize).copied().unwrap_or(table[0])
+}
+
+/// The options set once by `demo_set_options`, which every later layout
+/// completes with its own.
+#[derive(Default)]
+struct ExtraOptions {
+    frontend: FrontendOptions,
+    constraints: LayoutConstraints,
+    letter_spacing: f32,
+    word_spacing: f32,
+}
+
+/// The registered faces, the page's options and the laid-out paragraphs.
+#[derive(Default)]
+pub struct Demo {
+    fonts: Fonts,
     paragraphs: Vec<ValidatedParagraph>,
     extra: ExtraOptions,
 }
 
 impl Demo {
-    fn new() -> Self {
-        Self {
-            faces: Vec::new(),
-            shaper: None,
-            paragraphs: Vec::new(),
-            extra: ExtraOptions::default(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    fn add_font(&mut self, family: &str, bytes: Vec<u8>) -> Option<(u32, u16)> {
-        if self.faces.iter().any(|face| *face.family == *family) {
-            return None;
-        }
-        let font = SkrifaFont::new(bytes.as_slice()).ok()?;
-        let upem = font
-            .metrics(Size::unscaled(), LocationRef::default())
-            .units_per_em;
-        self.faces.push(FaceEntry {
-            family: Arc::from(family),
-            bytes: FontBytes::new(bytes),
-        });
-        self.shaper = None;
-        let id = u32::try_from(self.faces.len() - 1).ok()?;
-        Some((id, upem))
+    pub fn add_font(&mut self, family: &str, bytes: Vec<u8>) -> Option<(u32, u16)> {
+        self.fonts.add(family, bytes)
     }
 
-    fn shaper(&mut self) -> &HarfRustShaper {
-        if self.shaper.is_none() {
-            let mut registry = FontRegistry::new();
-            for face in &self.faces {
-                registry.add_face(
-                    Arc::clone(&face.family),
-                    FontStyle::default(),
-                    FontFace::new(face.bytes.clone(), 0),
-                );
-            }
-            self.shaper = Some(HarfRustShaper::new(Arc::new(registry)));
-        }
-        self.shaper.as_ref().expect("just built")
+    /// Drops every laid-out paragraph, keeping the registered faces.
+    pub fn clear_paragraphs(&mut self) {
+        self.paragraphs.clear();
     }
 
-    /// The family stack handed to the engine: the chosen face, then the
-    /// Latin faces, the CJK faces, the Indic and Southeast Asian faces and
-    /// anything else registered. It is the same for every locale: the engine
-    /// routes CJK runs to the regional face of their locale (spec SHP-12,
-    /// SHP-25), so the page never reorders the stack.
-    fn family_stack(&self, primary: Option<&str>) -> Arc<[FontFamily]> {
-        let mut names: Vec<Arc<str>> = Vec::new();
-        let mut push = |family: &str| {
-            if let Some(face) = self.faces.iter().find(|face| *face.family == *family)
-                && !names.iter().any(|name| **name == *face.family)
-            {
-                names.push(Arc::clone(&face.family));
-            }
-        };
-        if let Some(primary) = primary {
-            push(primary);
-        }
-        for family in FIXED_STACK {
-            push(family);
-        }
-        for face in &self.faces {
-            push(&face.family);
-        }
-        names
-            .into_iter()
-            .map(FontFamily::Named)
-            .collect::<Vec<_>>()
-            .into()
+    /// The outline of `glyph` in `font` as SVG path data, empty when there
+    /// is none.
+    pub fn outline(&self, font: u32, glyph: u32) -> String {
+        self.fonts.outline(font, glyph).unwrap_or_default()
     }
-}
 
-struct LayoutRequest<'a> {
-    text: &'a str,
-    width: f32,
-    font_size: f32,
-    line_height: f32,
-    locale: Option<&'a str>,
-    cjk_quotes: bool,
-    primary: Option<&'a str>,
-    heuristics: bool,
-    phase2: Phase2,
-}
-
-/// The Phase 2 options the page sets, packed into one `u32` across the C
-/// ABI: bits 0-1 the base direction (0 from the text, 1 LTR, 2 RTL), bit 2
-/// `justify`, bits 3-4 the start hang (0 none, 1 first line, 2 all lines),
-/// bits 5-6 the end hang (0 none, 1 allow, 2 force), bit 7 the `CssCompat`
-/// autospace profile, bit 8 preserved trailing whitespace and bit 9
-/// `compress_last_lines`.
-#[derive(Clone, Copy, Default)]
-struct Phase2 {
-    base_direction: Option<BidiDirection>,
-    justify: bool,
-    compress_last_lines: bool,
-    hang_mode: HangMode,
-    autospace: AutospaceProfile,
-    whitespace: HangingWhitespaceMode,
-}
-
-impl Phase2 {
-    fn from_bits(bits: u32) -> Self {
-        let field = |shift: u32| (bits >> shift) & 0b11;
-        Self {
-            base_direction: match field(0) {
-                1 => Some(BidiDirection::Ltr),
-                2 => Some(BidiDirection::Rtl),
-                _ => None,
-            },
-            justify: bits & (1 << 2) != 0,
-            compress_last_lines: bits & (1 << 9) != 0,
-            hang_mode: HangMode {
-                start: match field(3) {
-                    1 => HangStartMode::FirstLine,
-                    2 => HangStartMode::AllLines,
-                    _ => HangStartMode::None,
-                },
-                end: match field(5) {
-                    1 => HangEndMode::Allow,
-                    2 => HangEndMode::Force,
-                    _ => HangEndMode::None,
-                },
-            },
-            autospace: if bits & (1 << 7) != 0 {
-                AutospaceProfile::CssCompat
-            } else {
-                AutospaceProfile::Jlreq
-            },
-            whitespace: if bits & (1 << 8) != 0 {
-                HangingWhitespaceMode::Preserved
-            } else {
-                HangingWhitespaceMode::Collapsible
-            },
-        }
+    /// Compiles, lays out and validates one paragraph, keeps it for later
+    /// queries and returns the engine's output as JSON under its new id.
+    pub fn layout(&mut self, req: &LayoutRequest<'_>) -> String {
+        self.try_layout(req).unwrap_or_else(|error| error)
     }
-}
 
-impl Demo {
-    fn default_style(
-        &self,
-        font_size: f32,
-        primary: Option<&str>,
-        locale: Option<LocaleTag>,
-    ) -> TextStyle {
-        let mut features = FontFeatures::new();
-        if let Some(weight) = FontVariation::new(*b"wght", WEIGHT) {
-            features.push_variation(weight);
-        }
-        TextStyle {
-            families: self.family_stack(primary),
-            font_size,
+    /// [`Demo::layout`], with the error JSON of the stage that failed.
+    fn try_layout(&mut self, req: &LayoutRequest<'_>) -> Result<String, String> {
+        let locale = req.locale.map(LocaleTag::parse_lenient).transpose();
+        let locale = locale.map_err(|_| error_json("input", "not a BCP 47 language tag"))?;
+        // The host step: inline locale tags become style spans over the
+        // plain paragraph text (spec AX-1, FE-25).
+        let marked = markup::parse(req.text);
+        let style = TextStyle {
+            families: self.fonts.family_stack(req.primary),
+            font_size: req.font_size,
             style: FontStyle::default(),
-            features,
+            features: fonts::regular_weight(),
             decoration: TextDecoration::default(),
             baseline_align: BaselineAlignment::Auto,
             letter_spacing: self.extra.letter_spacing,
             word_spacing: self.extra.word_spacing,
             script: None,
-            locale,
-        }
-    }
-
-    /// Compiles, lays out and validates one paragraph. The returned JSON is
-    /// the engine's output, not a re-derived approximation.
-    fn layout(&mut self, req: &LayoutRequest<'_>) -> String {
-        let locale = match req.locale {
-            Some(tag) => match LocaleTag::parse_lenient(tag) {
-                Ok(tag) => Some(tag),
-                Err(_) => return error_json("input", "not a BCP 47 language tag", None),
-            },
-            None => None,
+            locale: locale.clone(),
         };
-        // The host step: inline locale tags become style spans over the
-        // plain paragraph text (spec AX-1, FE-25).
-        let marked = markup::parse(req.text);
-        let text = marked.text.as_str();
-        let style = self.default_style(req.font_size, req.primary, locale.clone());
         let style_spans: Vec<StyleSpan> = marked
             .spans
             .iter()
@@ -296,7 +155,7 @@ impl Demo {
             })
             .collect();
         let input = ParagraphInput {
-            text,
+            text: &marked.text,
             default_style: &style,
             style_spans: &style_spans,
             inline_objects: &[],
@@ -307,218 +166,58 @@ impl Demo {
         };
         let constraints = LayoutConstraints {
             wrap_width: req.width,
-            first_line_indent: self.extra.first_line_indent,
-            hanging_indent: self.extra.hanging_indent,
-            ..LayoutConstraints::default()
+            ..self.extra.constraints.clone()
         };
-        let options = LayoutOptions {
-            line_height: if req.line_height > 0.0 {
-                LineHeight::Fixed(req.line_height)
+        let frontend = req.frontend(&self.extra.frontend, locale);
+        let shaper = self.fonts.shaper();
+        let ast =
+            compile_paragraph(&input, &frontend, shaper).map_err(|e| error_json("compile", e))?;
+        let options = req.layout_options();
+        let paragraph = layout_paragraph(&ast, &marked.text, shaper, &constraints, &options)
+            .map_err(|e| error_json("layout", e))?;
+        let stored = StoredParagraph { marked, paragraph };
+        let validated = ValidatedParagraph::try_new(stored, |s| {
+            ValidatedLayout::new(&s.paragraph, &s.marked.text)
+        })
+        .map_err(|(_, e)| error_json("validate", e))?;
+        let json = layout_json(validated.borrow_dependent(), self.paragraphs.len());
+        self.paragraphs.push(validated);
+        Ok(json)
+    }
+}
+
+impl LayoutRequest<'_> {
+    fn frontend(&self, extra: &FrontendOptions, locale: Option<LocaleTag>) -> FrontendOptions {
+        use {AutospaceProfile::*, BidiDirection as Dir, LocalePolicy::*, QuotePolicy::*};
+        let bits = self.phase2;
+        FrontendOptions {
+            quote_policy: pick(self.cjk_quotes, &[Standard, CjkAware]),
+            default_locale: locale.unwrap_or_default(),
+            locale_policy: pick(self.heuristics, &[ExplicitOnly, ExperimentalHeuristics]),
+            base_direction: bits.field(0, &[None, Some(Dir::Ltr), Some(Dir::Rtl)]),
+            autospace_profile: pick(bits.flag(7), &[Jlreq, CssCompat]),
+            ..extra.clone()
+        }
+    }
+
+    fn layout_options(&self) -> LayoutOptions {
+        use {HangEndMode as End, HangStartMode as Start, HangingWhitespaceMode::*};
+        let bits = self.phase2;
+        LayoutOptions {
+            line_height: if self.line_height > 0.0 {
+                LineHeight::Fixed(self.line_height)
             } else {
                 LineHeight::Normal
             },
-            justify: req.phase2.justify,
-            compress_last_lines: req.phase2.compress_last_lines,
-            hang_mode: req.phase2.hang_mode,
-            whitespace: req.phase2.whitespace,
+            justify: bits.flag(2),
+            compress_last_lines: bits.flag(9),
+            hang_mode: HangMode {
+                start: bits.field(3, &[Start::None, Start::FirstLine, Start::AllLines]),
+                end: bits.field(5, &[End::None, End::Allow, End::Force]),
+            },
+            whitespace: pick(bits.flag(8), &[Collapsible, Preserved]),
             ..LayoutOptions::default()
-        };
-        let frontend = FrontendOptions {
-            quote_policy: if req.cjk_quotes {
-                QuotePolicy::CjkAware
-            } else {
-                QuotePolicy::Standard
-            },
-            default_locale: locale.unwrap_or_default(),
-            locale_policy: if req.heuristics {
-                LocalePolicy::ExperimentalHeuristics
-            } else {
-                LocalePolicy::ExplicitOnly
-            },
-            base_direction: req.phase2.base_direction,
-            autospace_profile: req.phase2.autospace,
-            line_break_strictness: self.extra.line_break,
-            word_break_option: self.extra.word_break,
-            ..FrontendOptions::default()
-        };
-        let ast = match compile_paragraph(&input, &frontend, self.shaper()) {
-            Ok(ast) => ast,
-            Err(error) => return error_json("compile", &error.to_string(), None),
-        };
-        let paragraph = match layout_paragraph(
-            &ast,
-            text,
-            self.shaper.as_ref().expect("built above"),
-            &constraints,
-            &options,
-        ) {
-            Ok(paragraph) => paragraph,
-            Err(error) => return error_json("layout", &error.to_string(), None),
-        };
-        let id = self.paragraphs.len();
-        let stored = StoredParagraph {
-            text: marked.text,
-            removed: marked.removed,
-            paragraph,
-        };
-        let validated = match ValidatedParagraph::try_new(stored, |s| {
-            ValidatedLayout::new(&s.paragraph, &s.text)
-        }) {
-            Ok(validated) => validated,
-            Err((line, error)) => {
-                return error_json("validate", &error.to_string(), Some(line));
-            }
-        };
-        let json = layout_json(validated.borrow_dependent(), req.font_size, req.width, id);
-        self.paragraphs.push(validated);
-        json
-    }
-
-    fn validated(&self, para_id: usize) -> Option<&ValidatedLayout<'_>> {
-        Some(self.paragraphs.get(para_id)?.borrow_dependent())
-    }
-
-    /// The offset in paragraph `para_id`'s laid-out text of byte
-    /// `source_offset` of its source, which may hold locale markup.
-    fn text_offset(&self, para_id: usize, source_offset: usize) -> Option<usize> {
-        let stored = self.paragraphs.get(para_id)?.borrow_owner();
-        Some(markup::text_offset(&stored.removed, source_offset).min(stored.text.len()))
-    }
-
-    fn hit_test(&self, para_id: usize, x: f32, y: f32) -> Option<String> {
-        let layout = self.validated(para_id)?;
-        Some(hit_json(layout.hit_test(Point { x, y })))
-    }
-
-    fn hit_test_on_line(&self, para_id: usize, line: u32, inline_position: f32) -> Option<String> {
-        let layout = self.validated(para_id)?;
-        let line_idx = if line == u32::MAX {
-            layout.paragraph().lines.len().saturating_sub(1)
-        } else {
-            line as usize
-        };
-        Some(hit_json(layout.hit_test_on_line(line_idx, inline_position)))
-    }
-
-    fn caret_geometry(&self, para_id: usize, pos: CursorPosition) -> Option<String> {
-        let layout = self.validated(para_id)?;
-        Some(caret_json(layout.caret_geometry(pos)))
-    }
-
-    fn move_cursor(
-        &self,
-        para_id: usize,
-        pos: CursorPosition,
-        motion: Motion,
-        preferred_inline: Option<f32>,
-    ) -> Option<String> {
-        let layout = self.validated(para_id)?;
-        Some(cursor_move_json(layout.move_cursor(
-            pos,
-            motion,
-            preferred_inline,
-        )))
-    }
-
-    fn selection_geometry(
-        &mut self,
-        para_id: usize,
-        start: usize,
-        end: usize,
-        height: BoxHeightStyle,
-    ) -> Option<String> {
-        let _ = self.shaper();
-        let shaper = self.shaper.as_ref()?;
-        let layout = self.paragraphs.get(para_id)?.borrow_dependent();
-        let len = layout.text().len();
-        let lo = start.min(end).min(len);
-        let hi = start.max(end).min(len);
-        Some(selection_rects_json(&layout.selection_geometry(
-            shaper,
-            TextRange::new(lo, hi),
-            height,
-        )))
-    }
-
-    fn range_rects(&self, para_id: usize, start: usize, end: usize) -> Option<String> {
-        let layout = self.validated(para_id)?;
-        let len = layout.text().len();
-        let lo = start.min(end).min(len);
-        let hi = start.max(end).min(len);
-        Some(range_rects_json(
-            &layout.range_rects(TextRange::new(lo, hi)),
-        ))
-    }
-
-    fn outline(&self, font: u32, glyph: u32) -> String {
-        let Ok(index) = usize::try_from(font) else {
-            return String::new();
-        };
-        let Some(face) = self.faces.get(index) else {
-            return String::new();
-        };
-        let Ok(font) = SkrifaFont::new(face.bytes.as_bytes()) else {
-            return String::new();
-        };
-        let Some(outline) = font.outline_glyphs().get(GlyphId::new(glyph)) else {
-            return String::new();
-        };
-        // Draw the same instance the layout shaped (see `WEIGHT`).
-        let location = font.axes().location([("wght", WEIGHT)]);
-        let mut pen = PathPen::default();
-        // Font units, no hinting (spec HST-5/HST-6). The pen flips y into
-        // canvas coordinates.
-        if outline
-            .draw(
-                DrawSettings::unhinted(Size::unscaled(), &location),
-                &mut pen,
-            )
-            .is_err()
-        {
-            return String::new();
         }
-        pen.0
-    }
-}
-
-/// Collects an outline as SVG path data, in font units with y pointing down
-/// (the canvas convention), so the page can scale it by `size / upem`.
-#[derive(Default)]
-struct PathPen(String);
-
-impl skrifa::outline::OutlinePen for PathPen {
-    fn move_to(&mut self, x: f32, y: f32) {
-        self.0.push('M');
-        self.point(x, y);
-    }
-    fn line_to(&mut self, x: f32, y: f32) {
-        self.0.push('L');
-        self.point(x, y);
-    }
-    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
-        self.0.push('Q');
-        self.point(cx0, cy0);
-        self.0.push(' ');
-        self.point(x, y);
-    }
-    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
-        self.0.push('C');
-        self.point(cx0, cy0);
-        self.0.push(' ');
-        self.point(cx1, cy1);
-        self.0.push(' ');
-        self.point(x, y);
-    }
-    fn close(&mut self) {
-        self.0.push('Z');
-    }
-}
-
-impl PathPen {
-    fn point(&mut self, x: f32, y: f32) {
-        // Two decimals of a font unit: far below a device pixel at any
-        // plausible size, and short enough to keep the payload small.
-        let _ = write!(self.0, "{x:.2} {:.2}", -y);
     }
 }
 
@@ -530,47 +229,26 @@ fn with_demo<T>(f: impl FnOnce(&mut Demo) -> T) -> Option<T> {
     Some(f(guard.get_or_insert_with(Demo::new)))
 }
 
-/// Packs a pointer and a length into one word: high 32 bits are the pointer,
-/// low 32 the length (both fit in wasm32).
-fn packed(ptr: *mut u8, len: usize) -> u64 {
+/// Answers a query on paragraph `para_id`, or returns `fallback` when there
+/// is no such paragraph.
+fn query(
+    fallback: &str,
+    para_id: u32,
+    answer: impl FnOnce(&ValidatedLayout<'_>, &mut Fonts) -> String,
+) -> u64 {
+    let json = with_demo(|demo| {
+        let layout = demo.paragraphs.get(para_id as usize)?.borrow_dependent();
+        Some(answer(layout, &mut demo.fonts))
+    });
+    leak(json.flatten().unwrap_or_else(|| fallback.to_owned()))
+}
+
+/// Hands `text` to the page as one word it frees with [`demo_free`]: the
+/// pointer in the high 32 bits, the length in the low 32 (both fit in wasm32).
+fn leak(text: String) -> u64 {
+    let len = text.len();
+    let ptr = Box::into_raw(text.into_bytes().into_boxed_slice()).cast::<u8>();
     ((ptr as u64) << 32) | (len as u64 & 0xffff_ffff)
-}
-
-fn leak(bytes: Vec<u8>) -> u64 {
-    let boxed = bytes.into_boxed_slice();
-    let len = boxed.len();
-    let ptr = Box::into_raw(boxed).cast::<u8>();
-    packed(ptr, len)
-}
-
-/// Allocates `len` bytes for the page to write into; free with [`demo_free`].
-#[unsafe(no_mangle)]
-pub extern "C" fn demo_alloc(len: u32) -> *mut u8 {
-    let len = len as usize;
-    if len == 0 {
-        return std::ptr::NonNull::<u8>::dangling().as_ptr();
-    }
-    let layout = std::alloc::Layout::array::<u8>(len).expect("byte layout");
-    // SAFETY: the layout is non-zero-sized and valid.
-    unsafe { std::alloc::alloc(layout) }
-}
-
-/// Releases a buffer from [`demo_alloc`] or a result from any call below.
-///
-/// # Safety
-/// `ptr` must come from this module and `len` must be its exact length.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn demo_free(ptr: *mut u8, len: u32) {
-    let len = len as usize;
-    if len == 0 {
-        return;
-    }
-    // SAFETY: the caller contract mirrors the allocator that produced `ptr`.
-    unsafe {
-        if let Ok(layout) = std::alloc::Layout::from_size_align(len, 1) {
-            std::alloc::dealloc(ptr, layout);
-        }
-    }
 }
 
 fn read_str<'a>(ptr: *const u8, len: u32) -> Option<&'a str> {
@@ -580,6 +258,48 @@ fn read_str<'a>(ptr: *const u8, len: u32) -> Option<&'a str> {
     // SAFETY: the page wrote `len` bytes at `ptr` before the call.
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     std::str::from_utf8(bytes).ok()
+}
+
+/// A caret at `byte_offset`; a non-zero `affinity` is upstream.
+fn cursor(byte_offset: u32, affinity: u32) -> CursorPosition {
+    use CaretAffinity::{Downstream, Upstream};
+    CursorPosition {
+        byte_offset: byte_offset as usize,
+        affinity: pick(affinity != 0, &[Downstream, Upstream]),
+    }
+}
+
+/// The range between `start` and `end`, in either order, clamped to the
+/// layout's text.
+fn clamped_range(layout: &ValidatedLayout<'_>, start: u32, end: u32) -> TextRange {
+    let len = layout.text().len();
+    let (start, end) = ((start as usize).min(len), (end as usize).min(len));
+    TextRange::new(start.min(end), start.max(end))
+}
+
+/// Allocates `len` bytes for the page to write into, or returns null when
+/// memory runs out; free with [`demo_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_alloc(len: u32) -> *mut u8 {
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(len as usize).is_err() {
+        return std::ptr::null_mut();
+    }
+    bytes.resize(len as usize, 0);
+    Box::into_raw(bytes.into_boxed_slice()).cast()
+}
+
+/// Releases a buffer from [`demo_alloc`] or a result from any call below.
+///
+/// # Safety
+/// `ptr` must come from this module and `len` must be its exact length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn demo_free(ptr: *mut u8, len: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: both producers hand out boxed byte slices of exactly `len`.
+    drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len as usize)) });
 }
 
 /// Copies `bytes` into the engine's face table and registers it under
@@ -596,24 +316,22 @@ pub unsafe extern "C" fn demo_add_font(
     data_ptr: *const u8,
     data_len: u32,
 ) -> u64 {
-    let Some(family) = read_str(family_ptr, family_len) else {
-        return leak(b"{\"id\":null}".to_vec());
-    };
-    if data_len == 0 {
-        return leak(b"{\"id\":null}".to_vec());
-    }
-    // SAFETY: the page wrote `data_len` bytes at `data_ptr`.
-    let bytes = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) }.to_vec();
-    let result = with_demo(|demo| demo.add_font(family, bytes)).flatten();
-    leak(font_json(result).into_bytes())
+    let registered = read_str(family_ptr, family_len)
+        .filter(|_| data_len != 0)
+        .and_then(|family| {
+            // SAFETY: the page wrote `data_len` bytes at `data_ptr`.
+            let bytes = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
+            with_demo(|demo| demo.add_font(family, bytes.to_vec())).flatten()
+        });
+    leak(json::font_json(registered))
 }
 
 /// Lays out one paragraph. `line_height` 0 means normal; `phase2` packs the
 /// bidi, justification, hanging and autospace options ([`Phase2`]).
 ///
 /// # Safety
-/// `text_ptr` must point to `text_len` bytes that stay readable for the
-/// duration of the call.
+/// `text_ptr`, `locale_ptr` and `primary_ptr` must point to the stated number
+/// of bytes that stay readable for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn demo_layout(
     text_ptr: *const u8,
@@ -629,52 +347,49 @@ pub unsafe extern "C" fn demo_layout(
     heuristics: u32,
     phase2: u32,
 ) -> u64 {
-    let Some(text) = read_str(text_ptr, text_len) else {
-        return leak(error_json("input", "text is not UTF-8", None).into_bytes());
+    let strings = [
+        (text_ptr, text_len, "text"),
+        (locale_ptr, locale_len, "locale"),
+        (primary_ptr, primary_len, "face"),
+    ]
+    .map(|(ptr, len, name)| read_str(ptr, len).ok_or(name));
+    let [text, locale, primary] = match strings {
+        [Ok(text), Ok(locale), Ok(primary)] => [text, locale, primary],
+        [Err(name), ..] | [_, Err(name), _] | [.., Err(name)] => {
+            return leak(error_json("input", format_args!("{name} is not UTF-8")));
+        }
     };
-    let Some(locale) = read_str(locale_ptr, locale_len) else {
-        return leak(error_json("input", "locale is not UTF-8", None).into_bytes());
-    };
-    let Some(primary) = read_str(primary_ptr, primary_len) else {
-        return leak(error_json("input", "face is not UTF-8", None).into_bytes());
-    };
-    let locale = (!locale.is_empty()).then_some(locale);
-    let primary = (!primary.is_empty()).then_some(primary);
     let req = LayoutRequest {
         text,
         width,
         font_size,
         line_height,
-        locale,
+        locale: (!locale.is_empty()).then_some(locale),
         cjk_quotes: cjk_quotes != 0,
-        primary,
+        primary: (!primary.is_empty()).then_some(primary),
         heuristics: heuristics != 0,
-        phase2: Phase2::from_bits(phase2),
+        phase2: Phase2(phase2),
     };
-    let result = with_demo(|demo| demo.layout(&req));
-    let json =
-        result.unwrap_or_else(|| error_json("engine", "the engine is not initialised", None));
-    leak(json.into_bytes())
+    leak(
+        with_demo(|demo| demo.layout(&req))
+            .unwrap_or_else(|| error_json("engine", "the engine is not initialised")),
+    )
 }
 
 /// The outline of `glyph` in `font`, in font units, y down, as SVG path data.
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_outline(font_id: u32, glyph_id: u32) -> u64 {
-    let path = with_demo(|demo| demo.outline(font_id, glyph_id)).unwrap_or_default();
-    leak(path.into_bytes())
+    leak(with_demo(|demo| demo.outline(font_id, glyph_id)).unwrap_or_default())
 }
 
-/// The components the engine itself reports as installed (spec SCO-8). A
-/// `null` version means the component is not implemented.
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_conformance() -> u64 {
-    let report = conformance_report();
-    leak(conformance_json(mutil_engine::UNICODE_DATA_VERSION, &report).into_bytes())
+    leak(json::conformance_json())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_clear_paragraphs() {
-    with_demo(|demo| demo.paragraphs.clear());
+    with_demo(Demo::clear_paragraphs);
 }
 
 #[unsafe(no_mangle)]
@@ -686,61 +401,52 @@ pub extern "C" fn demo_set_options(
     first_line_indent: f32,
     hanging_indent: f32,
 ) {
+    use {LineBreakStrictness::*, WordBreakOption as Wb};
+    let frontend = FrontendOptions {
+        line_break_strictness: pick(line_break, &[Normal, Loose, Strict, Anywhere]),
+        word_break_option: pick(word_break, &[Wb::Normal, Wb::BreakAll, Wb::KeepAll]),
+        ..FrontendOptions::default()
+    };
+    let constraints = LayoutConstraints {
+        first_line_indent,
+        hanging_indent,
+        ..LayoutConstraints::default()
+    };
     with_demo(|demo| {
         demo.extra = ExtraOptions {
-            line_break: match line_break {
-                1 => LineBreakStrictness::Loose,
-                2 => LineBreakStrictness::Strict,
-                3 => LineBreakStrictness::Anywhere,
-                _ => LineBreakStrictness::Normal,
-            },
-            word_break: match word_break {
-                1 => WordBreakOption::BreakAll,
-                2 => WordBreakOption::KeepAll,
-                _ => WordBreakOption::Normal,
-            },
+            frontend,
+            constraints,
             letter_spacing,
             word_spacing,
-            first_line_indent,
-            hanging_indent,
         };
     });
 }
 
-fn parse_affinity(affinity: u32) -> CaretAffinity {
-    if affinity != 0 {
-        CaretAffinity::Upstream
-    } else {
-        CaretAffinity::Downstream
-    }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_hit_test(para_id: u32, x: f32, y: f32) -> u64 {
-    let json = with_demo(|demo| demo.hit_test(para_id as usize, x, y))
-        .flatten()
-        .unwrap_or_else(|| "null".to_string());
-    leak(json.into_bytes())
+    query("null", para_id, |layout, _| {
+        hit_json(layout.hit_test(Point { x, y }))
+    })
 }
 
+/// Hit-tests line `line` (`u32::MAX` for the last line) at `inline_position`.
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_hit_test_on_line(para_id: u32, line: u32, inline_position: f32) -> u64 {
-    let json = with_demo(|demo| demo.hit_test_on_line(para_id as usize, line, inline_position))
-        .flatten()
-        .unwrap_or_else(|| "null".to_string());
-    leak(json.into_bytes())
+    query("null", para_id, |layout, _| {
+        let line = match line {
+            u32::MAX => layout.paragraph().lines.len().saturating_sub(1),
+            line => line as usize,
+        };
+        hit_json(layout.hit_test_on_line(line, inline_position))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_caret_geometry(para_id: u32, byte_offset: u32, affinity: u32) -> u64 {
-    let pos = CursorPosition {
-        byte_offset: byte_offset as usize,
-        affinity: parse_affinity(affinity),
-    };
-    let json = with_demo(|demo| demo.caret_geometry(para_id as usize, pos))
-        .flatten()
-        .unwrap_or_else(|| "null".to_string());
-    leak(json.into_bytes())
+    let pos = cursor(byte_offset, affinity);
+    query("null", para_id, |layout, _| {
+        caret_json(layout.caret_geometry(pos))
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -752,64 +458,46 @@ pub extern "C" fn demo_move_cursor(
     has_preferred: u32,
     preferred_inline: f32,
 ) -> u64 {
-    let pos = CursorPosition {
-        byte_offset: byte_offset as usize,
-        affinity: parse_affinity(affinity),
-    };
-    let motion = match motion {
-        1 => Motion::Right,
-        2 => Motion::Up,
-        3 => Motion::Down,
-        4 => Motion::LineStart,
-        5 => Motion::LineEnd,
-        6 => Motion::WordLeft,
-        7 => Motion::WordRight,
-        8 => Motion::Previous,
-        9 => Motion::Next,
-        _ => Motion::Left,
-    };
+    use Motion::*;
+    let pos = cursor(byte_offset, affinity);
+    let motions = [
+        Left, Right, Up, Down, LineStart, LineEnd, WordLeft, WordRight, Previous, Next,
+    ];
     let preferred = (has_preferred != 0).then_some(preferred_inline);
-    let json = with_demo(|demo| demo.move_cursor(para_id as usize, pos, motion, preferred))
-        .flatten()
-        .unwrap_or_else(|| "null".to_string());
-    leak(json.into_bytes())
+    query("null", para_id, |layout, _| {
+        cursor_move_json(layout.move_cursor(pos, pick(motion, &motions), preferred))
+    })
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn demo_selection_geometry(
-    para_id: u32,
-    start: u32,
-    end: u32,
-    height_style: u32,
-) -> u64 {
-    let height = match height_style {
-        1 => BoxHeightStyle::Max,
-        2 => BoxHeightStyle::Strut,
-        _ => BoxHeightStyle::Tight,
-    };
-    let json = with_demo(|demo| {
-        demo.selection_geometry(para_id as usize, start as usize, end as usize, height)
+pub extern "C" fn demo_selection_geometry(para_id: u32, start: u32, end: u32, height: u32) -> u64 {
+    use BoxHeightStyle::{Max, Strut, Tight};
+    let height = pick(height, &[Tight, Max, Strut]);
+    query("[]", para_id, |layout, fonts| {
+        let range = clamped_range(layout, start, end);
+        let rects = layout.selection_geometry(fonts.shaper(), range, height);
+        rects_json(rects.iter().map(|selected| selected.rect))
     })
-    .flatten()
-    .unwrap_or_else(|| "[]".to_string());
-    leak(json.into_bytes())
 }
 
 /// The offset in paragraph `para_id`'s laid-out text of byte `source_offset`
 /// of its source, past any locale tags; `u32::MAX` for no such paragraph.
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_text_offset(para_id: u32, source_offset: u32) -> u32 {
-    with_demo(|demo| demo.text_offset(para_id as usize, source_offset as usize))
-        .flatten()
-        .map_or(u32::MAX, |offset| offset as u32)
+    with_demo(|demo| {
+        let stored = demo.paragraphs.get(para_id as usize)?.borrow_owner();
+        let offset = markup::text_offset(&stored.marked.removed, source_offset as usize);
+        Some(offset.min(stored.marked.text.len()))
+    })
+    .flatten()
+    .map_or(u32::MAX, |offset| offset as u32)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn demo_range_rects(para_id: u32, start: u32, end: u32) -> u64 {
-    let json = with_demo(|demo| demo.range_rects(para_id as usize, start as usize, end as usize))
-        .flatten()
-        .unwrap_or_else(|| "[]".to_string());
-    leak(json.into_bytes())
+    query("[]", para_id, |layout, _| {
+        rects_json(layout.range_rects(clamped_range(layout, start, end)))
+    })
 }
 
 #[cfg(test)]

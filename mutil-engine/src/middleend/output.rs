@@ -1,6 +1,4 @@
-//! Middle-end output: positioned lines and glyphs (spec §2.6).
-//!
-//! Data only. The invariants of these types are checked by
+//! Middle-end output: positioned lines and glyphs (spec §2.6), checked by
 //! [`PositionedLine::validate`] and [`PositionedParagraph::validate`].
 
 use super::{
@@ -14,63 +12,40 @@ use crate::types::{
 };
 use smallvec::SmallVec;
 
-/// One glyph placed on a line (spec §2.6).
-///
-/// `x` is **line-local** (spec OUT-1): measured from the inline start of the
-/// line's envelope, `0` for every line (spec SLT-1, GEO-3), so it is also the
-/// paragraph's flow-space inline coordinate. It is the strict **pen advance
-/// position**, the cumulative advance along the line, and not the drawing
-/// origin. The offsets are flow-relative (spec SHP-19): the flow-space
-/// drawing origin is `x + x_offset` and `baseline_y + over_to_block(y_offset)`,
-/// which is `baseline_y - y_offset` except in `VerticalLr` (spec OUT-1,
-/// ORI-2). Renderers take the physical origin from
-/// [`PlacedRun::glyphs`](super::PlacedRun::glyphs) instead (spec HST-4). A
-/// zero-advance combining mark with a negative `x_offset` at the start of a
-/// line therefore sits at the content start of its slot. `x` may lie left of
-/// that start for hanging punctuation placed outside the edge (§5 Stage 1.3),
-/// see [`PositionedLine::hanging_left`]. Containment is judged on the pen
-/// interval `[x, x + advance]`.
+/// One glyph placed on a line (spec §2.6). `x` is line-local (OUT-1; `0` at
+/// every line's envelope start, SLT-1, GEO-3) and is the pen position, not the
+/// drawing origin: the flow-space origin is `x + x_offset` and
+/// `baseline_y - y_offset`, except in `VerticalLr` (OUT-1, ORI-2). Renderers
+/// take the physical origin from [`PlacedRun::glyphs`](super::PlacedRun::glyphs)
+/// (HST-4).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedGlyph {
     /// Backend glyph index in the run's font.
     pub glyph_id: u32,
-    /// Pen advance position from the line's left edge (**not** the drawing
-    /// origin; see the type documentation).
+    /// Pen position from the line's left edge.
     pub x: f32,
-    /// Inline offset from the pen position, positive towards the inline end
-    /// (spec SHP-19). The inline drawing origin is `x + x_offset`.
+    /// Inline drawing offset, positive towards the inline end (SHP-19).
     pub x_offset: f32,
-    /// Offset from the baseline towards line-over, preserved unclamped
-    /// (spec SHP-19); its block direction depends on the writing mode
-    /// (spec ORI-2).
+    /// Drawing offset towards line-over, unclamped (SHP-19); its block
+    /// direction depends on the writing mode (ORI-2).
     pub y_offset: f32,
-    /// Advance width.
+    /// Advance width; may be negative.
     pub advance: f32,
-    /// Source bytes, non-empty. `None` exactly for a **synthesized** glyph,
-    /// one with no source counterpart (an inserted hyphen, a repeated math
-    /// operator, an ellipsis), and for annotation glyphs, which never claim
-    /// body bytes (spec §1.5, AX-1). A glyph replacing source atoms after a
-    /// boundary re-shape keeps their range; an actual U+00AD in the source
-    /// is not synthesized.
+    /// Non-empty source bytes; `None` exactly for synthesized and annotation
+    /// glyphs, which claim no body bytes (spec §1.5, AX-1).
     pub byte_range: Option<TextRange>,
-    /// `true` for punctuation hanging outside the text block (§5 Stage 1.3).
-    /// May straddle the body edge; its normalized pen interval must overflow
-    /// the content of the line's outer slots beyond tolerance. Only the
-    /// overflow counts as hanging.
+    /// Punctuation hanging outside the text block (§5 Stage 1.3).
     pub is_hanging: bool,
 }
 
 impl PositionedGlyph {
-    /// `true` for a glyph with no source counterpart: `byte_range` is `None`,
-    /// the only marker of synthesis (spec §1.5, AX-1). Synthesized glyphs are
-    /// never copied to the clipboard (§6.6).
+    /// No source counterpart (AX-1); never copied to the clipboard (§6.6).
     #[must_use]
     pub const fn is_synthesized(&self) -> bool {
         self.byte_range.is_none()
     }
 
-    /// The normalized inline pen interval `(lo, hi)` covered by this glyph
-    /// (`lo <= hi`, accounting for negative advances).
+    /// The normalized pen interval `(lo, hi)` (OUT-1).
     #[must_use]
     pub(crate) fn pen_interval(&self) -> (f32, f32) {
         let end = self.x + self.advance;
@@ -78,11 +53,8 @@ impl PositionedGlyph {
     }
 }
 
-/// Glyphs of one font and one bidi level, in screen order.
-///
-/// **[Design decision]** The spec names `VisualGlyphRun` (§2.6) without
-/// defining it; it groups glyphs that share a font so a painter can bind one
-/// face per run.
+/// Glyphs of one font and one bidi level, in screen order (OUT-3).
+/// **[Design decision]**: §2.6 names this type without defining it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisualGlyphRun {
     /// Resolved glyph orientation.
@@ -97,9 +69,7 @@ pub struct VisualGlyphRun {
     pub bidi_level: BidiLevel,
     /// Source bytes covered by the run.
     pub byte_range: TextRange,
-    /// Glyphs, screen left to right: pen positions never decrease
-    /// (`glyphs[i].x <= glyphs[i + 1].x`; a mark shares its base's position
-    /// and keeps its drawing offset in `x_offset`).
+    /// Glyphs, screen left to right; pen positions never decrease.
     pub glyphs: Vec<PositionedGlyph>,
 }
 
@@ -112,8 +82,8 @@ pub enum DecorationKind {
     Strikethrough,
 }
 
-/// A decoration segment, merged across adjacent clusters and glue (§5 Stage 5).
-/// Colour is not stored; the painter looks it up from `byte_range`.
+/// A decoration segment, merged across adjacent clusters and glue (§5 Stage
+/// 5). The painter looks its colour up from `byte_range`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DecorationLine {
     /// Underline or strike-through.
@@ -122,7 +92,7 @@ pub struct DecorationLine {
     pub byte_range: TextRange,
     /// Left end, line-local.
     pub x: f32,
-    /// Extent to the right of `x` (non-negative).
+    /// Non-negative extent to the right of `x`.
     pub width: f32,
     /// Offset from the baseline.
     pub y_offset: f32,
@@ -131,108 +101,83 @@ pub struct DecorationLine {
 }
 
 /// An inline object placed on a line (spec §2.4 `InlineBox`, §2.6).
-///
-/// Glyph runs carry no objects, so this is where a painter and the hit-test
-/// and selection code find them. **[Design decision]**; the spec left object
-/// positions unrepresented.
+/// **[Design decision]**: the spec left object positions unrepresented.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedInlineBox {
     /// Alignment relative to the main line baseline.
     pub baseline_align: BaselineAlignment,
-    /// Caller-assigned identifier from `BoxNode::InlineObject::box_id`.
+    /// `BoxNode::InlineObject::box_id`.
     pub box_id: u64,
     /// Source bytes the object stands for.
     pub byte_range: TextRange,
-    /// Left edge, line-local. The object lies inside the content of one slot.
+    /// Left edge, line-local.
     pub x: f32,
-    /// Vertical offset of the object's baseline from the line's baseline,
-    /// y growing downwards (`0.0` = the object sits on the baseline).
+    /// Offset of the object's baseline below the line's baseline.
     pub y: f32,
-    /// Width (non-negative).
+    /// Non-negative width.
     pub width: f32,
-    /// Extent above the object's baseline (non-negative).
+    /// Non-negative extent above the object's baseline.
     pub ascent: f32,
-    /// Extent below the object's baseline (non-negative).
+    /// Non-negative extent below the object's baseline.
     pub descent: f32,
-    /// The object's `BoxNode::InlineObject::overflow_policy`, so validation can
-    /// tell a legitimate `AllowOverflow` from a `Clip` or `ScaleToFit` box that
-    /// was not made to fit.
+    /// `BoxNode::InlineObject::overflow_policy` (SLT-5, WN-7).
     pub overflow_policy: BoxOverflowPolicy,
-    /// The object's resolved bidi level (`BoxNode::InlineObject::bidi_level`).
+    /// `BoxNode::InlineObject::bidi_level`.
     pub bidi_level: BidiLevel,
 }
 
-/// A tab placed on a line (spec §2.4 `Tab`, §2.6).
-///
-/// A tab carries no glyph; this is where a painter (leaders, selection) and the
-/// hit-test code find its extent. **[Design decision]**; the spec left tab
-/// positions unrepresented. `width` is `TabStops::next_stop(x) - x`, resolved during
-/// layout.
+/// A tab placed on a line (spec §2.4 `Tab`, §2.6). It stores no bidi level:
+/// UAX #9 L1 puts it at the paragraph level (AX-2). **[Design decision]**.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedTab {
     /// Source bytes of the tab character.
     pub byte_range: TextRange,
-    /// Left edge, line-local. The tab lies inside the content of one slot,
-    /// except for a trailing tab under `Preserved` (trailing-whitespace rule).
+    /// Left edge, line-local.
     pub x: f32,
-    /// Width (non-negative). A tab stores no bidi level: UAX #9 rule L1 puts
-    /// it at the paragraph level (spec §1.5, AX-2).
+    /// Non-negative width, `TabStops::next_stop(d) - d` where `d` is the tab's
+    /// distance from the slot's line-start edge (not `x`); zero when no stop
+    /// is reachable (ST3-1).
     pub width: f32,
 }
 
-/// The visual box of one line fragment of an inline decoration span (spec
-/// §2.6), after bidi reordering.
-///
-/// Bidi reordering can split one span into several visual groups on a line;
-/// each group is its own fragment. The fragment carries the span's whole
-/// range, so [`is_first_fragment`](Self::is_first_fragment) and
-/// [`is_last_fragment`](Self::is_last_fragment) follow from the fragment
-/// alone: a painter that joins borders across fragments reads them from the
-/// two ranges, which no stored flag can contradict (spec §1.5, AX-2).
+/// The visual box of one bidi-reordered line fragment of an inline decoration
+/// span (spec §2.6). First/last-ness follows from the two ranges (AX-2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PositionedSpanFragment {
-    /// Identifier of the `InlineDecorationSpan`.
+    /// `InlineDecorationSpan` identifier.
     pub span_id: u64,
-    /// The whole `InlineDecorationSpan::byte_range`; the same on every
-    /// fragment of the span.
+    /// The whole `InlineDecorationSpan::byte_range`.
     pub span_range: TextRange,
-    /// Source bytes of the span that this fragment covers: inside
-    /// `span_range` and inside the line.
+    /// The span's bytes in this fragment, inside the line.
     pub byte_range: TextRange,
     /// Left visual edge, line-local.
     pub x: f32,
-    /// Visual width including the padding that applies (non-negative).
+    /// Non-negative visual width, padding included.
     pub width: f32,
-    /// Extent above the baseline (non-negative).
+    /// Non-negative extent above the baseline.
     pub ascent: f32,
-    /// Extent below the baseline (non-negative).
+    /// Non-negative extent below the baseline.
     pub descent: f32,
-    /// UAX #9 level of the text in this fragment.
+    /// UAX #9 level of the fragment's text.
     pub bidi_level: BidiLevel,
 }
 
 impl PositionedSpanFragment {
-    /// Whether the fragment holds the logical start of its span:
-    /// `byte_range.start == span_range.start`.
+    /// The fragment holds the logical start of its span.
     #[must_use]
     pub const fn is_first_fragment(&self) -> bool {
         self.byte_range.start() == self.span_range.start()
     }
 
-    /// Whether the fragment holds the logical end of its span:
-    /// `byte_range.end == span_range.end`.
+    /// The fragment holds the logical end of its span.
     #[must_use]
     pub const fn is_last_fragment(&self) -> bool {
         self.byte_range.end() == self.span_range.end()
     }
 }
 
-/// Which side of an ambiguous boundary a caret belongs to (spec §6.1).
-///
-/// Flutter's definition: upstream leans toward the start of the string. At a
-/// soft wrap, upstream is the end of the first line and downstream the start of
-/// the second; affinity also resolves a bidi boundary. Explicit newlines are
-/// unambiguous `[C1]`.
+/// Which side of an ambiguous boundary (soft wrap, bidi) a caret belongs to
+/// (spec §6.1); upstream leans toward the start of the string.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum CaretAffinity {
     /// Leans toward the following text.
@@ -242,76 +187,48 @@ pub enum CaretAffinity {
     Upstream,
 }
 
-/// One visual boundary on a line, in visual order (spec §6.1). Two stops sit at
-/// each direction boundary.
+/// One visual boundary on a line, in visual order (spec §6.1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CaretStop {
     /// Line-local x position.
     pub x: f32,
-    /// Logical byte offset at this stop.
+    /// Logical byte offset.
     pub offset: ByteIndex,
     /// Affinity this stop represents.
     pub affinity: CaretAffinity,
-    /// Bidi level of the text the stop belongs to: the `bidi_level` of a
-    /// visual run with a glyph whose bytes contain or touch `offset` (at a
-    /// run boundary, of either adjacent run).
+    /// Level of a glyph's visual run, inline box or tab (paragraph level)
+    /// touching `offset`; otherwise the paragraph level or that of the
+    /// nearest entity, as on an empty line (CRT-2).
     pub level: BidiLevel,
     /// Index into `PositionedParagraph::lines`.
     pub line: usize,
 }
 
 /// Visual fragment of an atomic edit span, independent of decorations.
-///
-/// Lives in the output layer because it is part of a [`PositionedLine`]'s
-/// geometry; hit-testing behaviour is implemented in the interaction layer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AtomicFragment {
     /// Atomic span id (independent id space).
     pub atomic_id: u64,
-    /// Entire atomic logical range; the same on every fragment of the span.
+    /// The span's whole logical range.
     pub full_byte_range: TextRange,
-    /// Source bytes on this visual fragment: non-empty, inside
-    /// `full_byte_range` and inside the line. The fragments of one span on one
-    /// line are disjoint and together cover the part of the span on that line.
+    /// Non-empty bytes of this fragment; disjoint from the span's others.
     pub fragment_byte_range: TextRange,
     /// Physical left edge, line-local.
     pub x: f32,
-    /// Extent to the right of `x` (non-negative).
+    /// Non-negative extent to the right of `x`.
     pub width: f32,
     /// Resolved fragment direction.
     pub bidi_level: BidiLevel,
 }
 
-/// The content placed in one available interval of a line.
-///
-/// The slot carries the interval it was laid out in, so a line describes its
-/// own geometry: validation never queries a geometry provider again.
-///
-/// ```text
-/// constraint.start      content_start                content_end      constraint.end
-///        |<- alignment ->|<------- visual_width ------->|<- slack ------->|
-/// ```
-///
-/// The content block `[content_start, content_start + visual_width]` lies
-/// inside `constraint` (but see the overflow exemption on
-/// [`PositionedLine::validate`]). What the constraint has outside the block is
-/// alignment offset and slack; an unjustified or last line keeps its slack.
-///
-/// Inside the block the **line-end** edge is exact and the **line-start** edge
-/// may be preceded by preserved leading glue, which has no output entity of
-/// its own. In an LTR paragraph the last item ends at `content_end`
-/// (`visual_width == max(right edge) - content_start`) and the gap
-/// `[content_start, first item)` is leading glue; in an RTL paragraph the
-/// mirror image holds: the leftmost item starts at `content_start` and the gap
-/// `(last item, content_end]` is leading glue. A slot without content has
-/// `visual_width == 0`.
+/// The content placed in one available interval of a line (SLT-1 to SLT-3).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PositionedSlot {
-    /// The available interval, as resolved when the line was laid out.
+    /// The available interval the line was laid out in.
     pub constraint: InlineSlotConstraint,
-    /// Left edge of the content block; finite and inside `constraint`.
+    /// Left edge of the content block.
     pub content_start: f32,
-    /// Advance of the content block; finite and non-negative.
+    /// Advance of the content block.
     pub visual_width: f32,
 }
 
@@ -328,7 +245,7 @@ impl PositionedSlot {
 pub struct PositionedAnnotationRun {
     /// Source annotation identifier.
     pub annotation_id: u64,
-    /// Nonempty visible base range.
+    /// Non-empty visible base range.
     pub base_byte_range: TextRange,
     /// Physical line-over or line-under side.
     pub side: AnnotationSide,
@@ -342,43 +259,33 @@ pub struct PositionedAnnotationRun {
     pub orientation: GlyphOrientation,
     /// Finite baseline offset toward line-over.
     pub baseline_offset: f32,
-    /// Maximum finite nonnegative overhang beyond the base.
+    /// Largest finite non-negative overhang beyond the base.
     pub max_overhang: f32,
-    /// Declared additional block extent, including gap.
+    /// Declared additional block extent, gap included.
     pub block_extent: f32,
-    /// Finite nonnegative extent of the annotated base content above the
-    /// baseline (toward line-over): the largest over-side extent of the base's
-    /// glyphs and inline boxes, as the producer measured it.
-    ///
-    /// An `Over` annotation sits at `baseline_offset >= base_over` and needs
-    /// `base_over + block_extent` of ascent under [`LineHeight::Normal`].
+    /// Non-negative over-side extent of the base's glyphs and boxes.
     pub base_over: f32,
-    /// Finite nonnegative extent of the annotated base content below the
-    /// baseline (toward line-under); the mirror of `base_over`. An `Under`
-    /// annotation sits at `baseline_offset <= -base_under` and needs
-    /// `base_under + block_extent` of descent under [`LineHeight::Normal`].
+    /// The under-side mirror of `base_over`.
     pub base_under: f32,
-    /// Glyphs shaped from the annotation's own text; they carry no body byte
-    /// range, so they are marked synthesized.
+    /// Synthesized glyphs shaped from the annotation's own text.
     pub glyphs: Vec<PositionedGlyph>,
 }
 
 /// One laid-out line (spec §2.6).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PositionedLine {
-    /// The line's slots, left to right: every available interval of the line
-    /// with the content placed in it. Never empty.
+    /// One slot per available interval, left to right; never empty.
     pub slots: SmallVec<[PositionedSlot; 1]>,
     /// Whether the suffix represents clamped source.
     pub is_ellipsized: bool,
     /// Interlinear glyph sequences.
     pub annotations: Vec<PositionedAnnotationRun>,
-    /// Atomic editing geometry, independent of decoration ids.
+    /// Atomic editing geometry.
     pub atomic_fragments: Vec<AtomicFragment>,
-    /// Source bytes, **including** trailing whitespace.
+    /// Source bytes, trailing whitespace included.
     pub byte_range: TextRange,
-    /// End of the last visible cluster (trailing whitespace excluded). Glyphs
-    /// whose `byte_range` starts at or after it are trailing whitespace.
+    /// End of the visible content (clusters, inline boxes, tabs); trailing
+    /// whitespace starts here.
     pub visible_byte_end: ByteIndex,
     /// Baseline y within the paragraph.
     pub baseline_y: f32,
@@ -392,11 +299,11 @@ pub struct PositionedLine {
     pub is_justified: bool,
     /// Glyph runs, screen left to right.
     pub visual_runs: Vec<VisualGlyphRun>,
-    /// Inline objects on this line, in logical order.
+    /// Inline objects, in logical order.
     pub visual_boxes: Vec<PositionedInlineBox>,
-    /// Tabs on this line, in logical order.
+    /// Tabs, in logical order.
     pub tabs: Vec<PositionedTab>,
-    /// Visual boxes of inline decoration spans, screen left to right.
+    /// Inline decoration span boxes, screen left to right.
     pub span_fragments: Vec<PositionedSpanFragment>,
     /// Caret stops in visual order (§6.1).
     pub caret_stops: Vec<CaretStop>,
@@ -404,7 +311,22 @@ pub struct PositionedLine {
     pub decorations: Vec<DecorationLine>,
 }
 
-/// Which physical edge of a line a hanging extent belongs to.
+impl PositionedLine {
+    /// The extreme caret stop towards `side` (spec §6.3 rule 3); equal-`x`
+    /// ties go to the first stop for `Left` and the last for `Right`.
+    #[must_use]
+    pub fn extreme_caret_stop(&self, side: HangSide) -> Option<&CaretStop> {
+        let by_x = |a: &&CaretStop, b: &&CaretStop| {
+            a.x.partial_cmp(&b.x).unwrap_or(core::cmp::Ordering::Equal)
+        };
+        match side {
+            HangSide::Left => self.caret_stops.iter().min_by(by_x),
+            HangSide::Right => self.caret_stops.iter().max_by(by_x),
+        }
+    }
+}
+
+/// A physical edge of a line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HangSide {
     /// Physical left edge.
@@ -414,8 +336,7 @@ pub enum HangSide {
 }
 
 impl HangSide {
-    /// Whether this edge is where a line of base `direction` starts: the left
-    /// one for LTR, the right one for RTL.
+    /// Whether a line of base `direction` starts at this edge.
     #[must_use]
     pub const fn is_line_start(self, direction: Direction) -> bool {
         matches!(
@@ -434,15 +355,29 @@ impl core::fmt::Display for HangSide {
     }
 }
 
-/// The policy a paragraph was laid out under, recorded in the output so that
-/// validating it needs nothing from the caller: a paragraph cannot be checked
-/// against a more permissive policy than the one that produced it.
+/// Positioned lines in canonical flow space (§2.7), with the policy they were
+/// laid out under so that [`validate`](Self::validate) needs only the text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PositionedParagraph {
+    /// The policy the lines were laid out under.
+    pub policy: LayoutPolicySnapshot,
+    /// Paragraph base direction, copied from the AST.
+    pub base_direction: BidiDirection,
+    /// Unrendered logical tail, when clamped.
+    pub truncated_range: Option<TextRange>,
+    /// Authoritative block-axis extent, clearance included.
+    pub total_block_size: f32,
+    /// Lines top to bottom.
+    pub lines: Vec<PositionedLine>,
+}
+
+/// The policy a paragraph was laid out under, recorded so that it cannot be
+/// validated against a more permissive one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutPolicySnapshot {
-    /// Writing mode of the paragraph (`ParagraphAst::writing_mode`).
+    /// `ParagraphAst::writing_mode`.
     pub writing_mode: WritingMode,
-    /// The **resolved** strut: `ParagraphAst::strut_metrics` after
-    /// `LineHeight::resolve_strut`, half-leading included.
+    /// The strut after `LineHeight::resolve_strut`.
     pub strut: StrutMetrics,
     /// The line-height policy.
     pub line_height: LineHeight,
@@ -450,64 +385,62 @@ pub struct LayoutPolicySnapshot {
     pub whitespace: HangingWhitespaceMode,
     /// The hanging-punctuation mode.
     pub hang_mode: HangMode,
-    /// `LayoutConstraints::wrap_width`: positive, possibly infinite. A line
-    /// wider than this is valid only in the single-entity overflow state (see
-    /// [`PositionedLine::validate`]).
+    /// `LayoutConstraints::wrap_width`: positive, possibly infinite (SLT-5).
     pub wrap_width: f32,
     /// Where the lines' slots came from.
     pub slot_source: SlotSource,
-    /// The truncation policy, if any (`LayoutOptions::clamp`).
+    /// `LayoutOptions::clamp`.
     pub clamp: Option<LineClampPolicy>,
 }
 
-/// Where a paragraph's slots came from, recorded so that validation can
-/// rebuild the standard column (spec §5, GEO-2).
+/// Where a paragraph's slots came from (spec §5, GEO-2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SlotSource {
-    /// No geometry provider: every line has exactly the one slot
-    /// `[indent, wrap_width]`, with `first_line_indent` on line 0 and
-    /// `hanging_indent` after it. Both indents lie in `[0, wrap_width)`.
+    /// No geometry provider: each line has the one slot `[indent, wrap_width]`.
     Standard {
-        /// `LayoutConstraints::first_line_indent`.
+        /// `LayoutConstraints::first_line_indent`, for line 0.
         first_line_indent: f32,
-        /// `LayoutConstraints::hanging_indent`.
+        /// `LayoutConstraints::hanging_indent`, for later lines.
         hanging_indent: f32,
     },
-    /// A `LineGeometryProvider` answered for every line. Its answers are not
-    /// recomputable after layout, so only their shape is validated; the
-    /// constraints' indents do not apply.
+    /// A `LineGeometryProvider`; only the shape of its answers is validated.
     Provider,
 }
 
 impl SlotSource {
-    /// The one slot line `line_index` must have under
-    /// [`Standard`](Self::Standard) in a container `wrap_width` wide; `None`
-    /// for [`Provider`](Self::Provider), and for indents that leave no
-    /// well-formed slot (a policy [`LayoutPolicySnapshot::is_valid`] rejects).
+    /// The one slot of line `line_index` under [`Standard`](Self::Standard),
+    /// if the indent leaves a well-formed one.
     #[must_use]
     pub fn standard_slot(self, line_index: usize, wrap_width: f32) -> Option<InlineSlotConstraint> {
-        match self {
-            Self::Standard {
-                first_line_indent,
-                hanging_indent,
-            } => InlineSlotConstraint::new(
-                if line_index == 0 {
-                    first_line_indent
-                } else {
-                    hanging_indent
-                },
-                wrap_width,
-            ),
-            Self::Provider => None,
+        let Self::Standard {
+            first_line_indent,
+            hanging_indent,
+        } = self
+        else {
+            return None;
+        };
+        let indent = match line_index {
+            0 => first_line_indent,
+            _ => hanging_indent,
+        };
+        InlineSlotConstraint::new(indent, wrap_width)
+    }
+
+    /// The slot source `constraints` lay lines out from.
+    pub(crate) fn of(constraints: &LayoutConstraints) -> Self {
+        match constraints.geometry_provider {
+            Some(_) => Self::Provider,
+            None => Self::Standard {
+                first_line_indent: constraints.first_line_indent,
+                hanging_indent: constraints.hanging_indent,
+            },
         }
     }
 }
 
 impl LayoutPolicySnapshot {
-    /// Resolves the policy of one paragraph from the layout inputs. The strut
-    /// is resolved here, once, from the AST's **raw** strut metrics,
-    /// `ParagraphAst::strut_font_size`, the writing mode and
-    /// `options.line_height`.
+    /// Resolves a paragraph's policy, resolving the strut once from the AST's
+    /// raw strut metrics and `options.line_height`.
     ///
     /// # Errors
     /// `InvalidConstraints`, `InvalidLayoutOptions`, `InvalidStrut` or
@@ -523,24 +456,27 @@ impl LayoutPolicySnapshot {
         if options.clamp.as_ref().is_some_and(|c| !c.is_valid()) {
             return Err(LayoutInputError::InvalidLayoutOptions);
         }
-        let raw = &ast.strut_metrics;
-        let extents_are_valid = is_extent(raw.ascent)
+        let (raw, font_size) = (&ast.strut_metrics, ast.strut_font_size);
+        if !(is_extent(raw.ascent)
             && is_extent(raw.descent)
             && is_measurement(raw.line_gap)
-            && raw.ascent + raw.descent > 0.0;
-        let font_size_is_valid = is_extent(ast.strut_font_size) && ast.strut_font_size > 0.0;
-        if !(extents_are_valid && font_size_is_valid && options.line_height.is_valid()) {
+            && raw.ascent + raw.descent > 0.0
+            && is_extent(font_size)
+            && font_size > 0.0
+            && options.line_height.is_valid())
+        {
             return Err(LayoutInputError::InvalidStrut);
         }
         if !raw.is_valid() {
             return Err(LayoutInputError::InvalidFontMetrics);
         }
-        let strut = options
-            .line_height
-            .resolve_strut(raw, ast.strut_font_size, ast.writing_mode);
-        if !strut.is_valid() {
-            return Err(LayoutInputError::InvalidStrut);
-        }
+        let strut = Some(
+            options
+                .line_height
+                .resolve_strut(raw, font_size, ast.writing_mode),
+        )
+        .filter(StrutMetrics::is_valid)
+        .ok_or(LayoutInputError::InvalidStrut)?;
         Ok(Self {
             writing_mode: ast.writing_mode,
             strut,
@@ -548,21 +484,15 @@ impl LayoutPolicySnapshot {
             whitespace: options.whitespace,
             hang_mode: options.hang_mode,
             wrap_width: constraints.wrap_width,
-            slot_source: if constraints.geometry_provider.is_some() {
-                SlotSource::Provider
-            } else {
-                SlotSource::Standard {
-                    first_line_indent: constraints.first_line_indent,
-                    hanging_indent: constraints.hanging_indent,
-                }
-            },
+            slot_source: SlotSource::of(constraints),
             clamp: options.clamp.clone(),
         })
     }
 
-    /// `true` when the snapshot could have come from
-    /// [`resolve`](Self::resolve): a valid strut, line height and clamp, a
-    /// positive wrap width, and standard indents inside `[0, wrap_width)`.
+    /// The PAR-1 field checks: a valid strut, line height and clamp, a
+    /// positive wrap width and standard indents in `[0, wrap_width)`. Every
+    /// snapshot [`resolve`](Self::resolve) produces passes; passing does not
+    /// prove `resolve` produced it.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         let indents_are_valid = match self.slot_source {
@@ -570,8 +500,8 @@ impl LayoutPolicySnapshot {
                 first_line_indent,
                 hanging_indent,
             } => [first_line_indent, hanging_indent]
-                .iter()
-                .all(|&indent| indent >= 0.0 && indent < self.wrap_width),
+                .into_iter()
+                .all(|indent| (0.0..self.wrap_width).contains(&indent)),
             SlotSource::Provider => true,
         };
         self.strut.is_valid()
@@ -581,8 +511,7 @@ impl LayoutPolicySnapshot {
             && self.clamp.as_ref().is_none_or(LineClampPolicy::is_valid)
     }
 
-    /// The context line `line_index` of a paragraph of base `base_direction`
-    /// is validated against.
+    /// The context line `line_index` is validated against.
     #[must_use]
     pub fn line_context(&self, base_direction: BidiDirection, line_index: usize) -> LineContext {
         LineContext {
@@ -598,38 +527,30 @@ impl LayoutPolicySnapshot {
     }
 }
 
-/// What one line is validated against: the paragraph's policy
-/// ([`LayoutPolicySnapshot`]), its base direction and the line's index.
-///
-/// There is no default context: an all-zero strut validates no line. Build one
-/// with [`LineContext::for_paragraph`] or
-/// [`LayoutPolicySnapshot::line_context`].
+/// What one line is validated against: its paragraph's
+/// [`LayoutPolicySnapshot`], base direction and the line's index.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LineContext {
     /// Active writing mode.
     pub writing_mode: WritingMode,
-    /// The paragraph base direction. It decides which physical edge is the
-    /// line start (hanging, leading glue) and where trailing whitespace lies
-    /// (UAX #9 L1).
+    /// Paragraph base direction.
     pub base_direction: BidiDirection,
-    /// The **resolved** strut.
+    /// The resolved strut.
     pub strut: StrutMetrics,
-    /// The active line-height policy.
+    /// The line-height policy.
     pub line_height: LineHeight,
-    /// The active trailing-whitespace mode.
+    /// The trailing-whitespace mode.
     pub whitespace: HangingWhitespaceMode,
-    /// The active hanging-punctuation mode.
+    /// The hanging-punctuation mode.
     pub hang_mode: HangMode,
-    /// The paragraph's `LayoutConstraints::wrap_width`.
+    /// `LayoutConstraints::wrap_width`.
     pub wrap_width: f32,
-    /// Index of the line within the paragraph; `0` is the first line, which
-    /// `HangStartMode::FirstLine` refers to.
+    /// Index of the line in the paragraph (`HangStartMode::FirstLine` is 0).
     pub line_index: usize,
 }
 
 impl LineContext {
-    /// The context of line `line_index` of the paragraph `ast` laid out under
-    /// `constraints` and `options`.
+    /// The context of line `line_index` of `ast` under `constraints`, `options`.
     ///
     /// # Errors
     /// As [`LayoutPolicySnapshot::resolve`].
@@ -641,51 +562,5 @@ impl LineContext {
     ) -> Result<Self, LayoutInputError> {
         LayoutPolicySnapshot::resolve(ast, constraints, options)
             .map(|policy| policy.line_context(ast.base_direction, line_index))
-    }
-}
-
-/// Positioned lines in canonical flow space, with paragraph-local physical mapping.
-/// The lines and `total_block_size` are the paragraph's extent; block transforms
-/// and validation use `total_block_size` as the authoritative block extent.
-///
-/// The paragraph records the policy it was laid out under, so
-/// [`validate`](Self::validate) needs only the text.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PositionedParagraph {
-    /// The policy the lines were laid out under, writing mode included.
-    pub policy: LayoutPolicySnapshot,
-    /// Paragraph base direction, copied from the AST.
-    pub base_direction: BidiDirection,
-    /// Unrendered logical tail, when clamped.
-    pub truncated_range: Option<TextRange>,
-    /// Final block-axis extent including clearance.
-    pub total_block_size: f32,
-    /// Lines top to bottom.
-    pub lines: Vec<PositionedLine>,
-}
-
-impl PositionedLine {
-    /// The extreme caret stop towards the physical `side` (spec §6.3 rule 3):
-    /// where a click beyond that edge of the line's visual content converges.
-    ///
-    /// `caret_stops` are in visual order, so equal-`x` ties (a bidi boundary
-    /// has two stops at one `x`) resolve by that order: the first for `Left`,
-    /// the last for `Right`. `None` if the line has no stops.
-    ///
-    /// When the content at that edge flows in the paragraph's base direction the
-    /// stop is `(visible_byte_end, Upstream)`; when it is written in the
-    /// opposite direction the stop is the outer edge of that text, never
-    /// `visible_byte_end` as a blanket rule (which would jump the caret to the
-    /// middle of the line).
-    #[must_use]
-    pub fn extreme_caret_stop(&self, side: HangSide) -> Option<&CaretStop> {
-        // `min_by` keeps the first of equal stops and `max_by` the last.
-        let by_x = |a: &&CaretStop, b: &&CaretStop| {
-            a.x.partial_cmp(&b.x).unwrap_or(core::cmp::Ordering::Equal)
-        };
-        match side {
-            HangSide::Left => self.caret_stops.iter().min_by(by_x),
-            HangSide::Right => self.caret_stops.iter().max_by(by_x),
-        }
     }
 }
