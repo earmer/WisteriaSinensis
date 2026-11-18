@@ -236,7 +236,10 @@ pub trait TextShaper: Send + Sync {
         instance: FontInstanceRef<'_>,
         glyph_id: u32,
         direction: Direction,
-    ) -> SmallVec<[f32; 4]>;
+    ) -> SmallVec<[f32; 4]> {
+        let _ = (instance, glyph_id, direction);
+        SmallVec::new()
+    }
 
     /// The nominal advance of U+0020 SPACE in `instance`, along the inline
     /// axis of `orientation` (spec SHP-20): the horizontal advance for

@@ -1,6 +1,5 @@
 //! Font-unit metrics, GDEF ligature carets, and BASE table offsets.
 
-use super::super::clusters::finite_or_zero;
 use crate::types::FontMetrics;
 use harfrust::Tag;
 use read_fonts::TableProvider;
@@ -109,21 +108,21 @@ pub(super) fn unit_metrics(font: &Font) -> UnitMetrics {
     UnitMetrics {
         units_per_em: upem,
         metrics: FontMetrics {
-            vertical_ascent: finite_or_zero(vertical_ascent),
-            vertical_descent: finite_or_zero(vertical_descent),
-            vertical_line_gap: finite_or_zero(vertical_line_gap),
-            ideographic_baseline_offset: finite_or_zero(ideographic),
-            central_baseline_offset: finite_or_zero(central),
-            hanging_baseline_offset: finite_or_zero(base.hang.unwrap_or(0.8 * ascent)),
-            mathematical_baseline_offset: finite_or_zero(base.math.unwrap_or(0.5 * x_height)),
-            ascent: finite_or_zero(ascent),
-            descent: finite_or_zero(descent),
-            line_gap: finite_or_zero(line_gap),
-            underline_position: finite_or_zero(underline_position),
-            underline_thickness: finite_or_zero(underline_thickness),
-            strikeout_position: finite_or_zero(strikeout_position),
-            x_height: finite_or_zero(x_height.max(0.0)),
-            cap_height: finite_or_zero(cap_height.max(0.0)),
+            vertical_ascent,
+            vertical_descent,
+            vertical_line_gap,
+            ideographic_baseline_offset: ideographic,
+            central_baseline_offset: central,
+            hanging_baseline_offset: base.hang.unwrap_or(0.8 * ascent),
+            mathematical_baseline_offset: base.math.unwrap_or(0.5 * x_height),
+            ascent,
+            descent,
+            line_gap,
+            underline_position,
+            underline_thickness,
+            strikeout_position,
+            x_height: x_height.max(0.0),
+            cap_height: cap_height.max(0.0),
             use_typo_metrics: metrics.use_typo_metrics,
         },
     }

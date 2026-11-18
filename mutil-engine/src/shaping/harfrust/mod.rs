@@ -6,9 +6,10 @@
 //! HarfRust, metrics come from `read-fonts`.
 
 use super::clusters::{
-    attach_synthesized, finite_nonnegative, plan_window, push_clusters, push_empty_clusters,
+    EdgeFonts, TaggedGlyph, atom_containing, finish_window, plan_window, push_clusters,
+    push_empty_clusters,
 };
-use super::{FontFace, FontSource, LeadingEdit, TextShaper, TrailingEdit};
+use super::{FontFace, FontSource, LeadingEdit, TextShaper, TrailingEdit, finite_nonnegative};
 use crate::types::{
     Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontRef, FontStyle, FontVariation,
     GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster,
@@ -132,7 +133,10 @@ impl HarfRustShaper {
     ) {
         let mut start = range.start;
         let group = target.run.orientation == GlyphOrientation::HorizontalInVertical;
-        let mut current_font = (start < range.end).then(|| {
+        let face_at = |t: &ShapingTarget<'_>, atom: usize| {
+            self.face_for(t.text, t.run, &t.atoms[atom], candidates)
+        };
+        let mut pending = (start < range.end).then(|| {
             if group {
                 self.face_for_group(
                     target.text,
@@ -141,25 +145,18 @@ impl HarfRustShaper {
                     candidates,
                 )
             } else {
-                self.face_for(target.text, target.run, &target.atoms[start], candidates)
+                face_at(target, start)
             }
         });
-        while let Some(font) = current_font {
-            let mut end = start + 1;
-            let mut next_font = None;
-            if group {
-                end = range.end;
+        while let Some(font) = pending {
+            let end = if group {
+                range.end
             } else {
-                while end < range.end {
-                    let candidate =
-                        self.face_for(target.text, target.run, &target.atoms[end], candidates);
-                    if candidate != font {
-                        next_font = Some(candidate);
-                        break;
-                    }
-                    end += 1;
-                }
-            }
+                (start + 1..range.end)
+                    .find(|&i| face_at(target, i) != font)
+                    .unwrap_or(range.end)
+            };
+            pending = (end < range.end).then(|| face_at(target, end));
             let first_cluster = target.clusters.len();
             self.shape_font_run(target, start..end, font);
             if cut_before
@@ -169,7 +166,6 @@ impl HarfRustShaper {
                 cluster.safe_to_concat_before = false;
             }
             start = end;
-            current_font = next_font;
         }
     }
 
@@ -221,19 +217,16 @@ impl HarfRustShaper {
             return;
         };
         let vertical = run.orientation == GlyphOrientation::VerticalUpright;
-        let mut glyphs: Vec<(usize, RawShapedGlyph, bool, bool)> = buffer
+        let mut glyphs: Vec<TaggedGlyph> = buffer
             .glyph_infos()
             .iter()
             .zip(buffer.glyph_positions())
-            .map(|(info, pos)| {
-                let byte = bytes.start() + info.cluster as usize;
-                // The atom holding the glyph's cluster value.
-                let atom = range.start
-                    + atoms[range.clone()]
-                        .partition_point(|a| a.byte_range.start() <= byte)
-                        .saturating_sub(1);
-                let glyph = raw_glyph(info, pos, k, vertical, false);
-                (atom, glyph, info.unsafe_to_break(), info.unsafe_to_concat())
+            .map(|(info, pos)| TaggedGlyph {
+                atom: atom_containing(atoms, range.clone(), bytes.start() + info.cluster as usize),
+                font: font_id,
+                glyph: raw_glyph(info, pos, k, vertical, false),
+                unsafe_break: info.unsafe_to_break(),
+                unsafe_concat: info.unsafe_to_concat(),
             })
             .collect();
         if run.bidi_level.direction().is_rtl() && !vertical {
@@ -244,8 +237,8 @@ impl HarfRustShaper {
             run,
             atoms,
             range,
-            FontRef::unscaled(font_id),
             &glyphs,
+            font_id,
             output_clusters,
             output_glyphs,
         );
@@ -479,80 +472,61 @@ impl TextShaper for HarfRustShaper {
             return;
         };
         let candidates = self.registry.candidates(&run.families, run.style);
-        let first_cluster = output_clusters.len();
-        // A cut edit removes atoms: they keep empty clusters, so the window's
-        // atoms stay partitioned (SHP-6), and the rest is shaped as is.
         let fallback = candidates.first().copied().unwrap_or_default();
-        push_empty_clusters(
+        finish_window(
             run,
             atoms,
-            plan.first..plan.kept_start,
-            fallback,
+            &plan,
             output_clusters,
             output_glyphs,
-        );
-        let kept_first = output_clusters.len();
-        if plan.kept_start < plan.kept_end {
-            let mut buffer = Buffer::new();
-            let mut target = ShapingTarget {
-                text,
-                run,
-                atoms,
-                clusters: output_clusters,
-                glyphs: output_glyphs,
-                buffer: &mut buffer,
-            };
-            for (k, segment) in contiguous_segments(atoms, plan.kept_start..plan.kept_end)
-                .into_iter()
-                .enumerate()
-            {
-                self.shape_segment(&mut target, segment, &candidates, k == 0);
-            }
-        }
-        let kept_end = output_clusters.len();
-        push_empty_clusters(
-            run,
-            atoms,
-            plan.kept_end..plan.end,
-            fallback,
-            output_clusters,
-            output_glyphs,
-        );
-        let appended = output_clusters.len();
-        if appended == first_cluster {
-            return;
-        }
-        // A cut atom's empty cluster takes the face of the kept text beside
-        // it, so a replacement attached to it is shaped in that face rather
-        // than in the stack's first one.
-        if kept_first < kept_end {
-            let (lead, rest) =
-                output_clusters[first_cluster..].split_at_mut(kept_first - first_cluster);
-            let (kept, trail) = rest.split_at_mut(kept_end - kept_first);
-            lead.iter_mut().for_each(|c| c.font = kept[0].font);
-            trail
-                .iter_mut()
-                .for_each(|c| c.font = kept[kept.len() - 1].font);
-        }
-        output_clusters[first_cluster].safe_to_concat_before = false;
-        output_clusters[first_cluster].safe_to_break_before &= plan.leading_text.is_empty();
-        let leading = if plan.leading_text.is_empty() {
-            Vec::new()
-        } else {
-            let font = output_clusters[first_cluster].font.font_id;
-            self.synthesized_glyphs(run, font, plan.leading_text)
-        };
-        let trailing = if plan.trailing_text.is_empty() {
-            Vec::new()
-        } else {
-            let font = output_clusters[appended - 1].font.font_id;
-            self.synthesized_glyphs(run, font, plan.trailing_text.as_str())
-        };
-        attach_synthesized(
-            &mut output_clusters[first_cluster..],
-            output_glyphs,
-            leading,
-            trailing,
+            |clusters, glyphs| {
+                // A cut atom's empty cluster takes the face of the kept text
+                // beside it, so a replacement attached to it is shaped in
+                // that face rather than in the stack's first one.
+                let kept_first = clusters.len();
+                if plan.kept_start < plan.kept_end {
+                    let mut buffer = Buffer::new();
+                    let mut target = ShapingTarget {
+                        text,
+                        run,
+                        atoms,
+                        clusters: &mut *clusters,
+                        glyphs,
+                        buffer: &mut buffer,
+                    };
+                    for (k, segment) in contiguous_segments(atoms, plan.kept_start..plan.kept_end)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        self.shape_segment(&mut target, segment, &candidates, k == 0);
+                    }
+                }
+                let kept = &clusters[kept_first..];
+                let edges = match (kept.first(), kept.last()) {
+                    (Some(first), Some(last)) => EdgeFonts {
+                        first: first.font.font_id,
+                        last: last.font.font_id,
+                    },
+                    _ => EdgeFonts {
+                        first: fallback,
+                        last: fallback,
+                    },
+                };
+                (edges, ())
+            },
+            |(), edges| {
+                let synthesize = |text: &str, font| {
+                    if text.is_empty() {
+                        Vec::new()
+                    } else {
+                        self.synthesized_glyphs(run, font, text)
+                    }
+                };
+                (
+                    synthesize(plan.leading_text, edges.first),
+                    synthesize(&plan.trailing_text, edges.last),
+                )
+            },
         );
     }
 
@@ -572,11 +546,7 @@ impl TextShaper for HarfRustShaper {
         for caret in &mut carets {
             *caret *= scale;
         }
-        if carets.iter().all(|c| c.is_finite()) {
-            carets
-        } else {
-            SmallVec::new()
-        }
+        carets
     }
 
     fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32 {

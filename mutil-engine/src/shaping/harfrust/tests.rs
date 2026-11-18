@@ -1,5 +1,5 @@
 use super::registry::{
-    code_page_region, locale_region, scan_chars_region, single_region, style_distance, word_region,
+    code_page_region, family_region, locale_region, single_region, style_distance,
 };
 use super::*;
 use crate::shaping::FontBytes;
@@ -98,25 +98,6 @@ fn locales_name_their_cjk_region_from_subtags_alone() {
     }
 }
 
-fn family_region<'a>(families: impl IntoIterator<Item = &'a str>) -> Option<CjkRegion> {
-    let votes = families.into_iter().flat_map(|family| {
-        family
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter_map(word_region)
-    });
-    single_region(votes, None)
-}
-
-fn scan_families(families: &[&str]) -> Option<CjkRegion> {
-    let mut found = None;
-    for family in families {
-        if !scan_chars_region(family.chars(), &mut found) {
-            return None;
-        }
-    }
-    found
-}
-
 #[test]
 fn one_vote_names_a_region_and_disagreement_names_the_fallback() {
     use CjkRegion::*;
@@ -136,14 +117,7 @@ fn one_vote_names_a_region_and_disagreement_names_the_fallback() {
         (&["Foo Sans TRADITIONALFOO"][..], None),
     ] {
         assert_eq!(family_region(families.iter().copied()), expected);
-        assert_eq!(scan_families(families), expected);
     }
-    let mut found = None;
-    assert!(scan_chars_region("Foo Sans TC".chars(), &mut found));
-    assert_eq!(found, Some(Traditional));
-    let mut overlong = None;
-    assert!(scan_chars_region("TRADITIONALFOO".chars(), &mut overlong));
-    assert_eq!(overlong, None);
     // Noto Sans JP sets JIS and GB 2312: code pages alone do not decide.
     assert_eq!(code_page_region(0b11 << 17), None);
     assert_eq!(code_page_region(1 << 20), Some(Traditional));

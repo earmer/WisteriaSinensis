@@ -16,51 +16,33 @@ use std::sync::Arc;
 /// private: static data is borrowed, and any other buffer (a `Vec<u8>`, a
 /// memory map) is moved into a shared owner, so its bytes stay where they are.
 #[derive(Clone)]
-pub struct FontBytes(Repr);
-
-#[derive(Clone)]
-enum Repr {
-    Static(&'static [u8]),
-    Shared(Arc<dyn AsRef<[u8]> + Send + Sync>),
-}
+pub struct FontBytes(pub(super) Arc<dyn AsRef<[u8]> + Send + Sync>);
 
 impl FontBytes {
     /// Borrows bytes that live for the whole program, such as an embedded
     /// font.
     #[must_use]
-    pub const fn from_static(bytes: &'static [u8]) -> Self {
-        Self(Repr::Static(bytes))
+    pub fn from_static(bytes: &'static [u8]) -> Self {
+        Self::new(bytes)
     }
 
     /// Takes ownership of any byte buffer. Moving a `Vec<u8>` or a memory
     /// map in moves its handle, not its bytes.
     #[must_use]
     pub fn new<T: AsRef<[u8]> + Send + Sync + 'static>(owner: T) -> Self {
-        Self(Repr::Shared(Arc::new(owner)))
+        Self(Arc::new(owner))
     }
 
     /// Shares a buffer that is already reference-counted elsewhere.
     #[must_use]
     pub fn from_shared(owner: Arc<dyn AsRef<[u8]> + Send + Sync>) -> Self {
-        Self(Repr::Shared(owner))
+        Self(owner)
     }
 
     /// The font file's bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        match &self.0 {
-            Repr::Static(bytes) => bytes,
-            Repr::Shared(owner) => (**owner).as_ref(),
-        }
-    }
-
-    /// Returns a reference-counted handle to the underlying bytes without
-    /// wrapping an already-shared buffer in a second `Arc`.
-    pub(crate) fn shared_arc(&self) -> Arc<dyn AsRef<[u8]> + Send + Sync> {
-        match &self.0 {
-            Repr::Static(bytes) => Arc::new(*bytes),
-            Repr::Shared(owner) => Arc::clone(owner),
-        }
+        (*self.0).as_ref()
     }
 }
 
@@ -146,7 +128,7 @@ mod tests {
         let address = (*owner).as_ref().as_ptr();
         let bytes = FontBytes::from_shared(Arc::clone(&owner));
         assert_eq!(bytes.as_bytes().as_ptr(), address);
-        let shared = bytes.shared_arc();
+        let shared = bytes.0.clone();
         assert!(Arc::ptr_eq(&owner, &shared));
         assert_eq!((*shared).as_ref().as_ptr(), address);
         assert_eq!(Arc::strong_count(&owner), 3);
