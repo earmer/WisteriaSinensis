@@ -163,10 +163,6 @@ fn clusters_are_rebuilt_from_byte_indices_with_conservative_seams() {
 
 #[test]
 fn the_profile_has_no_ligature_carets_and_divides_ligatures_equally() {
-    assert_eq!(
-        LineOnlyShaper::<HarfRustLines>::PROFILE,
-        ShaperProfile::LineOnly
-    );
     let text = "office";
     let ast = compile_lines(text, &["Noto Serif"]);
     let ffi = &ast.clusters[1];

@@ -10,6 +10,5 @@ fn public_policy_defaults_match_the_contract() {
         HangingWhitespaceMode::Collapsible
     );
     assert_eq!(SoftHyphenPolicy::default(), SoftHyphenPolicy::Keep);
-    assert_eq!(ShaperProfile::default(), ShaperProfile::FullContract);
     assert_eq!(LineBreakStrategy::default(), LineBreakStrategy::Balanced);
 }

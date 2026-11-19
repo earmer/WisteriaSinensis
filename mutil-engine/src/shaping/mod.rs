@@ -7,12 +7,10 @@ mod font_source;
 mod harfrust;
 mod line_only;
 mod noop;
-mod profile;
 mod traits;
 
 pub use font_source::{FontBytes, FontFace, FontSource};
 pub use harfrust::{CjkRegion, FaceProfile, FontRegistry, HarfRustShaper};
 pub use line_only::{LineGlyph, LineOnlyShaper, LineShaper};
 pub use noop::NoopShaper;
-pub use profile::ShaperProfile;
 pub use traits::{LeadingEdit, ReshapeRequest, ShapeOutput, TextShaper, TrailingEdit};
