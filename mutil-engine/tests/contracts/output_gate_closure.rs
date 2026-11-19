@@ -454,3 +454,76 @@ fn int13_logical_motions_never_enter_the_truncated_tail() {
     }
     assert_eq!(visited, [0, 1, 2, 3, 4]);
 }
+
+/// One line of `TEXT` carrying a 10-wide box over byte 0 whose baseline is
+/// `y` below the line's, `ascent` above it and `descent` below it.
+fn boxed_line(y: f32, ascent: f32, descent: f32) -> PositionedParagraph {
+    let mut l = text_line(0, 0, 6);
+    l.visual_boxes = vec![PositionedInlineBox {
+        bidi_level: BidiLevel::LTR,
+        baseline_align: BaselineAlignment::Auto,
+        box_id: 1,
+        byte_range: TextRange::new(0, 1),
+        x: 20.,
+        y,
+        width: 10.,
+        ascent,
+        descent,
+        overflow_policy: BoxOverflowPolicy::Clip,
+    }];
+    let mut p = paragraph(&ctx(), vec![l]);
+    p.total_block_size = 10.;
+    p
+}
+
+/// G4 on `boxed_line(y, ascent, descent)`: the line check, the paragraph
+/// check and the `ValidatedLayout` gate agree.
+fn check_box(y: f32, ascent: f32, descent: f32, expected: Result<(), LineInvariantError>) {
+    let p = boxed_line(y, ascent, descent);
+    let fields = (y, ascent, descent);
+    assert_eq!(p.lines[0].validate(&ctx()), expected, "{fields:?}");
+    let at_line = expected.map_err(|e| (0, e));
+    assert_eq!(p.validate(TEXT), at_line, "{fields:?}");
+    assert_eq!(
+        ValidatedLayout::try_from_paragraph(&p, TEXT).map(drop),
+        at_line,
+        "{fields:?}"
+    );
+}
+
+#[test]
+fn the_boxed_fixture_passes_the_output_gate() {
+    check_box(0., 5., 1., Ok(()));
+}
+
+#[test]
+fn int16_a_box_whose_extent_above_the_baseline_overflows_is_invalid() {
+    // Every field is finite, but `ascent - y` (the box's top for Tight
+    // selection) is 6e38: infinite in f32.
+    assert!((3e38_f32 - -3e38_f32).is_infinite());
+    check_box(
+        -3e38,
+        3e38,
+        1.,
+        Err(LineInvariantError::InvalidInlineBox { index: 0 }),
+    );
+}
+
+#[test]
+fn int16_a_box_whose_extent_below_the_baseline_overflows_is_invalid() {
+    // The mirror case: `descent + y` (the box's bottom) is 6e38.
+    assert!((3e38_f32 + 3e38_f32).is_infinite());
+    check_box(
+        3e38,
+        5.,
+        3e38,
+        Err(LineInvariantError::InvalidInlineBox { index: 0 }),
+    );
+}
+
+#[test]
+fn int16_a_box_with_large_but_finite_extents_about_the_baseline_is_valid() {
+    // `ascent - y` is 2e38 and `descent + y` is 1e38 + 1: both finite.
+    check_box(-1e38, 1e38, 1., Ok(()));
+    check_box(1e38, 5., 1e38, Ok(()));
+}
