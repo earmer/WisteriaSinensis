@@ -218,10 +218,7 @@ pub enum FontSlant { Normal, Italic, Oblique }
 pub struct FontStyle { pub weight: FontWeight, pub slant: FontSlant }
 pub struct FontFeature { pub tag: [u8; 4], pub value: u32 }
 pub struct FontVariation { .. }       // a finite axis coordinate, by construction
-pub struct FontFeatures {
-    pub features: SmallVec<[FontFeature; 4]>,
-    pub variations: SmallVec<[FontVariation; 2]>,
-}
+pub struct FontFeatures { .. }        // canonical by construction (FNT-2)
 pub struct FontInstanceRef<'a> { pub font: FontRef, pub font_size: f32, pub variations: &'a [FontVariation] }
 ```
 
@@ -243,7 +240,7 @@ pub struct FontInstanceRef<'a> { pub font: FontRef, pub font_size: f32, pub vari
 
 **[FNT-1]** `FontWeight::new` accepts `1..=1000` (`FontWeight::NORMAL` 400, `FontWeight::BOLD` 700, `FontWeight::get`). `FontVariation::new` accepts only a finite coordinate and maps `-0.0` to `0.0`, so equality and hashing by bit pattern are sound (`FontVariation::tag`, `FontVariation::value`).
 
-**[FNT-2]** `ShapingRun::features` is the single source of OpenType features and variation coordinates. `FontFeatures::normalize` sorts by tag and keeps the last setting per tag, and `FontFeatures::is_normalized` tests that canonical form; the input gate accepts only canonical features, so `Eq` and `Hash` on features agree with effective equality behind it; `FontFeatures::new`, `FontFeatures::push`, `FontFeatures::push_variation`, `FontFeatures::as_slice` and `FontFeatures::variations` build and read it.
+**[FNT-2]** `ShapingRun::features` is the single source of OpenType features and variation coordinates. `FontFeatures` is canonical by construction: its fields are private, and `FontFeatures::push` and `FontFeatures::push_variation` keep each list strictly ascending by tag with the **last** setting for a tag replacing an earlier one (as in CSS cascade order). Equal effective settings are therefore equal values however they were pushed, so `Eq` and `Hash` agree with effective equality and the value is a valid cache key as built, with nothing to normalise or check. The `Default` value is the empty set; `FontFeatures::as_slice` and `FontFeatures::variations` read the two lists in tag order.
 
 **[FNT-3]** `FontId` names a physical face, not a size or variation instance; `FontInstanceRef` is the complete query context of a font instance. A `FontId` is meaningful only within the id space of the shaper that issued it. A renderer resolves it to font bytes and a face index only through the `FontSource` that covers that id space, typically the font registry the shaper was built on and shared with the renderer (HST-2), never through its own font lookup; `TextShaper` gains no method for it.
 
@@ -548,7 +545,7 @@ pub enum LayoutInputError {
 | `ParagraphSeparatorInText` | the text holds a paragraph separator | AST-2 |
 | `InvalidStrut` | the strut's own ascent, descent or line gap, the strut font size or a `LineHeight::Fixed` multiplier is not valid, or the resolved strut is invalid | AST-6, MET-1 |
 | `RunOutsideText { run }` | a run's range exceeds the text or splits a UTF-8 sequence | AST-5 |
-| `InvalidShapingRun { run }` | a run's size is not a positive measurement, its script is unresolved, its features are not canonical, or a body run starts before the previous one ends | AST-5, FNT-2, MSR-1 |
+| `InvalidShapingRun { run }` | a run's size is not a positive measurement, its script is unresolved, or a body run starts before the previous one ends | AST-5, MSR-1 |
 | `InvalidRunStorage { run }` | the runs do not tile the atoms or clusters, or a run's text boxes do not cover its atoms and clusters | AST-4 |
 | `InvalidGlyphStorage { cluster }` | the clusters' glyph ranges do not tile the glyphs | AST-4 |
 | `RunIndexOutOfRange { item }` | a text box names a run that does not exist | AST-4 |
@@ -1181,7 +1178,7 @@ pub enum FrontendFeature { VerticalWritingMode, RtlBaseDirection, DecorationSpan
                            BidiSpans, Annotations, BidiText, BaselineAlignment }
 ```
 
-**[FE-25] Input.** `compile_paragraph(input, options, shaper)` compiles one paragraph into a `ParagraphAst` in the order of FE-3. `ParagraphInput::text` is one paragraph (AST-2), and every range of the input is local to it. A `TextStyle` is complete: nothing cascades from one style to another. `ParagraphInput::style_spans` are non-empty, ascending, disjoint and on character boundaries; a byte no span covers takes `ParagraphInput::default_style`. The frontend normalises each style's features (FNT-2), so a caller need not. A style's `TextStyle::script` stands over script resolution (FE-13) and its `TextStyle::locale` over the default locale (SCO-5). A paragraph in which no character has a resolved script (every one is `Zyyy` or `Zinh`) and no style states one resolves to `ScriptTag::LATIN`. The default style also gives the strut: `strut_font_size` is its `font_size` and `strut_metrics` what `TextShaper::resolve_primary_font_metrics` returns for it, so that an empty paragraph, whose items are the sentinel alone, has a valid strut (AST-6).
+**[FE-25] Input.** `compile_paragraph(input, options, shaper)` compiles one paragraph into a `ParagraphAst` in the order of FE-3. `ParagraphInput::text` is one paragraph (AST-2), and every range of the input is local to it. A `TextStyle` is complete: nothing cascades from one style to another. `ParagraphInput::style_spans` are non-empty, ascending, disjoint and on character boundaries; a byte no span covers takes `ParagraphInput::default_style`. A style's features are canonical as built (FNT-2). A style's `TextStyle::script` stands over script resolution (FE-13) and its `TextStyle::locale` over the default locale (SCO-5). A paragraph in which no character has a resolved script (every one is `Zyyy` or `Zinh`) and no style states one resolves to `ScriptTag::LATIN`. The default style also gives the strut: `strut_font_size` is its `font_size` and `strut_metrics` what `TextShaper::resolve_primary_font_metrics` returns for it, so that an empty paragraph, whose items are the sentinel alone, has a valid strut (AST-6).
 
 **[FE-26] Guarantee.** For an input the frontend accepts and a shaper that keeps its contract (§4), the result passes the input gate (G1) under any valid constraints and options. The frontend checks its own input (FE-28) and whether a shaper's clusters can be assigned to text boxes at all; whether the measurements a shaper answered are valid is checked once, by G1 (AX-3).
 

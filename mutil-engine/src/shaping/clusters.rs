@@ -367,7 +367,7 @@ mod tests {
             letter_spacing: 0.0,
             word_spacing: 0.0,
             orientation: GlyphOrientation::Horizontal,
-            features: FontFeatures::new(),
+            features: FontFeatures::default(),
             byte_range: TextRange::new(0, 4),
             families: Arc::from([]),
             font_size: 16.0,

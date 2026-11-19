@@ -29,23 +29,6 @@ fn measurements_beyond_the_bound_are_rejected_at_the_input_gate() {
     );
 }
 
-/// FNT-2: only canonical features pass the gate, so `Eq` and `Hash` agree
-/// with effective equality behind it.
-#[test]
-fn features_must_be_canonical() {
-    let mut a = ast("a");
-    a.runs[0].features.push(*b"liga", 1);
-    a.runs[0].features.push(*b"kern", 1);
-    assert!(!a.runs[0].features.is_normalized());
-    assert_eq!(
-        check(&a, "a"),
-        Err(LayoutInputError::InvalidShapingRun { run: 0 })
-    );
-    a.runs[0].features.normalize();
-    assert!(a.runs[0].features.is_normalized());
-    assert_eq!(check(&a, "a"), Ok(()));
-}
-
 /// G1: `ValidatedInputs` exists only for gated inputs, and its lookups say
 /// `None` only for an item that is not text.
 #[test]

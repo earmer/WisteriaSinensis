@@ -221,13 +221,13 @@ fn resolve_levels(input: &ParagraphInput<'_>, options: &FrontendOptions) -> bidi
     )
 }
 
-/// The read-only inputs of the compiler phases, with the normalized styles.
+/// The read-only inputs of the compiler phases, with the styles.
 struct Compiler<'a> {
     input: &'a ParagraphInput<'a>,
     options: &'a FrontendOptions,
     shaper: &'a dyn TextShaper,
     text: &'a str,
-    /// Every style with normalized features: the default first, then the spans' in order.
+    /// Every style (features are canonical by construction, FNT-2): the default first, then the spans' in order.
     styles: Vec<TextStyle>,
 }
 
@@ -254,11 +254,7 @@ impl<'a> Compiler<'a> {
     ) -> Self {
         let styles = core::iter::once(input.default_style)
             .chain(input.style_spans.iter().map(|span| &span.style))
-            .map(|style| {
-                let mut normalized = style.clone();
-                normalized.features.normalize();
-                normalized
-            })
+            .cloned()
             .collect();
         Self {
             input,

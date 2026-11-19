@@ -113,7 +113,7 @@ pub(super) fn check_storage(ast: &ParagraphAst) -> Result<TextBoxes<'_>, LayoutI
 }
 
 /// A run's own shaping settings: its bytes fit `text`, its size is positive,
-/// its script resolved and its features canonical (FNT-2).
+/// its script resolved.
 pub(super) fn check_run(
     run: &ShapingRun,
     text: &str,
@@ -123,11 +123,7 @@ pub(super) fn check_run(
     if !fits(text, run.byte_range) {
         return Err(E::RunOutsideText { run: index });
     }
-    if !(is_extent(run.font_size)
-        && run.font_size > 0.0
-        && !run.script.is_unresolved()
-        && run.features.is_normalized())
-    {
+    if !(is_extent(run.font_size) && run.font_size > 0.0 && !run.script.is_unresolved()) {
         return Err(E::InvalidShapingRun { run: index });
     }
     Ok(())

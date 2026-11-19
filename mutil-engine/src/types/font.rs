@@ -197,67 +197,55 @@ impl core::hash::Hash for FontVariation {
 /// Feature and variation settings handed to `shape_run` and `reshape_window`.
 /// Cache-relevant (spec §4.1, §4.2 req. 5).
 ///
+/// Parsed, not validated (spec §1.5, AX-3): the fields are private and both
+/// `push` methods keep each list strictly ascending by tag with the **last**
+/// setting for a tag winning (as in CSS cascade order), so `Eq` and `Hash`
+/// agree with effective equality and the value is a valid cache key as built.
+///
 /// **[Design decision]** Variation axes live here rather than in a new
 /// parameter because the §4.1 signature carries only `FontFeatures`. Inline
 /// capacity (4 features, 2 axes) covers the usual `kern`/`liga`/`chws`/`locl`
-/// overrides and `wght`/`wdth` without a heap allocation. Call
-/// [`FontFeatures::normalize`] before using a value as a cache key.
+/// overrides and `wght`/`wdth` without a heap allocation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FontFeatures {
-    /// OpenType feature settings.
-    pub features: SmallVec<[FontFeature; 4]>,
-    /// Variable-font axis settings.
-    pub variations: SmallVec<[FontVariation; 2]>,
+    features: SmallVec<[FontFeature; 4]>,
+    variations: SmallVec<[FontVariation; 2]>,
+}
+
+/// Inserts `item` into `list` (ascending by `tag`, one entry per tag),
+/// replacing an entry with the same tag.
+fn set_by_tag<T, A: smallvec::Array<Item = T>>(
+    list: &mut SmallVec<A>,
+    item: T,
+    tag: impl Fn(&T) -> [u8; 4],
+) {
+    match list.binary_search_by_key(&tag(&item), tag) {
+        Ok(at) => list[at] = item,
+        Err(at) => list.insert(at, item),
+    }
 }
 
 impl FontFeatures {
-    /// An empty set.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Appends a feature setting.
+    /// Sets feature `tag` to `value`, replacing an earlier setting of `tag`.
     pub fn push(&mut self, tag: [u8; 4], value: u32) {
-        self.features.push(FontFeature { tag, value });
+        set_by_tag(&mut self.features, FontFeature { tag, value }, |f| f.tag);
     }
 
-    /// Appends a variation-axis setting.
+    /// Sets a variation axis, replacing an earlier setting of the same axis.
     pub fn push_variation(&mut self, variation: FontVariation) {
-        self.variations.push(variation);
+        set_by_tag(&mut self.variations, variation, FontVariation::tag);
     }
 
-    /// The feature settings as a slice.
+    /// The feature settings, ascending by tag.
     #[must_use]
     pub fn as_slice(&self) -> &[FontFeature] {
         &self.features
     }
 
-    /// The variation settings as a slice.
+    /// The variation settings, ascending by tag.
     #[must_use]
     pub fn variations(&self) -> &[FontVariation] {
         &self.variations
-    }
-
-    /// `true` when the value is in the canonical form [`normalize`](Self::normalize)
-    /// produces: features and variations each strictly ascending by tag. The
-    /// input gate accepts only canonical features (spec FNT-2), so `Eq` and
-    /// `Hash` agree with effective equality behind it.
-    #[must_use]
-    pub fn is_normalized(&self) -> bool {
-        self.features.windows(2).all(|w| w[0].tag < w[1].tag)
-            && self.variations.windows(2).all(|w| w[0].tag < w[1].tag)
-    }
-
-    /// Canonical form for cache keys: sorted by tag, one entry per tag, the
-    /// **last** setting for a tag winning (as in CSS cascade order).
-    pub fn normalize(&mut self) {
-        self.features.reverse();
-        self.features.sort_by_key(|f| f.tag);
-        self.features.dedup_by_key(|f| f.tag);
-        self.variations.reverse();
-        self.variations.sort_by_key(|v| v.tag);
-        self.variations.dedup_by_key(|v| v.tag);
     }
 }
 
@@ -373,7 +361,7 @@ mod tests {
 
     #[test]
     fn features_collect_inline() {
-        let mut f = FontFeatures::new();
+        let mut f = FontFeatures::default();
         f.push(*b"chws", 1);
         f.push(*b"kern", 0);
         assert_eq!(f.as_slice().len(), 2);
@@ -381,15 +369,14 @@ mod tests {
     }
 
     #[test]
-    fn normalize_sorts_and_keeps_last_setting_per_tag() {
-        let mut f = FontFeatures::new();
+    fn push_keeps_ascending_tags_and_the_last_setting_per_tag() {
+        let mut f = FontFeatures::default();
         f.push(*b"kern", 1);
         f.push(*b"chws", 1);
         f.push(*b"kern", 0); // later wins
         f.push_variation(FontVariation::new(*b"wght", 400.0).unwrap());
         f.push_variation(FontVariation::new(*b"wdth", 100.0).unwrap());
         f.push_variation(FontVariation::new(*b"wght", 650.0).unwrap());
-        f.normalize();
         assert_eq!(
             f.as_slice(),
             &[
