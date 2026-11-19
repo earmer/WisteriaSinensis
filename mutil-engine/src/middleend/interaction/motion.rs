@@ -1,9 +1,12 @@
 //! Cursor motion over the caret stops (spec INT-13 to INT-15).
 
-use super::super::ValidatedLayout;
-use super::super::output::{CaretAffinity, CaretStop, HangSide};
-use super::super::tolerance::approx_eq;
-use super::{CursorMove, CursorPosition, FlowMotion, Motion, ParagraphEdge, stop_position};
+use super::{
+    Command, CursorMove, CursorPosition, FlowMotion, Motion, ParagraphEdge, ResolvedMotion,
+    stop_position,
+};
+use crate::middleend::ValidatedLayout;
+use crate::middleend::output::{CaretAffinity, CaretStop, HangSide};
+use crate::middleend::tolerance::approx_eq;
 
 impl ValidatedLayout<'_> {
     /// Moves `position` by `motion` (spec INT-13 to INT-15). Physical arrows
@@ -22,31 +25,34 @@ impl ValidatedLayout<'_> {
         let p = self.paragraph();
         let rtl = p.base_direction.is_rtl();
         let (line, index) = self.locate(position);
-        if let Some(flow) = motion.flow_direction(p.policy.writing_mode) {
-            return match flow {
-                FlowMotion::InlinePrev => self.move_visual(line, index, false),
-                FlowMotion::InlineNext => self.move_visual(line, index, true),
-                FlowMotion::BlockPrev | FlowMotion::BlockNext => {
-                    let inline =
-                        preferred_inline.unwrap_or_else(|| p.lines[line].caret_stops[index].x);
-                    let forward = flow == FlowMotion::BlockNext;
-                    match adjacent_line(line, p.lines.len(), forward) {
-                        Some(target) => {
-                            CursorMove::Moved(self.hit_test_on_line(target, inline).position)
+        let command = match motion.resolve(p.policy.writing_mode) {
+            ResolvedMotion::Command(command) => command,
+            ResolvedMotion::Flow(flow) => {
+                return match flow {
+                    FlowMotion::InlinePrev => self.move_visual(line, index, false),
+                    FlowMotion::InlineNext => self.move_visual(line, index, true),
+                    FlowMotion::BlockPrev | FlowMotion::BlockNext => {
+                        let inline =
+                            preferred_inline.unwrap_or_else(|| p.lines[line].caret_stops[index].x);
+                        let forward = flow == FlowMotion::BlockNext;
+                        match adjacent_line(line, p.lines.len(), forward) {
+                            Some(target) => {
+                                CursorMove::Moved(self.hit_test_on_line(target, inline).position)
+                            }
+                            None => CursorMove::Exited {
+                                edge: ParagraphEdge::ahead(forward),
+                                inline_position: Some(inline),
+                            },
                         }
-                        None => CursorMove::Exited {
-                            edge: ParagraphEdge::ahead(forward),
-                            inline_position: Some(inline),
-                        },
                     }
-                }
-            };
-        }
+                };
+            }
+        };
         let l = &p.lines[line];
-        match motion {
-            Motion::LineStart | Motion::LineEnd => {
+        match command {
+            Command::LineStart | Command::LineEnd => {
                 // The line start is on the left in LTR text, on the right in RTL.
-                let side = if (motion == Motion::LineStart) != rtl {
+                let side = if (command == Command::LineStart) != rtl {
                     HangSide::Left
                 } else {
                     HangSide::Right
@@ -56,23 +62,22 @@ impl ValidatedLayout<'_> {
                     .expect("a validated line has caret stops");
                 CursorMove::Moved(stop_position(stop))
             }
-            Motion::Previous | Motion::Next => {
-                self.move_logical(position.byte_offset, motion == Motion::Next, None)
+            Command::Previous | Command::Next => {
+                self.move_logical(position.byte_offset, command == Command::Next, None)
             }
-            Motion::WordPrevious | Motion::WordNext => {
+            Command::WordPrevious | Command::WordNext => {
                 let words = crate::frontend::word_boundaries(self.text());
                 self.move_logical(
                     position.byte_offset,
-                    motion == Motion::WordNext,
+                    command == Command::WordNext,
                     Some(&words),
                 )
             }
-            Motion::WordLeft | Motion::WordRight => {
+            Command::WordLeft | Command::WordRight => {
                 let words = crate::frontend::word_boundaries(self.text());
-                let forward = (motion == Motion::WordRight) != rtl;
+                let forward = (command == Command::WordRight) != rtl;
                 self.move_logical(position.byte_offset, forward, Some(&words))
             }
-            _ => unreachable!("physical arrows resolved above"),
         }
     }
 

@@ -1,6 +1,6 @@
-use super::super::*;
 use super::*;
 use crate::frontend::*;
+use crate::middleend::*;
 use crate::middleend::{
     CaretStop, DecorationKind, DecorationLine, HangMode, HangStartMode, InlineSlotConstraint,
     LayoutPolicySnapshot, PositionedInlineBox, PositionedSpanFragment, PositionedTab, StrutMetrics,

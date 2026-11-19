@@ -1,10 +1,10 @@
 //! Selection geometry (spec INT-16, INT-18): the rectangles a logical range
 //! covers, merged over visual order, at the requested block height.
 
-use super::super::ValidatedLayout;
-use super::super::output::PositionedParagraph;
-use super::super::tolerance::{approx_eq, tolerance};
 use super::{BoxHeightStyle, SelectionRect, line_block};
+use crate::middleend::ValidatedLayout;
+use crate::middleend::output::PositionedParagraph;
+use crate::middleend::tolerance::{approx_eq, tolerance};
 use crate::types::{BidiLevel, Rect, TextRange};
 
 /// Calls `emit(line, x0, x1, level)` for each inline interval that `range`
@@ -141,7 +141,7 @@ impl ValidatedLayout<'_> {
             if !selected {
                 continue;
             }
-            let Ok(metrics) = super::super::shaper_gate::checked_font_metrics(
+            let Ok(metrics) = crate::middleend::shaper_gate::checked_font_metrics(
                 shaper,
                 crate::types::FontInstanceRef {
                     font: run.font,

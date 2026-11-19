@@ -228,22 +228,71 @@ pub enum FlowMotion {
     BlockNext,
 }
 
+/// A [`Motion`] after the physical arrows are resolved for a writing mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedMotion {
+    /// A physical arrow, as a direction in flow space.
+    Flow(FlowMotion),
+    /// A logical, word or line-edge command, unchanged.
+    Command(Command),
+}
+
+/// The motions that need no writing mode to resolve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Command {
+    Previous,
+    Next,
+    WordLeft,
+    WordRight,
+    WordPrevious,
+    WordNext,
+    LineStart,
+    LineEnd,
+}
+
 impl Motion {
     /// Resolves the four physical arrows; logical and word commands return `None`.
     #[must_use]
     pub const fn flow_direction(self, mode: WritingMode) -> Option<FlowMotion> {
+        match self.resolve(mode) {
+            ResolvedMotion::Flow(flow) => Some(flow),
+            ResolvedMotion::Command(_) => None,
+        }
+    }
+
+    /// Resolves the physical arrows against `mode`; every other motion is a
+    /// [`Command`].
+    const fn resolve(self, mode: WritingMode) -> ResolvedMotion {
         use FlowMotion::*;
+        use ResolvedMotion::{Command as Cmd, Flow};
         use WritingMode::*;
-        match (mode, self) {
-            (HorizontalTb, Self::Left) | (VerticalRl | VerticalLr, Self::Up) => Some(InlinePrev),
-            (HorizontalTb, Self::Right) | (VerticalRl | VerticalLr, Self::Down) => Some(InlineNext),
-            (HorizontalTb, Self::Up) | (VerticalRl, Self::Right) | (VerticalLr, Self::Left) => {
-                Some(BlockPrev)
-            }
-            (HorizontalTb, Self::Down) | (VerticalRl, Self::Left) | (VerticalLr, Self::Right) => {
-                Some(BlockNext)
-            }
-            _ => None,
+        match self {
+            Self::Left => Flow(match mode {
+                HorizontalTb => InlinePrev,
+                VerticalRl => BlockNext,
+                VerticalLr => BlockPrev,
+            }),
+            Self::Right => Flow(match mode {
+                HorizontalTb => InlineNext,
+                VerticalRl => BlockPrev,
+                VerticalLr => BlockNext,
+            }),
+            Self::Up => Flow(match mode {
+                HorizontalTb => BlockPrev,
+                VerticalRl | VerticalLr => InlinePrev,
+            }),
+            Self::Down => Flow(match mode {
+                HorizontalTb => BlockNext,
+                VerticalRl | VerticalLr => InlineNext,
+            }),
+            Self::Previous => Cmd(Command::Previous),
+            Self::Next => Cmd(Command::Next),
+            Self::WordLeft => Cmd(Command::WordLeft),
+            Self::WordRight => Cmd(Command::WordRight),
+            Self::WordPrevious => Cmd(Command::WordPrevious),
+            Self::WordNext => Cmd(Command::WordNext),
+            Self::LineStart => Cmd(Command::LineStart),
+            Self::LineEnd => Cmd(Command::LineEnd),
         }
     }
 }
