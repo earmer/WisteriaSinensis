@@ -123,6 +123,7 @@ bitflags::bitflags! {
     /// are masked off by `from_bits_truncate` and `!`. Layout: 2 bytes,
     /// alignment 2.
     #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
+    #[repr(transparent)]
     pub struct AtomFlags: u16 {
         /// Han ideographs and full-width Kana.
         const IS_CJK_IDEOGRAPH = 1 << 0;
@@ -158,25 +159,27 @@ bitflags::bitflags! {
         /// A stop or comma that may hang at a line end: U+002C, U+002E, U+3001,
         /// U+3002, U+FF0C or U+FF0E (spec ST1-3).
         const HANGABLE_END = 1 << 12;
-
-        /// No flags set.
-        const EMPTY = 0;
-        /// Every assigned bit.
-        const ALL = (1 << 13) - 1;
-        /// Flags a cluster takes only from its **first** atom.
-        const FIRST_ATOM_ONLY = Self::IS_OPEN_PUNCT.bits()
-            | Self::BINDS_TO_PREVIOUS.bits()
-            | Self::HANGABLE_START.bits();
-        /// Flags a cluster takes only from its **last** atom: the justification
-        /// opportunity *after* a ligature is the one after its last component, and
-        /// a closing mark closes at the end, and a line-end mark hangs from it.
-        const LAST_ATOM_ONLY = Self::ALLOW_CJK_JUSTIFY_AFTER.bits()
-            | Self::IS_CLOSE_PUNCT.bits()
-            | Self::HANGABLE_END.bits();
     }
 }
 
 impl AtomFlags {
+    /// No flags set.
+    pub const EMPTY: Self = Self::empty();
+    /// Every assigned bit.
+    pub const ALL: Self = Self::all();
+    /// Flags a cluster takes only from its **first** atom.
+    pub const FIRST_ATOM_ONLY: Self = Self::from_bits_truncate(
+        Self::IS_OPEN_PUNCT.bits() | Self::BINDS_TO_PREVIOUS.bits() | Self::HANGABLE_START.bits(),
+    );
+    /// Flags a cluster takes only from its **last** atom: the justification
+    /// opportunity *after* a ligature is the one after its last component, and
+    /// a closing mark closes at the end, and a line-end mark hangs from it.
+    pub const LAST_ATOM_ONLY: Self = Self::from_bits_truncate(
+        Self::ALLOW_CJK_JUSTIFY_AFTER.bits()
+            | Self::IS_CLOSE_PUNCT.bits()
+            | Self::HANGABLE_END.bits(),
+    );
+
     /// Aggregates the flags of the atoms a cluster covers (spec §2.3):
     /// [`FIRST_ATOM_ONLY`](Self::FIRST_ATOM_ONLY) from the first atom,
     /// [`LAST_ATOM_ONLY`](Self::LAST_ATOM_ONLY) from the last, and every other

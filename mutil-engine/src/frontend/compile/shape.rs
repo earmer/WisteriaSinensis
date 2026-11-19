@@ -2,7 +2,9 @@
 
 use super::{Compiler, FrontendError, Shaped};
 use crate::shaping::{ReshapeRequest, ShapeOutput};
-use crate::types::{GraphemeAtom, RawShapedGlyph, ShapedCluster, ShapingRun, TextRange};
+use crate::types::{
+    GraphemeAtom, RawShapedGlyph, ShapedCluster, ShapingRun, TextRange, natural_width,
+};
 
 impl Compiler<'_> {
     /// Shapes every run, splits clusters that straddle a text box boundary
@@ -34,9 +36,7 @@ impl Compiler<'_> {
             let push_cluster =
                 |mut cluster: ShapedCluster, source_glyphs: &[RawShapedGlyph], ast: &mut Shaped| {
                     let own = &source_glyphs[cluster.glyph_range.clone()];
-                    let advance: f32 = own.iter().map(|g| g.x_advance).sum();
-                    let raw = advance + run.letter_spacing;
-                    cluster.natural_width = if raw.is_finite() { raw.max(0.0) } else { raw };
+                    cluster.natural_width = natural_width(own, run.letter_spacing);
                     let at = ast.glyphs.len();
                     ast.glyphs.extend_from_slice(own);
                     cluster.glyph_range = at..ast.glyphs.len();
