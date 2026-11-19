@@ -47,9 +47,20 @@ impl PositionedLine {
             }
         }
         for (index, b) in self.visual_boxes.iter().enumerate() {
-            let finite = [b.x, b.y, b.width, b.ascent, b.descent, b.x + b.width]
-                .into_iter()
-                .all(f32::is_finite);
+            // The extents about the line's baseline too: selection geometry
+            // takes `ascent - y` and `descent + y` (INT-16).
+            let finite = [
+                b.x,
+                b.y,
+                b.width,
+                b.ascent,
+                b.descent,
+                b.x + b.width,
+                b.ascent - b.y,
+                b.descent + b.y,
+            ]
+            .into_iter()
+            .all(f32::is_finite);
             if !(finite && b.width >= 0.0 && b.ascent >= 0.0 && b.descent >= 0.0) {
                 return Err(E::InvalidInlineBox { index });
             }
