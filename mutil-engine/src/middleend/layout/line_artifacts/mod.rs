@@ -3,6 +3,8 @@
 
 mod carets;
 
+pub(super) use carets::CaretScratch;
+
 use super::line_builder::{AlignedLine, PlacedLine};
 use super::{Layout, Piece, PieceKind, PlacedPiece};
 use crate::frontend::{DiscretionaryNode, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH};
@@ -28,8 +30,10 @@ pub(super) struct VisualGroup {
 
 /// A line's visual order, indexed for grouping (ST2-3): each piece's
 /// visual position, and how many pieces other than span boundaries come
-/// before each visual position. Built once per line.
-pub(super) struct VisualIndex {
+/// before each visual position. Rebuilt once per line in the paragraph's
+/// scratch.
+#[derive(Default)]
+pub(in crate::middleend::layout) struct VisualIndex {
     /// The visual position of each piece in logical order; `None` for the
     /// trailing whitespace, which has none.
     position: Vec<Option<usize>>,
@@ -39,20 +43,22 @@ pub(super) struct VisualIndex {
 }
 
 impl VisualIndex {
-    pub(super) fn new(placed: &[PlacedPiece<'_>], order: &[usize]) -> Self {
-        let mut position = vec![None; placed.len()];
-        let mut solid_before = Vec::with_capacity(order.len() + 1);
+    /// Indexes `order`, the visual order of the body of `placed`.
+    pub(in crate::middleend::layout) fn rebuild(
+        &mut self,
+        placed: &[PlacedPiece<'_>],
+        order: &[usize],
+    ) {
+        self.position.clear();
+        self.position.resize(placed.len(), None);
+        self.solid_before.clear();
         let mut solid = 0;
         for (v, &k) in order.iter().enumerate() {
-            position[k] = Some(v);
-            solid_before.push(solid);
+            self.position[k] = Some(v);
+            self.solid_before.push(solid);
             solid += usize::from(!matches!(placed[k].piece.kind, PieceKind::SpanEdge { .. }));
         }
-        solid_before.push(solid);
-        Self {
-            position,
-            solid_before,
-        }
+        self.solid_before.push(solid);
     }
 
     /// Whether a piece other than a span boundary lies strictly between
@@ -210,7 +216,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// bytes stay inside its span and the line.
     pub(super) fn for_each_span_group(
         &self,
-        line: &PlacedLine<'_>,
+        line: &PlacedLine<'_, '_>,
         mut emit: impl FnMut(&InlineDecorationSpan, &VisualGroup),
     ) {
         let bytes = line.byte_range;
@@ -229,7 +235,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             |b| b.pre_break_width,
             bytes.end(),
         );
-        let visual = VisualIndex::new(&line.placed, &line.order);
+        let visual = line.visual;
         for (index, span) in spans.iter().enumerate() {
             let range = span.byte_range;
             if range.end() < bytes.start() || range.start() > bytes.end() {
@@ -244,8 +250,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 _ => !p.bytes.is_empty() && range.contains_range(p.bytes),
             };
-            let candidates = pieces_within(&line.placed, range);
-            let mut groups = visual_groups(&line.placed, &visual, candidates, is_member);
+            let candidates = pieces_within(line.placed, range);
+            let mut groups = visual_groups(line.placed, visual, candidates, is_member);
             if groups.iter().any(|g| !g.is_bare_boundary) {
                 groups.retain(|g| !g.is_bare_boundary);
             }
@@ -273,7 +279,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// its own at the line's edge offset on that side (AX-5).
     fn attach_padding(
         &self,
-        line: &PlacedLine<'_>,
+        line: &PlacedLine<'_, '_>,
         [at_start, at_end]: [PaddingSide; 2],
         is_member: &impl Fn(&Piece<'_>) -> bool,
         groups: &mut Vec<VisualGroup>,
@@ -344,7 +350,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// One fragment per visual group of each decoration span on the line
     /// (spec ST2-3, FRG-1), padding included; a span cloned across this
     /// line's breaks reaches the line's edge.
-    pub(super) fn span_fragments(&self, line: &AlignedLine<'_>) -> Vec<PositionedSpanFragment> {
+    pub(super) fn span_fragments(&self, line: &AlignedLine<'_, '_>) -> Vec<PositionedSpanFragment> {
         let mut fragments = Vec::new();
         let (ascent, descent) = (self.strut.ascent.max(0.0), self.strut.descent.max(0.0));
         self.for_each_span_group(line, |span, g| {
@@ -366,9 +372,9 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// FRG-3), together covering exactly the part of the span on the line:
     /// each group takes the bytes from where the previous one stopped to its
     /// own end, at least one byte, and the last takes the rest.
-    pub(super) fn atomic_fragments(&self, line: &AlignedLine<'_>) -> Vec<AtomicFragment> {
+    pub(super) fn atomic_fragments(&self, line: &AlignedLine<'_, '_>) -> Vec<AtomicFragment> {
         let mut out = Vec::new();
-        let visual = VisualIndex::new(&line.placed, &line.order);
+        let visual = line.visual;
         for span in &self.ast.atomic_spans {
             let full = span.byte_range;
             let part_end = full.end().min(line.byte_range.end());
@@ -376,8 +382,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             if covered >= part_end {
                 continue;
             }
-            let candidates = pieces_meeting(&line.placed, full);
-            let mut groups = visual_groups(&line.placed, &visual, candidates, |p| {
+            let candidates = pieces_meeting(line.placed, full);
+            let mut groups = visual_groups(line.placed, visual, candidates, |p| {
                 !p.bytes.is_empty() && p.bytes.start() < full.end() && p.bytes.end() > full.start()
             });
             groups.sort_by_key(|g| g.bytes.start());
@@ -411,7 +417,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     pub(super) fn decorations(
         &mut self,
         kind: DecorationKind,
-        line: &AlignedLine<'_>,
+        line: &AlignedLine<'_, '_>,
         out: &mut Vec<DecorationLine>,
     ) -> Result<(), LayoutInputError> {
         let drawn: fn(TextDecoration) -> bool = match kind {

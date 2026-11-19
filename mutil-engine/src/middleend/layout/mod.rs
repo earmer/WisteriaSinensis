@@ -19,6 +19,7 @@ mod justify;
 mod line_artifacts;
 mod line_box;
 mod line_builder;
+mod scratch;
 mod visual_runs;
 
 use crate::frontend::{
@@ -33,6 +34,7 @@ use crate::middleend::{
 use crate::shaping::TextShaper;
 use crate::types::{BidiDirection, BidiLevel, FontMetrics, RawShapedGlyph, TextRange};
 use breaking::{LineFit, within};
+use scratch::LayoutScratch;
 use std::collections::HashMap;
 
 /// How many obstructed block positions the clearance loop tries in a row
@@ -273,12 +275,11 @@ pub(super) struct Layout<'i, 'a> {
 }
 
 /// One piece of the current line, its level resolved by UAX #9 L1 in
-/// `piece.level`, with its preceding no-break gap, horizontal placement and
-/// baseline shift.
+/// `piece.level`, with its final horizontal placement and baseline shift.
+/// Built once, when the line's columns are final (`LayoutScratch`).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PlacedPiece<'a> {
     pub(super) piece: Piece<'a>,
-    pub(super) gap: f32,
     pub(super) x: f32,
     pub(super) width: f32,
     /// Justification space after a cluster, inside `width` (ST3-2).
@@ -371,12 +372,14 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     /// Places lines from the paragraph start until no token is left; returns
-    /// them with the block size they stack to.
+    /// them with the block size they stack to. One [`LayoutScratch`] serves
+    /// every line.
     fn place_lines(&mut self) -> Result<(Vec<PositionedLine>, f32), LayoutInputError> {
         let mut lines = Vec::new();
         let mut cursor = LineCursor::paragraph_start();
+        let mut scratch = LayoutScratch::default();
         loop {
-            let (line, end) = self.place_next_line(&mut cursor)?;
+            let (line, end) = self.place_next_line(&mut cursor, &mut scratch)?;
             cursor.advance(end, &self.tokens, line.line_height);
             lines.push(line);
             if cursor.is_paragraph_end(&self.tokens) {
@@ -389,6 +392,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn place_next_line(
         &mut self,
         cursor: &mut LineCursor<'a>,
+        scratch: &mut LayoutScratch<'a>,
     ) -> Result<(PositionedLine, LineEnd<'a>), LayoutInputError> {
         let strut_height = self.strut.line_height();
         let has_provider = self.inputs.constraints().geometry_provider.is_some();
@@ -408,7 +412,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             for _ in 0..MAX_ENVELOPE_REFITS {
                 let slot = geometry.first_slot();
                 let LineFit { end, reshapes } = self.fit(cursor, slot);
-                let line = self.place(cursor, end, &geometry, &reshapes)?;
+                let line = self.place(cursor, end, &geometry, &reshapes, scratch)?;
                 if within(line.line_height, envelope) || !has_provider {
                     self.reshaped.extend(reshapes);
                     return Ok((line, end));
@@ -622,7 +626,7 @@ mod tests {
 
     #[test]
     fn levels_reverse_from_the_highest_to_the_lowest_odd_one() {
-        let piece = |v: u8| PlacedPiece {
+        let piece = |v: u8| scratch::LogicalPiece {
             piece: Piece {
                 kind: PieceKind::Tab,
                 bytes: TextRange::empty_at(0),
@@ -630,14 +634,10 @@ mod tests {
                 width: 0.0,
             },
             gap: 0.0,
-            x: 0.0,
-            width: 0.0,
-            expansion: 0.0,
-            y_shift: 0.0,
         };
         let order = |levels: &[u8]| {
-            let pieces: Vec<PlacedPiece> = levels.iter().copied().map(piece).collect();
-            line_builder::visual_order(&pieces)
+            let pieces: Vec<_> = levels.iter().copied().map(piece).collect();
+            line_builder::visual_order(&pieces, &mut Vec::new())
         };
         assert_eq!(order(&[0, 0]), [0, 1]);
         assert_eq!(order(&[1, 1, 1]), [2, 1, 0]);

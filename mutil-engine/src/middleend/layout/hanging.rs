@@ -1,7 +1,8 @@
 //! Hanging punctuation (spec ST1-3, HNG-1 to HNG-4): which mark hangs at
 //! each edge of a line, by [`HANG_FRACTION`] of its advance.
 
-use super::{Layout, Piece, PieceKind, PlacedPiece, Reshapes};
+use super::scratch::LogicalPiece;
+use super::{Layout, Piece, PieceKind, Reshapes};
 use crate::middleend::{DecorationLine, HangEndMode, HangSide, PositionedSpanFragment};
 use crate::types::AtomFlags;
 
@@ -85,7 +86,7 @@ impl Layout<'_, '_> {
 
     /// The index of the first or last visible piece of `body`: only
     /// zero-width span boundaries may lie between a mark and its edge.
-    fn outermost(body: &[PlacedPiece<'_>], edge: LineEdge) -> Option<usize> {
+    fn outermost(body: &[LogicalPiece<'_>], edge: LineEdge) -> Option<usize> {
         let visible = |k: &usize| !body[*k].piece.is_edge_transparent();
         match edge {
             LineEdge::Start => (0..body.len()).find(visible),
@@ -97,7 +98,7 @@ impl Layout<'_, '_> {
     /// outermost visible piece passes `allowed`.
     fn hang_at(
         &self,
-        body: &[PlacedPiece<'_>],
+        body: &[LogicalPiece<'_>],
         edge: LineEdge,
         first_line: bool,
         allowed: impl FnOnce(usize) -> bool,
@@ -114,7 +115,7 @@ impl Layout<'_, '_> {
     /// no cloned padding (`post`) before it (ST1-3).
     pub(super) fn start_hang(
         &self,
-        body: &[PlacedPiece<'_>],
+        body: &[LogicalPiece<'_>],
         first_line: bool,
         post: f32,
         pending: &Reshapes,
@@ -127,7 +128,7 @@ impl Layout<'_, '_> {
     /// only when the line does not fit without it (`fits_without`, ST1-3).
     pub(super) fn end_hang(
         &self,
-        body: &[PlacedPiece<'_>],
+        body: &[LogicalPiece<'_>],
         first_line: bool,
         EndHang {
             pre,

@@ -1,7 +1,8 @@
 //! The line box (spec §5 Stage 4, BAS-1): the line's ascent and descent
 //! from the strut and the items on it, and each item's baseline shift.
 
-use super::{Layout, PieceKind, PlacedPiece};
+use super::scratch::LogicalPiece;
+use super::{Layout, PieceKind};
 use crate::middleend::{InlineSlotConstraint, LayoutInputError, LineHeight, StrutMetrics};
 use crate::types::{BaselineAlignment, FontMetrics, TextRange};
 
@@ -31,6 +32,18 @@ struct LineRelativeItem {
     below: f32,
 }
 
+/// Where an item's baseline goes, classified once from its alignment
+/// (BAS-1): against an edge of the finished line box, or shifted from the
+/// strut's baseline, with the extent it adds to the line when it counts
+/// (under `Normal`, and always for an object).
+enum BaselinePlacement {
+    LineEdge(LineRelativeItem),
+    StrutRelative {
+        shift: f32,
+        extent: Option<(f32, f32)>,
+    },
+}
+
 pub(super) struct LineBoxMetrics {
     pub(super) ascent: f32,
     pub(super) descent: f32,
@@ -38,12 +51,14 @@ pub(super) struct LineBoxMetrics {
 }
 
 impl Layout<'_, '_> {
-    /// Computes line-box ascent/descent and assigns `y_shift` to every piece
-    /// (spec §5 Stage 4, BAS-1).
+    /// Computes line-box ascent/descent and writes each body piece's
+    /// baseline shift to `y_shifts`, which holds 0 for the others (spec §5
+    /// Stage 4, BAS-1).
     pub(super) fn compute_line_box(
         &mut self,
-        placed: &mut [PlacedPiece<'_>],
+        placed: &[LogicalPiece<'_>],
         order: &[usize],
+        y_shifts: &mut [f32],
         byte_range: TextRange,
         slot: InlineSlotConstraint,
     ) -> Result<LineBoxMetrics, LayoutInputError> {
@@ -51,41 +66,54 @@ impl Layout<'_, '_> {
         let (mut above, mut below) = half_leaded(self.strut);
         let mut line_relative: Vec<LineRelativeItem> = Vec::new();
         for &k in order {
-            let piece = placed[k].piece;
-            // The extent counts under `Normal`, for objects, and for items
-            // placed against the line box; the shift only for items on the
-            // baseline.
-            let (align, extent, shift) = match piece.kind {
+            let item = |edge, (above, below)| {
+                BaselinePlacement::LineEdge(LineRelativeItem {
+                    piece_index: k,
+                    edge,
+                    above,
+                    below,
+                })
+            };
+            let placement = match placed[k].piece.kind {
                 PieceKind::Cluster { run, cluster } => {
                     let align = self.ast.runs[run].baseline_align;
-                    let extent = if normal || LineRelativeEdge::of(align).is_some() {
-                        Some(half_leaded(self.cluster_box(run, cluster)?))
-                    } else {
-                        None
-                    };
-                    let own = self.cluster_metrics(run, cluster)?;
-                    let shift = baseline_shift(align, &self.ast.strut_metrics, Some(&own));
-                    (align, extent, shift)
+                    match LineRelativeEdge::of(align) {
+                        Some(edge) => item(edge, half_leaded(self.cluster_box(run, cluster)?)),
+                        None => {
+                            let extent = if normal {
+                                Some(half_leaded(self.cluster_box(run, cluster)?))
+                            } else {
+                                None
+                            };
+                            let own = self.cluster_metrics(run, cluster)?;
+                            BaselinePlacement::StrutRelative {
+                                shift: baseline_shift(align, &self.ast.strut_metrics, Some(&own)),
+                                extent,
+                            }
+                        }
+                    }
                 }
                 PieceKind::Object(object) => {
                     let (_, a, d) = Self::fitted_object(object, slot);
-                    let shift =
-                        baseline_shift(object.baseline_align, &self.ast.strut_metrics, None);
-                    (object.baseline_align, Some((a, d)), shift)
+                    match LineRelativeEdge::of(object.baseline_align) {
+                        Some(edge) => item(edge, (a, d)),
+                        None => BaselinePlacement::StrutRelative {
+                            shift: baseline_shift(
+                                object.baseline_align,
+                                &self.ast.strut_metrics,
+                                None,
+                            ),
+                            extent: Some((a, d)),
+                        },
+                    }
                 }
                 _ => continue,
             };
-            let (item_above, item_below) = extent.unwrap_or_default();
-            match LineRelativeEdge::of(align) {
-                Some(edge) => line_relative.push(LineRelativeItem {
-                    piece_index: k,
-                    edge,
-                    above: item_above,
-                    below: item_below,
-                }),
-                None => {
-                    placed[k].y_shift = shift;
-                    if extent.is_some() {
+            match placement {
+                BaselinePlacement::LineEdge(item) => line_relative.push(item),
+                BaselinePlacement::StrutRelative { shift, extent } => {
+                    y_shifts[k] = shift;
+                    if let Some((item_above, item_below)) = extent {
                         above = above.max(item_above + shift);
                         below = below.max(item_below - shift);
                     }
@@ -97,7 +125,7 @@ impl Layout<'_, '_> {
         }
         let metrics = self.resolve_line_box(above, below, byte_range);
         for item in &line_relative {
-            placed[item.piece_index].y_shift = match item.edge {
+            y_shifts[item.piece_index] = match item.edge {
                 LineRelativeEdge::Top => metrics.ascent - item.above,
                 LineRelativeEdge::Bottom => item.below - metrics.descent,
             };

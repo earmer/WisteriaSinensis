@@ -6,7 +6,10 @@ use super::{Layout, PieceKind, PlacedPiece, Reshapes};
 use crate::middleend::{
     InlineSlotConstraint, PositionedGlyph, PositionedInlineBox, PositionedTab, VisualGlyphRun,
 };
-use crate::types::{RawShapedGlyph, TextRange};
+use crate::types::{
+    BidiLevel, FontRef, FontVariation, GlyphOrientation, RawShapedGlyph, TextRange,
+};
+use smallvec::SmallVec;
 
 /// A line's glyph runs before alignment, the inline extent of its visible
 /// entities (`None` when it has none), and the end of its last visible
@@ -27,6 +30,29 @@ impl VisualRuns {
 fn extend_extent(extent: &mut Option<(f32, f32)>, a: f32, b: f32) {
     let (lo, hi) = (a.min(b), a.max(b));
     *extent = Some(extent.map_or((lo, hi), |(l, h)| (l.min(lo), h.max(hi))));
+}
+
+/// What a run's glyphs share: consecutive clusters with equal keys merge
+/// into one run (OUT-3).
+#[derive(Clone, Copy, PartialEq)]
+struct RunKey<'k> {
+    font: FontRef,
+    level: BidiLevel,
+    font_size: f32,
+    orientation: GlyphOrientation,
+    variations: &'k [FontVariation],
+}
+
+impl<'k> RunKey<'k> {
+    fn of_run(v: &'k VisualGlyphRun) -> Self {
+        Self {
+            font: v.font,
+            level: v.bidi_level,
+            font_size: v.font_size,
+            orientation: v.orientation,
+            variations: &v.variations,
+        }
+    }
 }
 
 /// How one cluster's glyphs are placed: from pen position `pen`, raised by
@@ -76,19 +102,21 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// source byte, in one pass over the body.
     pub(super) fn build_visual_runs(
         &self,
-        line: &PlacedLine<'_>,
+        line: &PlacedLine<'_, '_>,
         pending: &Reshapes,
     ) -> VisualRuns {
+        let sizes = self.run_sizes(line, pending);
         let mut out = VisualRuns {
-            runs: Vec::new(),
+            runs: Vec::with_capacity(sizes.len()),
             extent: None,
             visible_end: line.byte_range.start(),
         };
+        let mut sizes = sizes.into_iter();
         for &k in &line.order {
             let p = line.placed[k];
             match p.piece.kind {
                 PieceKind::Cluster { run, cluster } => {
-                    self.push_cluster_glyphs(&mut out, &p, (run, cluster), pending)
+                    self.push_cluster_glyphs(&mut out, &p, (run, cluster), pending, &mut sizes)
                 }
                 PieceKind::Object(_) | PieceKind::Tab => {
                     out.extend(p.x, p.x + p.width);
@@ -100,15 +128,53 @@ impl<'i, 'a> Layout<'i, 'a> {
         out
     }
 
+    /// The key of the run a cluster's glyphs join, at level `level`.
+    fn run_key(&self, run: usize, cluster: usize, level: BidiLevel) -> RunKey<'a> {
+        let (r, c) = (&self.ast.runs[run], &self.ast.clusters[cluster]);
+        RunKey {
+            font: c.font,
+            level,
+            font_size: r.font_size,
+            orientation: c.orientation,
+            variations: r.features.variations(),
+        }
+    }
+
+    /// How many glyphs each of the line's runs will hold, in visual order,
+    /// so each run's glyphs are allocated once.
+    fn run_sizes(&self, line: &PlacedLine<'_, '_>, pending: &Reshapes) -> SmallVec<[usize; 8]> {
+        let mut sizes = SmallVec::new();
+        let mut last = None;
+        for &k in &line.order {
+            let p = &line.placed[k];
+            let PieceKind::Cluster { run, cluster } = p.piece.kind else {
+                continue;
+            };
+            let count = self.cluster_glyphs(pending, cluster).0.len();
+            if count == 0 {
+                continue;
+            }
+            let key = self.run_key(run, cluster, p.piece.level);
+            match sizes.last_mut().filter(|_| last == Some(key)) {
+                Some(size) => *size += count,
+                None => sizes.push(count),
+            }
+            last = Some(key);
+        }
+        sizes
+    }
+
     /// Appends the glyphs of placed cluster `p` to the line's runs, merging
     /// into the last run when font, level, size, orientation and variations
-    /// agree. The glyphs go straight into that run, in visual order.
+    /// agree. The glyphs go straight into that run, in visual order; a new
+    /// run takes the next of `sizes` as its capacity.
     fn push_cluster_glyphs(
         &self,
         out: &mut VisualRuns,
         p: &PlacedPiece<'_>,
         (run, cluster): (usize, usize),
         pending: &Reshapes,
+        sizes: &mut impl Iterator<Item = usize>,
     ) {
         let r = &self.ast.runs[run];
         let c = &self.ast.clusters[cluster];
@@ -138,18 +204,14 @@ impl<'i, 'a> Layout<'i, 'a> {
                 cluster_glyphs.push(target, glyphs.iter(), extent);
             }
         };
-        let joins_last = |v: &&mut VisualGlyphRun| {
-            v.font == c.font
-                && v.bidi_level == level
-                && v.font_size == r.font_size
-                && v.orientation == c.orientation
-                && v.variations.as_slice() == r.features.variations()
-        };
+        let key = self.run_key(run, cluster, level);
+        let joins_last = |v: &&mut VisualGlyphRun| RunKey::of_run(v) == key;
         if let Some(v) = out.runs.last_mut().filter(joins_last) {
             v.byte_range = v.byte_range.cover(c.byte_range);
             place(&mut v.glyphs);
         } else {
-            let mut positioned = Vec::with_capacity(glyphs.len());
+            // `run_sizes` counted this run; the hint only sizes the Vec.
+            let mut positioned = Vec::with_capacity(sizes.next().unwrap_or(glyphs.len()));
             place(&mut positioned);
             out.runs.push(VisualGlyphRun {
                 orientation: c.orientation,

@@ -10,7 +10,6 @@ use crate::middleend::{
 };
 use crate::types::{AtomFlags, BidiLevel, GlyphOrientation, TextRange};
 use smallvec::SmallVec;
-use std::cell::OnceCell;
 
 /// A candidate caret stop, with the affinity and level it takes at a
 /// direction boundary (CRT-3): upstream at its piece's end, downstream at its
@@ -23,18 +22,40 @@ struct RawStop {
     level: Option<BidiLevel>,
 }
 
+/// The working buffers of [`Layout::caret_stops`], kept across the lines
+/// of a paragraph.
+#[derive(Default)]
+pub(in crate::middleend::layout) struct CaretScratch {
+    raw: Vec<RawStop>,
+    /// Stop indices sorted by offset.
+    by_offset: Vec<usize>,
+    /// `(offset, index)` pairs sorted by offset.
+    pairs: Vec<(usize, usize)>,
+    /// One mark per stop: a duplicate, or merged away.
+    marks: Vec<bool>,
+    entities: Vec<Entity>,
+}
+
 impl Layout<'_, '_> {
     /// The line's caret stops in visual order (spec §6.1, CRT-1 to CRT-3,
     /// INT-4 to INT-6, INT-9), given the end of its visible bytes, where its
     /// content starts, and its glyph runs and boxes.
     pub(in crate::middleend::layout) fn caret_stops(
         &self,
-        line: &AlignedLine<'_>,
+        line: &AlignedLine<'_, '_>,
         visible_end: usize,
         runs: &[VisualGlyphRun],
         boxes: &[PositionedInlineBox],
         pending: &Reshapes,
+        scratch: &mut CaretScratch,
     ) -> Vec<CaretStop> {
+        let CaretScratch {
+            raw,
+            by_offset,
+            pairs,
+            marks,
+            entities,
+        } = scratch;
         let bytes = line.byte_range;
         // Under `Collapsible`, a soft wrap hides the trailing white space,
         // whose offsets belong to the next line (INT-6). Otherwise it all
@@ -42,7 +63,7 @@ impl Layout<'_, '_> {
         // of a hard-broken line or of the paragraph stays reachable.
         let hides_trailing =
             line.soft_wrap() && self.options.whitespace == HangingWhitespaceMode::Collapsible;
-        let mut raw = Vec::new();
+        raw.clear();
         if bytes.is_empty() || line.body_len() == 0 && (line.placed.is_empty() || hides_trailing) {
             raw.push(RawStop {
                 x: line.content.start,
@@ -62,7 +83,7 @@ impl Layout<'_, '_> {
         };
         let body = line.order.iter().map(|&k| &line.placed[k]);
         for &piece in body.chain(forward).chain(backward.iter().rev()) {
-            self.push_piece_stops(piece, &mut raw, pending);
+            self.push_piece_stops(piece, raw, pending);
         }
         // A hard break's own bytes start the next line.
         let drops_end = !line.soft_wrap()
@@ -81,24 +102,27 @@ impl Layout<'_, '_> {
                 && !(hides_trailing && offset > visible_end && offset != bytes.start())
         };
         raw.retain(|s| belongs_here(s.offset));
-        let mut stops = distinct_stops(raw);
-        resolve_shared_offsets(&mut stops, line.soft_wrap());
+        distinct_stops(raw, by_offset, marks);
+        resolve_shared_offsets(raw, pairs, marks, line.soft_wrap());
         // The level of an entity touching `offset`, else the paragraph's. The
         // index is built when the first stop needs it.
-        let entities = OnceCell::new();
-        let level_at = |offset: usize| {
-            entities
-                .get_or_init(|| EntityLevels::new(runs, boxes))
-                .at(offset)
+        let mut levels = EntityLevels {
+            sorted: entities,
+            built: false,
+        };
+        let mut level_at = |offset: usize| {
+            levels
+                .at(runs, boxes, offset)
                 .unwrap_or_else(|| self.base.base_level())
         };
-        let to_stop = |s: &RawStop| CaretStop {
-            x: s.x,
-            offset: s.offset,
-            affinity: s.affinity,
-            level: s.level.unwrap_or_else(|| level_at(s.offset)),
-        };
-        stops.iter().map(to_stop).collect()
+        raw.iter()
+            .map(|s| CaretStop {
+                x: s.x,
+                offset: s.offset,
+                affinity: s.affinity,
+                level: s.level.unwrap_or_else(|| level_at(s.offset)),
+            })
+            .collect()
     }
 
     /// A piece's caret stops, left to right: its two visual edges and, between
@@ -182,11 +206,15 @@ impl Layout<'_, '_> {
 /// its whole body but sits at its visual left, beside the body's last
 /// logical edge. So every stop is compared with all earlier stops of its
 /// offset, not with its recent neighbours.
-fn distinct_stops(mut raw: Vec<RawStop>) -> Vec<RawStop> {
-    let mut by_offset: Vec<usize> = (0..raw.len()).collect();
+///
+/// `by_offset` and `duplicate` are working buffers.
+fn distinct_stops(raw: &mut Vec<RawStop>, by_offset: &mut Vec<usize>, duplicate: &mut Vec<bool>) {
+    by_offset.clear();
+    by_offset.extend(0..raw.len());
     // Stable: emission order within an offset.
     by_offset.sort_by_key(|&i| raw[i].offset);
-    let mut duplicate = vec![false; raw.len()];
+    duplicate.clear();
+    duplicate.resize(raw.len(), false);
     for same in by_offset.chunk_by(|&a, &b| raw[a].offset == raw[b].offset) {
         for (n, &i) in same.iter().enumerate() {
             duplicate[i] = same[..n]
@@ -194,9 +222,8 @@ fn distinct_stops(mut raw: Vec<RawStop>) -> Vec<RawStop> {
                 .any(|&j| !duplicate[j] && approx_eq(raw[j].x, raw[i].x));
         }
     }
-    let mut duplicate = duplicate.into_iter();
-    raw.retain(|_| duplicate.next() == Some(false));
-    raw
+    let mut duplicate = duplicate.iter();
+    raw.retain(|_| duplicate.next() == Some(&false));
 }
 
 /// Resolves the stops, in visual order, that share an offset (CRT-3). Those
@@ -204,17 +231,21 @@ fn distinct_stops(mut raw: Vec<RawStop>) -> Vec<RawStop> {
 /// overlaps two clusters, merge into one at their midpoint. Only stops at two
 /// positions, a direction boundary, keep their own affinity and level; the
 /// others lean downstream, except the line's last logical stop at a soft
-/// wrap, which is upstream (INT-1, INT-9).
-fn resolve_shared_offsets(stops: &mut Vec<RawStop>, soft_wrap: bool) {
+/// wrap, which is upstream (INT-1, INT-9). `by_offset` and `merged` are
+/// working buffers.
+fn resolve_shared_offsets(
+    stops: &mut Vec<RawStop>,
+    by_offset: &mut Vec<(usize, usize)>,
+    merged: &mut Vec<bool>,
+    soft_wrap: bool,
+) {
     stops.sort_by(|a, b| a.x.total_cmp(&b.x));
-    let mut by_offset: Vec<(usize, usize)> = stops
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.offset, i))
-        .collect();
+    by_offset.clear();
+    by_offset.extend(stops.iter().enumerate().map(|(i, s)| (s.offset, i)));
     by_offset.sort_unstable();
     let last_offset = by_offset.last().map(|&(offset, _)| offset);
-    let mut merged = vec![false; stops.len()];
+    merged.clear();
+    merged.resize(stops.len(), false);
     for same in by_offset.chunk_by(|a, b| a.0 == b.0) {
         let (first, last) = (same[0].1, same[same.len() - 1].1);
         let (x, level) = (stops[first].x, stops[first].level);
@@ -235,8 +266,8 @@ fn resolve_shared_offsets(stops: &mut Vec<RawStop>, soft_wrap: bool) {
             stops[if merges { first } else { last }].affinity = CaretAffinity::Upstream;
         }
     }
-    let mut merged = merged.into_iter();
-    stops.retain(|_| merged.next() == Some(false));
+    let mut merged = merged.iter();
+    stops.retain(|_| merged.next() == Some(&false));
     stops.sort_by(|a, b| a.x.total_cmp(&b.x));
 }
 
@@ -254,41 +285,57 @@ struct Entity {
 /// entity in visual order whose closed range holds `offset`" is a binary
 /// search, not a scan of every glyph. Consecutive glyphs of one cluster share
 /// a range and a level, so only the first is indexed: a multi-glyph cluster
-/// costs one entry, not one per glyph.
-struct EntityLevels {
+/// costs one entry, not one per glyph. The index lives in the paragraph's
+/// scratch and is built for a line when its first stop needs it.
+struct EntityLevels<'s> {
     /// Sorted by range start, then rank.
-    sorted: Vec<Entity>,
+    sorted: &'s mut Vec<Entity>,
+    built: bool,
 }
 
-impl EntityLevels {
-    fn new(runs: &[VisualGlyphRun], boxes: &[PositionedInlineBox]) -> Self {
+impl EntityLevels<'_> {
+    /// Indexes the glyphs of `runs` and then `boxes`.
+    fn build(&mut self, runs: &[VisualGlyphRun], boxes: &[PositionedInlineBox]) {
         let glyphs = runs.iter().flat_map(|r| {
             r.glyphs
                 .iter()
                 .filter_map(|g| Some((g.byte_range?, r.bidi_level)))
         });
         let mut previous = None;
-        let mut sorted: Vec<Entity> = glyphs
-            .chain(boxes.iter().map(|b| (b.byte_range, b.bidi_level)))
-            .enumerate()
-            .filter(|&(_, entity)| previous.replace(entity) != Some(entity))
-            .map(|(rank, (range, level))| Entity {
-                range,
-                rank,
-                level,
-                reach: 0,
-            })
-            .collect();
+        let sorted = &mut *self.sorted;
+        sorted.clear();
+        sorted.extend(
+            glyphs
+                .chain(boxes.iter().map(|b| (b.byte_range, b.bidi_level)))
+                .enumerate()
+                .filter(|&(_, entity)| previous.replace(entity) != Some(entity))
+                .map(|(rank, (range, level))| Entity {
+                    range,
+                    rank,
+                    level,
+                    reach: 0,
+                }),
+        );
         sorted.sort_unstable_by_key(|e| (e.range.start(), e.rank));
         let mut reach = 0;
-        for entity in &mut sorted {
+        for entity in sorted.iter_mut() {
             reach = reach.max(entity.range.end());
             entity.reach = reach;
         }
-        Self { sorted }
+        self.built = true;
     }
 
-    fn at(&self, offset: usize) -> Option<BidiLevel> {
+    /// The level of the first entity in visual order whose closed range
+    /// holds `offset`, building the index on first use.
+    fn at(
+        &mut self,
+        runs: &[VisualGlyphRun],
+        boxes: &[PositionedInlineBox],
+        offset: usize,
+    ) -> Option<BidiLevel> {
+        if !self.built {
+            self.build(runs, boxes);
+        }
         let upto = self.sorted.partition_point(|e| e.range.start() <= offset);
         self.sorted[..upto]
             .iter()
