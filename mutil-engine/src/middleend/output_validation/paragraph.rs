@@ -1,16 +1,23 @@
 //! Paragraph-level validation for [`PositionedParagraph`].
 
-use super::super::tolerance::tolerance;
-use super::super::{LineInvariantError, ParagraphErrorReason, PositionedParagraph, validated};
+use crate::middleend::tolerance::tolerance;
+use crate::middleend::{LineInvariantError, ParagraphErrorReason, PositionedParagraph, validated};
 use crate::types::TextRange;
 use std::collections::{HashMap, HashSet};
+
+impl ParagraphErrorReason {
+    /// The paragraph-level violation, reported at `line`.
+    fn at(self, line: usize) -> (usize, LineInvariantError) {
+        (line, LineInvariantError::InvalidParagraph { reason: self })
+    }
+}
 
 impl PositionedParagraph {
     /// Validates the geometry of the paragraph against its own recorded
     /// policy: the policy is one layout could have resolved; there is at least
     /// one line; every line is valid under its own `line_index` (so
     /// `HangStartMode::FirstLine` applies to line 0 only); under
-    /// [`SlotSource::Standard`](super::super::SlotSource::Standard) every line has
+    /// [`SlotSource::Standard`](crate::middleend::SlotSource::Standard) every line has
     /// exactly its standard slot; and the line boxes follow one another inside
     /// `total_block_size`.
     ///
@@ -20,15 +27,14 @@ impl PositionedParagraph {
     /// The index of the first invalid line and its violation.
     pub fn validate_geometry(&self) -> Result<(), (usize, LineInvariantError)> {
         use ParagraphErrorReason as R;
-        let invalid = |line, reason| Err((line, LineInvariantError::InvalidParagraph { reason }));
         if !self.policy.is_valid() {
-            return invalid(0, R::InvalidPolicy);
+            return Err(R::InvalidPolicy.at(0));
         }
         if self.lines.is_empty() {
-            return invalid(0, R::NoLines);
+            return Err(R::NoLines.at(0));
         }
         if !self.total_block_size.is_finite() || self.total_block_size < 0.0 {
-            return invalid(0, R::InvalidBlockSize);
+            return Err(R::InvalidBlockSize.at(0));
         }
         let mut previous_bottom = 0.0;
         for (i, line) in self.lines.iter().enumerate() {
@@ -39,7 +45,7 @@ impl PositionedParagraph {
             if let Some(standard) = self.policy.slot_source.standard_slot(i, ctx.wrap_width)
                 && !matches!(line.slots.as_slice(), [slot] if slot.constraint == standard)
             {
-                return invalid(i, R::NotStandardSlots);
+                return Err(R::NotStandardSlots.at(i));
             }
             let (top, bottom) =
                 self.policy
@@ -51,15 +57,15 @@ impl PositionedParagraph {
                 || top < previous_bottom - eps
                 || bottom < top
             {
-                return invalid(i, R::LineBoxesOverlap);
+                return Err(R::LineBoxesOverlap.at(i));
             }
             if line.ascent + line.descent > line.line_height + eps {
-                return invalid(i, R::LineBoxExceedsLineHeight);
+                return Err(R::LineBoxExceedsLineHeight.at(i));
             }
             previous_bottom = bottom;
         }
         if self.total_block_size < previous_bottom - tolerance(previous_bottom, 0.0) {
-            return invalid(self.lines.len() - 1, R::InvalidBlockSize);
+            return Err(R::InvalidBlockSize.at(self.lines.len() - 1));
         }
         Ok(())
     }
@@ -84,30 +90,29 @@ impl PositionedParagraph {
     /// is reported with the line where it was detected.
     pub fn validate(&self, text: &str) -> Result<(), (usize, LineInvariantError)> {
         use ParagraphErrorReason as R;
-        let invalid = |line, reason| Err((line, LineInvariantError::InvalidParagraph { reason }));
         self.validate_geometry()?;
         let last = self.lines.len() - 1;
         let mut rendered_end = 0;
         let mut annotation_ids = HashSet::new();
         for (i, line) in self.lines.iter().enumerate() {
             if line.byte_range.start() != rendered_end || line.byte_range.slice(text).is_none() {
-                return invalid(i, R::SourceNotCovered);
+                return Err(R::SourceNotCovered.at(i));
             }
             if line.is_ellipsized && i != last {
-                return invalid(i, R::InvalidTruncation);
+                return Err(R::InvalidTruncation.at(i));
             }
             if !line
                 .annotations
                 .iter()
                 .all(|a| annotation_ids.insert(a.annotation_id))
             {
-                return invalid(i, R::DuplicateAnnotation);
+                return Err(R::DuplicateAnnotation.at(i));
             }
             rendered_end = line.byte_range.end();
         }
         match self.truncated_range {
-            None if rendered_end != text.len() => return invalid(last, R::SourceNotCovered),
-            None if self.lines[last].is_ellipsized => return invalid(last, R::InvalidTruncation),
+            None if rendered_end != text.len() => return Err(R::SourceNotCovered.at(last)),
+            None if self.lines[last].is_ellipsized => return Err(R::InvalidTruncation.at(last)),
             None => {}
             Some(tail) => {
                 let is_consistent = self.policy.clamp.is_some()
@@ -116,7 +121,7 @@ impl PositionedParagraph {
                     && tail.start() < tail.end()
                     && self.lines[last].is_ellipsized;
                 if !is_consistent {
-                    return invalid(last, R::InvalidTruncation);
+                    return Err(R::InvalidTruncation.at(last));
                 }
             }
         }
@@ -139,14 +144,8 @@ impl PositionedParagraph {
             has_first: bool,
             has_last: bool,
         }
-        let invalid = |line| {
-            Err((
-                line,
-                LineInvariantError::InvalidParagraph {
-                    reason: ParagraphErrorReason::InconsistentSpanFragments,
-                },
-            ))
-        };
+        use ParagraphErrorReason as R;
+        let invalid = |line| Err(R::InconsistentSpanFragments.at(line));
         let mut spans: HashMap<u64, Seen> = HashMap::new();
         for (line, fragment) in self
             .lines
@@ -196,14 +195,8 @@ impl PositionedParagraph {
             line: usize,
             bytes: usize,
         }
-        let invalid = |line| {
-            Err((
-                line,
-                LineInvariantError::InvalidParagraph {
-                    reason: ParagraphErrorReason::InconsistentAtomicFragments,
-                },
-            ))
-        };
+        use ParagraphErrorReason as R;
+        let invalid = |line| Err(R::InconsistentAtomicFragments.at(line));
         let mut spans: HashMap<u64, Seen> = HashMap::new();
         for (line, fragment) in self
             .lines

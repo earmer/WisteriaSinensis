@@ -17,9 +17,7 @@ fn all_lines() -> LayoutOptions {
 
 /// The number of hanging glyphs on `line`.
 fn hanging_glyphs(line: &PositionedLine) -> usize {
-    crate::acceptance_phase2::glyphs(line)
-        .filter(|g| g.is_hanging)
-        .count()
+    line.hanging_glyphs().count()
 }
 
 #[test]

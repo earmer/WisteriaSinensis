@@ -249,10 +249,6 @@ fn line_invariant_error_messages() {
             "trailing whitespace glyph 5 of run 1 has width in Collapsible mode",
         ),
         (
-            LineInvariantError::HangingGlyphInsideBlock { run: 1, glyph: 5 },
-            "hanging glyph 5 of run 1 overlaps the text block",
-        ),
-        (
             LineInvariantError::BodyGlyphOutsideBlock { run: 1, glyph: 5 },
             "body glyph 5 of run 1 lies outside the content of every slot",
         ),
@@ -349,10 +345,6 @@ fn line_invariant_error_messages() {
         (
             LineInvariantError::InvalidDecoration { index: 4 },
             "decoration 4 has a non-finite or negative extent or bytes outside the line",
-        ),
-        (
-            LineInvariantError::TrailingWhitespaceMarkedHanging { run: 1, glyph: 5 },
-            "trailing whitespace glyph 5 of run 1 is flagged as hanging",
         ),
         (
             LineInvariantError::HangingNotAllowed {

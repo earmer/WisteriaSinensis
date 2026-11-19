@@ -45,7 +45,7 @@ fn a_font_source_resolves_faces_without_copying() {
 fn placed(mode: WritingMode, orientation: GlyphOrientation, baseline_y: f32) -> Point {
     let mut l = line();
     l.baseline_y = baseline_y;
-    let mut g = glyph(0.0, 100.0, false);
+    let mut g = glyph(0.0, 100.0);
     g.x_offset = 3.0;
     g.y_offset = 2.0;
     let mut r = run(g);
@@ -96,7 +96,7 @@ fn drawing_origins_are_physical_in_every_writing_mode() {
 fn the_output_gate_rejects_unplaced_tate_chu_yoko() {
     let mut l = line();
     l.baseline_y = 8.0;
-    let mut r = run(glyph(0.0, 100.0, false));
+    let mut r = run(glyph(0.0, 100.0));
     r.orientation = GlyphOrientation::HorizontalInVertical;
     l.visual_runs = vec![r];
     let mut p = paragraph(&ctx(), vec![l]);
@@ -112,7 +112,7 @@ fn the_output_gate_rejects_unplaced_tate_chu_yoko() {
 /// 25, `baseline_offset` 8 towards line-over, in `mode`.
 fn annotated(mode: WritingMode, orientation: GlyphOrientation, baseline_y: f32) -> Vec<Point> {
     let mut l = line();
-    let mut r = run(glyph(0.0, 100.0, false));
+    let mut r = run(glyph(0.0, 100.0));
     r.orientation = orientation;
     l.visual_runs = vec![r];
     let mut ann = positioned_annotation();
@@ -164,7 +164,7 @@ fn annotation_runs_are_placed_beyond_the_base() {
 fn the_output_gate_rejects_overflowing_drawing_origins() {
     let mut l = line();
     l.baseline_y = 3.0e38;
-    let mut g = glyph(0.0, 100.0, false);
+    let mut g = glyph(0.0, 100.0);
     g.y_offset = -3.0e38;
     l.visual_runs = vec![run(g)];
     let mut p = paragraph(&ctx(), vec![l]);

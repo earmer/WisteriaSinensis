@@ -80,11 +80,11 @@ fn two_run_line(left_run_x: f32, right_run_x: f32) -> PositionedLine {
     let mut l = line();
     l.byte_range = TextRange::new(0, 2);
     l.visible_byte_end = 2;
-    let mut second = glyph(right_run_x, 50., false);
+    let mut second = glyph(right_run_x, 50.);
     second.byte_range = Some(TextRange::new(1, 2));
     let mut second_run = run(second);
     second_run.bidi_level = BidiLevel::RTL;
-    l.visual_runs = vec![run(glyph(left_run_x, 50., false)), second_run];
+    l.visual_runs = vec![run(glyph(left_run_x, 50.)), second_run];
     l
 }
 

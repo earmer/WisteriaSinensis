@@ -2,9 +2,9 @@
   "unreachable_in_layout": 1,
   "mut_self_in_compile": 0,
   "empty_ast_placeholder": 0,
-  "super_super_imports": 15,
+  "super_super_imports": 7,
   "too_many_arguments": 0,
-  "occupied_slots_calls": 1,
-  "is_hanging_field_uses": 10,
+  "occupied_slots_calls": 0,
+  "is_hanging_field_uses": 0,
   "unsafe_in_demo": 16
 }

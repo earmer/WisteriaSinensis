@@ -34,8 +34,6 @@ pub struct PositionedGlyph {
     /// Non-empty source bytes; `None` exactly for synthesized and annotation
     /// glyphs, which claim no body bytes (spec §1.5, AX-1).
     pub byte_range: Option<TextRange>,
-    /// Punctuation hanging outside the text block (§5 Stage 1.3).
-    pub is_hanging: bool,
 }
 
 impl PositionedGlyph {

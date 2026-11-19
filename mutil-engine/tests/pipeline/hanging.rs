@@ -32,8 +32,7 @@ fn hang_start(start: HangStartMode) -> LayoutOptions {
 
 /// The byte offsets of `line`'s hanging glyphs.
 fn hanging(line: &PositionedLine) -> Vec<usize> {
-    glyphs(line)
-        .filter(|g| g.is_hanging)
+    line.hanging_glyphs()
         .map(|g| g.byte_range.unwrap().start())
         .collect()
 }

@@ -2,7 +2,7 @@
 //! (spec §5 Stages 2–4).
 
 use super::breaking::within;
-use super::hanging::{LineHangs, clip_to_content, mark_hanging};
+use super::hanging::{LineHangs, clip_to_content};
 use super::{Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Token};
 use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_order};
 use crate::frontend::{DiscretionaryNode, SpanEdge};
@@ -314,7 +314,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         let line = self.align_line_content(line, &mut runs, extent, slot);
         let content = &line.content;
         let content_edges = content.edges();
-        mark_hanging(&mut runs, &line.placed, line.hangs, content_edges);
         let (visual_boxes, tabs) = self.build_boxes_and_tabs(&line.placed, slot);
         let mut span_fragments = self.span_fragments(&line);
 
@@ -482,7 +481,6 @@ impl<'i, 'a> Layout<'i, 'a> {
                 y_offset: g.y_offset + p.y_shift,
                 advance: g.x_advance,
                 byte_range: (!g.is_synthesized).then_some(c.byte_range),
-                is_hanging: false,
             };
             pen += g.x_advance;
             glyph

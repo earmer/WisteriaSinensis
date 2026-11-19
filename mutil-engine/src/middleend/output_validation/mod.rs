@@ -1,8 +1,7 @@
 //! Output validation: the invariants of [`PositionedLine`] and
 //! [`PositionedParagraph`] (spec §2.6).
 
-use super::tolerance::tolerance;
-use super::{HangSide, LineContext, PositionedGlyph, PositionedLine, PositionedSlot};
+use crate::middleend::{HangSide, LineContext, PositionedGlyph, PositionedLine};
 use crate::types::{BidiLevel, TextRange};
 
 mod line_checks;
@@ -139,16 +138,8 @@ pub enum LineInvariantError {
         /// Index into that run's `glyphs`.
         glyph: usize,
     },
-    /// A glyph flagged `is_hanging` overlaps the text block, i.e. hanging
-    /// punctuation is being counted inside `visual_width`.
-    HangingGlyphInsideBlock {
-        /// Index into `visual_runs`.
-        run: usize,
-        /// Index into that run's `glyphs`.
-        glyph: usize,
-    },
-    /// A body glyph (not `is_hanging`, not trailing whitespace) lies outside
-    /// the content of every slot.
+    /// A glyph outside the content of every slot does not hang from an outer
+    /// slot (spec HNG-1).
     BodyGlyphOutsideBlock {
         /// Index into `visual_runs`.
         run: usize,
@@ -276,14 +267,6 @@ pub enum LineInvariantError {
         /// Index into `decorations`.
         index: usize,
     },
-    /// A trailing-whitespace glyph is flagged `is_hanging`; the flag is
-    /// reserved for hanging punctuation.
-    TrailingWhitespaceMarkedHanging {
-        /// Index into `visual_runs`.
-        run: usize,
-        /// Index into that run's `glyphs`.
-        glyph: usize,
-    },
     /// Punctuation hangs at an edge the active `HangMode` does not allow.
     HangingNotAllowed {
         /// Edge concerned.
@@ -410,12 +393,21 @@ pub enum ParagraphErrorReason {
     InconsistentAtomicFragments,
 }
 
-/// Whether `[lo, hi]` lies in the content block of `slot`. The one rule that
-/// decides both whether content belongs to a slot and whether the slot counts
-/// as occupied.
-pub(super) fn slot_holds(slot: &PositionedSlot, lo: f32, hi: f32) -> bool {
-    let eps = tolerance(slot.visual_width, 0.0);
-    lo >= slot.content_start - eps && hi <= slot.content_end() + eps
+impl SlotErrorReason {
+    /// The line error reporting this violation of the slots.
+    const fn error(self) -> LineInvariantError {
+        LineInvariantError::InvalidSlots { reason: self }
+    }
+}
+
+impl AnnotationErrorReason {
+    /// The line error reporting this violation of annotation `index`.
+    const fn at(self, index: usize) -> LineInvariantError {
+        LineInvariantError::InvalidAnnotation {
+            index,
+            reason: self,
+        }
+    }
 }
 
 /// Source ranges with a payload, sorted for intersection queries.
@@ -494,7 +486,8 @@ impl<T> RangeIndex<T> {
 pub(super) type SourcedGlyphs<'a> = RangeIndex<(BidiLevel, &'a PositionedGlyph)>;
 
 impl PositionedLine {
-    /// Validates the line against `ctx`:
+    /// Validates the line against `ctx`, in this order (the order is the
+    /// error precedence):
     ///
     /// 1. every number is finite and no extent or size is negative;
     /// 2. the envelope: byte range, empty-line state, line box;
@@ -502,7 +495,7 @@ impl PositionedLine {
     ///    stop and annotation refers to bytes of this line, runs are in screen
     ///    order and caret stops carry the level of the text they belong to;
     /// 4. the slots: valid constraints inside the wrap envelope, content
-    ///    inside its constraint, conserved width;
+    ///    inside its constraint; they yield the body extent;
     /// 5. containment: every entity lies in the content of one slot, each
     ///    slot's content block is exactly the span of what it holds, and
     ///    hanging punctuation, preserved whitespace, span fragments and
@@ -523,93 +516,22 @@ impl PositionedLine {
         let glyphs = self.sourced_glyphs();
         self.check_caret_stops(ctx, &glyphs)?;
         self.check_annotation_records(ctx)?;
-        self.check_slots(ctx)?;
-        if self.byte_range.is_empty() && !self.is_ellipsized {
-            return Ok(());
-        }
-        self.check_containment_and_hanging(ctx, &glyphs)
+        let Some(body) = self.check_slots(ctx)? else {
+            return self.check_nothing_outside_slots();
+        };
+        self.check_glyph_placement(ctx, &body)?;
+        self.check_hanging(ctx, &body)?;
+        self.check_object_placement(ctx, &body)?;
+        self.check_annotation_placement(ctx, &body, &glyphs)?;
+        self.check_span_fragments()?;
+        self.check_slot_overflow(ctx)?;
+        self.check_slot_spans(ctx.base_direction)
     }
 
     /// `true` when [`PositionedLine::validate`] succeeds.
     #[must_use]
     pub fn is_valid(&self, ctx: &LineContext) -> bool {
         self.validate(ctx).is_ok()
-    }
-
-    /// The body width: the sum of the slots' content advances, hanging
-    /// punctuation, preserved trailing whitespace and obstacles excluded.
-    #[must_use]
-    pub fn visual_width(&self) -> f32 {
-        self.slots.iter().map(|slot| slot.visual_width).sum()
-    }
-
-    /// Overflow of hanging punctuation beyond the left edge of the first
-    /// occupied slot's content.
-    #[must_use]
-    pub fn hanging_left(&self) -> f32 {
-        self.occupied_slots()
-            .map_or(0.0, |o| self.hanging_extents(&o).0)
-    }
-
-    /// Overflow of hanging punctuation beyond the right edge of the last
-    /// occupied slot's content.
-    #[must_use]
-    pub fn hanging_right(&self) -> f32 {
-        self.occupied_slots()
-            .map_or(0.0, |o| self.hanging_extents(&o).1)
-    }
-
-    /// `(left, right)` hanging overflow: the largest overflow of an
-    /// `is_hanging` glyph's pen interval beyond the body edges, from the left
-    /// edge of the first occupied slot's content to the right edge of the
-    /// last one's.
-    pub(super) fn hanging_extents(&self, &(first, last): &(usize, usize)) -> (f32, f32) {
-        let (left, right) = (
-            self.slots[first].content_start,
-            self.slots[last].content_end(),
-        );
-        self.visual_runs
-            .iter()
-            .flat_map(|r| &r.glyphs)
-            .filter(|g| g.is_hanging && g.advance != 0.0 && !self.is_trailing_whitespace(g))
-            .fold((0.0_f32, 0.0_f32), |(l, r), g| {
-                let (lo, hi) = g.pen_interval();
-                (l.max(left - lo), r.max(hi - right))
-            })
-    }
-
-    /// The first and last slot that hold content: a non-zero block, or a
-    /// visible body glyph, an inline box or a visible tab inside its block.
-    pub(super) fn occupied_slots(&self) -> Option<(usize, usize)> {
-        let is_occupied = |slot: &PositionedSlot| {
-            slot.visual_width > 0.0
-                || self.visual_runs.iter().flat_map(|r| &r.glyphs).any(|g| {
-                    let (lo, hi) = g.pen_interval();
-                    !g.is_hanging
-                        && g.byte_range
-                            .is_some_and(|r| r.start() < self.visible_byte_end)
-                        && slot_holds(slot, lo, hi)
-                })
-                || self
-                    .visual_boxes
-                    .iter()
-                    .any(|b| slot_holds(slot, b.x, b.x + b.width))
-                || self.tabs.iter().any(|t| {
-                    t.byte_range.start() < self.visible_byte_end
-                        && slot_holds(slot, t.x, t.x + t.width)
-                })
-        };
-        let first = self.slots.iter().position(is_occupied)?;
-        let last = self.slots.iter().rposition(is_occupied)?;
-        Some((first, last))
-    }
-
-    /// `true` for a glyph of the trailing whitespace: source text at or after
-    /// `visible_byte_end`.
-    pub(super) fn is_trailing_whitespace(&self, glyph: &PositionedGlyph) -> bool {
-        glyph
-            .byte_range
-            .is_some_and(|range| range.start() >= self.visible_byte_end)
     }
 
     /// `true` when `range` is well formed and inside this line's bytes.
