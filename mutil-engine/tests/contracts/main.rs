@@ -14,6 +14,7 @@ mod error_messages;
 mod gates;
 mod geometry;
 mod hanging_gates;
+mod hanging_roles;
 mod host_contract;
 mod input_precedence;
 mod input_validation;
