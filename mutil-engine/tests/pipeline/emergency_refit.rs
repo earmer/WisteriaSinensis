@@ -39,6 +39,26 @@ impl LineGeometryProvider for Shrinking {
     }
 }
 
+/// The reverse of [`Shrinking`]: answers `narrow` to an envelope no taller
+/// than `limit` and `wide` to any taller one.
+#[derive(Debug)]
+struct Growing {
+    limit: f32,
+    narrow: f32,
+    wide: f32,
+}
+
+impl LineGeometryProvider for Growing {
+    fn query_line_geometry(&self, _: usize, block_start: f32, block_end: f32) -> LineGeometry {
+        let end = if block_end - block_start > self.limit {
+            self.wide
+        } else {
+            self.narrow
+        };
+        slot(end)
+    }
+}
+
 /// Answers `end` whatever the envelope: the final envelope given directly.
 #[derive(Debug)]
 struct Direct(f32);
@@ -174,4 +194,99 @@ fn a_narrowed_layout_passes_the_output_gate() {
         next = line.byte_range.end();
     }
     assert_eq!(next, word.len());
+}
+
+// GEO-4 lets an expanded envelope only remove space, so "the envelope grows"
+// means a taller block envelope whose answer is the same or smaller, never a
+// wider one. A wider answer is a contract violation, not a refit.
+
+/// Lays `word` out through a provider that gives `first` to the strut-height
+/// envelope and `expanded` to a taller one, and through one that gives
+/// `expanded` at once, and requires identical output.
+#[track_caller]
+fn assert_expanded_refit_equals_fresh_fit(
+    word: &str,
+    unit: usize,
+    first: f32,
+    expanded: f32,
+) -> PositionedParagraph {
+    let refit = lay_out_word(
+        word,
+        unit,
+        &provided(Shrinking {
+            limit: strut_height() + 0.5,
+            wide: first,
+            narrow: expanded,
+        }),
+    );
+    let fresh = lay_out_word(word, unit, &provided(Direct(expanded)));
+    assert!(refit.lines.len() > 1, "{word:?} must need emergency breaks");
+    assert_eq!(
+        line_texts(&refit, word),
+        line_texts(&fresh, word),
+        "{word:?}"
+    );
+    assert_eq!(refit, fresh, "{word:?}");
+    refit
+}
+
+#[test]
+fn an_expanded_envelope_that_keeps_the_answer_equals_a_fresh_fit() {
+    // The taller envelope changes nothing, so the refit's seams are exactly
+    // the first attempt's; no line may differ from a fresh fit.
+    let word = "abcdefghij".repeat(30);
+    let p = assert_expanded_refit_equals_fresh_fit(&word, 1, WIDE, WIDE);
+    assert!(p.lines.iter().any(|l| l.visual_width() > NARROW));
+}
+
+#[test]
+fn a_slightly_narrowed_envelope_equals_a_fresh_fit() {
+    // The first attempt fits 150, the refit only 105: lines that were broken
+    // at the wide fit's seams are broken again at the narrower one's.
+    let word = "abcdefghij".repeat(30);
+    assert_expanded_refit_equals_fresh_fit(&word, 1, WIDE, 105.0);
+}
+
+#[test]
+fn slightly_narrowed_ligature_seams_equal_a_fresh_fit() {
+    for unit in ["->", "==", "!=", "<=", "www", "|>", "=>", "::", "<!--"] {
+        let word = unit.repeat(80);
+        assert_expanded_refit_equals_fresh_fit(&word, unit.len(), WIDE, 105.0);
+    }
+}
+
+#[test]
+fn a_provider_that_widens_with_the_envelope_is_rejected() {
+    // Narrow for the strut-height envelope, wide for the taller one: the
+    // refit must stop with `NonMonotonicGeometry`, not lay out the wide fit.
+    let word = "abcdefghij".repeat(30);
+    let base = style(SMALL);
+    let spans: Vec<StyleSpan> = (0..word.len())
+        .rev()
+        .step_by(TALL_EVERY)
+        .rev()
+        .map(|n| StyleSpan {
+            byte_range: TextRange::new(n, n + 1),
+            style: style(TALL),
+        })
+        .collect();
+    let input = ParagraphInput {
+        style_spans: &spans,
+        ..input(&word, &base)
+    };
+    let ast = compile_paragraph(&input, &FrontendOptions::default(), &*SHAPER)
+        .expect("the frontend accepts the word");
+    let constraints = provided(Growing {
+        limit: strut_height() + 0.5,
+        narrow: NARROW,
+        wide: WIDE,
+    });
+    let result = layout_paragraph(
+        &ast,
+        &word,
+        &*SHAPER,
+        &constraints,
+        &LayoutOptions::default(),
+    );
+    assert_eq!(result, Err(LayoutInputError::NonMonotonicGeometry));
 }

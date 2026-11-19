@@ -602,3 +602,95 @@ fn shp13_backward_atom_order_across_faces_lays_out_and_validates() {
         panic!("line {line}: {error}\n{p:#?}");
     }
 }
+
+/// The atoms and run of the horizontal text `text`, one atom per character.
+fn horizontal(text: &str) -> (Vec<GraphemeAtom>, ShapingRun) {
+    let (mut atoms, mut run) = crate::shaper::tate_chu_yoko(text, &[FAMILY]);
+    run.orientation = GlyphOrientation::Horizontal;
+    for atom in &mut atoms {
+        atom.orientation = GlyphOrientation::Horizontal;
+    }
+    (atoms, run)
+}
+
+/// The face of the cluster holding each atom, after checking that `clusters`
+/// partition `atom_count` atoms in order.
+#[track_caller]
+fn face_per_atom(clusters: &[ShapedCluster], atom_count: usize) -> Vec<FontId> {
+    let mut next = 0;
+    let mut faces = Vec::new();
+    for c in clusters {
+        assert_eq!(c.atom_range.start, next, "{clusters:?}");
+        assert!(c.atom_range.end > c.atom_range.start, "{clusters:?}");
+        faces.extend(c.atom_range.clone().map(|_| c.font.font_id));
+        next = c.atom_range.end;
+    }
+    assert_eq!(next, atom_count, "{clusters:?}");
+    faces
+}
+
+#[test]
+fn shp6_trailing_cut_atom_takes_the_last_kept_face() {
+    // Window "abc" with the trailing atom "c" cut and replaced by "x". The
+    // kept "a" is set in face 1 and "b" in face 2: the cut atom's empty
+    // cluster takes the last kept cluster's face, 2.
+    let text = "abc";
+    let (atoms, run) = horizontal(text);
+    let shaper = LineOnlyShaper::new(ScriptedLines(vec![(0, 1, 10), (1, 2, 20)]));
+    let mut out = ShapeOutput::default();
+    shaper.reshape_window(
+        &ReshapeRequest {
+            text,
+            run: &run,
+            atoms: &atoms,
+            window: TextRange::new(0, text.len()),
+            leading_edit: &LeadingEdit::None,
+            trailing_edit: &TrailingEdit::ReplacePrefix {
+                replacement: "x".into(),
+                cut_bytes: 1,
+                hyphen: '-',
+            },
+        },
+        &mut out,
+    );
+    let faces = face_per_atom(&out.clusters, atoms.len());
+    assert_eq!(
+        faces,
+        [FontId(1), FontId(2), FontId(2)],
+        "{:?}",
+        out.clusters
+    );
+}
+
+#[test]
+fn shp6_leading_cut_atom_takes_the_first_kept_face_not_the_replacements() {
+    // Window "abc" with the leading atom "a" cut and replaced by "z". The
+    // backend shapes "zbc": the replacement in face 3, then "b" in face 1 and
+    // "c" in face 2. The cut atom's empty cluster takes the first kept
+    // cluster's face, 1, not the replacement's face 3.
+    let text = "abc";
+    let (atoms, run) = horizontal(text);
+    let shaper = LineOnlyShaper::new(ScriptedLines(vec![(0, 3, 30), (1, 1, 10), (2, 2, 20)]));
+    let mut out = ShapeOutput::default();
+    shaper.reshape_window(
+        &ReshapeRequest {
+            text,
+            run: &run,
+            atoms: &atoms,
+            window: TextRange::new(0, text.len()),
+            leading_edit: &LeadingEdit::ReplaceSuffix {
+                replacement: "z".into(),
+                cut_bytes: 1,
+            },
+            trailing_edit: &TrailingEdit::None,
+        },
+        &mut out,
+    );
+    let faces = face_per_atom(&out.clusters, atoms.len());
+    assert_eq!(
+        faces,
+        [FontId(1), FontId(1), FontId(2)],
+        "{:?}",
+        out.clusters
+    );
+}
