@@ -14,6 +14,7 @@ mod fonts;
 mod frontend;
 mod hanging;
 mod hanging_regressions;
+mod hanging_roles;
 mod justification;
 mod layout;
 mod line_only;
