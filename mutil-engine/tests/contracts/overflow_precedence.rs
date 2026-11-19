@@ -1,8 +1,8 @@
-//! The overflow errors of SLT-5 come before the hanging checks, in the order
-//! `PositionedLine::validate` documents: the slots (step 4) are judged before
-//! the containment and hanging rules (step 5). `LineWiderThanWrapWidth`
-//! names a body wider than the container, `SlotOverflow` a block beyond its
-//! own constraint while the line still fits.
+//! The hanging errors come before the overflow errors of SLT-5, in the order
+//! of the spec's error table (HNG-1 to HNG-4 rows, then the SLT-5 rows).
+//! `LineWiderThanWrapWidth` names a body wider than the container,
+//! `SlotOverflow` a block beyond its own constraint while the line still
+//! fits; once hanging is allowed the overflow is what is reported.
 
 use super::common::*;
 use mutil_engine::*;
@@ -49,16 +49,20 @@ fn wider_than_wrap_width_with_a_mark() -> PositionedLine {
 }
 
 #[test]
-fn slt5_a_line_wider_than_wrap_width_is_reported_before_a_hanging_violation() {
+fn slt5_a_hanging_violation_is_reported_before_a_line_wider_than_wrap_width() {
     let wider = Err(LineInvariantError::LineWiderThanWrapWidth {
         visual_width: 120.,
         wrap_width: 100.,
     });
     let l = wider_than_wrap_width_with_a_mark();
-    // Hanging is off: the mark would be `HangingNotAllowed`, but the body
-    // is judged first.
-    assert_eq!(l.validate(&ctx()), wider);
-    // And where hanging is allowed the overflow stands.
+    // Hanging is off: the hanging rows of the error table come first.
+    assert_eq!(
+        l.validate(&ctx()),
+        Err(LineInvariantError::HangingNotAllowed {
+            side: HangSide::Right
+        })
+    );
+    // Where hanging is allowed the overflow stands.
     assert_eq!(l.validate(&hanging_end(HangEndMode::Force, ctx())), wider);
 
     // The same mark on a body that fits is what the hanging rule rejects.
@@ -102,7 +106,7 @@ fn two_slots_with_a_mark(first: f32) -> (PositionedLine, LineContext) {
 }
 
 #[test]
-fn slt5_a_slot_overflow_is_reported_before_a_hanging_violation() {
+fn slt5_a_hanging_violation_is_reported_before_a_slot_overflow() {
     // The control: with the first block inside its constraint, the mark past
     // the right edge is the hanging rule's to reject.
     let (fits, c) = two_slots_with_a_mark(100.);
@@ -115,14 +119,20 @@ fn slt5_a_slot_overflow_is_reported_before_a_hanging_violation() {
     assert_eq!(fits.validate(&hanging_end(HangEndMode::Force, c)), Ok(()));
 
     // The first block ends 10 units beyond its constraint, the line as a
-    // whole still fits: the slot is named, whatever the mark does.
+    // whole still fits: with hanging off the mark's error comes first, and
+    // once hanging is allowed the slot is named.
     let (l, c) = two_slots_with_a_mark(110.);
     let overflow = Err(LineInvariantError::SlotOverflow {
         slot: 0,
         extent: 110.,
         capacity: 100.,
     });
-    assert_eq!(l.validate(&c), overflow);
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::HangingNotAllowed {
+            side: HangSide::Right
+        })
+    );
     assert_eq!(l.validate(&hanging_end(HangEndMode::Force, c)), overflow);
 }
 
