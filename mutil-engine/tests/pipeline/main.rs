@@ -6,6 +6,7 @@ mod acceptance;
 mod acceptance_phase2;
 mod bidi_frontend;
 mod bidi_queries;
+mod canonical_features;
 mod cjk_routing;
 mod common;
 mod decoration_spans;
