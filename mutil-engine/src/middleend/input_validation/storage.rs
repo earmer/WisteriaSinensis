@@ -303,7 +303,7 @@ pub(super) fn check_coverage(ast: &ParagraphAst, text: &str) -> Result<(), Layou
     let mut covered = 0;
     for node in &ast.items {
         let range = node.byte_span();
-        if range.start != covered {
+        if range.start() != covered {
             break;
         }
         covered = range.end();

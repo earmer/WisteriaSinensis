@@ -141,7 +141,7 @@ fn tallest_first_line(
     let content_end = ast
         .items
         .get(first_break)
-        .map_or(usize::MAX, |node| node.byte_span().start);
+        .map_or(usize::MAX, |node| node.byte_span().start());
     let mut content_height = strut_height;
     for (item, node) in ast.items[..first_break].iter().enumerate() {
         if let WordNode::Box(BoxNode::InlineObject(InlineObjectBox {

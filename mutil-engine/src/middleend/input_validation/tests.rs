@@ -155,10 +155,7 @@ fn text_box(atoms: Vec<GraphemeAtom>) -> WordNode {
         })
         .collect();
     let byte_range = match (atoms.first(), atoms.last()) {
-        (Some(f), Some(l)) => TextRange {
-            start: f.byte_range.start,
-            end: l.byte_range.end,
-        },
+        (Some(f), Some(l)) => TextRange::new(f.byte_range.start(), l.byte_range.end()),
         _ => TextRange::EMPTY,
     };
     let slot = STAGE.with(|stage| {
@@ -297,7 +294,7 @@ fn tiled(mut a: ParagraphAst) -> ParagraphAst {
     let mut covered = 0;
     for node in std::mem::take(&mut a.items) {
         let r = node.byte_span();
-        if r.start > covered {
+        if r.start() > covered {
             items.push(text_box(
                 (covered..r.start()).map(|i| atom(i, i + 1)).collect(),
             ));
@@ -339,7 +336,7 @@ fn closed(mut a: ParagraphAst) -> ParagraphAst {
         let at = a
             .items
             .iter()
-            .position(|n| n.byte_span().start >= sp.byte_range.end)
+            .position(|n| n.byte_span().start() >= sp.byte_range.end())
             .unwrap_or(a.items.len() - 1);
         a.items
             .insert(at, bnd(sp.span_id, SpanEdge::Trailing, sp.byte_range.end()));
@@ -828,13 +825,6 @@ fn every_atom_must_fit_and_be_in_order() {
     let o = LayoutOptions::default();
     // Overall span fits "abcd" but the middle atom does not end inside it.
     let a = with_items(vec![text_box(vec![atom(0, 1), atom(1, 9), atom(2, 4)])]);
-    assert_eq!(
-        check_layout_inputs(&a, "abcd", &constraints(), &o),
-        Err(LayoutInputError::ItemOutsideText { item: 0 })
-    );
-    // First atom starts after the last one ends: the box's stored range
-    // is inverted, so it does not fit the text. No panic, an error.
-    let a = with_items(vec![text_box(vec![atom(3, 4), atom(0, 1)])]);
     assert_eq!(
         check_layout_inputs(&a, "abcd", &constraints(), &o),
         Err(LayoutInputError::ItemOutsideText { item: 0 })

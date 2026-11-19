@@ -26,5 +26,5 @@ pub use geometry::{MAX_MEASUREMENT, Point, Rect, Size, is_extent, is_measurement
 pub use hyphen::{HyphenOpportunity, ReplacementText};
 pub use run::{ShapingRun, TextDecoration};
 pub use tag::{InvalidLocaleTag, InvalidScriptTag, LocaleTag, ScriptTag};
-pub use text::{ByteIndex, InvertedRange, TextRange};
+pub use text::{ByteIndex, TextRange};
 pub use writing::{BaselineAlignment, GlyphOrientation, TextOrientation, WritingMode};

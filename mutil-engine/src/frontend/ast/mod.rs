@@ -319,6 +319,7 @@ fn spans_atoms(byte_range: TextRange, atoms: &[GraphemeAtom]) -> bool {
         .first()
         .zip(atoms.last())
         .is_some_and(|(first, last)| {
-            byte_range.start == first.byte_range.start && byte_range.end == last.byte_range.end
+            byte_range.start() == first.byte_range.start()
+                && byte_range.end() == last.byte_range.end()
         })
 }

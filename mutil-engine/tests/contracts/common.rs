@@ -34,7 +34,9 @@ pub fn push_text(
     let run_local = atom_at - ast.runs[run].atom_range.start;
     let (n_atoms, n_clusters) = (atoms.len(), clusters.len());
     let byte_range = match (atoms.first(), atoms.last()) {
-        (Some(first), Some(last)) => TextRange::new(first.byte_range.start, last.byte_range.end),
+        (Some(first), Some(last)) => {
+            TextRange::new(first.byte_range.start(), last.byte_range.end())
+        }
         _ => TextRange::EMPTY,
     };
     let natural_width = clusters.iter().map(|c| c.natural_width).sum();

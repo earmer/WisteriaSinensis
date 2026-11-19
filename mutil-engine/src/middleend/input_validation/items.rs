@@ -54,7 +54,7 @@ pub(super) fn check_paragraph_end(ast: &ParagraphAst) -> Result<(), LayoutInputE
 /// breakable space's glue precedes its discretionary (so the spacing stays on
 /// the line that ends there): `[Glue(CjkAutospace), Discretionary]`.
 pub(super) fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
-    let out_of_order = |w: &[WordNode]| w[0].byte_span().end > w[1].byte_span().start;
+    let out_of_order = |w: &[WordNode]| w[0].byte_span().end() > w[1].byte_span().start();
     if let Some(i) = ast.items.windows(2).position(out_of_order) {
         return Err(LayoutInputError::ItemsOutOfOrder { item: i + 1 });
     }
@@ -63,7 +63,7 @@ pub(super) fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputErro
     let mut break_opportunity_offset: Option<usize> = None;
     for (item, node) in ast.items.iter().enumerate() {
         let range = node.byte_span();
-        if !range.is_empty() || break_opportunity_offset != Some(range.start) {
+        if !range.is_empty() || break_opportunity_offset != Some(range.start()) {
             break_opportunity_offset = None;
         }
         if node.is_break_opportunity() && range.is_empty() {

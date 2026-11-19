@@ -595,8 +595,8 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
     assert!(all_self_contained(&ast));
     let mut next = 0;
     for c in (0..ast.items.len()).flat_map(|item| clusters_of(&ast, item)) {
-        assert_eq!(c.byte_range.start, next);
-        next = c.byte_range.end;
+        assert_eq!(c.byte_range.start(), next);
+        next = c.byte_range.end();
     }
     assert_eq!(next, text_len);
 }

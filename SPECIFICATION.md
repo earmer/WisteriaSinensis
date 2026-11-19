@@ -88,8 +88,7 @@ Every data-model, pipeline and tie-breaking decision in this specification follo
 
 ```rust
 pub type ByteIndex = usize;
-pub struct TextRange { pub start: ByteIndex, pub end: ByteIndex }  // [start, end)
-pub struct InvertedRange;             // error of TextRange::try_from(Range<usize>)
+pub struct TextRange { .. }           // [start, end), start <= end by construction
 pub struct ScriptTag(..);             // ISO 15924, by construction
 pub struct InvalidScriptTag;
 pub struct LocaleTag(..);             // BCP 47 well formed, by construction
@@ -109,7 +108,7 @@ pub fn is_extent(value: f32) -> bool;
 
 **[TYP-1]** Every offset is a UTF-8 byte offset (`ByteIndex`) into the text of one paragraph. Synthetic elements never displace source offsets.
 
-**[TYP-2]** A `TextRange` is half-open. Its fields are public: it is the coordinate primitive of the engine, and its only constructor check is ordering. `TextRange::new` panics on `start > end` (for ranges the caller computes); `TextRange::try_new` and `TryFrom<Range<usize>>` return `None` / `InvertedRange` (for offsets read from outside). `TextRange::start`, `TextRange::end`, `TextRange::len`, `TextRange::is_empty`, `TextRange::contains`, `TextRange::contains_range`, `TextRange::cover`, `TextRange::slice` and `TextRange::as_range` are the queries. `TextRange::EMPTY` is `0..0` and `TextRange::empty_at` an empty range at an offset. Whether a range fits a text and falls on its code point boundaries is checked where the text is known.
+**[TYP-2]** A `TextRange` is half-open and its fields are private, so `start <= end` holds for every value: it is the coordinate primitive of the engine, parsed rather than validated. `TextRange::new` panics on `start > end` (for ranges the caller computes); `TextRange::try_new` returns `None` for it (for offsets read from outside, which host paths use). `TextRange::start`, `TextRange::end`, `TextRange::len`, `TextRange::is_empty`, `TextRange::contains`, `TextRange::contains_range`, `TextRange::cover`, `TextRange::slice` and `TextRange::as_range` are the queries. `TextRange::EMPTY` is `0..0` and `TextRange::empty_at` an empty range at an offset. Whether a range fits a text and falls on its code point boundaries is checked where the text is known.
 
 **[TYP-3]** A `ScriptTag` is four ASCII letters stored in ISO 15924 case (`Latn`); `ScriptTag::try_from_bytes` and `ScriptTag::try_from_str` (also `FromStr`) are its only constructors besides the constants (`ScriptTag::COMMON`, `ScriptTag::INHERITED`, `ScriptTag::UNKNOWN`, `ScriptTag::EMOJI`, `ScriptTag::LATIN`, `ScriptTag::CYRILLIC`, `ScriptTag::GREEK`, `ScriptTag::ARABIC`, `ScriptTag::HEBREW`, `ScriptTag::DEVANAGARI`, `ScriptTag::THAI`, `ScriptTag::HAN`, `ScriptTag::HIRAGANA`, `ScriptTag::KATAKANA`, `ScriptTag::HANGUL`, `ScriptTag::BOPOMOFO`). `ScriptTag::is_unresolved` is true for `Zyyy` and `Zinh`. `Zsye` (`ScriptTag::EMOJI`) is an engine-internal font-fallback key for emoji presentation, not a Unicode `Script` value.
 

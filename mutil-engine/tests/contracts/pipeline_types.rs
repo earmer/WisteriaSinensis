@@ -21,7 +21,9 @@ fn run() -> ShapingRun {
 
 fn word(ast: &mut ParagraphAst, range: TextRange) -> WordNode {
     let atoms: Vec<_> = range.as_range().map(atom).collect();
-    let clusters: Vec<_> = (0..atoms.len()).map(|i| cluster(range.start, i)).collect();
+    let clusters: Vec<_> = (0..atoms.len())
+        .map(|i| cluster(range.start(), i))
+        .collect();
     push_text(ast, 0, atoms, clusters)
 }
 
