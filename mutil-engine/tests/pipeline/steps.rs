@@ -92,7 +92,7 @@ fn decoration_spans_compile_to_nested_boundaries_with_cloned_padding() {
             &LayoutOptions::default(),
         )
         .expect("the paragraph lays out");
-        ValidatedLayout::new(&p, text).expect("the output gate accepts it");
+        ValidatedLayout::try_from_paragraph(&p, text).expect("the output gate accepts it");
     }
 }
 
@@ -119,7 +119,7 @@ fn an_atomic_span_has_no_inner_caret_stop() {
         &LayoutOptions::default(),
     )
     .expect("the paragraph lays out");
-    ValidatedLayout::new(&p, text).expect("the output gate accepts it");
+    ValidatedLayout::try_from_paragraph(&p, text).expect("the output gate accepts it");
     assert!(
         p.lines[0]
             .caret_stops
@@ -425,7 +425,7 @@ fn fe15_space_separated_dashes_are_separate_runs_and_break_at_space() {
         &LayoutOptions::default(),
     )
     .expect("lays out");
-    ValidatedLayout::new(&p, text).expect("validates");
+    ValidatedLayout::try_from_paragraph(&p, text).expect("validates");
     assert_eq!(line_texts(&p, text), ["字 — ", "— a"]);
 
     // Each space-separated dash resolves its script independently rather than
@@ -720,7 +720,7 @@ fn named_baselines_align_runs_and_objects_to_the_strut() {
         &LayoutOptions::default(),
     )
     .expect("the paragraph lays out");
-    ValidatedLayout::new(&p, text).expect("the output gate accepts it");
+    ValidatedLayout::try_from_paragraph(&p, text).expect("the output gate accepts it");
     assert_close(glyph_y(&p, 0), 0.0);
     // The run's ideographic baseline moves onto the strut's: -3.0 - -1.2.
     assert_close(glyph_y(&p, 2), -1.8);
@@ -761,7 +761,7 @@ fn line_top_and_bottom_objects_sit_on_the_line_edges() {
         &LayoutOptions::default(),
     )
     .expect("the paragraph lays out");
-    ValidatedLayout::new(&p, text).expect("the output gate accepts it");
+    ValidatedLayout::try_from_paragraph(&p, text).expect("the output gate accepts it");
     let line = &p.lines[0];
     // The strut is 10.2 + 3.0; the 30-unit bottom object deepens the line
     // above the baseline to 27.0.
@@ -876,7 +876,8 @@ fn fe15_a_cjk_middle_dot_moves_to_the_next_line_with_the_ideograph_before_it() {
         &LayoutOptions::default(),
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    ValidatedLayout::new(&p, text).unwrap_or_else(|(line, e)| panic!("line {line}: {e}"));
+    ValidatedLayout::try_from_paragraph(&p, text)
+        .unwrap_or_else(|(line, e)| panic!("line {line}: {e}"));
     let lines = line_texts(&p, text);
     assert!(lines.len() >= 2, "{lines:?}");
     assert_eq!(lines[0], "间隔", "{lines:?}");

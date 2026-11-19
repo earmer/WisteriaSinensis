@@ -22,7 +22,7 @@ fn moved(m: CursorMove) -> usize {
 fn a_click_lands_on_the_nearest_grapheme_boundary() {
     let text = "abc";
     let p = lay_out(text, &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let y = 5.0;
     // Glyphs are 6 wide: the left half of `b` (6..9) maps to 1.
     for (x, offset) in [(0.5, 0), (2.9, 0), (3.1, 1), (8.0, 1), (9.5, 2), (17.0, 3)] {
@@ -42,7 +42,7 @@ fn a_click_past_a_wrapped_line_lands_upstream_at_its_visible_end() {
     // INT-8, INT-9.
     let text = "ab cd";
     let p = lay_out(text, &column(20.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let end_of_first = l.hit_test(Point { x: 19.0, y: 1.0 });
     assert_eq!(
         end_of_first.position,
@@ -64,7 +64,7 @@ fn a_click_past_a_wrapped_line_lands_upstream_at_its_visible_end() {
 fn caret_rectangles_span_the_line_box() {
     let text = "ab\u{2028}cd";
     let p = lay_out(text, &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let caret = l.caret_geometry(at(6));
     assert_close(caret.primary_rect.x, 6.0);
     assert_close(
@@ -80,7 +80,7 @@ fn caret_rectangles_span_the_line_box() {
 fn arrows_move_one_stop_and_exit_at_the_paragraph_edges() {
     let text = "ab cd";
     let p = lay_out(text, &column(20.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     assert_eq!(moved(l.move_cursor(at(0), Motion::Right, None)), 1);
     assert_eq!(
         l.move_cursor(at(0), Motion::Left, None),
@@ -124,7 +124,7 @@ fn arrows_move_one_stop_and_exit_at_the_paragraph_edges() {
 fn line_edges_and_block_motion() {
     let text = "ab cd";
     let p = lay_out(text, &column(20.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     assert_eq!(moved(l.move_cursor(at(1), Motion::LineStart, None)), 0);
     assert_eq!(
         l.move_cursor(at(0), Motion::LineEnd, None),
@@ -149,7 +149,7 @@ fn line_edges_and_block_motion() {
 fn word_motions_follow_word_boundaries() {
     let text = "one two three";
     let p = lay_out(text, &column(1000.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     assert_eq!(moved(l.move_cursor(at(0), Motion::WordNext, None)), 3);
     assert_eq!(moved(l.move_cursor(at(3), Motion::WordNext, None)), 4);
     assert_eq!(moved(l.move_cursor(at(5), Motion::WordPrevious, None)), 4);
@@ -160,7 +160,7 @@ fn word_motions_follow_word_boundaries() {
 fn a_combining_mark_moves_with_its_base() {
     let text = "e\u{301}x";
     let p = lay_out(text, &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     assert_eq!(moved(l.move_cursor(at(0), Motion::Right, None)), 3);
     assert_eq!(moved(l.move_cursor(at(0), Motion::Next, None)), 3);
 }
@@ -169,7 +169,7 @@ fn a_combining_mark_moves_with_its_base() {
 fn a_selection_is_one_rectangle_per_line_piece() {
     let text = "ab cd";
     let p = lay_out(text, &column(20.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     assert!(
         l.selection_geometry(&*SHAPER, TextRange::empty_at(2), BoxHeightStyle::Max)
             .is_empty()
@@ -204,7 +204,7 @@ fn a_tight_selection_follows_the_fonts_it_crosses() {
         &column(200.0),
         &LayoutOptions::default(),
     );
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let latin = l.selection_geometry(&*SCRIPT_SHAPER, TextRange::new(0, 2), BoxHeightStyle::Tight);
     let both = l.selection_geometry(&*SCRIPT_SHAPER, TextRange::new(0, 8), BoxHeightStyle::Tight);
     assert_eq!((latin.len(), both.len()), (1, 1));
@@ -232,7 +232,7 @@ fn a_tight_selection_inside_a_ligature_takes_its_font() {
     let ast = compile_paragraph(&paragraph, &FrontendOptions::default(), &*SCRIPT_SHAPER).unwrap();
     let (constraints, options) = (column(200.0), LayoutOptions::default());
     let p = layout_paragraph(&ast, text, &*SCRIPT_SHAPER, &constraints, &options).unwrap();
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let rect =
         |r: TextRange| l.selection_geometry(&*SCRIPT_SHAPER, r, BoxHeightStyle::Tight)[0].rect;
     let part = rect(TextRange::new(2, 3));
@@ -261,7 +261,7 @@ fn deletion_removes_marks_alone_and_emoji_objects_and_chips_whole() {
     };
     let ast = compile_paragraph(&paragraph, &FrontendOptions::default(), &*SHAPER).unwrap();
     let (constraints, options) = (column(200.0), LayoutOptions::default());
-    let inputs = ValidatedInputs::new(&ast, text, &constraints, &options).unwrap();
+    let inputs = ValidatedInputs::try_from_ast(&ast, text, &constraints, &options).unwrap();
     // Backspace after "e\u{301}" removes the mark alone; Delete before it
     // removes the whole atom.
     assert_eq!(inputs.delete_backward_range(3), TextRange::new(1, 3));
@@ -295,7 +295,7 @@ fn copying_keeps_or_strips_soft_hyphens() {
             soft_hyphen: policy,
             ..Default::default()
         };
-        let inputs = ValidatedInputs::new(&ast, text, &constraints, &options).unwrap();
+        let inputs = ValidatedInputs::try_from_ast(&ast, text, &constraints, &options).unwrap();
         assert_eq!(inputs.copied_text(TextRange::new(0, text.len())), expected);
     }
 }
@@ -345,7 +345,7 @@ fn with_object(
         ..Default::default()
     };
     let p = layout_paragraph(&ast, text, &*SHAPER, &column(200.0), &options).unwrap();
-    ValidatedLayout::new(&p, text).unwrap_or_else(|(l, e)| panic!("line {l}: {e}"));
+    ValidatedLayout::try_from_paragraph(&p, text).unwrap_or_else(|(l, e)| panic!("line {l}: {e}"));
     (text, p)
 }
 
@@ -405,7 +405,7 @@ fn int16_a_strut_selection_takes_the_resolved_strut_in_every_writing_mode() {
         ] {
             let p = in_mode(&horizontal, mode);
             let what = format!("{line_height:?} {mode:?}");
-            let l = ValidatedLayout::new(&p, text)
+            let l = ValidatedLayout::try_from_paragraph(&p, text)
                 .unwrap_or_else(|(line, e)| panic!("{what}: line {line}: {e}"));
             let line = &p.lines[0];
             let strut = p.policy.strut;
@@ -439,7 +439,7 @@ fn int16_a_strut_selection_takes_the_resolved_strut_in_every_writing_mode() {
 #[test]
 fn int16_a_tight_selection_takes_a_wholly_selected_objects_extent() {
     let (text, p) = with_object(30.0, 10.0, LineHeight::Normal);
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let line = &p.lines[0];
     // The object is taller and deeper than the monospace instance, so the
     // union is the object's extent wherever the object is selected whole:
@@ -480,7 +480,7 @@ fn int16_selection_rectangles_never_have_negative_height() {
             let (text, horizontal) = with_object(ascent, descent, line_height);
             for mode in [WritingMode::HorizontalTb, WritingMode::VerticalLr] {
                 let p = in_mode(&horizontal, mode);
-                let l = ValidatedLayout::new(&p, text).unwrap();
+                let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
                 for start in 0..text.len() {
                     for end in start + 1..=text.len() {
                         if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
@@ -508,7 +508,7 @@ fn int16_range_rects_of_a_later_line_cover_that_line_only() {
     let text = "ab cd ef";
     let p = lay_out(text, &column(20.0), &LayoutOptions::default());
     assert_eq!(line_texts(&p, text), ["ab ", "cd ", "ef"]);
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     for (range, index) in [(TextRange::new(3, 5), 1), (TextRange::new(6, 8), 2)] {
         let line = &p.lines[index];
         let rects = l.range_rects(range);
@@ -530,7 +530,8 @@ fn int7_a_point_maps_to_the_first_line_whose_bottom_lies_below_it() {
     p.lines[1].baseline_y += 5.0;
     p.lines[2].baseline_y += 10.0;
     p.total_block_size += 10.0;
-    let l = ValidatedLayout::new(&p, text).unwrap_or_else(|(line, e)| panic!("line {line}: {e}"));
+    let l = ValidatedLayout::try_from_paragraph(&p, text)
+        .unwrap_or_else(|(line, e)| panic!("line {line}: {e}"));
     let bounds: Vec<(f32, f32)> = p
         .lines
         .iter()
@@ -588,7 +589,7 @@ fn int12_an_inline_object_is_deleted_whole_from_either_side_and_from_inside() {
     };
     let ast = compile_paragraph(&paragraph, &FrontendOptions::default(), &*SHAPER).unwrap();
     let (constraints, options) = (column(200.0), LayoutOptions::default());
-    let inputs = ValidatedInputs::new(&ast, text, &constraints, &options).unwrap();
+    let inputs = ValidatedInputs::try_from_ast(&ast, text, &constraints, &options).unwrap();
     let object = TextRange::new(2, 5);
     for offset in [3, 4, 5] {
         assert_eq!(
@@ -621,7 +622,7 @@ fn int12_a_multibyte_atomic_span_is_deleted_whole_only_from_the_unit_inside_it()
     };
     let ast = compile_paragraph(&paragraph, &FrontendOptions::default(), &*SCRIPT_SHAPER).unwrap();
     let (constraints, options) = (column(200.0), LayoutOptions::default());
-    let inputs = ValidatedInputs::new(&ast, text, &constraints, &options).unwrap();
+    let inputs = ValidatedInputs::try_from_ast(&ast, text, &constraints, &options).unwrap();
     let inner = 3 + "李".len();
     for offset in [chip.end(), inner, 3] {
         assert_eq!(inputs.delete_backward_range(offset), chip, "back {offset}");

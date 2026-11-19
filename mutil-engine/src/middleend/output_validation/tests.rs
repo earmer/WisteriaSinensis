@@ -61,7 +61,7 @@ fn policy(ctx: &LineContext) -> LayoutPolicySnapshot {
 /// A slot `capacity` wide from `start`, with content from its start.
 fn slot(start: f32, visual_width: f32, capacity: f32) -> PositionedSlot {
     PositionedSlot {
-        constraint: InlineSlotConstraint::new(start, start + capacity).unwrap(),
+        constraint: InlineSlotConstraint::try_new(start, start + capacity).unwrap(),
         content_start: start,
         visual_width,
     }
@@ -653,7 +653,7 @@ fn caret_stop_levels_follow_their_owners() {
         ascent: 0.0,
         descent: 0.0,
         overflow_policy: BoxOverflowPolicy::AllowOverflow,
-        bidi_level: BidiLevel::new(2).unwrap(),
+        bidi_level: BidiLevel::try_new(2).unwrap(),
     };
     let tab = PositionedTab {
         byte_range: TextRange::new(2, 4),
@@ -666,7 +666,7 @@ fn caret_stop_levels_follow_their_owners() {
     l.caret_stops = vec![leveled(3, BidiLevel::RTL)];
     assert_eq!(l.validate(&ctx()), invalid(0));
     // Between the glyph and the object either level qualifies.
-    l.caret_stops = vec![leveled(1, BidiLevel::new(2).unwrap())];
+    l.caret_stops = vec![leveled(1, BidiLevel::try_new(2).unwrap())];
     assert_eq!(l.validate(&ctx()), Ok(()));
     l.caret_stops = vec![leveled(1, BidiLevel::RTL)];
     assert_eq!(l.validate(&ctx()), invalid(0));
@@ -832,7 +832,7 @@ impl ValidateAt for PositionedLine {
     fn validate_at(&self, w: f32) -> Result<(), LineInvariantError> {
         let mut l = self.clone();
         l.slots[0].constraint =
-            InlineSlotConstraint::new(l.slots[0].constraint.start(), w).unwrap();
+            InlineSlotConstraint::try_new(l.slots[0].constraint.start(), w).unwrap();
         PositionedLine::validate(&l, &wrap(w))
     }
 }
@@ -1126,11 +1126,11 @@ fn paragraph_validation_applies_the_wrap_width_to_every_line() {
     );
     let mut p = paragraph(&wrap(30.0), vec![two]);
     p.lines[0].slots[0].constraint =
-        InlineSlotConstraint::new(p.lines[0].slots[0].constraint.start(), 30.0).unwrap();
+        InlineSlotConstraint::try_new(p.lines[0].slots[0].constraint.start(), 30.0).unwrap();
     assert!(p.validate_geometry().is_ok());
     p.policy.wrap_width = 10.0;
     p.lines[0].slots[0].constraint =
-        InlineSlotConstraint::new(p.lines[0].slots[0].constraint.start(), 10.0).unwrap();
+        InlineSlotConstraint::try_new(p.lines[0].slots[0].constraint.start(), 10.0).unwrap();
     assert_eq!(
         p.validate_geometry(),
         Err((

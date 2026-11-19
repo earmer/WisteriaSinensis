@@ -319,5 +319,5 @@ pub(super) fn run_sequences(
 
 /// The level `level` as a [`BidiLevel`]; UAX #9 never exceeds its maximum.
 pub(super) fn checked_level(level: u8) -> BidiLevel {
-    BidiLevel::new(level).expect("UAX #9 levels never exceed BIDI_MAX_DEPTH + 1")
+    BidiLevel::try_new(level).expect("UAX #9 levels never exceed BIDI_MAX_DEPTH + 1")
 }

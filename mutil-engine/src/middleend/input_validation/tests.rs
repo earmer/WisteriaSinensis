@@ -1676,7 +1676,7 @@ fn flagged_hyphens_cloned_spans_synthetic_glue_and_terminators_are_enforced() {
     assert_eq!(check(build(6.0, 6.0, BidiLevel::LTR)), bad(0));
     assert_eq!(check(build(2.0, 2.0, BidiLevel::LTR)), bad(1));
     // A level 127 is not representable at all.
-    assert_eq!(BidiLevel::new(127), None);
+    assert_eq!(BidiLevel::try_new(127), None);
 
     // Half of a CRLF pair is not a terminator.
     let run_over = |text: &str, items: Vec<WordNode>| {

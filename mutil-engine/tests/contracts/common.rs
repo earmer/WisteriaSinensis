@@ -325,7 +325,7 @@ pub fn check(a: &ParagraphAst, t: &str) -> Result<(), LayoutInputError> {
 /// A slot `capacity` wide from `start`, with content from its start.
 pub fn slot(start: f32, visual_width: f32, capacity: f32) -> PositionedSlot {
     PositionedSlot {
-        constraint: InlineSlotConstraint::new(start, start + capacity).unwrap(),
+        constraint: InlineSlotConstraint::try_new(start, start + capacity).unwrap(),
         content_start: start,
         visual_width,
     }

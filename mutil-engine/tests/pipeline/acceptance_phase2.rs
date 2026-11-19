@@ -395,7 +395,7 @@ fn rm6_a_chip_over_two_rtl_lines_clones_or_slices_its_padding() {
 fn rm6_clicks_beyond_the_ends_of_an_rtl_line_take_its_extreme_stops() {
     let text = "אבג דהו";
     let p = lay_out_bidi(text, &[HEBREW], &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let line = &p.lines[0];
     let y = line.baseline_y;
     // Left of an RTL line is its end: the content there has the base
@@ -422,7 +422,7 @@ fn rm6_clicks_beyond_the_ends_of_an_rtl_line_take_its_extreme_stops() {
     // A wrapped line: past its left end is its visible end, upstream.
     let p = lay_out_bidi(text, &[HEBREW], &column(20.0), &LayoutOptions::default());
     assert_eq!(line_texts(&p, text), ["אבג ", "דהו"]);
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let hit = l.hit_test(Point {
         x: -50.0,
         y: p.lines[0].baseline_y,
@@ -448,7 +448,7 @@ fn rm6_clicks_beyond_the_ends_of_a_mixed_line_take_its_extreme_stops() {
     // the jump).
     let text = "abcאבג";
     let p = lay_out_bidi(text, &[HEBREW], &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let line = &p.lines[0];
     let y = line.baseline_y;
     let right = l.hit_test(Point { x: 500.0, y });
@@ -467,7 +467,7 @@ fn rm6_clicks_beyond_the_ends_of_a_mixed_line_take_its_extreme_stops() {
     // (offset 7, level 2), not the visible end 10.
     let text = "אבג abc";
     let p = lay_out_bidi(text, &[HEBREW], &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let y = p.lines[0].baseline_y;
     let left = l.hit_test(Point { x: -50.0, y });
     assert_eq!(
@@ -487,7 +487,7 @@ fn rm6_clicks_above_and_below_the_text_clamp_to_the_first_and_last_lines() {
     let text = "אבג דהו זחט";
     let p = lay_out_bidi(text, &[HEBREW], &column(20.0), &LayoutOptions::default());
     assert_eq!(p.lines.len(), 3);
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     for x in [-10.0, 5.0, 12.0, 30.0] {
         let above = l.hit_test(Point { x, y: -100.0 });
         assert!(!above.inside, "{x}");

@@ -88,7 +88,7 @@ fn int5_rtl_ligature_sub_slots_pair_gdef_carets_with_atoms_in_reverse() {
     assert_eq!(cluster_glyph_ids(&ast), [ligature]);
     assert_close(cluster.natural_width, 11.9);
     let p = lay_out_bidi_ast(&ast, text, &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let line = &p.lines[0];
     let left = glyph_at(line, 0).x;
     for (offset, dx) in [(12, 0.0), (10, 4.53), (4, 6.92), (2, 9.60), (0, 11.9)] {
@@ -110,7 +110,7 @@ fn cluster_glyph_ids(ast: &ParagraphAst) -> Vec<u32> {
 fn int11_the_primary_caret_follows_the_affinity_and_the_secondary_the_other() {
     let text = "abcאבג";
     let p = lay_out_bidi(text, &[HEBREW], &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let line = &p.lines[0];
     let x = |affinity| {
         line.caret_stops
@@ -161,7 +161,7 @@ fn int13_visual_arrows_skip_coincident_stops() {
     for text in ["abc אבג", "abcאבג", "אבג abc 123 דהו", "אבג abc \tdef"] {
         let p = lay_out_bidi(text, &[HEBREW], &column(300.0), &LayoutOptions::default());
         assert_eq!(p.lines.len(), 1, "{text}");
-        let l = ValidatedLayout::new(&p, text).unwrap();
+        let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
         let line = &p.lines[0];
         let rtl = p.base_direction == Direction::Rtl;
         for stop in &line.caret_stops {
@@ -201,7 +201,7 @@ fn int13_arrows_exit_by_the_visual_stops_not_by_offsets() {
     // the paragraph at its end although 3 is not the text's end.
     let text = "abcאבג";
     let p = lay_out_bidi(text, &[HEBREW], &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let exit = |edge| CursorMove::Exited {
         edge,
         inline_position: None,
@@ -217,7 +217,7 @@ fn int13_arrows_exit_by_the_visual_stops_not_by_offsets() {
     // RTL: right is the line start.
     let text = "אבג";
     let p = lay_out_bidi(text, &[HEBREW], &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     assert_eq!(
         l.move_cursor(down(0), Motion::Right, None),
         exit(ParagraphEdge::Start)
@@ -250,7 +250,7 @@ fn int13_visual_arrows_across_soft_wrap_with_bidi_boundary_advance() {
             &LayoutOptions::default(),
         );
         assert_eq!(line_texts(&p, text), expected_lines, "{text:?}");
-        let l = ValidatedLayout::new(&p, text).unwrap();
+        let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
 
         let total_stops: usize = p.lines.iter().map(|line| line.caret_stops.len()).sum();
         let stops_of = |line: &PositionedLine| -> Vec<CursorPosition> {
@@ -300,7 +300,7 @@ fn int16_selection_geometry_across_bidi_boundary_uses_non_zero_width_slot_level(
     // LTR base (level 0) + RTL Hebrew (level 1): boundary at byte 3.
     let text = "abcאבג";
     let p = lay_out_bidi(text, &[HEBREW], &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
 
     // Selecting only the RTL side starting at the boundary (3..9) must carry level 1,
     // not a zero-width boundary slot's level 0.
@@ -333,7 +333,7 @@ fn int16_selection_geometry_across_bidi_boundary_uses_non_zero_width_slot_level(
         &column(100.0),
         &LayoutOptions::default(),
     );
-    let l2 = ValidatedLayout::new(&p2, rtl_text).unwrap();
+    let l2 = ValidatedLayout::try_from_paragraph(&p2, rtl_text).unwrap();
     let emb_ltr = l2.selection_geometry(&*BIDI_SHAPER, TextRange::new(6, 9), BoxHeightStyle::Tight);
     assert_eq!(emb_ltr.len(), 1, "{emb_ltr:?}");
     assert_eq!(emb_ltr[0].level.get(), 2);
@@ -350,7 +350,7 @@ fn moved(m: CursorMove) -> usize {
 fn logical_and_word_motions_stay_logical_in_bidi_text() {
     let text = "אבג דהו";
     let p = lay_out_bidi(text, &[HEBREW], &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     assert_eq!(moved(l.move_cursor(down(0), Motion::Next, None)), 2);
     assert_eq!(moved(l.move_cursor(down(4), Motion::Previous, None)), 2);
     assert!(matches!(
@@ -385,7 +385,7 @@ fn logical_and_word_motions_stay_logical_in_bidi_text() {
     // On a mixed line, Next crosses the direction boundary logically.
     let text = "abcאבג";
     let p = lay_out_bidi(text, &[HEBREW], &column(100.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     assert_eq!(moved(l.move_cursor(down(2), Motion::Next, None)), 3);
     assert_eq!(moved(l.move_cursor(down(3), Motion::Next, None)), 5);
 }
@@ -529,7 +529,7 @@ fn the_output_gate_rejects_visual_runs_out_of_screen_order() {
     let runs = &mut p.lines[0].visual_runs;
     assert!(runs.len() >= 2, "{runs:#?}");
     runs.swap(0, 1);
-    match ValidatedLayout::new(&p, text) {
+    match ValidatedLayout::try_from_paragraph(&p, text) {
         Err((0, LineInvariantError::VisualRunsOutOfOrder { run })) => assert_eq!(run, 1),
         other => panic!("{:?}", other.err()),
     }

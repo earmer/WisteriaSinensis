@@ -76,7 +76,7 @@ pub type FamilyStack = Arc<[FontFamily]>;
 /// CSS-scale font weight: 1 to 1000, 400 normal, 700 bold.
 ///
 /// Parsed, not validated (spec §1.5, AX-3): the field is private and
-/// [`new`](Self::new) refuses a value outside the scale, so a weight that
+/// [`try_new`](Self::try_new) refuses a value outside the scale, so a weight that
 /// exists is in range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FontWeight(u16);
@@ -89,7 +89,7 @@ impl FontWeight {
 
     /// The weight `value`, or `None` outside `1..=1000`.
     #[must_use]
-    pub const fn new(value: u16) -> Option<Self> {
+    pub const fn try_new(value: u16) -> Option<Self> {
         if 1 <= value && value <= 1000 {
             Some(Self(value))
         } else {
@@ -144,7 +144,7 @@ pub struct FontFeature {
 /// One variable-font axis setting, for example `("wght", 650.0)` (spec §4.2
 /// req. 5: the cache key includes "variation settings").
 ///
-/// Parsed, not validated (spec §1.5, AX-3): [`new`](Self::new) refuses a
+/// Parsed, not validated (spec §1.5, AX-3): [`try_new`](Self::try_new) refuses a
 /// coordinate that is not finite and maps `-0.0` to `0.0`, so equality and
 /// hashing by bit pattern are sound and agree with numeric equality.
 #[derive(Clone, Copy, Debug)]
@@ -157,7 +157,7 @@ impl FontVariation {
     /// The setting of axis `tag` to `value`, with `-0.0` canonicalised to
     /// `0.0`; `None` unless `value` is finite.
     #[must_use]
-    pub const fn new(tag: [u8; 4], value: f32) -> Option<Self> {
+    pub const fn try_new(tag: [u8; 4], value: f32) -> Option<Self> {
         let value = if value == 0.0 { 0.0 } else { value };
         if value.is_finite() {
             Some(Self { tag, value })
@@ -349,11 +349,11 @@ mod tests {
 
     #[test]
     fn font_weight_is_parsed_onto_the_css_scale() {
-        assert_eq!(FontWeight::new(400), Some(FontWeight::NORMAL));
-        assert_eq!(FontWeight::new(1).map(FontWeight::get), Some(1));
-        assert_eq!(FontWeight::new(1000).map(FontWeight::get), Some(1000));
-        assert_eq!(FontWeight::new(0), None);
-        assert_eq!(FontWeight::new(1001), None);
+        assert_eq!(FontWeight::try_new(400), Some(FontWeight::NORMAL));
+        assert_eq!(FontWeight::try_new(1).map(FontWeight::get), Some(1));
+        assert_eq!(FontWeight::try_new(1000).map(FontWeight::get), Some(1000));
+        assert_eq!(FontWeight::try_new(0), None);
+        assert_eq!(FontWeight::try_new(1001), None);
         assert_eq!(FontWeight::default(), FontWeight::NORMAL);
     }
 
@@ -374,9 +374,9 @@ mod tests {
         f.push(*b"kern", 1);
         f.push(*b"chws", 1);
         f.push(*b"kern", 0); // later wins
-        f.push_variation(FontVariation::new(*b"wght", 400.0).unwrap());
-        f.push_variation(FontVariation::new(*b"wdth", 100.0).unwrap());
-        f.push_variation(FontVariation::new(*b"wght", 650.0).unwrap());
+        f.push_variation(FontVariation::try_new(*b"wght", 400.0).unwrap());
+        f.push_variation(FontVariation::try_new(*b"wdth", 100.0).unwrap());
+        f.push_variation(FontVariation::try_new(*b"wght", 650.0).unwrap());
         assert_eq!(
             f.as_slice(),
             &[
@@ -397,13 +397,13 @@ mod tests {
 
     #[test]
     fn a_variation_is_finite_by_construction() {
-        const WEIGHT: Option<FontVariation> = FontVariation::new(*b"wght", 400.0);
+        const WEIGHT: Option<FontVariation> = FontVariation::try_new(*b"wght", 400.0);
         assert!(WEIGHT.is_some());
         for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            assert_eq!(FontVariation::new(*b"wght", bad), None);
+            assert_eq!(FontVariation::try_new(*b"wght", bad), None);
         }
         assert_eq!(
-            FontVariation::new(*b"wght", 650.0).map(|v| v.value()),
+            FontVariation::try_new(*b"wght", 650.0).map(|v| v.value()),
             Some(650.0)
         );
     }
@@ -412,8 +412,8 @@ mod tests {
     fn variation_negative_zero_hashes_like_zero() {
         use std::hash::{BuildHasher, RandomState};
         let s = RandomState::new();
-        let a = FontVariation::new(*b"slnt", -0.0).unwrap();
-        let b = FontVariation::new(*b"slnt", 0.0).unwrap();
+        let a = FontVariation::try_new(*b"slnt", -0.0).unwrap();
+        let b = FontVariation::try_new(*b"slnt", 0.0).unwrap();
         assert_eq!(a, b);
         assert_eq!(s.hash_one(a), s.hash_one(b));
     }

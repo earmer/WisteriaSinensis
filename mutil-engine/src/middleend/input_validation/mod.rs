@@ -295,7 +295,7 @@ pub fn check_layout_inputs(
     constraints: &LayoutConstraints,
     options: &LayoutOptions,
 ) -> Result<(), LayoutInputError> {
-    super::ValidatedInputs::new(ast, text, constraints, options).map(drop)
+    super::ValidatedInputs::try_from_ast(ast, text, constraints, options).map(drop)
 }
 
 /// [`check_layout_inputs`], returning the policy it resolved on the way so

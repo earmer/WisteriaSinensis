@@ -144,7 +144,7 @@ fn rm4_emoji_sequences_move_the_caret_atomically() {
     let family = TextRange::new(1, 19);
     let flag = TextRange::new(19, 27);
     let p = lay_out(text, &column(200.0), &LayoutOptions::default());
-    let l = ValidatedLayout::new(&p, text).unwrap();
+    let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let next = |from: usize| match l.move_cursor(
         CursorPosition {
             byte_offset: from,
@@ -165,7 +165,7 @@ fn rm4_emoji_sequences_move_the_caret_atomically() {
     }
     let ast = compile(text);
     let (constraints, options) = (column(200.0), LayoutOptions::default());
-    let inputs = ValidatedInputs::new(&ast, text, &constraints, &options).unwrap();
+    let inputs = ValidatedInputs::try_from_ast(&ast, text, &constraints, &options).unwrap();
     assert_eq!(inputs.delete_backward_range(family.end()), family);
     assert_eq!(inputs.delete_forward_range(flag.start()), flag);
 }
@@ -232,7 +232,7 @@ fn rm4_a_mention_chip_is_one_caret_unit_wrapped_or_not() {
         let constraints = column(width);
         let options = LayoutOptions::default();
         let p = layout_paragraph(&ast, text, &*SHAPER, &constraints, &options).unwrap();
-        let l = ValidatedLayout::new(&p, text).unwrap();
+        let l = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
         let lines_holding: Vec<usize> = p
             .lines
             .iter()
@@ -255,7 +255,7 @@ fn rm4_a_mention_chip_is_one_caret_unit_wrapped_or_not() {
                 );
             }
         }
-        let inputs = ValidatedInputs::new(&ast, text, &constraints, &options).unwrap();
+        let inputs = ValidatedInputs::try_from_ast(&ast, text, &constraints, &options).unwrap();
         assert_eq!(inputs.delete_backward_range(chip.end()), chip);
         assert_eq!(inputs.delete_forward_range(chip.start()), chip);
     }

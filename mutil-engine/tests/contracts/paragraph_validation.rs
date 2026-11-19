@@ -131,7 +131,7 @@ fn the_policy_records_where_the_slots_came_from() {
     );
     assert_eq!(
         policy.slot_source.standard_slot(1, policy.wrap_width),
-        Some(InlineSlotConstraint::new(7., 100.).unwrap())
+        Some(InlineSlotConstraint::try_new(7., 100.).unwrap())
     );
     assert_eq!(SlotSource::Provider.standard_slot(0, 100.), None);
 }

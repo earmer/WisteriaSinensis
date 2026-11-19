@@ -51,7 +51,7 @@ impl LineGeometryProvider for Direct {
 
 fn slot(end: f32) -> LineGeometry {
     LineGeometry {
-        slots: [InlineSlotConstraint::new(0.0, end).unwrap()]
+        slots: [InlineSlotConstraint::try_new(0.0, end).unwrap()]
             .into_iter()
             .collect(),
         next_feature_block_offset: None,
@@ -91,7 +91,7 @@ fn lay_out_word(word: &str, unit: usize, constraints: &LayoutConstraints) -> Pos
         .expect("the frontend accepts the word");
     let paragraph = layout_paragraph(&ast, word, &*SHAPER, constraints, &LayoutOptions::default())
         .unwrap_or_else(|e| panic!("{word:?}: {e}"));
-    if let Err((line, error)) = ValidatedLayout::new(&paragraph, word) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&paragraph, word) {
         panic!("{word:?}: line {line}: {error}\n{paragraph:#?}");
     }
     paragraph
@@ -166,7 +166,7 @@ fn an_unbreakable_word_after_a_space_equals_a_fresh_fit() {
 fn a_narrowed_layout_passes_the_output_gate() {
     let word = "->".repeat(60);
     let p = assert_refit_equals_fresh_fit(&word, 2);
-    ValidatedLayout::new(&p, &word).expect("validates");
+    ValidatedLayout::try_from_paragraph(&p, &word).expect("validates");
     // Every byte is laid out exactly once, in order.
     let mut next = 0;
     for line in &p.lines {

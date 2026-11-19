@@ -14,7 +14,8 @@ fn unbounded_width_indent_and_clamp_options() {
     let mut empty_body = line();
     set_visual_width(&mut empty_body, 0.0);
     empty_body.slots[0].constraint =
-        InlineSlotConstraint::new(empty_body.slots[0].constraint.start(), f32::INFINITY).unwrap();
+        InlineSlotConstraint::try_new(empty_body.slots[0].constraint.start(), f32::INFINITY)
+            .unwrap();
     assert_eq!(empty_body.validate(&c), Ok(()));
     constraints.wrap_width = 10.0;
     constraints.first_line_indent = 10.0;
@@ -43,7 +44,7 @@ fn unbounded_width_indent_and_clamp_options() {
     // The first line's standard slot starts at the indent.
     assert_eq!(
         constraints.resolve_line_geometry(0, 0.0, 10.0).slots[..],
-        [InlineSlotConstraint::new(2.0, 10.0).unwrap()]
+        [InlineSlotConstraint::try_new(2.0, 10.0).unwrap()]
     );
     let c = LineContext::for_paragraph(&a, &constraints, &LayoutOptions::default(), 0).unwrap();
     assert_eq!(c.wrap_width, 10.0);
@@ -151,7 +152,7 @@ impl LineGeometryProvider for GrowingGeometry {
     fn query_line_geometry(&self, _: usize, _: f32, end: f32) -> LineGeometry {
         LineGeometry {
             slots: smallvec![
-                InlineSlotConstraint::new(0.0, if end > 10.0 { 200.0 } else { 100.0 }).unwrap()
+                InlineSlotConstraint::try_new(0.0, if end > 10.0 { 200.0 } else { 100.0 }).unwrap()
             ],
             next_feature_block_offset: None,
         }
@@ -187,13 +188,13 @@ fn provider_monotonicity_clearance_and_snapshots() {
         Err(LayoutInputError::NonMonotonicGeometry)
     );
     let previous = LineGeometry {
-        slots: smallvec![InlineSlotConstraint::new(0.0, 100.0).unwrap()],
+        slots: smallvec![InlineSlotConstraint::try_new(0.0, 100.0).unwrap()],
         next_feature_block_offset: None,
     };
     let split = LineGeometry {
         slots: smallvec![
-            InlineSlotConstraint::new(0.0, 20.0).unwrap(),
-            InlineSlotConstraint::new(40.0, 100.0).unwrap()
+            InlineSlotConstraint::try_new(0.0, 20.0).unwrap(),
+            InlineSlotConstraint::try_new(40.0, 100.0).unwrap()
         ],
         ..previous.clone()
     };
@@ -259,7 +260,7 @@ fn infinity_does_not_equal_finite_slot_capacity() {
     // Only an unbounded container admits an unbounded slot.
     let (mut l, c) = two_slots();
     l.slots[1].constraint =
-        InlineSlotConstraint::new(l.slots[1].constraint.start(), f32::INFINITY).unwrap();
+        InlineSlotConstraint::try_new(l.slots[1].constraint.start(), f32::INFINITY).unwrap();
     assert_eq!(
         l.validate(&c),
         Err(LineInvariantError::InvalidSlots {
@@ -267,7 +268,7 @@ fn infinity_does_not_equal_finite_slot_capacity() {
         })
     );
     // A slot whose width overflows is malformed, so it cannot be built.
-    assert_eq!(InlineSlotConstraint::new(-f32::MAX, f32::MAX), None);
+    assert_eq!(InlineSlotConstraint::try_new(-f32::MAX, f32::MAX), None);
 }
 
 #[test]
@@ -346,17 +347,17 @@ fn geometry_rejects_empty_without_progress_and_invalid_intervals() {
     }
     let mut geometry = LineGeometry {
         slots: smallvec![
-            InlineSlotConstraint::new(0.0, 100.0).unwrap(),
-            InlineSlotConstraint::new(90.0, 200.0).unwrap()
+            InlineSlotConstraint::try_new(0.0, 100.0).unwrap(),
+            InlineSlotConstraint::try_new(90.0, 200.0).unwrap()
         ],
         next_feature_block_offset: None,
     };
     assert!(!geometry.is_valid(0.0, 200.0));
-    geometry.slots[1] = InlineSlotConstraint::new(100.0, geometry.slots[1].end()).unwrap();
+    geometry.slots[1] = InlineSlotConstraint::try_new(100.0, geometry.slots[1].end()).unwrap();
     assert!(geometry.is_valid(0.0, 200.0));
     // Only an infinite container admits an infinite slot end.
     geometry.slots[1] =
-        InlineSlotConstraint::new(geometry.slots[1].start(), f32::INFINITY).unwrap();
+        InlineSlotConstraint::try_new(geometry.slots[1].start(), f32::INFINITY).unwrap();
     assert!(!geometry.is_valid(0.0, 200.0));
     assert!(geometry.is_valid(0.0, f32::INFINITY));
 }
@@ -370,7 +371,7 @@ struct OneSlot {
 impl LineGeometryProvider for OneSlot {
     fn query_line_geometry(&self, _: usize, _: f32, _: f32) -> LineGeometry {
         LineGeometry {
-            slots: smallvec![InlineSlotConstraint::new(self.start, self.end).unwrap()],
+            slots: smallvec![InlineSlotConstraint::try_new(self.start, self.end).unwrap()],
             next_feature_block_offset: None,
         }
     }
@@ -438,7 +439,7 @@ fn layout_options_and_tab_stops_reject_every_bad_float() {
             "line height {bad}"
         );
         // A bad tab step is not representable.
-        assert_eq!(TabStops::new(bad), None, "tab step {bad}");
+        assert_eq!(TabStops::try_new(bad), None, "tab step {bad}");
     }
     for bad in [f32::NAN, f32::NEG_INFINITY, 0.0, -1.0] {
         assert_eq!(

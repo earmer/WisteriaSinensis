@@ -50,7 +50,12 @@ fn orientation_and_tcy_matrix() {
         ),
     ] {
         let mut a = ast("a");
-        orient(&mut a, mode, orientation, BidiLevel::new(level).unwrap());
+        orient(
+            &mut a,
+            mode,
+            orientation,
+            BidiLevel::try_new(level).unwrap(),
+        );
         assert_eq!(
             check(&a, "a").is_ok(),
             valid,

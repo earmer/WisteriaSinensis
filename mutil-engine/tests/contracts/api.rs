@@ -74,7 +74,7 @@ fn atomic_fragment_snaps_to_full_span_not_wrapped_fragment() {
     assert_eq!(f.hit_test(1.).byte_offset, 20);
     assert_eq!(f.hit_test(5.).byte_offset, 0);
     // Even levels above 0 behave like level 0.
-    f.bidi_level = BidiLevel::new(2).unwrap();
+    f.bidi_level = BidiLevel::try_new(2).unwrap();
     assert_eq!(f.hit_test(1.).byte_offset, 0);
     assert_eq!(f.hit_test(5.).byte_offset, 20);
     // The midpoint is that of the fragment itself, wherever it sits on the line.
@@ -163,7 +163,7 @@ fn report_names_the_data_of_every_installed_unicode_component() {
 }
 #[test]
 fn font_instance_queries_accept_variations_without_changing_face_identity() {
-    let variations = [FontVariation::new(*b"wght", 650.).unwrap()];
+    let variations = [FontVariation::try_new(*b"wght", 650.).unwrap()];
     let instance = FontInstanceRef {
         font: FontRef::unscaled(FontId(7)),
         font_size: 18.,

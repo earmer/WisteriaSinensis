@@ -559,9 +559,9 @@ fn hanging_punctuation_fits_negative_x_and_synthesized_flag_round_trips() {
 #[test]
 fn font_variation_is_nameable_and_canonical() {
     let mut f = FontFeatures::default();
-    f.push_variation(FontVariation::new(*b"wght", 650.0).unwrap());
-    f.push_variation(FontVariation::new(*b"slnt", -0.0).unwrap());
+    f.push_variation(FontVariation::try_new(*b"wght", 650.0).unwrap());
+    f.push_variation(FontVariation::try_new(*b"slnt", -0.0).unwrap());
     let v: &[FontVariation] = f.variations();
-    assert_eq!(Some(v[1]), FontVariation::new(*b"wght", 650.0));
+    assert_eq!(Some(v[1]), FontVariation::try_new(*b"wght", 650.0));
     assert_eq!(v[0].value().to_bits(), 0.0_f32.to_bits());
 }

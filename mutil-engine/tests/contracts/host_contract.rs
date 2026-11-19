@@ -54,7 +54,7 @@ fn placed(mode: WritingMode, orientation: GlyphOrientation, baseline_y: f32) -> 
     let mut p = paragraph(&ctx(), vec![l]);
     p.policy.writing_mode = mode;
     p.total_block_size = 10.0;
-    let layout = ValidatedLayout::new(&p, "a").expect("valid output");
+    let layout = ValidatedLayout::try_from_paragraph(&p, "a").expect("valid output");
     let runs: Vec<_> = layout.glyph_runs().collect();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].line(), 0);
@@ -103,7 +103,7 @@ fn the_output_gate_rejects_unplaced_tate_chu_yoko() {
     p.policy.writing_mode = WritingMode::VerticalRl;
     p.total_block_size = 10.0;
     assert_eq!(
-        ValidatedLayout::new(&p, "a").map(drop),
+        ValidatedLayout::try_from_paragraph(&p, "a").map(drop),
         Err((0, LineInvariantError::UnplacedTateChuYoko { run: 0 }))
     );
 }
@@ -124,7 +124,7 @@ fn annotated(mode: WritingMode, orientation: GlyphOrientation, baseline_y: f32) 
     let mut p = paragraph(&ctx(), vec![l]);
     p.policy.writing_mode = mode;
     p.total_block_size = 13.0;
-    let layout = ValidatedLayout::new(&p, "a").expect("valid output");
+    let layout = ValidatedLayout::try_from_paragraph(&p, "a").expect("valid output");
     let runs: Vec<_> = layout.glyph_runs().collect();
     assert_eq!(runs.len(), 2);
     assert!(matches!(runs[0].source(), PlacedRunSource::Body(_)));
@@ -170,7 +170,7 @@ fn the_output_gate_rejects_overflowing_drawing_origins() {
     let mut p = paragraph(&ctx(), vec![l]);
     p.total_block_size = 3.1e38;
     assert_eq!(
-        ValidatedLayout::new(&p, "a").map(drop),
+        ValidatedLayout::try_from_paragraph(&p, "a").map(drop),
         Err((0, LineInvariantError::NonFiniteGlyph { run: 0, glyph: 0 }))
     );
 }

@@ -15,7 +15,7 @@ fn every_level_of_the_body_lies_at_or_above_the_base_level() {
         Err(LayoutInputError::InvalidBidiLevel { item: 0 })
     );
     // At level 1 or 2 it is not.
-    for level in [BidiLevel::RTL, BidiLevel::new(2).unwrap()] {
+    for level in [BidiLevel::RTL, BidiLevel::try_new(2).unwrap()] {
         orient(
             &mut a,
             WritingMode::HorizontalTb,
