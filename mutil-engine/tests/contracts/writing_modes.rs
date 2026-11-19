@@ -295,7 +295,7 @@ fn tcy_run_split_across_two_boxes_is_rejected() {
 #[test]
 fn tcy_box_covering_part_of_the_run_is_rejected() {
     let mut a = tcy_ast();
-    let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[0] else {
+    let WordNode::Box(BoxNode::Text(TextBox { atom_range, .. })) = &mut a.items[0] else {
         panic!("not a text box");
     };
     atom_range.end = 1;

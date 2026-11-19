@@ -9,7 +9,7 @@ use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_o
 use crate::frontend::{DiscretionaryNode, SpanEdge};
 use crate::middleend::{
     DecorationKind, DecorationLine, HangingWhitespaceMode, InlineSlotConstraint, LayoutInputError,
-    LineGeometry, PositionedLine, PositionedSlot, VisualGlyphRun,
+    OpenGeometry, PositionedLine, PositionedSlot, VisualGlyphRun,
 };
 use crate::types::{AtomFlags, BidiLevel, TextRange, WritingMode};
 use smallvec::SmallVec;
@@ -43,8 +43,8 @@ pub(super) struct PlacedLine<'a> {
     pub(super) order: Vec<usize>,
     pub(super) byte_range: TextRange,
     pub(super) bounds: LineBounds,
+    pub(super) start_break: Option<&'a DiscretionaryNode>,
     pub(super) end_break: Option<&'a DiscretionaryNode>,
-    pub(super) post: f32,
     hangs: LineHangs,
     is_justified: bool,
     block_top: f32,
@@ -120,12 +120,12 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// Places the line `(cursor.token_start, end]` in the first slot of `geometry`.
     pub(super) fn place(
         &mut self,
-        cursor: &LineCursor,
+        cursor: &LineCursor<'a>,
         end: LineEnd<'a>,
-        geometry: &LineGeometry,
+        geometry: &OpenGeometry,
         pending: &Reshapes,
     ) -> Result<PositionedLine, LayoutInputError> {
-        let slot = geometry.slots[0];
+        let slot = geometry.first_slot();
         let LineEndFacts {
             last_piece,
             end_break,
@@ -143,7 +143,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let order = visual_order(&placed[..body_len]);
 
         let rtl = self.base.is_rtl();
-        let post = cursor.post_break_width;
+        let post = cursor.post_break_width();
         let pads = Pads::new(rtl, pre, post);
         let first_line = cursor.first_line();
         let start = self.start_hang(&placed[..body_len], first_line, post, pending);
@@ -191,8 +191,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                     body_lo: pads.left,
                     body_hi: body_end,
                 },
+                start_break: cursor.start_break,
                 end_break,
-                post,
                 hangs,
                 is_justified,
                 block_top: cursor.block_top,
@@ -386,10 +386,10 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn build_line(
         &mut self,
         mut line: PlacedLine<'a>,
-        geometry: &LineGeometry,
+        geometry: &OpenGeometry,
         pending: &Reshapes,
     ) -> Result<PositionedLine, LayoutInputError> {
-        let slot = geometry.slots[0];
+        let slot = geometry.first_slot();
         let line_box =
             self.compute_line_box(&mut line.placed, &line.order, line.byte_range, slot)?;
         let VisualRuns {
@@ -418,6 +418,7 @@ impl<'i, 'a> Layout<'i, 'a> {
 
         // The line fills its first slot; the others stay empty (ME-2).
         let slots: SmallVec<[PositionedSlot; 1]> = geometry
+            .geometry()
             .slots
             .iter()
             .enumerate()

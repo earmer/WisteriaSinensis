@@ -8,8 +8,8 @@
 use super::{LayoutInputError, LineHeight, StrutMetrics};
 use crate::shaping::{ReshapeRequest, ShapeOutput, TextShaper};
 use crate::types::{
-    FontInstanceRef, FontMetrics, GraphemeAtom, RawShapedGlyph, ShapingRun, TextRange, WritingMode,
-    is_extent, is_measurement, natural_width,
+    FontInstanceRef, FontMetrics, RawShapedGlyph, ShapedCluster, WritingMode, is_extent,
+    is_measurement, natural_width,
 };
 
 /// The shaper's metrics for one font instance, checked against MSR-1 and
@@ -68,37 +68,33 @@ pub(crate) fn glyph_is_measured(glyph: &RawShapedGlyph) -> bool {
         .all(is_measurement)
 }
 
-/// Re-shape one cluster window with no edits and verify the shaper's reply
-/// (spec ST1-5, G2, MSR-1).
+/// Re-shape `cluster` by `request`, a plain request over its bytes, and
+/// verify the shaper's reply (spec ST1-5, G2, MSR-1).
 ///
 /// Returns the replacement glyphs and adjusted cluster width when the shaper
-/// produces a single cluster matching `expected_atom_range` with valid glyph
-/// bounds and measurements; otherwise returns `None` so callers keep the
-/// original shaping.
+/// produces a single cluster over `cluster`'s atoms, in its font instance
+/// (layout draws the glyphs under that instance), with valid glyph bounds and
+/// measurements; otherwise returns `None` so callers keep the original
+/// shaping.
 pub(crate) fn checked_reshape_window(
     shaper: &dyn TextShaper,
-    text: &str,
-    run: &ShapingRun,
-    atoms: &[GraphemeAtom],
-    window: TextRange,
-    expected_atom_range: core::ops::Range<usize>,
+    request: &ReshapeRequest<'_>,
+    cluster: &ShapedCluster,
 ) -> Option<(Vec<RawShapedGlyph>, f32)> {
     let mut output = ShapeOutput::default();
-    shaper.reshape_window(
-        &ReshapeRequest::plain(text, run, atoms, window),
-        &mut output,
-    );
+    shaper.reshape_window(request, &mut output);
     let ShapeOutput { clusters, glyphs } = output;
     let [only] = clusters.as_slice() else {
         return None;
     };
-    if only.atom_range != expected_atom_range
+    if only.atom_range != cluster.atom_range
+        || only.font != cluster.font
         || only.glyph_range != (0..glyphs.len())
         || !is_extent(only.natural_width)
         || !glyphs.iter().all(glyph_is_measured)
     {
         return None;
     }
-    let width = natural_width(&glyphs, run.letter_spacing);
+    let width = natural_width(&glyphs, request.run.letter_spacing);
     is_extent(width).then_some((glyphs, width))
 }

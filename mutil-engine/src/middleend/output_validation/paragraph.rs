@@ -1,6 +1,6 @@
 //! Paragraph-level validation for [`PositionedParagraph`].
 
-use crate::middleend::tolerance::tolerance;
+use crate::middleend::tolerance::{keeps_extent, tolerance};
 use crate::middleend::{LineInvariantError, ParagraphErrorReason, PositionedParagraph, validated};
 use crate::types::TextRange;
 use std::collections::{HashMap, HashSet};
@@ -52,12 +52,17 @@ impl PositionedParagraph {
                     .writing_mode
                     .line_bounds(line.baseline_y, line.ascent, line.descent);
             let eps = tolerance(line.line_height, 0.0);
+            // Bottoms ascend exactly: hit testing bisects them (spec INT-20).
             if !top.is_finite()
                 || !bottom.is_finite()
                 || top < previous_bottom - eps
                 || bottom < top
+                || bottom < previous_bottom
             {
                 return Err(R::LineBoxesOverlap.at(i));
+            }
+            if !keeps_extent(top, bottom, line.ascent + line.descent, line.line_height) {
+                return Err(R::LineBoxCollapsed.at(i));
             }
             if line.ascent + line.descent > line.line_height + eps {
                 return Err(R::LineBoxExceedsLineHeight.at(i));
@@ -97,6 +102,21 @@ impl PositionedParagraph {
         for (i, line) in self.lines.iter().enumerate() {
             if line.byte_range.start() != rendered_end || line.byte_range.slice(text).is_none() {
                 return Err(R::SourceNotCovered.at(i));
+            }
+            if let Some(index) = line
+                .caret_stops
+                .iter()
+                .position(|s| !text.is_char_boundary(s.offset))
+            {
+                return Err((i, LineInvariantError::InvalidCaretStop { index }));
+            }
+            // A hit inside an atomic fragment snaps to its span's ends
+            // (INT-10), which must be caret positions of the text.
+            if let Some(index) = line.atomic_fragments.iter().position(|f| {
+                f.full_byte_range.slice(text).is_none()
+                    || f.fragment_byte_range.slice(text).is_none()
+            }) {
+                return Err((i, LineInvariantError::InvalidAtomicFragment { index }));
             }
             if line.is_ellipsized && i != last {
                 return Err(R::InvalidTruncation.at(i));

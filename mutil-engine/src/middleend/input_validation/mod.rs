@@ -50,6 +50,10 @@ pub enum LayoutInputError {
     /// More than the allowed number of obstructed provider answers in a row
     /// for one line (spec GEO-4).
     ClearanceExhausted,
+    /// A line's block envelope cannot be represented at its block position:
+    /// `f32` rounding there loses more than an eighth of the line's height
+    /// (spec GEO-3).
+    BlockPositionUnrepresentable,
     /// One line still outgrew its envelope after the allowed refits
     /// (spec GEO-6).
     RefitExhausted,
@@ -323,20 +327,21 @@ pub(super) fn validate_layout_inputs(
 ) -> Result<LayoutPolicySnapshot, LayoutInputError> {
     let policy = LayoutPolicySnapshot::resolve(ast, constraints, options)?;
     check_no_paragraph_separator(text)?;
-    // Phase order is error precedence. `check_storage` and `check_spans`
-    // return the proofs that the later phases take as arguments.
+    // Phase order is error precedence. A phase that establishes what a later
+    // one relies on returns it as a proof that the later one takes.
     let boxes = storage::check_storage(ast)?;
     storage::check_presentation(ast, &boxes)?;
     spans::check_bidi_and_annotations(ast, text, &boxes)?;
     storage::check_runs(ast, text)?;
-    let ids = spans::check_spans(ast, text, &boxes)?;
+    let ids = spans::check_decoration_spans(ast, text)?;
+    spans::check_atomic_spans(ast, text, &boxes)?;
     items::check_items_fit(ast, text)?;
-    items::check_item_order(ast)?;
-    let spans = spans::SpanIndex::new(ast, &boxes);
+    let in_order = items::check_item_order(ast)?;
+    let spans = spans::SpanIndex::new(ast, &boxes, &in_order);
     items::check_each_item(ast, text, &boxes, &ids, &spans)?;
     items::check_paragraph_end(ast)?;
-    spans::check_boundary_order(ast, &ids)?;
-    spans::check_span_enclosure(ast, &spans, &ids)?;
+    let boundaries = spans::check_boundary_order(ast, &ids)?;
+    spans::check_span_enclosure(ast, &spans, &boundaries)?;
     storage::check_coverage(ast, text)?;
     Ok(policy)
 }

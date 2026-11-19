@@ -91,7 +91,7 @@ pub fn shape_of(ast: &ParagraphAst, text: &str) -> String {
     ast.items
         .iter()
         .map(|item| match item {
-            WordNode::Box(BoxNode::Text { byte_range, .. }) => {
+            WordNode::Box(BoxNode::Text(TextBox { byte_range, .. })) => {
                 format!("[{}]", &text[byte_range.as_range()])
             }
             WordNode::Box(BoxNode::InlineObject(InlineObjectBox { .. })) => "O".into(),

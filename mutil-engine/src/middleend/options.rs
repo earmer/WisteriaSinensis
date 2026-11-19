@@ -2,7 +2,7 @@
 
 use crate::frontend::is_line_or_paragraph_separator;
 use crate::middleend::tolerance::tolerance;
-use crate::middleend::{GeometryAnswer, HangSide, LayoutInputError, SlotSource};
+use crate::middleend::{HangSide, SlotSource};
 use crate::types::{Direction, FontMetrics, WritingMode, is_measurement};
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -338,38 +338,6 @@ impl LayoutConstraints {
             next_feature_block_offset: None,
         }
     }
-
-    /// [`resolve_line_geometry`](Self::resolve_line_geometry), validating a provider's
-    /// untrusted answer, optionally against the `previous` smaller envelope (spec GEO-3,
-    /// AX-3). The envelope must be finite and non-empty (debug-asserted only: it is
-    /// built from gated measurements, spec MSR-1).
-    ///
-    /// # Errors
-    /// `InvalidLineGeometry` for an answer outside the envelope, out of order or
-    /// stalling; `NonMonotonicGeometry` for one not within `previous`.
-    pub fn query_checked_geometry(
-        &self,
-        line_index: usize,
-        block_start: f32,
-        block_end: f32,
-        previous: Option<&LineGeometry>,
-    ) -> Result<GeometryAnswer, LayoutInputError> {
-        debug_assert!(
-            block_start.is_finite() && block_end.is_finite() && block_end > block_start,
-            "query_checked_geometry precondition violated (spec GEO-3)"
-        );
-        let geometry = self.resolve_line_geometry(line_index, block_start, block_end);
-        if self.geometry_provider.is_none() {
-            return Ok(GeometryAnswer::from_checked(geometry));
-        }
-        if !geometry.is_valid(block_start, self.wrap_width) || geometry.stalls(block_start) {
-            return Err(LayoutInputError::InvalidLineGeometry);
-        }
-        if previous.is_some_and(|p| !geometry.is_subset_of(p)) {
-            return Err(LayoutInputError::NonMonotonicGeometry);
-        }
-        Ok(GeometryAnswer::from_checked(geometry))
-    }
 }
 
 /// An available inline interval `[start, end)`; parsed, not validated (spec §1.5, AX-3).
@@ -461,7 +429,7 @@ impl LineGeometry {
 
     /// Whether a fully obstructed answer fails to advance at least
     /// `MIN_CLEARANCE_STEP` past `block_start` (spec GEO-4, G3).
-    fn stalls(&self, block_start: f32) -> bool {
+    pub(super) fn stalls(&self, block_start: f32) -> bool {
         self.slots.is_empty()
             && self
                 .next_feature_block_offset

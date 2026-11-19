@@ -180,32 +180,40 @@ fn answer(geometry: LineGeometry, block_start: f32) -> Result<GeometryAnswer, La
     let options = LayoutOptions::default();
     let validated = ValidatedInputs::try_from_ast(&ast, "a", &constraints, &options)
         .expect("the inputs are valid");
-    validated.line_geometry(0, block_start, block_start + 10.0, None)
+    validated.line_geometry(0, block_start, 10.0, None)
 }
 
 #[test]
 fn an_empty_answer_with_a_valid_offset_is_obstructed_with_its_clear_at() {
     assert_eq!(
-        answer(obstructed(Some(7.5)), 2.0),
-        Ok(GeometryAnswer::Obstructed { clear_at: 7.5 })
+        answer(obstructed(Some(7.5)), 2.0).map(|a| a.geometry()),
+        Ok(obstructed(Some(7.5)))
     );
+    assert!(matches!(
+        answer(obstructed(Some(7.5)), 2.0),
+        Ok(GeometryAnswer::Obstructed(c)) if c.clear_at() == 7.5
+    ));
 }
 
 #[test]
 fn a_non_empty_answer_is_open() {
     let open = one_slot(40.0);
     assert_eq!(
-        answer(open.clone(), 2.0),
-        Ok(GeometryAnswer::Open(open.clone()))
+        answer(open.clone(), 2.0).map(|a| a.geometry()),
+        Ok(open.clone())
     );
+    assert!(matches!(
+        answer(open.clone(), 2.0),
+        Ok(GeometryAnswer::Open(_))
+    ));
     // An offset on an open answer changes nothing.
     let with_offset = LineGeometry {
         next_feature_block_offset: Some(9.0),
         ..open
     };
     assert_eq!(
-        answer(with_offset.clone(), 2.0),
-        Ok(GeometryAnswer::Open(with_offset))
+        answer(with_offset.clone(), 2.0).map(|a| a.geometry()),
+        Ok(with_offset)
     );
 }
 

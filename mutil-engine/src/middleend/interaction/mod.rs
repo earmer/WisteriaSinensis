@@ -352,16 +352,23 @@ impl ValidatedLayout<'_> {
         }
         let stops = &line.caret_stops;
         let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
-            return HitResult {
-                position: CursorPosition {
+            // A line may have no stops, as one wholly inside an atomic span
+            // (CRT-1): it snaps to the span's ends.
+            let position = line.atomic_fragments.first().map_or(
+                CursorPosition {
                     byte_offset: line.byte_range.start(),
                     affinity: CaretAffinity::Downstream,
                 },
+                |fragment| fragment.hit_test(x),
+            );
+            return HitResult {
+                position,
                 inside: false,
             };
         };
-        // Beyond an edge: the extreme stop on that side (INT-8).
-        if x < first.x {
+        // Beyond an edge: the extreme stop on that side (INT-8). A position
+        // that is not a number lies beyond the left edge, never inside.
+        if x.is_nan() || x < first.x {
             let stop = line.extreme_caret_stop(HangSide::Left).unwrap_or(first);
             return HitResult {
                 position: stop_position(stop),
@@ -400,14 +407,22 @@ impl ValidatedLayout<'_> {
     #[must_use]
     pub fn caret_geometry(&self, position: CursorPosition) -> CaretVisual {
         let p = self.paragraph();
-        let (line, index) = self.locate(position);
-        let stops = &p.lines[line].caret_stops;
-        let (top, bottom) = line_block(p, line);
-        let rect = |x: f32| {
+        let rect_on = |line: usize, x: f32| {
+            let (top, bottom) = line_block(p, line);
             p.policy
                 .writing_mode
                 .flow_to_physical_rect(Rect::new(x, top, 0.0, bottom - top), p.total_block_size)
         };
+        let Some((line, index)) = self.locate(position) else {
+            // No line has a stop: the caret stands at the first line's start.
+            let x = p.lines[0].slots.first().map_or(0.0, |s| s.content_start);
+            return CaretVisual {
+                primary_rect: rect_on(0, x),
+                secondary_rect: None,
+            };
+        };
+        let rect = |x: f32| rect_on(line, x);
+        let stops = &p.lines[line].caret_stops;
         let primary = stops[index];
         let secondary = stops
             .iter()
@@ -435,8 +450,10 @@ impl ValidatedLayout<'_> {
 
     /// The line and caret stop that show `position`: a stop with its offset
     /// and affinity, else one with its offset, else the nearest offset
-    /// before it on the line that holds it.
-    fn locate(&self, position: CursorPosition) -> (usize, usize) {
+    /// before it on the line that holds it. A line may have no stops (CRT-1),
+    /// as one inside an atomic span: the nearest earlier line with stops
+    /// shows it, else the nearest later one. `None` when no line has stops.
+    fn locate(&self, position: CursorPosition) -> Option<(usize, usize)> {
         let lines = &self.paragraph().lines;
         let offset = position.byte_offset;
         let mut fallback = None;
@@ -444,19 +461,23 @@ impl ValidatedLayout<'_> {
             for (k, stop) in line.caret_stops.iter().enumerate() {
                 if stop.offset == offset {
                     if stop.affinity == position.affinity {
-                        return (i, k);
+                        return Some((i, k));
                     }
                     fallback.get_or_insert((i, k));
                 }
             }
         }
-        if let Some(found) = fallback {
-            return found;
+        if fallback.is_some() {
+            return fallback;
         }
-        let line = lines
+        let holder = lines
             .iter()
             .position(|l| offset < l.byte_range.end())
             .unwrap_or(lines.len() - 1);
+        let line = lines[..=holder]
+            .iter()
+            .rposition(PositionedLine::has_caret_stops)
+            .or_else(|| lines.iter().position(PositionedLine::has_caret_stops))?;
         let stops = &lines[line].caret_stops;
         let k = stops
             .iter()
@@ -465,7 +486,7 @@ impl ValidatedLayout<'_> {
             .max_by_key(|(_, s)| s.offset)
             .or_else(|| stops.iter().enumerate().min_by_key(|(_, s)| s.offset))
             .map_or(0, |(k, _)| k);
-        (line, k)
+        Some((line, k))
     }
 }
 

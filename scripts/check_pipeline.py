@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ratchet for the type-state pipeline refactor (ADR-0003).
+"""Ratchet for the type-state pipeline refactor (ADR-0003, ADR-0004).
 
 Counts the structural smells that the refactor removes and compares each count
 with its ceiling in `scripts/pipeline_ceilings.json`. A count above its ceiling
@@ -67,6 +67,9 @@ def metrics() -> dict[str, int]:
         # `#[unsafe(no_mangle)]` export attribute is not counted: Rust 2024
         # requires it on every ABI export, so it is not a smell.
         "unsafe_in_demo": count(DEMO, r"\bunsafe\s*(\{|fn\b|impl\b)"),
+        # Panics that rely on a gate behind them (ADR-0004 rule 5): each is
+        # an assumption a gate must prove; a query handles the rest totally.
+        "panics_behind_gates": count(under("middleend"), r"panic!\(|\.expect\("),
     }
 
 
@@ -79,6 +82,7 @@ TARGETS = {
     "occupied_slots_calls": 0,
     "is_hanging_field_uses": 0,
     "unsafe_in_demo": 0,
+    "panics_behind_gates": 0,
 }
 
 

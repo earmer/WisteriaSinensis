@@ -118,7 +118,8 @@ pub enum LineInvariantError {
         glyph: usize,
     },
     /// An atomic fragment's geometry is invalid; its bytes are
-    /// empty, outside the line or outside its span; or the fragments of its
+    /// empty, outside the line or outside its span; its bytes or its span's
+    /// lie outside the text or off a character boundary; or the fragments of its
     /// span on this line disagree about the span's range, overlap, or do not
     /// cover the part of the span on the line.
     InvalidAtomicFragment {
@@ -253,8 +254,9 @@ pub enum LineInvariantError {
         /// Index into `tabs`.
         index: usize,
     },
-    /// A caret stop has a non-finite `x`, is out of visual order, lies outside
-    /// the line's bytes, or has a bidi level that
+    /// A caret stop has a non-finite `x`, is out of visual order (exactly:
+    /// hit testing bisects the stops), lies outside the line's bytes or off a
+    /// character boundary of the text, or has a bidi level that
     /// no glyph, box or tab owning its offset has. At an offset no entity
     /// touches (glyph-less glue, an empty line) the level is the paragraph
     /// level or that of the nearest entity on either side (spec CRT-2).
@@ -369,9 +371,12 @@ pub enum ParagraphErrorReason {
     /// `total_block_size` is not finite, is negative, or ends above the last
     /// line's bottom.
     InvalidBlockSize,
-    /// A line box is not finite, is inverted, or starts above the previous
-    /// line's bottom.
+    /// A line box is not finite, is inverted, starts above the previous
+    /// line's bottom, or ends above it.
     LineBoxesOverlap,
+    /// A line box's span loses more than an eighth of `ascent + descent` to
+    /// `f32` rounding at its block position (spec GEO-3).
+    LineBoxCollapsed,
     /// A line's `ascent + descent` exceeds its `line_height`.
     LineBoxExceedsLineHeight,
     /// Under [`SlotSource::Standard`](super::SlotSource::Standard), a line's

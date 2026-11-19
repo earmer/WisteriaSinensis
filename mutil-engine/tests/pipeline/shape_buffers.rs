@@ -107,6 +107,7 @@ fn clu6_shp18_a_non_finite_hyphen_advance_is_forwarded_and_rejected_by_the_gate(
                 window: TextRange::new(0, 3),
                 leading_edit: &LeadingEdit::None,
                 trailing_edit: &TrailingEdit::AppendHyphen { hyphen: '-' },
+                context: TextRange::new(0, text.len()),
             },
             &mut out,
         );

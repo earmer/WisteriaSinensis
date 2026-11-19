@@ -96,6 +96,7 @@ fn test_pipeline_types_compile() {
             window: TextRange::new(0, 5),
             leading_edit: &LeadingEdit::None,
             trailing_edit: &TrailingEdit::AppendHyphen { hyphen: '-' },
+            context: TextRange::new(0, TEXT.len()),
         },
         &mut out,
     );
@@ -291,7 +292,7 @@ fn every_word_node_variant_is_constructible() {
     for n in &nodes {
         match n {
             WordNode::Box(b) => match b {
-                BoxNode::Text { .. }
+                BoxNode::Text(TextBox { .. })
                 | BoxNode::InlineObject(InlineObjectBox { .. })
                 | BoxNode::SpanBoundary { .. } => {}
             },
@@ -396,7 +397,7 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
         let mut ast = crate::common::ast("");
         rebuild_items(&mut ast, |ast| {
             let mut node = push_text(ast, 0, atoms, clusters);
-            if let WordNode::Box(BoxNode::Text { byte_range, .. }) = &mut node {
+            if let WordNode::Box(BoxNode::Text(TextBox { byte_range, .. })) = &mut node {
                 *byte_range = range;
             }
             vec![node]

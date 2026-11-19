@@ -460,9 +460,9 @@ fn the_input_gate_rejects_levels_below_the_rtl_base_level() {
         Err(LayoutInputError::InvalidBidiLevel { item: object })
     );
     // The Hebrew text box's run, atoms and clusters, all lowered to 0.
-    let hebrew = find(&|n| matches!(n, WordNode::Box(BoxNode::Text { .. })));
+    let hebrew = find(&|n| matches!(n, WordNode::Box(BoxNode::Text(TextBox { .. }))));
     let mut a = ast.clone();
-    let WordNode::Box(BoxNode::Text { run_index, .. }) = a.items[hebrew].clone() else {
+    let WordNode::Box(BoxNode::Text(TextBox { run_index, .. })) = a.items[hebrew].clone() else {
         unreachable!()
     };
     let run = &mut a.runs[run_index];

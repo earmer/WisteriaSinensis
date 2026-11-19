@@ -6,5 +6,6 @@
   "too_many_arguments": 0,
   "occupied_slots_calls": 0,
   "is_hanging_field_uses": 0,
-  "unsafe_in_demo": 0
+  "unsafe_in_demo": 0,
+  "panics_behind_gates": 0
 }

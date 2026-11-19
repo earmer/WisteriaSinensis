@@ -45,11 +45,11 @@ fn wn6_text_width_is_the_left_to_right_f32_sum_of_its_clusters() {
         let ast = compile_at(&text, font_size);
         let mut texts = 0;
         for item in &ast.items {
-            let WordNode::Box(BoxNode::Text {
+            let WordNode::Box(BoxNode::Text(TextBox {
                 cluster_range,
                 natural_width,
                 ..
-            }) = item
+            })) = item
             else {
                 continue;
             };

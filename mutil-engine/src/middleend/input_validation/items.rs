@@ -6,7 +6,7 @@ use super::{LayoutInputError, fits, in_byte_order, is_range_edge};
 use crate::frontend::{
     BoxDecorationBreak, BoxNode, BreakAction, DiscretionaryNode, GlueKind, GlueNode,
     HyphenOpportunity, InlineDecorationSpan, InlineObjectBox, MAX_DECORATION_NESTING_DEPTH,
-    ParagraphAst, SpanEdge, WordNode, is_word_space,
+    ParagraphAst, SpanEdge, TextBox, WordNode, is_word_space,
 };
 use crate::middleend::tolerance::{approx_eq, approx_eq_f64, tolerance};
 use crate::types::{BidiClass, BidiLevel, TextRange, is_extent, is_measurement};
@@ -53,7 +53,7 @@ pub(super) fn check_paragraph_end(ast: &ParagraphAst) -> Result<(), LayoutInputE
 /// offset a `CjkAutospace` glue precedes every break opportunity, as a
 /// breakable space's glue precedes its discretionary (so the spacing stays on
 /// the line that ends there): `[Glue(CjkAutospace), Discretionary]`.
-pub(super) fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
+pub(super) fn check_item_order(ast: &ParagraphAst) -> Result<ItemsInOrder, LayoutInputError> {
     let out_of_order = |w: &[WordNode]| w[0].byte_span().end() > w[1].byte_span().start();
     if let Some(i) = ast.items.windows(2).position(out_of_order) {
         return Err(LayoutInputError::ItemsOutOfOrder { item: i + 1 });
@@ -74,8 +74,12 @@ pub(super) fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputErro
             return Err(LayoutInputError::ItemsOutOfOrder { item });
         }
     }
-    Ok(())
+    Ok(ItemsInOrder(()))
 }
+
+/// Proof from [`check_item_order`] that the items' byte spans ascend (the
+/// atoms inside a box are proved in order later, by `check_each_item`).
+pub(super) struct ItemsInOrder(());
 
 /// Byte bounds of the **hyphen chain** of every text box, indexed by item
 /// (entries of other items are unspecified). A chain is a maximal sequence of
@@ -159,7 +163,7 @@ impl<'a> ItemChecks<'a> {
     /// The bidi level `node` carries, if it carries one.
     fn bidi_level(&self, node: &WordNode) -> Option<BidiLevel> {
         match node {
-            WordNode::Box(BoxNode::Text { run_index, .. }) => {
+            WordNode::Box(BoxNode::Text(TextBox { run_index, .. })) => {
                 Some(self.ast.runs[*run_index].bidi_level)
             }
             WordNode::Box(
@@ -181,10 +185,13 @@ impl<'a> ItemChecks<'a> {
             return Err(LayoutInputError::InvalidBidiLevel { item });
         }
         match node {
-            WordNode::Box(BoxNode::Text { run_index, .. }) => {
-                let run = &self.ast.runs[*run_index];
+            WordNode::Box(BoxNode::Text(text)) => {
+                let run = &self.ast.runs[text.run_index];
                 self.last_text_font_size = Some(run.font_size);
-                let view = self.boxes.view(item);
+                // Resolved from the matched box rather than read back from
+                // `boxes` by index, which would need an `Option` for a fact
+                // the match already states (pipeline rules 5 and 6).
+                let view = &self.ast.resolve(text);
                 let base = view.atom_start - run.atom_range.start;
                 check_text_payload(self.text, run, view, &self.ast.glyphs, base, item)
             }

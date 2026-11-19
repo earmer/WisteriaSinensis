@@ -27,8 +27,8 @@ use crate::frontend::{
 };
 use crate::middleend::shaper_gate::checked_line_box;
 use crate::middleend::{
-    GeometryAnswer, LayoutConstraints, LayoutInputError, LayoutOptions, LineHeight, PositionedLine,
-    PositionedParagraph, StrutMetrics, ValidatedInputs,
+    Clearance, GeometryAnswer, LayoutConstraints, LayoutInputError, LayoutOptions, LineHeight,
+    PositionedLine, PositionedParagraph, StrutMetrics, ValidatedInputs,
 };
 use crate::shaping::TextShaper;
 use crate::types::{BidiDirection, BidiLevel, FontMetrics, RawShapedGlyph, TextRange};
@@ -79,12 +79,15 @@ pub fn layout_paragraph(
 /// Advances `obstructed` past an obstructed provider answer that clears at
 /// `clear_at`, failing once more than [`MAX_CLEARANCE_PROBES`] obstructed
 /// attempts occur in a row (spec GEO-4).
-fn advance_clearance(obstructed: &mut usize, clear_at: f32) -> Result<f32, LayoutInputError> {
+fn advance_clearance(
+    obstructed: &mut usize,
+    clearance: Clearance,
+) -> Result<f32, LayoutInputError> {
     *obstructed += 1;
     if *obstructed > MAX_CLEARANCE_PROBES {
         return Err(LayoutInputError::ClearanceExhausted);
     }
-    Ok(clear_at)
+    Ok(clearance.clear_at())
 }
 
 /// Checks that a geometry provider offers the first line a place to start.
@@ -102,22 +105,17 @@ fn probe_first_line(
     let mut block_start = 0.0;
     let mut obstructed = 0;
     loop {
-        let probe = inputs.line_geometry(0, block_start, block_start + strut_height, None)?;
+        let probe = inputs.line_geometry(0, block_start, strut_height, None)?;
         if tallest > strut_height {
             // Contract check only: an expanded envelope must stay inside the
             // original one. Its contents do not decide whether the initial
             // position is legal.
-            inputs.line_geometry(
-                0,
-                block_start,
-                block_start + tallest,
-                Some(&probe.geometry()),
-            )?;
+            inputs.line_geometry(0, block_start, tallest, Some(&probe.geometry()))?;
         }
-        let GeometryAnswer::Obstructed { clear_at } = probe else {
+        let GeometryAnswer::Obstructed(clearance) = probe else {
             return Ok(());
         };
-        block_start = advance_clearance(&mut obstructed, clear_at)?;
+        block_start = advance_clearance(&mut obstructed, clearance)?;
     }
 }
 
@@ -133,6 +131,10 @@ fn tallest_first_line(
 ) -> Result<f32, LayoutInputError> {
     let ast = inputs.ast();
     let options = inputs.options();
+    // A fixed line box is the strut's whatever the line holds (ME-2).
+    if matches!(options.line_height, LineHeight::Fixed(_)) {
+        return Ok(strut_height);
+    }
     let first_break = ast
         .items
         .iter()
@@ -161,18 +163,15 @@ fn tallest_first_line(
             content_height = content_height.max(line_box.line_height());
         }
     }
-    // A fixed line box does not grow for annotations; they overflow it.
     let (mut over, mut under) = (0.0_f32, 0.0_f32);
-    if matches!(options.line_height, LineHeight::Normal) {
-        for annotation in ast
-            .annotations
-            .iter()
-            .filter(|annotation| annotation.base_byte_range.start() < content_end)
-        {
-            match annotation.side {
-                AnnotationSide::Over => over = over.max(annotation.block_extent),
-                AnnotationSide::Under => under = under.max(annotation.block_extent),
-            }
+    for annotation in ast
+        .annotations
+        .iter()
+        .filter(|annotation| annotation.base_byte_range.start() < content_end)
+    {
+        match annotation.side {
+            AnnotationSide::Over => over = over.max(annotation.block_extent),
+            AnnotationSide::Under => under = under.max(annotation.block_extent),
         }
     }
     Ok(content_height + over + under)
@@ -287,21 +286,22 @@ pub(super) struct PlacedPiece<'a> {
     pub(super) y_shift: f32,
 }
 
-/// Where the next line starts: its first token, the cloned padding before
-/// it, its first source byte, its block offset and its index.
-pub(super) struct LineCursor {
+/// Where the next line starts: its first token, the break it starts after
+/// (whose cloned spans open it), its first source byte, its block offset and
+/// its index.
+pub(super) struct LineCursor<'a> {
     pub(super) token_start: usize,
-    pub(super) post_break_width: f32,
+    pub(super) start_break: Option<&'a DiscretionaryNode>,
     pub(super) byte_start: usize,
     pub(super) block_top: f32,
     pub(super) index: usize,
 }
 
-impl LineCursor {
+impl<'a> LineCursor<'a> {
     fn paragraph_start() -> Self {
         Self {
             token_start: 0,
-            post_break_width: 0.0,
+            start_break: None,
             byte_start: 0,
             block_top: 0.0,
             index: 0,
@@ -312,18 +312,23 @@ impl LineCursor {
         self.index == 0
     }
 
+    /// The padding cloned before the line's first piece (spec ST2-3).
+    pub(super) fn post_break_width(&self) -> f32 {
+        self.start_break.map_or(0.0, |b| b.post_break_width)
+    }
+
     /// Moves past the line that ended at `end` and was `line_height` tall.
-    fn advance(&mut self, end: LineEnd<'_>, tokens: &[Token<'_>], line_height: f32) {
+    fn advance(&mut self, end: LineEnd<'a>, tokens: &[Token<'_>], line_height: f32) {
         self.block_top += line_height;
         self.index += 1;
         match end {
             LineEnd::At { token, brk } => {
-                self.post_break_width = brk.post_break_width;
+                self.start_break = Some(brk);
                 self.byte_start = brk.byte_range.end();
                 self.token_start = token + 1;
             }
             LineEnd::Before(token) => {
-                self.post_break_width = 0.0;
+                self.start_break = None;
                 self.byte_start = tokens[token].bytes().start();
                 self.token_start = token;
             }
@@ -383,28 +388,25 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// Probes geometry and refits until the line fits its envelope (spec GEO-3–6).
     fn place_next_line(
         &mut self,
-        cursor: &mut LineCursor,
+        cursor: &mut LineCursor<'a>,
     ) -> Result<(PositionedLine, LineEnd<'a>), LayoutInputError> {
         let strut_height = self.strut.line_height();
         let has_provider = self.inputs.constraints().geometry_provider.is_some();
         let mut obstructed = 0;
         'place: loop {
             let mut envelope = strut_height;
-            let answer = self.inputs.line_geometry(
-                cursor.index,
-                cursor.block_top,
-                cursor.block_top + envelope,
-                None,
-            )?;
+            let answer =
+                self.inputs
+                    .line_geometry(cursor.index, cursor.block_top, envelope, None)?;
             let mut geometry = match answer {
                 GeometryAnswer::Open(geometry) => geometry,
-                GeometryAnswer::Obstructed { clear_at } => {
-                    cursor.block_top = advance_clearance(&mut obstructed, clear_at)?;
+                GeometryAnswer::Obstructed(clearance) => {
+                    cursor.block_top = advance_clearance(&mut obstructed, clearance)?;
                     continue;
                 }
             };
             for _ in 0..MAX_ENVELOPE_REFITS {
-                let slot = geometry.slots[0];
+                let slot = geometry.first_slot();
                 let LineFit { end, reshapes } = self.fit(cursor, slot);
                 let line = self.place(cursor, end, &geometry, &reshapes)?;
                 if within(line.line_height, envelope) || !has_provider {
@@ -415,8 +417,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                 let expanded = self.inputs.line_geometry(
                     cursor.index,
                     cursor.block_top,
-                    cursor.block_top + envelope,
-                    Some(&geometry),
+                    envelope,
+                    Some(geometry.geometry()),
                 )?;
                 match expanded {
                     GeometryAnswer::Open(open) if open == geometry => {
@@ -424,8 +426,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                         return Ok((line, end));
                     }
                     GeometryAnswer::Open(open) => geometry = open,
-                    GeometryAnswer::Obstructed { clear_at } => {
-                        cursor.block_top = advance_clearance(&mut obstructed, clear_at)?;
+                    GeometryAnswer::Obstructed(clearance) => {
+                        cursor.block_top = advance_clearance(&mut obstructed, clearance)?;
                         continue 'place;
                     }
                 }
@@ -450,26 +452,23 @@ fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> Vec<Token<'a>> {
         .enumerate()
         .map(|(index, span)| (span.span_id, index))
         .collect();
-    for (index, item) in ast.items.iter().enumerate() {
+    for item in &ast.items {
         match item {
-            WordNode::Box(BoxNode::Text { cluster_range, .. }) => {
-                let view = inputs.text_view(index);
-                tokens.extend(
-                    cluster_range
-                        .clone()
-                        .zip(view.clusters)
-                        .map(|(cluster, info)| {
-                            Token::Piece(Piece {
-                                kind: PieceKind::Cluster {
-                                    run: view.run_index,
-                                    cluster,
-                                },
-                                bytes: info.byte_range,
-                                level: info.bidi_level,
-                                width: info.natural_width,
-                            })
-                        }),
-                );
+            WordNode::Box(BoxNode::Text(text)) => {
+                let view = inputs.text_view(text);
+                tokens.extend(text.cluster_range.clone().zip(view.clusters).map(
+                    |(cluster, info)| {
+                        Token::Piece(Piece {
+                            kind: PieceKind::Cluster {
+                                run: view.run_index,
+                                cluster,
+                            },
+                            bytes: info.byte_range,
+                            level: info.bidi_level,
+                            width: info.natural_width,
+                        })
+                    },
+                ));
             }
             WordNode::Box(BoxNode::InlineObject(object)) => tokens.push(Token::Piece(Piece {
                 kind: PieceKind::Object(object),

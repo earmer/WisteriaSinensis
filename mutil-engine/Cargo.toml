@@ -21,4 +21,5 @@ unsafe_code = "forbid"
 missing_docs = "warn"
 
 [dev-dependencies]
+proptest = { version = "1.7", default-features = false, features = ["std"] }
 stats_alloc = "0.1.10"

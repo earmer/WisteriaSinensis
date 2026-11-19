@@ -63,6 +63,8 @@ impl fmt::Debug for HarfRustShaper {
 /// Shared input/output target for shaping one run or window segment.
 struct ShapingTarget<'a> {
     text: &'a str,
+    /// The bytes of `text` readable as context; its edges are text edges.
+    context: TextRange,
     run: &'a ShapingRun,
     atoms: &'a [GraphemeAtom],
     output: &'a mut ShapeOutput,
@@ -191,13 +193,18 @@ impl HarfRustShaper {
         for (offset, c) in text[bytes.as_range()].char_indices() {
             buffer.push(c as u32, u32::try_from(offset).unwrap_or(u32::MAX));
         }
-        buffer.set_pre_context(context_before(text, bytes.start()));
-        buffer.set_post_context(context_after(text, bytes.end()));
+        let context = &text[..target.context.end()];
+        buffer.set_pre_context(context_before(
+            context,
+            target.context.start(),
+            bytes.start(),
+        ));
+        buffer.set_post_context(context_after(context, bytes.end()));
         let mut flags = BufferFlags::PRODUCE_UNSAFE_TO_CONCAT;
-        if bytes.start() == 0 {
+        if bytes.start() == target.context.start() {
             flags |= BufferFlags::BEGINNING_OF_TEXT;
         }
-        if bytes.end() == text.len() {
+        if bytes.end() == target.context.end() {
             flags |= BufferFlags::END_OF_TEXT;
         }
         buffer.set_flags(flags);
@@ -324,8 +331,8 @@ fn raw_glyph(
     }
 }
 
-fn context_before(text: &str, at: usize) -> &str {
-    let mut start = at.saturating_sub(CONTEXT_BYTES);
+fn context_before(text: &str, from: usize, at: usize) -> &str {
+    let mut start = at.saturating_sub(CONTEXT_BYTES).max(from);
     while !text.is_char_boundary(start) {
         start += 1;
     }
@@ -426,6 +433,7 @@ impl TextShaper for HarfRustShaper {
         let mut buffer = Buffer::new();
         let mut target = ShapingTarget {
             text,
+            context: TextRange::new(0, text.len()),
             run,
             atoms,
             output,
@@ -444,6 +452,7 @@ impl TextShaper for HarfRustShaper {
             window,
             leading_edit,
             trailing_edit,
+            context,
         } = *request;
         let Some(plan) = plan_window(atoms, window, leading_edit, trailing_edit) else {
             return;
@@ -464,6 +473,7 @@ impl TextShaper for HarfRustShaper {
                     let mut buffer = Buffer::new();
                     let mut target = ShapingTarget {
                         text,
+                        context,
                         run,
                         atoms,
                         output: &mut *output,

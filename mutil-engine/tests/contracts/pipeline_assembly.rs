@@ -405,6 +405,7 @@ fn shaping_bridge_applies_both_spelling_edits() {
             window: TextRange::new(0, 3),
             leading_edit: &LeadingEdit::None,
             trailing_edit: &trailing_edit.clone(),
+            context: TextRange::new(0, TEXT.len()),
         },
         &mut out,
     );
@@ -416,6 +417,7 @@ fn shaping_bridge_applies_both_spelling_edits() {
             window: TextRange::new(3, 7),
             leading_edit: &leading_edit.clone(),
             trailing_edit: &TrailingEdit::None,
+            context: TextRange::new(0, TEXT.len()),
         },
         &mut out,
     );
@@ -428,6 +430,7 @@ fn shaping_bridge_applies_both_spelling_edits() {
             window: TextRange::new(3, 7),
             leading_edit: &leading_edit,
             trailing_edit: &trailing_edit,
+            context: TextRange::new(0, TEXT.len()),
         },
         &mut out,
     );
@@ -445,7 +448,7 @@ fn untaken_hyphenation_seam_is_rejoined_only_when_unsafe_to_concat() {
     );
 
     // The frontend split a multi-atom cluster here: the seam is unsafe.
-    let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &ast.items[2] else {
+    let WordNode::Box(BoxNode::Text(TextBox { cluster_range, .. })) = &ast.items[2] else {
         panic!("items[2] is a text box");
     };
     let first_cluster = cluster_range.start;

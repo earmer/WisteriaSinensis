@@ -118,13 +118,13 @@ fn shp5_horizontal_in_vertical_shapes_into_one_valid_cluster() {
         clusters,
         glyphs,
         items: vec![
-            WordNode::Box(BoxNode::Text {
+            WordNode::Box(BoxNode::Text(TextBox {
                 run_index: 0,
                 byte_range: TextRange::new(0, 2),
                 atom_range: 0..2,
                 cluster_range: 0..1,
                 natural_width,
-            }),
+            })),
             WordNode::Discretionary(DiscretionaryNode::paragraph_end(2)),
         ],
         decoration_spans: Vec::new(),

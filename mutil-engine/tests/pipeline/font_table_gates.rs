@@ -37,10 +37,6 @@ fn add(bytes: Vec<u8>) -> Option<FontId> {
 }
 
 const UNITS_PER_EM: usize = 18;
-const HHEA_ASCENDER: usize = 4;
-const HHEA_DESCENDER: usize = 6;
-const OS2_TYPO_ASCENDER: usize = 68;
-const OS2_TYPO_DESCENDER: usize = 70;
 
 #[test]
 fn shp21_the_unpatched_font_registers() {
@@ -126,46 +122,74 @@ fn lay_out_in_bad_face(
     )
 }
 
-/// Both tables the line metrics may come from (SHP-23: OS/2 typo metrics
-/// under `USE_TYPO_METRICS`, else `hhea`) get the same number, so the test
-/// does not depend on which one the face selects.
-fn with_metrics(ascender: i16, descender: i16) -> Vec<u8> {
-    let mut bytes = FONT_BYTES.to_vec();
-    for (tag, offset, value) in [
-        (b"hhea", HHEA_ASCENDER, ascender),
-        (b"hhea", HHEA_DESCENDER, descender),
-        (b"OS/2", OS2_TYPO_ASCENDER, ascender),
-        (b"OS/2", OS2_TYPO_DESCENDER, descender),
-    ] {
-        bytes = patched(&bytes, tag, offset, value.to_be_bytes());
-    }
-    bytes
-}
-
 #[test]
 fn shp18_fnt4_the_unpatched_bad_family_lays_out() {
     let shaper = shaper_with_bad_face(FONT_BYTES.to_vec());
     assert!(lay_out_in_bad_face(&shaper, "abc").is_ok());
 }
 
-#[test]
-fn shp18_fnt4_a_negative_ascent_is_rejected_at_the_shaper_gate() {
-    // The font's descender is about -300 units, so the ascent plus descent
-    // stays positive: only the sign of the ascent is wrong.
-    let shaper = shaper_with_bad_face(with_metrics(-100, -300));
-    assert_eq!(
-        lay_out_in_bad_face(&shaper, "abc").map(drop),
-        Err(LayoutInputError::InvalidShaperMetrics)
-    );
+/// Offsets of the line metrics SHP-23 reads: `hhea` ascender and
+/// descender, OS/2 `sTypoAscender` and `sTypoDescender`. The test font sets
+/// `USE_TYPO_METRICS`, so the typo pair is the one used; both are patched.
+const HHEA_ASCENDER: usize = 4;
+const HHEA_DESCENDER: usize = 6;
+const TYPO_ASCENDER: usize = 68;
+const TYPO_DESCENDER: usize = 70;
+
+/// The test font with `ascender` and `descender` stored in both `hhea` and
+/// the OS/2 typo metrics, signs as given.
+fn with_line_metrics(ascender: i16, descender: i16) -> Vec<u8> {
+    let bytes = patched(FONT_BYTES, b"hhea", HHEA_ASCENDER, ascender.to_be_bytes());
+    let bytes = patched(&bytes, b"hhea", HHEA_DESCENDER, descender.to_be_bytes());
+    let bytes = patched(&bytes, b"OS/2", TYPO_ASCENDER, ascender.to_be_bytes());
+    patched(&bytes, b"OS/2", TYPO_DESCENDER, descender.to_be_bytes())
+}
+
+/// The metrics of the `Bad` face (id 1) at 10 units per em.
+fn bad_face_metrics(shaper: &HarfRustShaper) -> FontMetrics {
+    shaper.font_metrics(FontInstanceRef {
+        font: FontRef::unscaled(FontId(1)),
+        font_size: 10.0,
+        variations: &[],
+    })
 }
 
 #[test]
-fn shp18_fnt4_a_negative_descent_is_rejected_at_the_shaper_gate() {
-    // `hhea` stores the descender positive towards line-over: a positive
-    // value of 100 is a descent of -100 below the baseline.
-    let shaper = shaper_with_bad_face(with_metrics(1000, 100));
-    assert_eq!(
-        lay_out_in_bad_face(&shaper, "abc").map(drop),
-        Err(LayoutInputError::InvalidShaperMetrics)
-    );
+fn shp23_a_descender_stored_positive_is_read_by_its_size() {
+    // 1000 units per em at size 10: 2000 units are 20, 500 units are 5.
+    let usual = shaper_with_bad_face(with_line_metrics(2000, -500));
+    let positive = shaper_with_bad_face(with_line_metrics(2000, 500));
+    for (name, shaper) in [("usual", &usual), ("positive", &positive)] {
+        let metrics = bad_face_metrics(shaper);
+        assert_close(metrics.ascent, 20.0);
+        assert_close(metrics.descent, 5.0);
+        let p = lay_out_in_bad_face(shaper, "abc").unwrap_or_else(|e| panic!("{name}: {e}"));
+        if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&p, "abc") {
+            panic!("{name}: line {line}: {error}");
+        }
+        // The face is taller than the strut, so it sets the line box.
+        assert_close(p.lines[0].ascent, 20.0);
+        assert_close(p.lines[0].descent, 5.0);
+    }
+    assert_eq!(bad_face_metrics(&usual), bad_face_metrics(&positive));
+}
+
+#[test]
+fn shp23_a_small_positive_descender_lays_out() {
+    let shaper = shaper_with_bad_face(with_line_metrics(1000, 100));
+    let metrics = bad_face_metrics(&shaper);
+    assert_close(metrics.ascent, 10.0);
+    assert_close(metrics.descent, 1.0);
+    assert!(lay_out_in_bad_face(&shaper, "abc").is_ok());
+}
+
+#[test]
+fn shp23_a_negative_ascender_is_read_by_its_size() {
+    let shaper = shaper_with_bad_face(with_line_metrics(-2000, -500));
+    let metrics = bad_face_metrics(&shaper);
+    assert_close(metrics.ascent, 20.0);
+    assert_close(metrics.descent, 5.0);
+    let p = lay_out_in_bad_face(&shaper, "abc").unwrap_or_else(|e| panic!("{e}"));
+    assert!(ValidatedLayout::try_from_paragraph(&p, "abc").is_ok());
+    assert_close(p.lines[0].ascent, 20.0);
 }

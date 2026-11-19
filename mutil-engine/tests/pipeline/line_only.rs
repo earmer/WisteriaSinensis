@@ -241,6 +241,7 @@ fn a_window_takes_its_edits_as_synthesized_glyphs() {
             window: TextRange::new(0, 3),
             leading_edit: &LeadingEdit::None,
             trailing_edit: &TrailingEdit::AppendHyphen { hyphen: '-' },
+            context: TextRange::new(0, text.len()),
         },
         &mut out,
     );
@@ -342,13 +343,13 @@ fn shp5_line_only_horizontal_in_vertical_shapes_into_one_valid_cluster() {
         clusters,
         glyphs,
         items: vec![
-            WordNode::Box(BoxNode::Text {
+            WordNode::Box(BoxNode::Text(TextBox {
                 run_index: 0,
                 byte_range: TextRange::new(0, 2),
                 atom_range: 0..2,
                 cluster_range: 0..1,
                 natural_width,
-            }),
+            })),
             WordNode::Discretionary(DiscretionaryNode::paragraph_end(2)),
         ],
         decoration_spans: Vec::new(),
@@ -493,6 +494,7 @@ fn shp6_line_only_horizontal_in_vertical_leading_cut_takes_the_first_kept_face()
                 cut_bytes: 1,
             },
             trailing_edit: &TrailingEdit::None,
+            context: TextRange::new(0, text.len()),
         },
         &mut out,
     );
@@ -650,6 +652,7 @@ fn shp6_trailing_cut_atom_takes_the_last_kept_face() {
                 cut_bytes: 1,
                 hyphen: '-',
             },
+            context: TextRange::new(0, text.len()),
         },
         &mut out,
     );
@@ -683,6 +686,7 @@ fn shp6_leading_cut_atom_takes_the_first_kept_face_not_the_replacements() {
                 cut_bytes: 1,
             },
             trailing_edit: &TrailingEdit::None,
+            context: TextRange::new(0, text.len()),
         },
         &mut out,
     );

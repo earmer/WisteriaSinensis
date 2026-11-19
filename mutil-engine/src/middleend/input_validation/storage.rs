@@ -2,7 +2,7 @@
 
 use super::{LayoutInputError, fits};
 use crate::frontend::{
-    BoxNode, ParagraphAst, ShapingRun, TextBoxView, WordNode, text_is_self_contained,
+    BoxNode, ParagraphAst, ShapingRun, TextBox, TextBoxView, WordNode, text_is_self_contained,
 };
 use crate::middleend::shaper_gate::glyph_is_measured;
 use crate::types::{
@@ -75,13 +75,13 @@ pub(super) fn check_storage(ast: &ParagraphAst) -> Result<TextBoxes<'_>, LayoutI
         .collect();
     let mut boxes = Vec::with_capacity(ast.items.len());
     for (item, node) in ast.items.iter().enumerate() {
-        let WordNode::Box(BoxNode::Text {
+        let WordNode::Box(BoxNode::Text(TextBox {
             run_index,
             byte_range,
             atom_range,
             cluster_range,
             natural_width,
-        }) = node
+        })) = node
         else {
             boxes.push(None);
             continue;
@@ -247,16 +247,6 @@ impl<'a> TextBoxes<'a> {
     /// The text box at `items[item]`, or `None` if that item is not one.
     pub(super) fn get(&self, item: usize) -> Option<&TextBoxView<'a>> {
         self.0.get(item)?.as_ref()
-    }
-
-    /// The text box at `items[item]`, for an item the caller matched as a
-    /// [`BoxNode::Text`]: `check_storage` produced one for each.
-    ///
-    /// # Panics
-    /// When `items[item]` is not a text box.
-    pub(super) fn view(&self, item: usize) -> &TextBoxView<'a> {
-        self.get(item)
-            .unwrap_or_else(|| panic!("items[{item}] is not a text box"))
     }
 
     /// Every text box, in item order.

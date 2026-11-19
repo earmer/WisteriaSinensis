@@ -354,7 +354,7 @@ impl PositionedLine {
                 .collect(),
         );
         for (index, stop) in self.caret_stops.iter().enumerate() {
-            let in_order = index == 0 || !approx_lt(stop.x, self.caret_stops[index - 1].x);
+            let in_order = index == 0 || stop.x >= self.caret_stops[index - 1].x;
             let level_is_owned = || {
                 let mut owners = glyphs
                     .touching(stop.offset)

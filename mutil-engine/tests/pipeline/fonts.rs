@@ -204,6 +204,7 @@ fn window_edits_append_and_replace_with_synthesized_glyphs() {
                 window,
                 leading_edit: &leading,
                 trailing_edit: &trailing,
+                context: TextRange::new(0, text.len()),
             },
             &mut out,
         );
@@ -279,6 +280,7 @@ fn shp6_a_cut_cluster_takes_the_face_of_the_nearest_kept_cluster() {
                 window,
                 leading_edit: &leading,
                 trailing_edit: &trailing,
+                context: TextRange::new(0, text.len()),
             },
             &mut out,
         );

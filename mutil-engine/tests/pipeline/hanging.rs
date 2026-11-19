@@ -188,7 +188,7 @@ fn natural_before(ast: &ParagraphAst, end: usize) -> f32 {
         .iter()
         .filter(|item| item.byte_span().end() <= end)
         .map(|item| match item {
-            WordNode::Box(BoxNode::Text { natural_width, .. }) => *natural_width,
+            WordNode::Box(BoxNode::Text(TextBox { natural_width, .. })) => *natural_width,
             WordNode::Glue(g) => g.natural_width,
             _ => 0.0,
         })

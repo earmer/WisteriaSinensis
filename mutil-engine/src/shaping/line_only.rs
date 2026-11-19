@@ -293,6 +293,9 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
             window,
             leading_edit,
             trailing_edit,
+            // The backend shapes each string without context (SHP-24), so
+            // every window edge already reads as a text edge.
+            context: _,
         } = *request;
         let Some(plan) = plan_window(atoms, window, leading_edit, trailing_edit) else {
             return;

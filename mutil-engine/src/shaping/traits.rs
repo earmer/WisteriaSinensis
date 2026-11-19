@@ -134,6 +134,11 @@ pub struct ReshapeRequest<'a> {
     pub leading_edit: &'a LeadingEdit,
     /// The edit at the window's end.
     pub trailing_edit: &'a TrailingEdit,
+    /// The bytes of `text` the backend may read as shaping context around
+    /// the window (SHP-3), holding the window; an edge of it that is not an
+    /// edge of `text` reads as one. A seam re-shape bounds it at the seam, so
+    /// the seam shapes as the line edge it becomes (ST1-5).
+    pub context: TextRange,
 }
 
 impl<'a> ReshapeRequest<'a> {
@@ -153,6 +158,7 @@ impl<'a> ReshapeRequest<'a> {
             window,
             leading_edit: &LeadingEdit::None,
             trailing_edit: &TrailingEdit::None,
+            context: TextRange::new(0, text.len()),
         }
     }
 }

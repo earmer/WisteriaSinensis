@@ -104,7 +104,7 @@ export function createRenderer(canvas) {
         ctx.lineWidth = 1;
         for (const [start, end] of line.columns ?? []) {
           if (end !== null) {
-            ctx.strokeRect(start + 0.5, line.top + 0.5, end - start - 1, line.height - 1);
+            strokeInside(ctx, start, end, line);
           }
         }
         ctx.restore();
@@ -114,7 +114,7 @@ export function createRenderer(canvas) {
           ctx.fillRect(start, line.top, end - start, line.height);
           ctx.strokeStyle = 'rgba(214, 140, 30, 0.8)';
           ctx.lineWidth = 1;
-          ctx.strokeRect(start + 0.5, line.top + 0.5, end - start - 1, line.height - 1);
+          strokeInside(ctx, start, end, line);
         }
       }
       for (const [start, end] of line.slots) {
@@ -123,7 +123,7 @@ export function createRenderer(canvas) {
           ctx.fillRect(start, line.top, end - start, line.height);
           ctx.strokeStyle = 'rgba(79, 112, 189, 0.35)';
           ctx.lineWidth = 1;
-          ctx.strokeRect(start + 0.5, line.top + 0.5, end - start - 1, line.height - 1);
+          strokeInside(ctx, start, end, line);
         }
         if (guides.baselines) {
           ctx.save();
@@ -259,4 +259,18 @@ export function createRenderer(canvas) {
   }
 
   return { drawPage, drawPlaceholder };
+}
+
+/**
+ * Strokes a one-pixel outline just inside `[start, end)` over the line box.
+ * An interval narrower than the line width is drawn as a hairline, never with
+ * a negative width.
+ */
+function strokeInside(ctx, start, end, line) {
+  ctx.strokeRect(
+    start + 0.5,
+    line.top + 0.5,
+    Math.max(0, end - start - 1),
+    Math.max(0, line.height - 1),
+  );
 }

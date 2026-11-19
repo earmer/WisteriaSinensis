@@ -134,7 +134,7 @@ fn fe12_explicit_bidi_spans_act_as_isolates_and_overrides() {
         .items
         .iter()
         .filter_map(|n| match n {
-            WordNode::Box(BoxNode::Text { byte_range, .. }) => {
+            WordNode::Box(BoxNode::Text(TextBox { byte_range, .. })) => {
                 Some((byte_range.start(), byte_range.end()))
             }
             _ => None,

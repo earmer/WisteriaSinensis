@@ -157,7 +157,7 @@ fn text_box_atoms_must_tile_their_byte_range() {
         // is wrong.
         clusters[1].atom_range = 1..2;
     });
-    if let WordNode::Box(BoxNode::Text { natural_width, .. }) = &mut a.items[0] {
+    if let WordNode::Box(BoxNode::Text(TextBox { natural_width, .. })) = &mut a.items[0] {
         *natural_width = 2.;
     }
     assert_eq!(

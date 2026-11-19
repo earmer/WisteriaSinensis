@@ -50,7 +50,7 @@ fn trace(ast: &ParagraphAst, text: &str) -> String {
                 SpanEdge::Leading => format!("<{span_id}"),
                 SpanEdge::Trailing => format!("{span_id}>"),
             },
-            WordNode::Box(BoxNode::Text { byte_range, .. }) => {
+            WordNode::Box(BoxNode::Text(TextBox { byte_range, .. })) => {
                 format!("[{}]", &text[byte_range.as_range()])
             }
             WordNode::Box(BoxNode::InlineObject { .. }) => "O".into(),

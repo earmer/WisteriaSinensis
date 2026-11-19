@@ -1,5 +1,4 @@
-use super::spans::{check_boundary_order, check_spans};
-use super::storage::check_storage;
+use super::spans::{check_boundary_order, check_decoration_spans};
 use super::*;
 use crate::frontend::RepeatedOperator;
 use crate::frontend::*;
@@ -163,13 +162,13 @@ fn text_box(atoms: Vec<GraphemeAtom>) -> WordNode {
         stage.push((atoms, clusters));
         STAGED + stage.len() - 1
     });
-    WordNode::Box(BoxNode::Text {
+    WordNode::Box(BoxNode::Text(TextBox {
         run_index: 0,
         byte_range,
         atom_range: slot..slot + 1,
         cluster_range: slot..slot + 1,
         natural_width: 0.0,
-    })
+    }))
 }
 
 /// Re-lays the paragraph storage of `a` in item order: every text box
@@ -186,12 +185,12 @@ fn settle(a: &mut ParagraphAst) {
     let mut per_run = vec![(Vec::new(), Vec::new()); a.runs.len()];
     let mut starts = Vec::new();
     for node in &a.items {
-        let WordNode::Box(BoxNode::Text {
+        let WordNode::Box(BoxNode::Text(TextBox {
             run_index,
             atom_range,
             cluster_range,
             ..
-        }) = node
+        })) = node
         else {
             continue;
         };
@@ -228,12 +227,12 @@ fn settle(a: &mut ParagraphAst) {
     }
     let mut starts = starts.into_iter();
     for node in &mut a.items {
-        if let WordNode::Box(BoxNode::Text {
+        if let WordNode::Box(BoxNode::Text(TextBox {
             run_index,
             atom_range,
             cluster_range,
             ..
-        }) = node
+        })) = node
         {
             let ((local_atom, n_atoms), (local_cluster, n_clusters)) = starts.next().unwrap();
             let (run_atom, run_cluster) = run_starts[*run_index];
@@ -527,7 +526,7 @@ fn unordered_atoms_report_the_item_error_before_hyphen_or_span_errors() {
         hyphenated(1, opportunity(0, 1)).items[1].clone(),
         text_box(vec![atom(3, 4), atom(1, 2), atom(2, 3)]),
     ]);
-    if let WordNode::Box(BoxNode::Text { byte_range, .. }) = &mut a.items[2] {
+    if let WordNode::Box(BoxNode::Text(TextBox { byte_range, .. })) = &mut a.items[2] {
         *byte_range = TextRange::new(1, 4);
     }
     assert_eq!(
@@ -636,7 +635,7 @@ fn a_hyphenation_needs_the_same_run_on_both_sides() {
             tail.byte_range = TextRange::empty_at(4);
         }
         a.runs.push(tail);
-        if let WordNode::Box(BoxNode::Text { run_index, .. }) = &mut a.items[2] {
+        if let WordNode::Box(BoxNode::Text(TextBox { run_index, .. })) = &mut a.items[2] {
             *run_index = tail_run;
         }
         settle(&mut a);
@@ -666,7 +665,7 @@ fn a_hyphenation_needs_the_same_run_on_both_sides() {
     tail.byte_range = TextRange::new(1, 4);
     a.runs.push(tail);
     for item in [2, 4] {
-        if let WordNode::Box(BoxNode::Text { run_index, .. }) = &mut a.items[item] {
+        if let WordNode::Box(BoxNode::Text(TextBox { run_index, .. })) = &mut a.items[item] {
             *run_index = 1;
         }
     }
@@ -831,7 +830,7 @@ fn every_atom_must_fit_and_be_in_order() {
     );
     // A byte range that disagrees with its atoms is not self-contained.
     let mut a = with_items(vec![text_box(vec![atom(0, 1), atom(1, 2)])]);
-    if let WordNode::Box(BoxNode::Text { byte_range, .. }) = &mut a.items[0] {
+    if let WordNode::Box(BoxNode::Text(TextBox { byte_range, .. })) = &mut a.items[0] {
         *byte_range = TextRange::new(0, 3);
     }
     assert_eq!(
@@ -1012,11 +1011,11 @@ fn soft_breaks_own_nothing_and_hard_breaks_own_their_terminator() {
 
 /// A staged text box (see [`text_box`]) with every cluster 4 wide.
 fn with_width(mut n: WordNode) -> WordNode {
-    if let WordNode::Box(BoxNode::Text {
+    if let WordNode::Box(BoxNode::Text(TextBox {
         atom_range,
         natural_width,
         ..
-    }) = &mut n
+    })) = &mut n
     {
         let slot = atom_range.start - STAGED;
         STAGE.with(|stage| {
@@ -1122,11 +1121,9 @@ fn span_boundaries_nest_in_lifo_order_and_equal_ranges_follow_the_slice_order() 
     let mut nested = ast([(1, L, 1), (2, L, 1), (2, T, 3), (1, T, 3)]);
     nested.decoration_spans[1].byte_range = TextRange::new(1, 3);
     nested.decoration_spans[0].byte_range = TextRange::new(1, 4);
-    let boxes = check_storage(&nested).unwrap();
-    let ids = check_spans(&nested, "abcd", &boxes).unwrap();
-    assert_eq!(
-        check_boundary_order(&nested, &ids),
-        Ok(()),
+    let ids = check_decoration_spans(&nested, "abcd").unwrap();
+    assert!(
+        check_boundary_order(&nested, &ids).is_ok(),
         "inner span closes first"
     );
 }
@@ -1359,7 +1356,7 @@ fn span_boundary_bidi_level_follows_the_atom_inside_the_span() {
         a.runs[0].byte_range = TextRange::new(0, 1);
         a.runs.extend([rtl_run, tail]);
         for (item, run) in [(2, 1), (3, 2), (5, 2)] {
-            if let WordNode::Box(BoxNode::Text { run_index, .. }) = &mut a.items[item] {
+            if let WordNode::Box(BoxNode::Text(TextBox { run_index, .. })) = &mut a.items[item] {
                 *run_index = run;
             }
         }
@@ -1709,7 +1706,7 @@ fn flagged_hyphens_cloned_spans_synthetic_glue_and_terminators_are_enforced() {
     a.runs[0].byte_range = TextRange::new(0, 1);
     assert_eq!(check(a), Err(LayoutInputError::ItemOutsideRun { item: 0 }));
     let mut a = with_items(vec![text_box(vec![atom(0, 1)])]);
-    if let WordNode::Box(BoxNode::Text { natural_width, .. }) = &mut a.items[0] {
+    if let WordNode::Box(BoxNode::Text(TextBox { natural_width, .. })) = &mut a.items[0] {
         *natural_width = 9.0; // the cluster is 0 wide
     }
     assert_eq!(
@@ -1717,7 +1714,7 @@ fn flagged_hyphens_cloned_spans_synthetic_glue_and_terminators_are_enforced() {
         Err(LayoutInputError::InvalidTextWidth { item: 0 })
     );
     let mut a = with_items(vec![text_box(vec![atom(0, 1)])]);
-    if let WordNode::Box(BoxNode::Text { natural_width, .. }) = &mut a.items[0] {
+    if let WordNode::Box(BoxNode::Text(TextBox { natural_width, .. })) = &mut a.items[0] {
         *natural_width = f32::NAN;
     }
     assert_eq!(

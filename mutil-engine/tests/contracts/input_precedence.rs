@@ -128,7 +128,7 @@ fn separator(c: &mut Case) {
 }
 
 fn run_index_out_of_range(c: &mut Case) {
-    if let WordNode::Box(BoxNode::Text { run_index, .. }) = &mut c.ast.items[0] {
+    if let WordNode::Box(BoxNode::Text(TextBox { run_index, .. })) = &mut c.ast.items[0] {
         *run_index = 5;
     }
 }
@@ -178,7 +178,7 @@ fn bad_decoration_span(c: &mut Case) {
 // --- items ----------------------------------------------------------------
 
 fn item_outside_text(c: &mut Case) {
-    if let WordNode::Box(BoxNode::Text { byte_range, .. }) = &mut c.ast.items[0] {
+    if let WordNode::Box(BoxNode::Text(TextBox { byte_range, .. })) = &mut c.ast.items[0] {
         *byte_range = TextRange::new(0, 9);
     }
 }
@@ -261,17 +261,17 @@ fn uncovered_source(c: &mut Case) {
         .ast
         .items
         .iter()
-        .rposition(|i| matches!(i, WordNode::Box(BoxNode::Text { .. })))
+        .rposition(|i| matches!(i, WordNode::Box(BoxNode::Text(TextBox { .. }))))
         .unwrap();
     edit_text_box(&mut c.ast, last, |atoms, clusters| {
         atoms.truncate(1);
         clusters.truncate(1);
     });
-    if let WordNode::Box(BoxNode::Text {
+    if let WordNode::Box(BoxNode::Text(TextBox {
         byte_range,
         natural_width,
         ..
-    }) = &mut c.ast.items[last]
+    })) = &mut c.ast.items[last]
     {
         *byte_range = TextRange::new(2, 3);
         *natural_width = 1.0;

@@ -99,6 +99,22 @@ pub enum BoxOverflowPolicy {
     ScaleToFit,
 }
 
+/// Shaped text, naming slices of the paragraph-wide arrays (spec WN-5),
+/// resolved by [`ParagraphAst::text_box`](super::ParagraphAst::text_box).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextBox {
+    /// Index into [`ParagraphAst::runs`](super::ParagraphAst::runs).
+    pub run_index: usize,
+    /// First atom's start to last atom's end.
+    pub byte_range: TextRange,
+    /// Paragraph-level, non-empty, inside the run's `atom_range`.
+    pub atom_range: Range<usize>,
+    /// Paragraph-level, inside the run's `cluster_range`.
+    pub cluster_range: Range<usize>,
+    /// Sum of the clusters' widths: a validated cache (spec §1.5, AX-2).
+    pub natural_width: f32,
+}
+
 /// An embedded object with fixed extents (spec §2.4, WN-7).
 #[derive(Clone, Debug, PartialEq)]
 pub struct InlineObjectBox {
@@ -123,20 +139,8 @@ pub struct InlineObjectBox {
 /// A rigid item of the line-breaking sequence (spec §2.4).
 #[derive(Clone, Debug, PartialEq)]
 pub enum BoxNode {
-    /// Shaped text, naming slices of the paragraph-wide arrays (resolved by
-    /// [`ParagraphAst::text_box`](super::ParagraphAst::text_box)).
-    Text {
-        /// Index into [`ParagraphAst::runs`](super::ParagraphAst::runs).
-        run_index: usize,
-        /// First atom's start to last atom's end.
-        byte_range: TextRange,
-        /// Paragraph-level, non-empty, inside the run's `atom_range`.
-        atom_range: Range<usize>,
-        /// Paragraph-level, inside the run's `cluster_range`.
-        cluster_range: Range<usize>,
-        /// Sum of the clusters' widths: a validated cache (spec §1.5, AX-2).
-        natural_width: f32,
-    },
+    /// Shaped text.
+    Text(TextBox),
     /// An embedded object with fixed extents.
     InlineObject(InlineObjectBox),
     /// The padding-plus-border advance at one end of a decoration span.
@@ -185,7 +189,7 @@ impl WordNode {
     pub fn byte_span(&self) -> TextRange {
         match self {
             Self::Box(
-                BoxNode::Text { byte_range, .. }
+                BoxNode::Text(TextBox { byte_range, .. })
                 | BoxNode::InlineObject(InlineObjectBox { byte_range, .. })
                 | BoxNode::SpanBoundary { byte_range, .. },
             )

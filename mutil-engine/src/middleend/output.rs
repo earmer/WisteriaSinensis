@@ -308,6 +308,12 @@ pub struct PositionedLine {
 }
 
 impl PositionedLine {
+    /// Whether the line has caret stops: one wholly inside an atomic span has
+    /// none (spec CRT-1).
+    pub(crate) fn has_caret_stops(&self) -> bool {
+        !self.caret_stops.is_empty()
+    }
+
     /// The extreme caret stop towards `side` (spec §6.3 rule 3); equal-`x`
     /// ties go to the first stop for `Left` and the last for `Right`.
     #[must_use]
@@ -488,10 +494,12 @@ impl LayoutPolicySnapshot {
         })
     }
 
-    /// The PAR-1 field checks: a valid strut, line height and clamp, a
-    /// positive wrap width and standard indents in `[0, wrap_width)`. Every
-    /// snapshot [`resolve`](Self::resolve) produces passes; passing does not
-    /// prove `resolve` produced it.
+    /// The PAR-1 field checks: a valid strut whose box (`ascent + descent`)
+    /// is not inverted and, under `LineHeight::Fixed`, has no line gap; a
+    /// valid line height and clamp; a positive wrap width; and standard
+    /// indents in `[0, wrap_width)`. Every snapshot
+    /// [`resolve`](Self::resolve) produces passes; passing does not prove
+    /// `resolve` produced it.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         let indents_are_valid = match self.slot_source {
@@ -503,7 +511,10 @@ impl LayoutPolicySnapshot {
                 .all(|indent| (0.0..self.wrap_width).contains(&indent)),
             SlotSource::Provider => true,
         };
+        let strut_box_is_valid = self.strut.ascent + self.strut.descent >= 0.0
+            && (!matches!(self.line_height, LineHeight::Fixed(_)) || self.strut.line_gap == 0.0);
         self.strut.is_valid()
+            && strut_box_is_valid
             && self.line_height.is_valid()
             && self.wrap_width > 0.0
             && indents_are_valid

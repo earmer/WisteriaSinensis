@@ -8,7 +8,7 @@ use crate::middleend::{
     CaretAffinity, CaretStop, HangingWhitespaceMode, PositionedInlineBox, VisualGlyphRun,
     resolve_ligature_carets,
 };
-use crate::types::{AtomFlags, BidiLevel};
+use crate::types::{AtomFlags, BidiLevel, GlyphOrientation};
 
 /// A candidate caret stop, with the affinity and level it takes at a
 /// direction boundary (CRT-3): upstream at its piece's end, downstream at its
@@ -155,6 +155,8 @@ impl Layout<'_, '_> {
             && let c = &self.ast.clusters[cluster]
             && c.atom_count() > 1
             && !c.flags.contains(AtomFlags::IS_EMOJI_SEQUENCE)
+            // A tate-chu-yoko cluster merges several atoms but is no ligature.
+            && c.orientation != GlyphOrientation::HorizontalInVertical
         {
             let direction = p.level.direction();
             let (glyphs, width) = self.cluster_glyphs(pending, cluster);

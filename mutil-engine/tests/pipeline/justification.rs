@@ -313,7 +313,7 @@ fn two_word_line(
         // Everything before the trailing space.
         .filter(|item| item.byte_span().end() < first_line_end)
         .map(|item| match item {
-            WordNode::Box(BoxNode::Text { natural_width, .. }) => *natural_width,
+            WordNode::Box(BoxNode::Text(TextBox { natural_width, .. })) => *natural_width,
             WordNode::Glue(g) => g.natural_width,
             _ => 0.0,
         })

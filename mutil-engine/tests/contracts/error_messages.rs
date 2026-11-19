@@ -340,7 +340,7 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidCaretStop { index: 4 },
-            "caret stop 4 is non-finite, out of visual order, outside the line, or at a bidi level that nothing owning its offset has",
+            "caret stop 4 is non-finite, out of visual order, outside the line or off a character boundary, or at a bidi level that nothing owning its offset has",
         ),
         (
             LineInvariantError::InvalidDecoration { index: 4 },

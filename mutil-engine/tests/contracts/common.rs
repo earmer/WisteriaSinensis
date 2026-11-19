@@ -56,12 +56,12 @@ pub fn push_text(
             later.cluster_range.start + n_clusters..later.cluster_range.end + n_clusters;
     }
     for item in &mut ast.items {
-        if let WordNode::Box(BoxNode::Text {
+        if let WordNode::Box(BoxNode::Text(TextBox {
             run_index,
             atom_range,
             cluster_range,
             ..
-        }) = item
+        })) = item
             && *run_index > run
         {
             *atom_range = atom_range.start + n_atoms..atom_range.end + n_atoms;
@@ -69,13 +69,13 @@ pub fn push_text(
         }
     }
     retile_glyphs(ast);
-    WordNode::Box(BoxNode::Text {
+    WordNode::Box(BoxNode::Text(TextBox {
         run_index: run,
         byte_range,
         atom_range: atom_at..atom_at + n_atoms,
         cluster_range: cluster_at..cluster_at + n_clusters,
         natural_width,
-    })
+    }))
 }
 
 /// Rebuilds `ast.glyphs` so that the clusters' `glyph_range`s tile it: each
@@ -203,12 +203,12 @@ pub fn edit_text_box(
     item: usize,
     edit: impl FnOnce(&mut Vec<GraphemeAtom>, &mut Vec<ShapedCluster>),
 ) {
-    let WordNode::Box(BoxNode::Text {
+    let WordNode::Box(BoxNode::Text(TextBox {
         run_index,
         atom_range,
         cluster_range,
         ..
-    }) = &ast.items[item]
+    })) = &ast.items[item]
     else {
         panic!("items[{item}] is not a text box");
     };
@@ -246,11 +246,11 @@ pub fn edit_text_box(
         shift(&mut later.cluster_range, delta_clusters);
     }
     for (i, node) in ast.items.iter_mut().enumerate() {
-        if let WordNode::Box(BoxNode::Text {
+        if let WordNode::Box(BoxNode::Text(TextBox {
             atom_range: a,
             cluster_range: c,
             ..
-        }) = node
+        })) = node
         {
             if i == item {
                 a.end = a.end.wrapping_add_signed(delta_atoms);

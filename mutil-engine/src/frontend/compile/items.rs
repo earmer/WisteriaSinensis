@@ -6,7 +6,7 @@ use super::units::{Unit, Units};
 use super::{Compiler, Shaped};
 use crate::frontend::{
     BoxDecorationBreak, BoxNode, DiscretionaryNode, GlueKind, GlueNode, InlineDecorationSpan,
-    InlineObjectBox, MAX_DECORATION_NESTING_DEPTH, SpanEdge, WordNode, bidi,
+    InlineObjectBox, MAX_DECORATION_NESTING_DEPTH, SpanEdge, TextBox, WordNode, bidi,
 };
 use crate::types::{
     BidiClass, BidiLevel, FontInstanceRef, FontRef, GlyphOrientation, GraphemeAtom, ScriptTag,
@@ -39,7 +39,7 @@ impl TextBoxes<'_> {
             + clusters[c0..run.cluster_range.end]
                 .partition_point(|c| run.atom_range.start + c.atom_range.start < end_atom);
         let natural_width = ShapedCluster::total_width(&clusters[c0..cluster]);
-        items.push(WordNode::Box(BoxNode::Text {
+        items.push(WordNode::Box(BoxNode::Text(TextBox {
             run_index,
             byte_range: TextRange::new(
                 self.atoms[first].byte_range.start(),
@@ -48,7 +48,7 @@ impl TextBoxes<'_> {
             atom_range: first..end_atom,
             cluster_range: c0..cluster,
             natural_width,
-        }));
+        })));
     }
 }
 

@@ -206,7 +206,7 @@ fn explicit_spacing_and_discretionary_equations() {
     }
     let mut a = ast("a");
     a.clusters[0].natural_width = -1.0;
-    if let WordNode::Box(BoxNode::Text { natural_width, .. }) = &mut a.items[0] {
+    if let WordNode::Box(BoxNode::Text(TextBox { natural_width, .. })) = &mut a.items[0] {
         *natural_width = -1.0;
     }
     assert_eq!(

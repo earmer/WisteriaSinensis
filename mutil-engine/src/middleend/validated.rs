@@ -7,12 +7,13 @@
 //! of degrading to empty content.
 
 use super::input_validation::validate_layout_inputs;
+use super::tolerance::resolves_extent;
 use super::{
-    AnnotationErrorReason, CaretStop, HangSide, LayoutConstraints, LayoutInputError, LayoutOptions,
-    LayoutPolicySnapshot, LineGeometry, LineInvariantError, PositionedAnnotationRun,
-    PositionedGlyph, PositionedLine, PositionedParagraph, VisualGlyphRun,
+    AnnotationErrorReason, CaretStop, HangSide, InlineSlotConstraint, LayoutConstraints,
+    LayoutInputError, LayoutOptions, LayoutPolicySnapshot, LineGeometry, LineInvariantError,
+    PositionedAnnotationRun, PositionedGlyph, PositionedLine, PositionedParagraph, VisualGlyphRun,
 };
-use crate::frontend::{BoxNode, ParagraphAst, TextBoxView, WordNode};
+use crate::frontend::{BoxNode, ParagraphAst, TextBox, TextBoxView, WordNode};
 use crate::types::{
     FontRef, FontVariation, GlyphOrientation, GraphemeAtom, Point, RawShapedGlyph, ShapedCluster,
     WritingMode,
@@ -91,35 +92,17 @@ impl<'a> ValidatedInputs<'a> {
     /// When `item` is not an index into `items`.
     #[must_use]
     pub fn text_box(&self, item: usize) -> Option<TextBoxView<'a>> {
-        let WordNode::Box(BoxNode::Text {
-            run_index,
-            byte_range,
-            atom_range,
-            cluster_range,
-            natural_width,
-        }) = &self.ast.items[item]
-        else {
+        let WordNode::Box(BoxNode::Text(text)) = &self.ast.items[item] else {
             return None;
         };
-        Some(TextBoxView {
-            run_index: *run_index,
-            byte_range: *byte_range,
-            atom_start: atom_range.start,
-            atoms: &self.ast.atoms[atom_range.clone()],
-            clusters: &self.ast.clusters[cluster_range.clone()],
-            natural_width: *natural_width,
-        })
+        Some(self.text_view(text))
     }
 
-    /// The text box at `items[item]`, for an item the caller matched as a
-    /// [`BoxNode::Text`].
-    ///
-    /// # Panics
-    /// When `items[item]` is not a text box.
+    /// `text`, a box of this paragraph, with its slices resolved: the gate
+    /// proved every text box's ranges (spec AST-4).
     #[must_use]
-    pub(crate) fn text_view(&self, item: usize) -> TextBoxView<'a> {
-        self.text_box(item)
-            .unwrap_or_else(|| panic!("items[{item}] is not a text box"))
+    pub(crate) fn text_view(&self, text: &'a TextBox) -> TextBoxView<'a> {
+        self.ast.resolve(text)
     }
 
     /// The atoms of body run `run` (spec AST-4).
@@ -149,58 +132,107 @@ impl<'a> ValidatedInputs<'a> {
         &self.ast.glyphs[cluster.glyph_range.clone()]
     }
 
-    /// The geometry of line `line_index` over `[block_start, block_end)`,
-    /// through the provider gate (spec GEO-3, G3). The only geometry query
-    /// layout uses.
+    /// The geometry of line `line_index` for a block envelope `extent` long
+    /// from `block_start`: the provider gate (spec GEO-3, GEO-4, G3), the
+    /// only geometry query layout uses. Without a provider the standard slot
+    /// derives from constraints G1 accepted and is not checked again.
     ///
     /// # Errors
-    /// `InvalidLineGeometry` or `NonMonotonicGeometry` for a provider answer
-    /// that breaks its contract.
+    /// `BlockPositionUnrepresentable` when `f32` cannot hold the envelope at
+    /// `block_start`; `InvalidLineGeometry` for a provider answer outside the
+    /// envelope, out of order or stalling; `NonMonotonicGeometry` for one not
+    /// within `previous`.
     pub fn line_geometry(
         &self,
         line_index: usize,
         block_start: f32,
-        block_end: f32,
+        extent: f32,
         previous: Option<&LineGeometry>,
     ) -> Result<GeometryAnswer, LayoutInputError> {
-        self.constraints
-            .query_checked_geometry(line_index, block_start, block_end, previous)
+        let block_end = block_start + extent;
+        if !(block_start.is_finite() && block_end > block_start)
+            || !resolves_extent(block_end, extent)
+        {
+            return Err(LayoutInputError::BlockPositionUnrepresentable);
+        }
+        let constraints = self.constraints;
+        let geometry = constraints.resolve_line_geometry(line_index, block_start, block_end);
+        if constraints.geometry_provider.is_some() {
+            if !geometry.is_valid(block_start, constraints.wrap_width)
+                || geometry.stalls(block_start)
+            {
+                return Err(LayoutInputError::InvalidLineGeometry);
+            }
+            if previous.is_some_and(|p| !geometry.is_subset_of(p)) {
+                return Err(LayoutInputError::NonMonotonicGeometry);
+            }
+        }
+        GeometryAnswer::classify(geometry).ok_or(LayoutInputError::InvalidLineGeometry)
     }
 }
 
-/// A geometry answer that passed the provider gate (spec GEO-3, G3).
+/// A geometry answer that passed the provider gate (spec GEO-3, G3). Only
+/// [`ValidatedInputs::line_geometry`] builds one.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GeometryAnswer {
     /// At least one slot is available.
-    Open(LineGeometry),
-    /// No slot is available; the gate proved the answer points ahead
-    /// (spec GEO-4). The answer itself is empty, so only its offset is kept.
-    Obstructed {
-        /// The next block start at which geometry may change, beyond the
-        /// queried start by a measurement.
-        clear_at: f32,
-    },
+    Open(OpenGeometry),
+    /// No slot is available; the answer points ahead (spec GEO-4).
+    Obstructed(Clearance),
+}
+
+/// An open geometry answer: at least one slot (spec GEO-3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenGeometry(LineGeometry);
+
+impl OpenGeometry {
+    /// The answer as the provider gave it.
+    #[must_use]
+    pub fn geometry(&self) -> &LineGeometry {
+        &self.0
+    }
+
+    /// The first slot, which Phase 1 layout fills (spec ME-2).
+    #[must_use]
+    pub fn first_slot(&self) -> InlineSlotConstraint {
+        self.0.slots[0]
+    }
+}
+
+/// An obstructed geometry answer: the next block start at which geometry may
+/// change, at least the minimum clearance step ahead (spec GEO-4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clearance(f32);
+
+impl Clearance {
+    /// The block start to try next.
+    #[must_use]
+    pub fn clear_at(self) -> f32 {
+        self.0
+    }
 }
 
 impl GeometryAnswer {
-    /// Classifies an answer the provider gate (or G1, without a provider)
-    /// accepted: an empty answer carries a next offset, because `stalls`
-    /// rejects one without it and the standard slot is non-empty (spec GEO-4).
-    pub(crate) fn from_checked(geometry: LineGeometry) -> Self {
-        match geometry.next_feature_block_offset {
-            Some(clear_at) if geometry.slots.is_empty() => Self::Obstructed { clear_at },
-            _ => Self::Open(geometry),
+    /// Classifies an answer the gate accepted: open when it has a slot,
+    /// obstructed when it has none but a next offset, and `None` for an empty
+    /// answer without one.
+    fn classify(geometry: LineGeometry) -> Option<Self> {
+        if !geometry.slots.is_empty() {
+            return Some(Self::Open(OpenGeometry(geometry)));
         }
+        geometry
+            .next_feature_block_offset
+            .map(|clear_at| Self::Obstructed(Clearance(clear_at)))
     }
 
     /// The answer as the provider gave it: its slots and next feature offset.
     #[must_use]
     pub fn geometry(&self) -> LineGeometry {
         match self {
-            Self::Open(geometry) => geometry.clone(),
-            Self::Obstructed { clear_at } => LineGeometry {
+            Self::Open(open) => open.0.clone(),
+            Self::Obstructed(clearance) => LineGeometry {
                 slots: SmallVec::new(),
-                next_feature_block_offset: Some(*clear_at),
+                next_feature_block_offset: Some(clearance.0),
             },
         }
     }
@@ -241,15 +273,14 @@ impl<'a> ValidatedLayout<'a> {
     }
 
     /// The extreme caret stop of line `line` towards `side` (spec §6.3 rule
-    /// 3). The gate proved every line has caret stops (spec CRT-1).
+    /// 3), or `None` for a line inside an atomic span, which has none
+    /// (CRT-1).
     ///
     /// # Panics
     /// When `line` is not an index into the paragraph's lines.
     #[must_use]
-    pub(crate) fn edge_caret_stop(&self, line: usize, side: HangSide) -> &'a CaretStop {
-        self.paragraph.lines[line]
-            .extreme_caret_stop(side)
-            .unwrap_or_else(|| panic!("line {line} has no caret stops (proved by the output gate)"))
+    pub(crate) fn edge_caret_stop(&self, line: usize, side: HangSide) -> Option<&'a CaretStop> {
+        self.paragraph.lines[line].extreme_caret_stop(side)
     }
 
     /// Every glyph run of the paragraph with its glyphs' drawing origins in
