@@ -175,10 +175,7 @@ impl<'a> ItemChecks<'a> {
             WordNode::Box(BoxNode::Text { run_index, .. }) => {
                 let run = &self.ast.runs[*run_index];
                 self.last_text_font_size = Some(run.font_size);
-                let view = self
-                    .boxes
-                    .get(item)
-                    .ok_or(LayoutInputError::ItemNotSelfContained { item })?;
+                let view = self.boxes.view(item);
                 let base = view.atom_start - run.atom_range.start;
                 check_text_payload(self.text, run, view, &self.ast.glyphs, base, item)
             }

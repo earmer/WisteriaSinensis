@@ -8,7 +8,7 @@
 
 use super::input_validation::validate_layout_inputs;
 use super::{
-    AnnotationErrorReason, LayoutConstraints, LayoutInputError, LayoutOptions,
+    AnnotationErrorReason, CaretStop, HangSide, LayoutConstraints, LayoutInputError, LayoutOptions,
     LayoutPolicySnapshot, LineGeometry, LineInvariantError, PositionedAnnotationRun,
     PositionedGlyph, PositionedLine, PositionedParagraph, VisualGlyphRun,
 };
@@ -237,6 +237,18 @@ impl<'a> ValidatedLayout<'a> {
     #[must_use]
     pub fn text(&self) -> &'a str {
         self.text
+    }
+
+    /// The extreme caret stop of line `line` towards `side` (spec §6.3 rule
+    /// 3). The gate proved every line has caret stops (spec CRT-1).
+    ///
+    /// # Panics
+    /// When `line` is not an index into the paragraph's lines.
+    #[must_use]
+    pub fn edge_caret_stop(&self, line: usize, side: HangSide) -> &'a CaretStop {
+        self.paragraph.lines[line]
+            .extreme_caret_stop(side)
+            .expect("the output gate proved every line has caret stops")
     }
 
     /// Every glyph run of the paragraph with its glyphs' drawing origins in

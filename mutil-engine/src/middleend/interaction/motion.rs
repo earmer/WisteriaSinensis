@@ -48,7 +48,6 @@ impl ValidatedLayout<'_> {
                 };
             }
         };
-        let l = &p.lines[line];
         match command {
             Command::LineStart | Command::LineEnd => {
                 // The line start is on the left in LTR text, on the right in RTL.
@@ -57,10 +56,7 @@ impl ValidatedLayout<'_> {
                 } else {
                     HangSide::Right
                 };
-                let stop = l
-                    .extreme_caret_stop(side)
-                    .expect("a validated line has caret stops");
-                CursorMove::Moved(stop_position(stop))
+                CursorMove::Moved(stop_position(self.edge_caret_stop(line, side)))
             }
             Command::Previous | Command::Next => {
                 self.move_logical(position.byte_offset, command == Command::Next, None)
@@ -114,9 +110,7 @@ impl ValidatedLayout<'_> {
             HangSide::Right
         };
         let target_stops = &lines[target].caret_stops;
-        let entry = lines[target]
-            .extreme_caret_stop(side)
-            .expect("a validated line has caret stops");
+        let entry = self.edge_caret_stop(target, side);
         if entry.offset != current.offset {
             return CursorMove::Moved(stop_position(entry));
         }
