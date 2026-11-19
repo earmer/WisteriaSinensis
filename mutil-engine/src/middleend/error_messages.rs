@@ -44,6 +44,8 @@ error_messages! {
         InvalidAnnotationSpan { annotation } => "annotation {annotation} is invalid",
         InvalidLayoutOptions => "invalid layout options",
         InvalidLineGeometry => "invalid line geometry",
+        ClearanceExhausted => "the geometry provider obstructed one line too many times in a row",
+        RefitExhausted => "a line still outgrew its envelope after the allowed refits",
         NonMonotonicGeometry => "geometry grew with an expanded block envelope",
         InvalidConstraints => "invalid wrap width or indentation (without a geometry provider each indent must lie in [0, wrap width))",
         ParagraphSeparatorInText => "text contains a paragraph separator; split it first",

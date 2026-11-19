@@ -480,9 +480,10 @@ pub struct TextBoxView<'a> {
 
 ```rust
 pub struct ValidatedInputs<'a> { .. }   // inputs that passed the input gate, with the resolved policy
+pub enum GeometryAnswer { Open(LineGeometry), Obstructed { geometry: LineGeometry, clear_at: f32 } }   // a provider answer that passed G3; `clear_at` is proved ahead
 ```
 
-**[AST-11] Validation entry point.** `ValidatedInputs::try_from_ast(ast, text, constraints, options)` is the input gate (G1, AX-3): it returns the first violation, or a `ValidatedInputs` holding the inputs and the resolved policy (`ValidatedInputs::policy`). Violations are checked in this order, which is their precedence: the policy (constraints, options, then the strut); a paragraph separator in the text (AST-2); run and atom storage (AST-4); presentation (AST-5); bidi and annotation spans (BID-2, ANN-2); shaping runs (AST-5); decoration and atomic spans (AST-7, AST-9); items outside the text, then item order (AST-3); each item in order; the paragraph end (WN-17); span-boundary order, then span enclosure (AST-8); source coverage (AST-3). `check_layout_inputs` runs the same gate and returns `Ok(())`; `layout_paragraph` runs it first and propagates its error. Behind the gate, `ValidatedInputs::text_box` returns `None` only for an item that is not text, `ValidatedInputs::run_atoms`, `ValidatedInputs::run_clusters` and `ValidatedInputs::cluster_glyphs` index directly, and `ValidatedInputs::line_geometry` is the only geometry query layout makes (G3). The raw lookups on `ParagraphAst` stay total for data that has not passed the gate. Its time is expected O(total input records and bytes) with O(atoms + boundaries + spans) extra memory for its edge indexes: it neither sorts nor copies the input, and no check rescans all items for each span or atom.
+**[AST-11] Validation entry point.** `ValidatedInputs::try_from_ast(ast, text, constraints, options)` is the input gate (G1, AX-3): it returns the first violation, or a `ValidatedInputs` holding the inputs and the resolved policy (`ValidatedInputs::policy`). Violations are checked in this order, which is their precedence: the policy (constraints, options, then the strut); a paragraph separator in the text (AST-2); run and atom storage (AST-4); presentation (AST-5); bidi and annotation spans (BID-2, ANN-2); shaping runs (AST-5); decoration and atomic spans (AST-7, AST-9); items outside the text, then item order (AST-3); each item in order; the paragraph end (WN-17); span-boundary order, then span enclosure (AST-8); source coverage (AST-3). `check_layout_inputs` runs the same gate and returns `Ok(())`; `layout_paragraph` runs it first and propagates its error. Behind the gate, `ValidatedInputs::text_box` returns `None` only for an item that is not text, `ValidatedInputs::text_view` is its total form for an item already matched as text, `ValidatedInputs::run_atoms`, `ValidatedInputs::run_clusters` and `ValidatedInputs::cluster_glyphs` index directly, and `ValidatedInputs::line_geometry` is the only geometry query layout makes (G3); it returns a `GeometryAnswer`, so an obstructed answer carries the offset the gate proved ahead. The raw lookups on `ParagraphAst` stay total for data that has not passed the gate. Its time is expected O(total input records and bytes) with O(atoms + boundaries + spans) extra memory for its edge indexes: it neither sorts nor copies the input, and no check rescans all items for each span or atom.
 
 ```rust
 pub enum LayoutInputError {
@@ -494,6 +495,8 @@ pub enum LayoutInputError {
     InvalidAnnotationSpan { annotation: usize },
     InvalidLayoutOptions,
     InvalidLineGeometry,
+    ClearanceExhausted,
+    RefitExhausted,
     NonMonotonicGeometry,
     InvalidConstraints,
     ParagraphSeparatorInText,
@@ -537,7 +540,9 @@ pub enum LayoutInputError {
 | `InvalidBidiSpan { span }` | an explicit bidi span breaks §2.8 | BID-2 |
 | `InvalidAnnotationSpan { annotation }` | an annotation breaks §2.9 | ANN-2, ANN-3 |
 | `InvalidLayoutOptions` | an invalid clamp policy | OPT-3 |
-| `InvalidLineGeometry` | a provider answer outside the wrap envelope or out of order, or clearance progress that stalls | GEO-3, GEO-4 |
+| `InvalidLineGeometry` | a provider answer outside the wrap envelope or out of order, or an obstructed answer without progress ahead | GEO-3, GEO-4 |
+| `ClearanceExhausted` | more than 1024 obstructed provider answers in a row for one line | GEO-4 |
+| `RefitExhausted` | one line still outgrew its envelope after 16 refits | GEO-6 |
 | `NonMonotonicGeometry` | an expanded block envelope introduced inline space | GEO-4 |
 | `InvalidConstraints` | a non-positive or NaN wrap width, a non-finite indent, or (without a provider) an indent outside `[0, wrap_width)` | GEO-2 |
 | `ParagraphSeparatorInText` | the text holds a paragraph separator | AST-2 |
@@ -1367,7 +1372,7 @@ pub trait LineGeometryProvider: Debug + Send + Sync {
 
 **[GEO-3]** A provider answers in flow coordinates for a line index and a block envelope `[block_start, block_end)`. Its slots ascend, are disjoint and lie in the envelope `[0, wrap_width]`; a `next_feature_block_offset` lies beyond `block_start` by a measurement (MSR-1; `LineGeometry::is_valid`). An empty answer means the envelope is obstructed. Every provider answer is validated when queried (`LayoutConstraints::query_checked_geometry`, the provider gate G3), and a violation is `InvalidLineGeometry`; the envelope is computed by layout and is not checked, and without a provider the geometry derives from constraints the input gate accepted and is returned unchecked (AX-3).
 
-**[GEO-4]** For a fixed line index and block start, an expanded envelope only removes space: each returned slot lies inside a slot of the smaller envelope's answer (`LineGeometry::is_subset_of`; `NonMonotonicGeometry` otherwise). An empty answer to an unexpanded query needs a `next_feature_block_offset` at least 1e-4 layout units ahead, which the provider gate checks; more than 1024 obstructed attempts in a row is `InvalidLineGeometry` (AX-6).
+**[GEO-4]** For a fixed line index and block start, an expanded envelope only removes space: each returned slot lies inside a slot of the smaller envelope's answer (`LineGeometry::is_subset_of`; `NonMonotonicGeometry` otherwise). An empty answer to an unexpanded query needs a `next_feature_block_offset` at least 1e-4 layout units ahead, which the provider gate checks; more than 1024 obstructed attempts in a row is `ClearanceExhausted` (AX-6).
 
 **[GEO-5]** The first-line probe tries only what can begin at block start: the strut and the input up to the first break opportunity (inline objects, text cluster heights and, under `LineHeight::Normal`, the `block_extent` of annotations whose base starts before that break). A taller item later in the paragraph is not first-line evidence. An expanded probe that comes back empty is a contract check, not a rejection of the position.
 

@@ -44,8 +44,15 @@ pub enum LayoutInputError {
     },
     /// Invalid clamp or other layout policy.
     InvalidLayoutOptions,
-    /// Malformed geometry or exhausted clearance progress.
+    /// A provider answer outside the wrap envelope or out of order, or an
+    /// obstructed answer without progress ahead.
     InvalidLineGeometry,
+    /// More than the allowed number of obstructed provider answers in a row
+    /// for one line (spec GEO-4).
+    ClearanceExhausted,
+    /// One line still outgrew its envelope after the allowed refits
+    /// (spec GEO-6).
+    RefitExhausted,
     /// Expanding a block envelope introduced available inline space.
     NonMonotonicGeometry,
     /// Invalid width or indentation; positive-infinite width is allowed. Without a geometry provider each indent must lie in

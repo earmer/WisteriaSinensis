@@ -110,6 +110,17 @@ impl<'a> ValidatedInputs<'a> {
         })
     }
 
+    /// The text box at `items[item]`, for an item the caller matched as a
+    /// [`BoxNode::Text`].
+    ///
+    /// # Panics
+    /// When `items[item]` is not a text box.
+    #[must_use]
+    pub fn text_view(&self, item: usize) -> TextBoxView<'a> {
+        self.text_box(item)
+            .unwrap_or_else(|| panic!("items[{item}] is not a text box"))
+    }
+
     /// The atoms of body run `run` (spec AST-4).
     ///
     /// # Panics
@@ -150,9 +161,47 @@ impl<'a> ValidatedInputs<'a> {
         block_start: f32,
         block_end: f32,
         previous: Option<&LineGeometry>,
-    ) -> Result<LineGeometry, LayoutInputError> {
-        self.constraints
-            .query_checked_geometry(line_index, block_start, block_end, previous)
+    ) -> Result<GeometryAnswer, LayoutInputError> {
+        let geometry = self.constraints.query_checked_geometry(
+            line_index,
+            block_start,
+            block_end,
+            previous,
+        )?;
+        match (
+            geometry.slots.is_empty(),
+            geometry.next_feature_block_offset,
+        ) {
+            (false, _) => Ok(GeometryAnswer::Open(geometry)),
+            (true, Some(clear_at)) => Ok(GeometryAnswer::Obstructed { geometry, clear_at }),
+            (true, None) => Err(LayoutInputError::InvalidLineGeometry),
+        }
+    }
+}
+
+/// A geometry answer that passed the provider gate (spec GEO-3, G3).
+#[derive(Clone, Debug, PartialEq)]
+pub enum GeometryAnswer {
+    /// At least one slot is available.
+    Open(LineGeometry),
+    /// No slot is available; the gate proved the answer points ahead
+    /// (spec GEO-4).
+    Obstructed {
+        /// The empty answer.
+        geometry: LineGeometry,
+        /// The next block start at which geometry may change, beyond the
+        /// queried start by a measurement.
+        clear_at: f32,
+    },
+}
+
+impl GeometryAnswer {
+    /// The answer's slots and next feature offset.
+    #[must_use]
+    pub fn geometry(&self) -> &LineGeometry {
+        match self {
+            Self::Open(geometry) | Self::Obstructed { geometry, .. } => geometry,
+        }
     }
 }
 
