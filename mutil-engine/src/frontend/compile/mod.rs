@@ -228,7 +228,7 @@ struct Compiler<'a> {
     shaper: &'a dyn TextShaper,
     text: &'a str,
     /// Every style (features are canonical by construction, FNT-2): the default first, then the spans' in order.
-    styles: Vec<TextStyle>,
+    styles: Vec<&'a TextStyle>,
 }
 
 /// The strut's raw metrics and the font size they were requested at
@@ -254,7 +254,6 @@ impl<'a> Compiler<'a> {
     ) -> Self {
         let styles = core::iter::once(input.default_style)
             .chain(input.style_spans.iter().map(|span| &span.style))
-            .cloned()
             .collect();
         Self {
             input,

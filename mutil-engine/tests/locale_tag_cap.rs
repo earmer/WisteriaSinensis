@@ -57,7 +57,7 @@ fn private_use_tag(len: usize) -> String {
 }
 
 /// TYP-4: a well-formed tag of exactly 128 bytes is accepted by
-/// `try_from_str`, `FromStr` and `parse_lenient`, and kept as given.
+/// `try_from_str`, `FromStr` and `try_from_str_lenient`, and kept as given.
 #[test]
 fn a_tag_of_exactly_128_bytes_is_accepted() {
     let _serial = serial();
@@ -66,10 +66,11 @@ fn a_tag_of_exactly_128_bytes_is_accepted() {
     assert_eq!(strict.as_str(), tag, "the tag is stored as given");
     let parsed: LocaleTag = tag.parse().expect("`FromStr` accepts a 128-byte tag");
     assert_eq!(parsed, strict, "`FromStr` agrees with `try_from_str`");
-    let lenient = LocaleTag::parse_lenient(&tag).expect("a 128-byte tag is accepted leniently");
+    let lenient =
+        LocaleTag::try_from_str_lenient(&tag).expect("a 128-byte tag is accepted leniently");
     assert_eq!(
         lenient, strict,
-        "`parse_lenient` agrees with `try_from_str`"
+        "`try_from_str_lenient` agrees with `try_from_str`"
     );
 }
 
@@ -90,32 +91,32 @@ fn a_tag_of_129_bytes_is_rejected() {
         "`FromStr` rejects a 129-byte tag"
     );
     assert_eq!(
-        LocaleTag::parse_lenient(&tag),
+        LocaleTag::try_from_str_lenient(&tag),
         Err(InvalidLocaleTag),
-        "`parse_lenient` rejects a 129-byte tag"
+        "`try_from_str_lenient` rejects a 129-byte tag"
     );
 }
 
-/// TYP-7: `parse_lenient` measures the length after trimming, so surrounding
+/// TYP-7: `try_from_str_lenient` measures the length after trimming, so surrounding
 /// white space does not count towards the cap.
 #[test]
-fn parse_lenient_measures_the_trimmed_input() {
+fn try_from_str_lenient_measures_the_trimmed_input() {
     let _serial = serial();
     let tag = private_use_tag(CAP);
     let padded = format!("   {tag}  \t");
     assert!(padded.len() > CAP, "the padded input exceeds the cap");
-    let lenient = LocaleTag::parse_lenient(&padded).expect("the trimmed tag fits the cap");
+    let lenient = LocaleTag::try_from_str_lenient(&padded).expect("the trimmed tag fits the cap");
     assert_eq!(lenient.as_str(), tag, "the white space is trimmed");
 }
 
-/// TYP-7: an oversized input holding `_` is rejected by `parse_lenient`.
+/// TYP-7: an oversized input holding `_` is rejected by `try_from_str_lenient`.
 #[test]
-fn parse_lenient_rejects_an_oversized_input_with_underscores() {
+fn try_from_str_lenient_rejects_an_oversized_input_with_underscores() {
     let _serial = serial();
     let input = "ja_JP_".repeat(CAP / 6 + 2);
     assert!(input.len() > CAP, "the input exceeds the cap");
     assert_eq!(
-        LocaleTag::parse_lenient(&input),
+        LocaleTag::try_from_str_lenient(&input),
         Err(InvalidLocaleTag),
         "an oversized input with `_` is rejected"
     );
@@ -150,7 +151,7 @@ fn an_oversized_input_is_rejected_before_anything_is_allocated() {
     assert!(hyphenated.len() >= HUGE / 2, "the input is multi-megabyte");
     let constructors: [(&str, Constructor); 2] = [
         ("try_from_str", LocaleTag::try_from_str),
-        ("parse_lenient", LocaleTag::parse_lenient),
+        ("try_from_str_lenient", LocaleTag::try_from_str_lenient),
     ];
     for (name, parse) in constructors {
         for (shape, input) in [("`-`", &hyphenated), ("`_`", &underscored)] {

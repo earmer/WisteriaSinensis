@@ -238,8 +238,14 @@ impl PositionedLine {
     /// slot need not be as wide as the wrap width: an indented line, or a
     /// provider's narrow slot, places an entity that fits nowhere the same way
     /// (spec SLT-5).
-    pub(super) fn check_slot_overflow(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
+    pub(super) fn check_slot_overflow(
+        &self,
+        ctx: &LineContext,
+        body: &BodyExtent,
+    ) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
+        let visual_width = self.visual_width();
+        let line_overflows = visual_width > ctx.wrap_width + body.eps;
         for (index, slot) in self.slots.iter().enumerate() {
             let eps = tolerance(slot.visual_width, 0.0);
             let capacity = slot.constraint.width();
@@ -253,11 +259,9 @@ impl PositionedLine {
             if overflows && !is_exempt {
                 // The whole line is wider than the container, or only this
                 // slot is wider than its own capacity.
-                let line_overflows =
-                    self.visual_width() > ctx.wrap_width + tolerance(self.visual_width(), 0.0);
                 return Err(if line_overflows {
                     E::LineWiderThanWrapWidth {
-                        visual_width: self.visual_width(),
+                        visual_width,
                         wrap_width: ctx.wrap_width,
                     }
                 } else {
@@ -296,38 +300,50 @@ impl PositionedLine {
         let slots = &self.slots;
         let eps = self.eps();
         let mut spans: Vec<Option<(f32, f32)>> = vec![None; slots.len()];
-        let mut place = |lo: f32, hi: f32| {
-            if let Some(i) = slots.iter().position(|s| s.holds(lo, hi, eps)) {
-                let (a, b) = spans[i].get_or_insert((lo, hi));
-                *a = a.min(lo);
-                *b = b.max(hi);
-            }
+        let owner = |lo: f32, hi: f32| slots.iter().position(|s| s.holds(lo, hi, eps));
+        let mut extend = |slot: usize, lo: f32, hi: f32| {
+            let (a, b) = spans[slot].get_or_insert((lo, hi));
+            *a = a.min(lo);
+            *b = b.max(hi);
         };
         for g in self.glyphs() {
             let (lo, hi) = g.pen_interval();
             match self.role(g) {
                 GlyphRole::Trailing | GlyphRole::ZeroAdvance => {}
-                GlyphRole::Body => place(lo, hi),
+                GlyphRole::Body => {
+                    if let Some(slot) = owner(lo, hi) {
+                        extend(slot, lo, hi);
+                    }
+                }
+                // Only the part inside a slot's content counts, for that slot.
                 GlyphRole::Hanging => {
-                    for s in slots {
+                    for (slot, s) in slots.iter().enumerate() {
                         let (lo, hi) = (lo.max(s.content_start), hi.min(s.content_end()));
                         if lo < hi {
-                            place(lo, hi);
+                            extend(slot, lo, hi);
                         }
                     }
                 }
             }
         }
-        for b in &self.visual_boxes {
-            place(b.x, b.x + b.width);
-        }
-        for t in self.tabs.iter().filter(|t| !self.is_trailing(t.byte_range)) {
-            place(t.x, t.x + t.width);
-        }
-        // The padding of a decoration span is advance of the body that no glyph
-        // or box covers: the fragment, which includes it, is part of the span.
-        for f in &self.span_fragments {
-            place(f.x, f.x + f.width);
+        // Inline boxes, tabs that are not trailing, and the span fragments: the
+        // padding of a decoration span is advance of the body that no glyph or
+        // box covers, and the fragment, which includes it, is part of the span.
+        let objects = self
+            .visual_boxes
+            .iter()
+            .map(|b| (b.x, b.x + b.width))
+            .chain(
+                self.tabs
+                    .iter()
+                    .filter(|t| !self.is_trailing(t.byte_range))
+                    .map(|t| (t.x, t.x + t.width)),
+            )
+            .chain(self.span_fragments.iter().map(|f| (f.x, f.x + f.width)));
+        for (lo, hi) in objects {
+            if let Some(slot) = owner(lo, hi) {
+                extend(slot, lo, hi);
+            }
         }
         for (slot, span) in slots.iter().zip(spans) {
             let is_content_span = match span {
@@ -381,10 +397,7 @@ impl PositionedLine {
             [] => {
                 let glyphs = || {
                     self.glyphs().filter(|g| {
-                        self.role(g) != GlyphRole::Hanging
-                            && (!g.is_synthesized() || self.is_ellipsized)
-                            && g.byte_range
-                                .is_none_or(|b| b.start() < self.visible_byte_end)
+                        self.role(g).is_inside_body() && (!g.is_synthesized() || self.is_ellipsized)
                     })
                 };
                 let mut ranges = glyphs()
@@ -511,7 +524,7 @@ impl PositionedLine {
             // Every other glyph that is not itself hanging counts,
             // zero-advance ones included; the mark's own glyphs do not.
             let other_reaches_further = roled().any(|(_, _, g, role)| {
-                !matches!(role, GlyphRole::Hanging | GlyphRole::Trailing)
+                role.is_inside_body()
                     && g.byte_range != mark.byte_range
                     && reach(g) > reach(mark) + body.eps
             });
@@ -539,16 +552,17 @@ impl PositionedLine {
                 return Err(E::SpanFragmentOutsideSpan { index });
             }
         }
+        let visual_width = self.visual_width();
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
                 let Some(range) = g.byte_range else {
                     continue;
                 };
-                if matches!(self.role(g), GlyphRole::Hanging | GlyphRole::Trailing) {
+                if !self.role(g).is_inside_body() {
                     continue;
                 }
                 let (lo, hi) = g.pen_interval();
-                if let Some(span_id) = self.uncovered_span(range, lo, hi) {
+                if let Some(span_id) = self.uncovered_span(range, lo, hi, visual_width) {
                     return Err(E::GlyphOutsideSpanFragment {
                         span_id,
                         run,
@@ -558,7 +572,9 @@ impl PositionedLine {
             }
         }
         for (index, b) in self.visual_boxes.iter().enumerate() {
-            if let Some(span_id) = self.uncovered_span(b.byte_range, b.x, b.x + b.width) {
+            if let Some(span_id) =
+                self.uncovered_span(b.byte_range, b.x, b.x + b.width, visual_width)
+            {
                 return Err(E::InlineBoxOutsideSpanFragment { span_id, index });
             }
         }
@@ -567,8 +583,7 @@ impl PositionedLine {
 
     /// The first span owning `range` (some fragment of it covers `range` in
     /// bytes) none of whose fragments contains `[lo, hi]` horizontally.
-    fn uncovered_span(&self, range: TextRange, lo: f32, hi: f32) -> Option<u64> {
-        let vw = self.visual_width();
+    fn uncovered_span(&self, range: TextRange, lo: f32, hi: f32, vw: f32) -> Option<u64> {
         self.span_fragments
             .iter()
             .filter(|f| f.byte_range.contains_range(range))

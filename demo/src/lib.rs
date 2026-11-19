@@ -127,7 +127,7 @@ impl Demo {
 
     /// [`Demo::layout`], with the error JSON of the stage that failed.
     fn try_layout(&mut self, req: &LayoutRequest<'_>) -> Result<String, String> {
-        let locale = req.locale.map(LocaleTag::parse_lenient).transpose();
+        let locale = req.locale.map(LocaleTag::try_from_str_lenient).transpose();
         let locale = locale.map_err(|_| error_json("input", "not a BCP 47 language tag"))?;
         // The host step: inline locale tags become style spans over the
         // plain paragraph text (spec AX-1, FE-25).

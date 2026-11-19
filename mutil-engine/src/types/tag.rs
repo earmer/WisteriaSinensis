@@ -210,7 +210,7 @@ impl LocaleTag {
     /// The trimmed input is longer than 128 bytes (rejected before anything
     /// is allocated), or the input, after the mapping, does not match the
     /// RFC 5646 `Language-Tag` grammar.
-    pub fn parse_lenient(tag: &str) -> Result<Self, InvalidLocaleTag> {
+    pub fn try_from_str_lenient(tag: &str) -> Result<Self, InvalidLocaleTag> {
         let trimmed = tag.trim();
         if trimmed.len() > MAX_LOCALE_TAG_LEN {
             return Err(InvalidLocaleTag);
@@ -558,7 +558,8 @@ mod tests {
 
     #[test]
     fn lenient_parsing_maps_shorthand_before_rfc_5646() {
-        let lenient = |tag: &str| LocaleTag::parse_lenient(tag).map(|t| t.as_str().to_owned());
+        let lenient =
+            |tag: &str| LocaleTag::try_from_str_lenient(tag).map(|t| t.as_str().to_owned());
         for (input, canonical) in [
             ("jp", "ja-JP"),
             ("JP", "ja-JP"),
@@ -583,8 +584,11 @@ mod tests {
         ] {
             assert_eq!(lenient(input).as_deref(), Ok(canonical), "{input}");
         }
-        assert_eq!(LocaleTag::parse_lenient("ja JP"), Err(InvalidLocaleTag));
-        assert_eq!(LocaleTag::parse_lenient(""), Err(InvalidLocaleTag));
+        assert_eq!(
+            LocaleTag::try_from_str_lenient("ja JP"),
+            Err(InvalidLocaleTag)
+        );
+        assert_eq!(LocaleTag::try_from_str_lenient(""), Err(InvalidLocaleTag));
         assert!(Arc::ptr_eq(&LocaleTag::und().0, &LocaleTag::und().0));
     }
 

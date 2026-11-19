@@ -211,8 +211,9 @@ impl Compiler<'_> {
     }
 
     /// `max(0, space advance + word_spacing)` for the primary font of a style
-    /// (FE-27, SHP-20), leaving non-finite shaper advances intact for the input
-    /// gate.
+    /// (FE-27, SHP-20). A space advance that is negative or not finite is the
+    /// backend's fault (SHP-18, AX-3): it is passed on unchanged, for the input
+    /// gate to reject as an invalid glue.
     fn glue_width(&self, style: usize) -> f32 {
         let s = &self.styles[style];
         let (font, _) = self.shaper.resolve_primary_font_metrics(
@@ -231,6 +232,9 @@ impl Compiler<'_> {
             },
             GlyphOrientation::Horizontal,
         );
+        if !(advance.is_finite() && advance >= 0.0) {
+            return advance;
+        }
         let raw = advance + s.word_spacing;
         if raw.is_finite() { raw.max(0.0) } else { raw }
     }

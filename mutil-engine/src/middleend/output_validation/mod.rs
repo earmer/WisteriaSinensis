@@ -26,7 +26,7 @@ pub enum LineInvariantError {
         /// Index into `visual_runs`.
         run: usize,
     },
-    /// A glyph's source range is empty, inverted or outside the line, or a
+    /// A glyph's source range is empty or outside the line, or a
     /// glyph of an ellipsis-only line has a source range.
     InvalidGlyphSource {
         /// Index into `visual_runs`.
@@ -524,7 +524,7 @@ impl PositionedLine {
         self.check_object_placement(ctx, &body)?;
         self.check_annotation_placement(ctx, &body, &glyphs)?;
         self.check_span_fragments()?;
-        self.check_slot_overflow(ctx)?;
+        self.check_slot_overflow(ctx, &body)?;
         self.check_slot_spans(ctx.base_direction)
     }
 
@@ -534,9 +534,9 @@ impl PositionedLine {
         self.validate(ctx).is_ok()
     }
 
-    /// `true` when `range` is well formed and inside this line's bytes.
+    /// `true` when `range` is inside this line's bytes.
     pub(super) fn owns_bytes(&self, range: TextRange) -> bool {
-        range.start() <= range.end() && self.byte_range.contains_range(range)
+        self.byte_range.contains_range(range)
     }
 
     fn sourced_glyphs(&self) -> SourcedGlyphs<'_> {
