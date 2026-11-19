@@ -494,27 +494,44 @@ fn lay_out_with(ast: &ParagraphAst, text: &str, shaper: &GlyphlessMerge) -> Posi
     paragraph
 }
 
+/// OUT-2's approximate equality of two output coordinates.
+fn same_position(a: f32, b: f32) -> bool {
+    use mutil_engine::middleend::{LINE_GEOMETRY_ABS_EPSILON, LINE_GEOMETRY_REL_EPSILON};
+    (a - b).abs() <= LINE_GEOMETRY_ABS_EPSILON.max(LINE_GEOMETRY_REL_EPSILON * a.abs().max(b.abs()))
+}
+
 #[test]
-fn int20_no_offset_has_two_stops_with_one_affinity_at_one_position() {
-    // "One stop per distinct offset and position" (INT-20): a coincident
-    // group holds distinct offsets or affinities, never a repeated stop.
+fn int20_crt1_no_two_stops_of_a_line_share_an_offset_at_one_position() {
+    // "One stop per distinct offset and position" (INT-20, CRT-1): two stops
+    // of one offset lie at distinct positions, whatever their affinities and
+    // levels; a coincident group holds distinct offsets only.
+    let mut pairs = 0;
     for text in [
         "אבג ",
         "אבג  ",
         "אבגabc ",
         "abcאבג ",
+        "abcאבג  ",
         "abc  ",
         "abc אבג def",
+        "abc אבג 123 def",
+        "abcאבגdef",
+        "abcאבג",
+        "אבגabc",
+        "אבג abc דהו",
+        "אבגabcדהו",
     ] {
         let line = Line::lay_out(text);
         let stops = line.stops();
         for (i, a) in stops.iter().enumerate() {
             for b in &stops[i + 1..] {
                 assert!(
-                    !(a.offset == b.offset && a.affinity == b.affinity && a.x == b.x),
-                    "{text:?}: {a:?} repeated in {stops:#?}"
+                    !(a.offset == b.offset && same_position(a.x, b.x)),
+                    "{text:?}: {a:?} and {b:?} share an offset at one position in {stops:#?}"
                 );
+                pairs += 1;
             }
         }
     }
+    assert!(pairs > 0);
 }

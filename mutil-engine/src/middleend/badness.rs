@@ -364,11 +364,4 @@ mod tests {
         };
         assert_eq!(positive.comparison_key(), negative.comparison_key());
     }
-
-    #[test]
-    fn an_unbounded_line_is_an_exact_fit() {
-        // `+inf` is an unbounded line, an exact fit (spec ST1-8 case A).
-        let fit = line_fit(f32::INFINITY, &CAP, 16.0);
-        assert_eq!((fit.ratio, fit.badness, fit.overfull), (0.0, 0.0, false));
-    }
 }

@@ -641,39 +641,118 @@ fn with_atomic_span(
     p
 }
 
-/// Whatever G4 accepts, a hit lands on a caret position of the text.
+/// Inline positions across the fixture's lines (0..100), past both edges,
+/// and the non-numbers.
+fn x_sweep() -> impl Iterator<Item = f32> {
+    (-40..=56).map(|i| 2.5 * i as f32).chain([
+        -1e9,
+        1e9,
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    ])
+}
+
+/// G4 accepts `p`, and every hit on it, per line and by point, lands on a
+/// caret position of `text`; a hit strictly inside the span's fragment on
+/// line `line` snaps to one of the span's ends `full` (INT-10).
 #[track_caller]
-fn assert_hits_are_caret_positions(p: &PositionedParagraph, text: &str) {
-    let Ok(l) = ValidatedLayout::try_from_paragraph(p, text) else {
-        return;
-    };
+fn assert_hits_snap_to_the_span(
+    p: &PositionedParagraph,
+    text: &str,
+    full: (usize, usize),
+    fragments: &[(usize, f32, f32)],
+) {
+    let l = ValidatedLayout::try_from_paragraph(p, text)
+        .unwrap_or_else(|(line, e)| panic!("G4 rejects the valid span {full:?}: line {line}: {e}"));
+    let mut checked = 0;
     for line in 0..p.lines.len() {
-        for x in [10.0, 40.0, 60.0, 90.0] {
+        for x in x_sweep() {
+            let what = format!("hit_test_on_line({line}, {x})");
             let hit = l.hit_test_on_line(line, x);
-            assert_position(
-                text,
-                hit.position,
-                &format!("hit_test_on_line({line}, {x})"),
-            );
+            assert_position(text, hit.position, &what);
+            if let Some(&(_, fx, fw)) = fragments
+                .iter()
+                .find(|&&(fl, fx, fw)| fl == line && fx < x && x < fx + fw)
+            {
+                assert!(
+                    [full.0, full.1].contains(&hit.position.byte_offset),
+                    "{what}: {hit:?} inside the fragment at {fx}+{fw} does not snap to {full:?}"
+                );
+            }
+            checked += 1;
         }
     }
+    for y in [
+        -1e9,
+        -10.0,
+        0.0,
+        3.0,
+        8.0,
+        13.0,
+        18.0,
+        23.0,
+        28.0,
+        40.0,
+        1e9,
+        f32::NAN,
+    ] {
+        for x in x_sweep() {
+            let what = format!("hit_test({x}, {y})");
+            assert_position(text, l.hit_test(Point { x, y }).position, &what);
+            checked += 1;
+        }
+    }
+    assert!(checked > 0);
 }
 
 #[test]
-fn frg3_int10_an_atomic_span_reaching_past_the_text_never_yields_a_hit_past_it() {
+fn frg3_int10_an_atomic_span_reaching_past_the_text_is_rejected_and_one_ending_at_it_snaps_inside_it()
+ {
     // A span recorded as 4..8 over the six bytes of "abcdef": its rendered
-    // part, 4..6, is covered by the fragment on the last line.
-    let p = with_atomic_span(TEXTS[0], (4, 8), &[(2, 4, 6, 0.0, 100.0)]);
-    assert_hits_are_caret_positions(&p, TEXTS[0]);
+    // part, 4..6, is covered by the fragment on the last line, but the span
+    // lies outside the text.
+    let past = with_atomic_span(TEXTS[0], (4, 8), &[(2, 4, 6, 0.0, 100.0)]);
+    let verdict = ValidatedLayout::try_from_paragraph(&past, TEXTS[0]).map(|_| ());
+    assert!(
+        matches!(
+            verdict,
+            Err((2, LineInvariantError::InvalidAtomicFragment { index: 0 }))
+        ),
+        "{verdict:?}"
+    );
+    // The boundary case G4 accepts: the span ends exactly at the text end.
+    let at_end = with_atomic_span(TEXTS[0], (4, 6), &[(2, 4, 6, 0.0, 100.0)]);
+    assert_hits_snap_to_the_span(&at_end, TEXTS[0], (4, 6), &[(2, 0.0, 100.0)]);
 }
 
 #[test]
-fn frg3_int10_an_atomic_span_ending_inside_a_character_never_yields_a_hit_inside_it() {
+fn frg3_int10_an_atomic_span_ending_inside_a_character_is_rejected_and_one_ending_on_its_boundary_snaps()
+ {
     // "é" is bytes 2..4 of "abéef": a span 0..3 ends inside it.
-    let p = with_atomic_span(
+    let inside = with_atomic_span(
         TEXTS[1],
         (0, 3),
         &[(0, 0, 2, 0.0, 100.0), (1, 2, 3, 0.0, 50.0)],
     );
-    assert_hits_are_caret_positions(&p, TEXTS[1]);
+    let verdict = ValidatedLayout::try_from_paragraph(&inside, TEXTS[1]).map(|_| ());
+    assert!(
+        matches!(
+            verdict,
+            Err((_, LineInvariantError::InvalidAtomicFragment { index: 0 }))
+        ),
+        "{verdict:?}"
+    );
+    // The boundary case G4 accepts: the span ends exactly after "é".
+    let on_boundary = with_atomic_span(
+        TEXTS[1],
+        (0, 4),
+        &[(0, 0, 2, 0.0, 100.0), (1, 2, 4, 0.0, 100.0)],
+    );
+    assert_hits_snap_to_the_span(
+        &on_boundary,
+        TEXTS[1],
+        (0, 4),
+        &[(0, 0.0, 100.0), (1, 0.0, 100.0)],
+    );
 }

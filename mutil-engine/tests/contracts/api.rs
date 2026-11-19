@@ -164,15 +164,66 @@ fn report_names_the_data_of_every_installed_unicode_component() {
 #[test]
 fn font_instance_queries_accept_variations_without_changing_face_identity() {
     let variations = [FontVariation::try_new(*b"wght", 650.).unwrap()];
-    let instance = FontInstanceRef {
-        font: FontRef::unscaled(FontId(7)),
+    let face = FontRef::unscaled(FontId(7));
+    let plain = FontInstanceRef {
+        font: face,
         font_size: 18.,
+        variations: &[],
+    };
+    let varied = FontInstanceRef {
         variations: &variations,
+        ..plain
     };
     let shaper: &dyn TextShaper = &NoopShaper;
-    // Noop checks interface closure only; real backend measurements need fonts.
-    let _: FontMetrics = shaper.font_metrics(instance);
-    let _ = shaper.ligature_carets(instance, 1, Direction::Ltr);
+    // SHP-9: NoopShaper answers all-zero metrics, no ligature carets and a
+    // zero space advance, whatever the variation coordinates.
+    let zero = FontMetrics {
+        vertical_ascent: 0.,
+        vertical_descent: 0.,
+        vertical_line_gap: 0.,
+        ideographic_baseline_offset: 0.,
+        central_baseline_offset: 0.,
+        hanging_baseline_offset: 0.,
+        mathematical_baseline_offset: 0.,
+        ascent: 0.,
+        descent: 0.,
+        line_gap: 0.,
+        underline_position: 0.,
+        underline_thickness: 0.,
+        strikeout_position: 0.,
+        x_height: 0.,
+        cap_height: 0.,
+        use_typo_metrics: false,
+    };
+    assert_eq!(shaper.font_metrics(varied), shaper.font_metrics(plain));
+    assert_eq!(shaper.font_metrics(varied), zero);
+    for direction in [Direction::Ltr, Direction::Rtl] {
+        let carets = shaper.ligature_carets(varied, 1, direction);
+        assert_eq!(carets, shaper.ligature_carets(plain, 1, direction));
+        assert!(carets.is_empty(), "{direction:?}: {carets:?}");
+    }
+    for orientation in [
+        GlyphOrientation::Horizontal,
+        GlyphOrientation::HorizontalInVertical,
+    ] {
+        assert_eq!(shaper.space_advance(varied, orientation), 0.);
+        assert_eq!(shaper.space_advance(plain, orientation), 0.);
+    }
+    // FontId names a face, not an instance: the variations change neither
+    // the face of the instance nor the primary face resolved for them.
+    assert_eq!((varied.font, plain.font), (face, face));
+    let resolve = |variations: &[FontVariation]| {
+        shaper.resolve_primary_font_metrics(
+            &[FontFamily::Generic(GenericFamily::Monospace)],
+            FontStyle::default(),
+            ScriptTag::LATIN,
+            &LocaleTag::und(),
+            18.,
+            variations,
+        )
+    };
+    assert_eq!(resolve(&variations), resolve(&[]));
+    assert_eq!(resolve(&variations), (FontId(0), zero));
 }
 #[test]
 fn saturated_badness_prefers_smaller_excess_slack() {

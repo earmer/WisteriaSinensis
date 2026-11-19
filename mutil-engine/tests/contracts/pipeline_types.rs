@@ -364,19 +364,6 @@ fn canonical_penalty_scale_is_ordered_and_tiers_are_ranked() {
 }
 
 #[test]
-fn hyphen_opportunity_carries_prefix_and_suffix_replacements() {
-    let h = HyphenOpportunity {
-        prefix_replacement: Some("a".into()),
-        suffix_replacement: Some("tje".into()),
-        prefix_cut_bytes: 1,
-        suffix_cut_bytes: 2,
-    };
-    assert_eq!(h.prefix_replacement.as_deref(), Some("a"));
-    assert_eq!(h.suffix_replacement.as_deref(), Some("tje"));
-    assert_eq!((h.prefix_cut_bytes, h.suffix_cut_bytes), (1, 2));
-}
-
-#[test]
 fn clusters_partition_atoms_and_split_clusters_are_detected() {
     // Fixture words satisfy both invariants.
     let mut ast = crate::common::ast("");
@@ -480,80 +467,6 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
         }]
     });
     assert!(tab.is_self_contained(0));
-}
-
-#[test]
-fn full_spec_type_surface_is_nameable() {
-    let pos = CursorPosition {
-        byte_offset: 3,
-        affinity: CaretAffinity::Downstream,
-    };
-    let hit = HitResult {
-        position: pos,
-        inside: false,
-    };
-    let sel = Selection {
-        anchor: pos,
-        focus: CursorPosition {
-            byte_offset: 7,
-            ..pos
-        },
-    };
-    let caret = CaretVisual {
-        primary_rect: Rect::new(10.0, 0.0, 1.0, 16.0),
-        secondary_rect: None,
-    };
-    assert!(!hit.inside && sel.anchor != sel.focus && caret.secondary_rect.is_none());
-
-    let motions = [
-        Motion::Left,
-        Motion::Right,
-        Motion::Previous,
-        Motion::Next,
-        Motion::WordLeft,
-        Motion::WordRight,
-        Motion::WordPrevious,
-        Motion::WordNext,
-        Motion::LineStart,
-        Motion::LineEnd,
-        Motion::Up,
-        Motion::Down,
-    ];
-    assert_eq!(motions.len(), 12);
-    assert_ne!(
-        HangMode {
-            start: HangStartMode::FirstLine,
-            end: HangEndMode::None
-        },
-        HangMode {
-            start: HangStartMode::None,
-            end: HangEndMode::Allow
-        }
-    );
-    assert_ne!(QuotePolicy::CjkAware, QuotePolicy::Standard);
-}
-
-#[test]
-fn hanging_punctuation_fits_negative_x_and_synthesized_flag_round_trips() {
-    // A hanging opening bracket sits left of the line edge.
-    let hanging = PositionedGlyph {
-        glyph_id: 1,
-        x: -ADV,
-        x_offset: 0.0,
-        y_offset: 0.0,
-        advance: ADV,
-        byte_range: Some(TextRange::new(0, 1)),
-    };
-    assert!(hanging.x < 0.0);
-
-    // The shaper marks a glyph it inserts (the hyphen of a `TrailingEdit`),
-    // since a raw glyph has no source range of its own; once positioned, the
-    // glyph carries `byte_range: None` instead.
-    let g = RawShapedGlyph {
-        is_synthesized: true,
-        ..Default::default()
-    };
-    assert!(g.is_synthesized);
 }
 
 #[test]

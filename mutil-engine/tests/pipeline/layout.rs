@@ -176,7 +176,20 @@ fn glyph_runs_place_every_glyph_with_a_finite_origin() {
     let text = "Hello, world";
     let p = lay_out(text, &column(100.0), &LayoutOptions::default());
     let layout = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
-    let glyphs: usize = layout.glyph_runs().map(|run| run.glyphs().count()).sum();
+    let mut glyphs = 0;
+    for run in layout.glyph_runs() {
+        for g in run.glyphs() {
+            assert!(
+                g.origin.x.is_finite() && g.origin.y.is_finite(),
+                "line {}: glyph {} at {:?}",
+                run.line(),
+                g.glyph_id,
+                g.origin
+            );
+            glyphs += 1;
+        }
+    }
+    assert!(glyphs > 0);
     assert_eq!(glyphs, text.chars().filter(|c| *c != ' ').count());
 }
 

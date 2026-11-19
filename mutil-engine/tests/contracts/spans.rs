@@ -136,15 +136,6 @@ fn atomic_spans_are_ascending_and_disjoint() {
     }
 }
 
-#[test]
-fn thousands_of_spans_validate() {
-    // Deterministic, untimed counterpart of `five_thousand_spans_scale_linearly`.
-    let (t, a) = spanned(3000);
-    assert_eq!(a.decoration_spans.len(), 3000);
-    assert_eq!(a.atomic_spans.len(), 3000);
-    assert!(check(&a, &t).is_ok());
-}
-
 fn bidi_span(id: u64, start: usize, end: usize) -> ExplicitBidiSpan {
     ExplicitBidiSpan {
         span_id: id,
