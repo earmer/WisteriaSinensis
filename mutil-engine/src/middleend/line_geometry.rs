@@ -49,11 +49,12 @@ pub(crate) struct BodyExtent {
 }
 
 impl PositionedSlot {
-    /// Whether `[lo, hi]` lies in this slot's content block. The one rule that
-    /// decides both whether content belongs to a slot and whether the slot
-    /// counts as occupied.
-    pub(crate) fn holds(&self, lo: f32, hi: f32) -> bool {
-        let eps = tolerance(self.visual_width, 0.0);
+    /// Whether `[lo, hi]` lies in this slot's content block, within `eps`. The
+    /// one rule that decides both whether content belongs to a slot and whether
+    /// the slot counts as occupied. `eps` is the line's
+    /// ([`PositionedLine::eps`]), so that a glyph's role and its overflow
+    /// beyond the body are judged at the same scale.
+    pub(crate) fn holds(&self, lo: f32, hi: f32, eps: f32) -> bool {
         lo >= self.content_start - eps && hi <= self.content_end() + eps
     }
 }
@@ -63,20 +64,21 @@ impl BodyExtent {
     /// occupied when it has a non-zero block, or holds a visible glyph with
     /// source bytes, an inline box or a visible tab.
     pub(crate) fn of(line: &PositionedLine) -> Option<Self> {
+        let eps = line.eps();
         let is_occupied = |slot: &PositionedSlot| {
             slot.visual_width > 0.0
                 || line.glyphs().any(|g| {
                     let (lo, hi) = g.pen_interval();
-                    g.byte_range.is_some_and(|r| !line.is_trailing(r)) && slot.holds(lo, hi)
+                    g.byte_range.is_some_and(|r| !line.is_trailing(r)) && slot.holds(lo, hi, eps)
                 })
                 || line
                     .visual_boxes
                     .iter()
-                    .any(|b| slot.holds(b.x, b.x + b.width))
+                    .any(|b| slot.holds(b.x, b.x + b.width, eps))
                 || line
                     .tabs
                     .iter()
-                    .any(|t| !line.is_trailing(t.byte_range) && slot.holds(t.x, t.x + t.width))
+                    .any(|t| !line.is_trailing(t.byte_range) && slot.holds(t.x, t.x + t.width, eps))
         };
         let first = line.slots.iter().position(is_occupied)?;
         let last = line.slots.iter().rposition(is_occupied)?;
@@ -85,7 +87,7 @@ impl BodyExtent {
             last,
             left: line.slots[first].content_start,
             right: line.slots[last].content_end(),
-            eps: tolerance(line.visual_width(), 0.0),
+            eps,
             slot_count: line.slots.len(),
         })
     }
@@ -185,9 +187,15 @@ impl PositionedLine {
         self.visual_runs.iter().flat_map(|run| &run.glyphs)
     }
 
+    /// The line's one geometry [`tolerance`], at the scale of its body width.
+    pub(crate) fn eps(&self) -> f32 {
+        tolerance(self.visual_width(), 0.0)
+    }
+
     /// Whether some slot's content block holds `[lo, hi]`.
     pub(crate) fn is_held(&self, lo: f32, hi: f32) -> bool {
-        self.slots.iter().any(|slot| slot.holds(lo, hi))
+        let eps = self.eps();
+        self.slots.iter().any(|slot| slot.holds(lo, hi, eps))
     }
 
     /// `true` for source bytes at or after `visible_byte_end`.

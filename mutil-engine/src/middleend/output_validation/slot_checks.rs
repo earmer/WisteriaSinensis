@@ -294,9 +294,10 @@ impl PositionedLine {
         base_direction: BidiDirection,
     ) -> Result<(), LineInvariantError> {
         let slots = &self.slots;
+        let eps = self.eps();
         let mut spans: Vec<Option<(f32, f32)>> = vec![None; slots.len()];
         let mut place = |lo: f32, hi: f32| {
-            if let Some(i) = slots.iter().position(|s| s.holds(lo, hi)) {
+            if let Some(i) = slots.iter().position(|s| s.holds(lo, hi, eps)) {
                 let (a, b) = spans[i].get_or_insert((lo, hi));
                 *a = a.min(lo);
                 *b = b.max(hi);

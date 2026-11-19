@@ -63,8 +63,10 @@ def metrics() -> dict[str, int]:
         "occupied_slots_calls": count(under("middleend"), r"\.occupied_slots\(\)"),
         # Stored-and-validated hang flag (§4.4).
         "is_hanging_field_uses": count(ENGINE, r"\bis_hanging\b"),
-        # Unsafe blocks and unsafe ABI functions in the demo (§4.5).
-        "unsafe_in_demo": count(DEMO, r"\bunsafe\b"),
+        # Unsafe blocks, functions and impls in the demo (§4.5). The
+        # `#[unsafe(no_mangle)]` export attribute is not counted: Rust 2024
+        # requires it on every ABI export, so it is not a smell.
+        "unsafe_in_demo": count(DEMO, r"\bunsafe\s*(\{|fn\b|impl\b)"),
     }
 
 
