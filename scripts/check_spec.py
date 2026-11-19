@@ -191,6 +191,25 @@ def parse_members(code: str, types: dict[str, TypeDef]) -> None:
             types[name].members.add(trait)
 
 
+# The methods `bitflags::bitflags!` generates, which the spec may name.
+BITFLAGS_METHODS = {
+    "bits", "from_bits_truncate", "is_empty", "contains", "intersects",
+    "union", "insert", "remove", "set",
+}
+
+
+def parse_bitflags(code: str, types: dict[str, TypeDef]) -> None:
+    """Adds the constants and generated methods of every `bitflags!` struct."""
+    for m in re.finditer(rf"\bbitflags::bitflags!\s*\{{", code):
+        body = code[m.end() - 1 : matching(code, m.end() - 1)]
+        sm = re.search(rf"\bpub\s+struct\s+({IDENT})\s*:\s*\w+\s*\{{", body)
+        if not sm or sm.group(1) not in types:
+            continue
+        members = types[sm.group(1)].members
+        members.update(BITFLAGS_METHODS)
+        members.update(re.findall(rf"\bconst\s+({IDENT})\s*=", body))
+
+
 def top_level_pub_fns(code: str) -> set[str]:
     """Returns `pub fn` names declared at brace depth 0 (outside impls/traits/bodies)."""
     top: list[str] = []
@@ -270,6 +289,7 @@ def crate_types(src: Path) -> tuple[dict[str, TypeDef], set[str], dict[str, set[
     code = remove_test_modules(code)
     types = parse_types(code, public_only=True)
     parse_members(code, types)
+    parse_bitflags(code, types)
     # Type aliases are names too.
     for am in re.finditer(rf"\bpub\s+type\s+({IDENT})\b", code):
         types.setdefault(am.group(1), TypeDef("type", am.group(1), opaque=True))

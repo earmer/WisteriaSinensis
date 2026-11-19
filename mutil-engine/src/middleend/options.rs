@@ -20,11 +20,7 @@ pub enum HangingWhitespaceMode {
 
 /// Line-breaking strategy (spec §5 Stage 1.6.1): one beam-lookahead machine `[L3][L6]`.
 ///
-/// | Profile | `beam_width` | `window_depth` | Use |
-/// |---|---|---|---|
-/// | `Greedy` | 1 | 1 | monospace code, logs, UAX #14 oracle tests |
-/// | `Balanced` (default) | 2 | 2 | interactive rich-text editing |
-/// | `Publication` | 8 | 6 | static reading view, print export |
+/// Phase 1 and 2 layout breaks every strategy greedily (spec ME-2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LineBreakStrategy {
     /// First-fit with the overflow ladder; each line depends only on its start.
@@ -34,28 +30,6 @@ pub enum LineBreakStrategy {
     Balanced,
     /// Knuth-Plass quality over a bounded window, with dominator pruning.
     Publication,
-}
-
-impl LineBreakStrategy {
-    /// Number of candidate paths kept alive (`K`).
-    #[must_use]
-    pub const fn beam_width(self) -> usize {
-        match self {
-            Self::Greedy => 1,
-            Self::Balanced => 2,
-            Self::Publication => 8,
-        }
-    }
-
-    /// Lines of lookahead before the oldest is committed (`W`).
-    #[must_use]
-    pub const fn window_depth(self) -> usize {
-        match self {
-            Self::Greedy => 1,
-            Self::Balanced => 2,
-            Self::Publication => 6,
-        }
-    }
 }
 
 /// Copy policy for a source U+00AD (spec §6.6); a generated hyphen is never copied.
@@ -510,20 +484,6 @@ pub trait LineGeometryProvider: std::fmt::Debug + Send + Sync {
 mod tests {
     use super::*;
     use smallvec::smallvec;
-
-    #[test]
-    fn strategy_profiles_map_to_beam_parameters() {
-        use LineBreakStrategy as S;
-        assert_eq!((S::Greedy.beam_width(), S::Greedy.window_depth()), (1, 1));
-        assert_eq!(
-            (S::Balanced.beam_width(), S::Balanced.window_depth()),
-            (2, 2)
-        );
-        assert_eq!(
-            (S::Publication.beam_width(), S::Publication.window_depth()),
-            (8, 6)
-        );
-    }
 
     #[test]
     fn a_line_limit_takes_the_field_type() {

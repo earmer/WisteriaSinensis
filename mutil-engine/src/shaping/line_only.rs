@@ -15,7 +15,7 @@ use super::clusters::{
     EdgeFonts, TaggedGlyph, atom_containing, finish_window, plan_window, push_clusters,
     push_empty_clusters,
 };
-use super::{ReshapeRequest, ShapeOutput, ShaperProfile, TextShaper};
+use super::{ReshapeRequest, ShapeOutput, TextShaper};
 use crate::types::{
     FontFamily, FontFeatures, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
     GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster,
@@ -84,9 +84,6 @@ pub struct LineOnlyShaper<B> {
 }
 
 impl<B: LineShaper> LineOnlyShaper<B> {
-    /// The profile this adapter runs as.
-    pub const PROFILE: ShaperProfile = ShaperProfile::LineOnly;
-
     /// The adapter over `backend`.
     pub fn new(backend: B) -> Self {
         Self { backend }

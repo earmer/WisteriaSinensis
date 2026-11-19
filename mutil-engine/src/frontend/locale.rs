@@ -53,55 +53,30 @@ pub(crate) fn resolve(
     if policy != LocalePolicy::ExperimentalHeuristics {
         return out;
     }
-    let mut ends = SENTENCES.segment_str(text).filter(|&b| b > 0).peekable();
     let mut first = 0;
-    while let Some(end) = ends.next() {
-        let last = if ends.peek().is_none() {
-            atoms.len()
-        } else {
-            first + atoms[first..].partition_point(|a| a.byte_range.start() < end)
-        };
+    for end in SENTENCES.segment_str(text).filter(|&b| b > 0) {
+        let last = first + atoms[first..].partition_point(|a| a.byte_range.start() < end);
         let sentence = &atoms[first..last];
-        let (mut has_kana, mut has_hangul, mut serbian) = (false, false, false);
-        for a in sentence {
-            match a.script {
-                ScriptTag::HIRAGANA | ScriptTag::KATAKANA => has_kana = true,
-                ScriptTag::HANGUL => has_hangul = true,
-                _ => {}
-            }
-            serbian = serbian
-                || a.text
-                    .contains(['\u{0402}', '\u{040B}', '\u{0452}', '\u{045B}']);
-        }
-        if has_kana || has_hangul || serbian {
-            for (k, atom) in sentence.iter().enumerate() {
-                if atom.explicit.is_some() {
-                    continue;
-                }
-                let s = atom.script;
-                let locale = if has_kana
-                    && matches!(
-                        s,
-                        ScriptTag::HAN | ScriptTag::HIRAGANA | ScriptTag::KATAKANA
-                    ) {
-                    Some(&*JA)
-                } else if !has_kana && has_hangul && matches!(s, ScriptTag::HAN | ScriptTag::HANGUL)
-                {
-                    Some(&*KO)
-                } else if serbian && s == ScriptTag::CYRILLIC {
-                    Some(&*SR)
-                } else {
-                    None
-                };
-                if let Some(locale) = locale {
-                    out[first + k] = locale.clone();
-                }
+        let has_kana = sentence
+            .iter()
+            .any(|a| matches!(a.script, ScriptTag::HIRAGANA | ScriptTag::KATAKANA));
+        let has_hangul = sentence.iter().any(|a| a.script == ScriptTag::HANGUL);
+        let serbian = sentence.iter().any(|a| {
+            a.text
+                .contains(['\u{0402}', '\u{040B}', '\u{0452}', '\u{045B}'])
+        });
+        for (atom, slot) in sentence.iter().zip(&mut out[first..last]) {
+            let inferred = match atom.script {
+                ScriptTag::HIRAGANA | ScriptTag::KATAKANA | ScriptTag::HAN if has_kana => Some(&JA),
+                ScriptTag::HAN | ScriptTag::HANGUL if has_hangul && !has_kana => Some(&KO),
+                ScriptTag::CYRILLIC if serbian => Some(&SR),
+                _ => None,
+            };
+            if let Some(locale) = inferred.filter(|_| atom.explicit.is_none()) {
+                slot.clone_from(locale);
             }
         }
         first = last;
-        if first == atoms.len() {
-            break;
-        }
     }
     out
 }
