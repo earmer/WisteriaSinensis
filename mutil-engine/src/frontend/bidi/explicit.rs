@@ -227,6 +227,15 @@ const fn next_level(level: u8, rtl: bool) -> u8 {
     }
 }
 
+/// The strong class of the direction of `level`: R when odd, else L.
+pub(super) const fn direction_class(level: u8) -> BidiClass {
+    if level % 2 == 1 {
+        BidiClass::R
+    } else {
+        BidiClass::L
+    }
+}
+
 /// An isolating run sequence (BD13): the indices of its characters in order,
 /// its level, and the classes before and after it (X10).
 pub(super) struct RunSequence {
@@ -287,13 +296,6 @@ pub(super) fn run_sequences(
         kept.get(kept.partition_point(|&k| k <= i))
             .map_or(paragraph, |&k| levels[k])
     };
-    let class_of = |level: u8| {
-        if level % 2 == 1 {
-            BidiClass::R
-        } else {
-            BidiClass::L
-        }
-    };
     sequences
         .into_iter()
         .map(|indices| {
@@ -308,8 +310,8 @@ pub(super) fn run_sequences(
                 level_after(last)
             };
             RunSequence {
-                sos: class_of(level.max(level_before(first))),
-                eos: class_of(level.max(after)),
+                sos: direction_class(level.max(level_before(first))),
+                eos: direction_class(level.max(after)),
                 level,
                 indices,
             }
@@ -319,5 +321,5 @@ pub(super) fn run_sequences(
 
 /// The level `level` as a [`BidiLevel`]; UAX #9 never exceeds its maximum.
 pub(super) fn checked_level(level: u8) -> BidiLevel {
-    BidiLevel::new(level).expect("UAX #9 levels never exceed BIDI_MAX_DEPTH + 1")
+    BidiLevel::try_new(level).expect("UAX #9 levels never exceed BIDI_MAX_DEPTH + 1")
 }

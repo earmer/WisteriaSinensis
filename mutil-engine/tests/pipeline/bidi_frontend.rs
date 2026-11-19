@@ -134,7 +134,7 @@ fn fe12_explicit_bidi_spans_act_as_isolates_and_overrides() {
         .items
         .iter()
         .filter_map(|n| match n {
-            WordNode::Box(BoxNode::Text { byte_range, .. }) => {
+            WordNode::Box(BoxNode::Text(TextBox { byte_range, .. })) => {
                 Some((byte_range.start(), byte_range.end()))
             }
             _ => None,
@@ -194,7 +194,9 @@ fn fe12_objects_are_neutrals_and_word_spaces_take_their_resolved_level() {
             .items
             .iter()
             .find_map(|n| match n {
-                WordNode::Box(BoxNode::InlineObject { bidi_level, .. }) => Some(*bidi_level),
+                WordNode::Box(BoxNode::InlineObject(InlineObjectBox { bidi_level, .. })) => {
+                    Some(*bidi_level)
+                }
                 _ => None,
             })
             .unwrap();

@@ -11,8 +11,8 @@ mod storage;
 mod tests;
 
 use super::{LayoutConstraints, LayoutOptions, LayoutPolicySnapshot};
-use crate::frontend::{ParagraphAst, WordNode, is_paragraph_separator};
-use crate::types::{GraphemeAtom, TextRange};
+use crate::frontend::{ParagraphAst, is_paragraph_separator};
+use crate::types::TextRange;
 
 /// An input that [`check_layout_inputs`] rejects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,8 +22,14 @@ pub enum LayoutInputError {
     /// or a tate-chu-yoko run is not one cluster in one text box spanning the
     /// whole run.
     OrientationMismatch,
-    /// Invalid raw horizontal/vertical metrics or baseline offsets.
+    /// The AST's raw strut metrics are not valid `FontMetrics` although the
+    /// strut's own ascent, descent and line gap pass (`InvalidStrut` covers
+    /// those); for example an invalid vertical metric or baseline offset.
     InvalidFontMetrics,
+    /// A `TextShaper` answered metrics that are not valid `FontMetrics` at
+    /// layout time, or that resolve under the line height to an invalid line
+    /// box (the shaper gate, G2). The AST is not at fault.
+    InvalidShaperMetrics,
     /// Nonfinite or forbidden explicit spacing.
     InvalidSpacing,
     /// Invalid explicit directional span.
@@ -38,8 +44,19 @@ pub enum LayoutInputError {
     },
     /// Invalid clamp or other layout policy.
     InvalidLayoutOptions,
-    /// Malformed geometry or exhausted clearance progress.
+    /// A provider answer outside the wrap envelope or out of order, or an
+    /// obstructed answer without progress ahead.
     InvalidLineGeometry,
+    /// More than the allowed number of obstructed provider answers in a row
+    /// for one line (spec GEO-4).
+    ClearanceExhausted,
+    /// A line's block envelope cannot be represented at its block position:
+    /// `f32` rounding there loses more than an eighth of the line's height
+    /// (spec GEO-3).
+    BlockPositionUnrepresentable,
+    /// One line still outgrew its envelope after the allowed refits
+    /// (spec GEO-6).
+    RefitExhausted,
     /// Expanding a block envelope introduced available inline space.
     NonMonotonicGeometry,
     /// Invalid width or indentation; positive-infinite width is allowed. Without a geometry provider each indent must lie in
@@ -251,31 +268,22 @@ pub(super) fn fits(text: &str, range: TextRange) -> bool {
 /// (`ItemOutsideText`, `ItemsOutOfOrder`, `ItemNotSelfContained`) rejects, so
 /// a search over it is skipped rather than allowed to report a misleading
 /// error first.
-pub(super) fn in_byte_order(mut ranges: impl Iterator<Item = TextRange>) -> bool {
-    let Some(mut prev) = ranges.next() else {
-        return true;
-    };
-    ranges.all(|r| {
-        let ok = prev.start() <= prev.end() && prev.end() <= r.start();
-        prev = r;
-        ok
-    }) && prev.start() <= prev.end()
+pub(super) fn in_byte_order(ranges: impl Iterator<Item = TextRange>) -> bool {
+    ranges.flat_map(|r| [r.start(), r.end()]).is_sorted()
 }
 
-/// Whether `ranges` (byte-ordered) has a range starting or ending at `offset`.
-pub(super) fn is_range_edge(ranges: &[TextRange], offset: usize) -> bool {
-    let at = ranges.partition_point(|r| r.end() < offset);
-    ranges
+/// Whether `items` (byte-ordered by `range`) has one starting or ending at
+/// `offset`.
+pub(super) fn is_range_edge<T>(
+    items: &[T],
+    range: impl Fn(&T) -> TextRange,
+    offset: usize,
+) -> bool {
+    let at = items.partition_point(|item| range(item).end() < offset);
+    items
         .get(at)
+        .map(range)
         .is_some_and(|r| r.start() == offset || r.end() == offset)
-}
-
-/// Whether `atoms` (byte-ordered) has an atom starting or ending at `offset`.
-pub(super) fn is_atom_boundary(atoms: &[GraphemeAtom], offset: usize) -> bool {
-    let at = atoms.partition_point(|a| a.byte_range.end() < offset);
-    atoms
-        .get(at)
-        .is_some_and(|a| a.byte_range.start() == offset || a.byte_range.end() == offset)
 }
 
 /// Checks the inputs of [`layout_paragraph`](super::layout_paragraph).
@@ -298,7 +306,15 @@ pub fn check_layout_inputs(
     constraints: &LayoutConstraints,
     options: &LayoutOptions,
 ) -> Result<(), LayoutInputError> {
-    super::ValidatedInputs::new(ast, text, constraints, options).map(drop)
+    super::ValidatedInputs::try_from_ast(ast, text, constraints, options).map(drop)
+}
+
+/// A paragraph AST covers one paragraph: the document text is split first.
+fn check_no_paragraph_separator(text: &str) -> Result<(), LayoutInputError> {
+    if text.chars().any(is_paragraph_separator) {
+        return Err(LayoutInputError::ParagraphSeparatorInText);
+    }
+    Ok(())
 }
 
 /// [`check_layout_inputs`], returning the policy it resolved on the way so
@@ -309,56 +325,23 @@ pub(super) fn validate_layout_inputs(
     constraints: &LayoutConstraints,
     options: &LayoutOptions,
 ) -> Result<LayoutPolicySnapshot, LayoutInputError> {
-    use LayoutInputError as E;
     let policy = LayoutPolicySnapshot::resolve(ast, constraints, options)?;
-    // A paragraph AST covers one paragraph: split the document text first.
-    if text.chars().any(is_paragraph_separator) {
-        return Err(E::ParagraphSeparatorInText);
-    }
-    storage::check_storage(ast)?;
-    storage::check_presentation(ast)?;
-    if !ast.bidi_spans.is_empty() || !ast.annotations.is_empty() {
-        let edges = spans::ContentEdges::new(ast);
-        spans::check_bidi_spans(ast, text, &edges)?;
-        spans::check_annotations(ast, text, &edges)?;
-    }
-    // `check_run` proves each run's range is ordered and inside `text`; the body
-    // runs then progress through the text (`prev.end <= next.start`).
-    let mut previous_end = 0;
-    for (index, run) in ast.runs.iter().enumerate() {
-        storage::check_run(run, text, index)?;
-        if run.byte_range.start() < previous_end {
-            return Err(E::InvalidShapingRun { run: index });
-        }
-        previous_end = run.byte_range.end();
-    }
-    spans::check_spans(ast, text)?;
-    // Reject out-of-text and out-of-order items before indexing spans against
-    // them, so the index is built on ordered ranges and cannot scan or clone
-    // unboundedly for a malformed AST. The item checks may assume every item
-    // fits inside `text`.
-    if let Some(item) = ast
-        .items
-        .iter()
-        .position(|node| !fits(text, node.byte_span()))
-    {
-        return Err(E::ItemOutsideText { item });
-    }
-    items::check_item_order(ast)?;
-    let spans = spans::SpanIndex::new(ast);
-    let mut checks = items::ItemChecks::new(ast, text, &spans);
-    for (item, node) in ast.items.iter().enumerate() {
-        checks.check(item, node)?;
-    }
-    let ends_with_sentinel = matches!(
-        ast.items.last(),
-        Some(WordNode::Discretionary(d)) if d.is_paragraph_end()
-    );
-    if !ends_with_sentinel {
-        return Err(E::MissingParagraphEnd);
-    }
-    spans::check_boundary_order(ast, &spans)?;
-    spans::check_span_enclosure(ast, &spans)?;
+    check_no_paragraph_separator(text)?;
+    // Phase order is error precedence. A phase that establishes what a later
+    // one relies on returns it as a proof that the later one takes.
+    let boxes = storage::check_storage(ast)?;
+    storage::check_presentation(ast, &boxes)?;
+    spans::check_bidi_and_annotations(ast, text, &boxes)?;
+    storage::check_runs(ast, text)?;
+    let ids = spans::check_decoration_spans(ast, text)?;
+    spans::check_atomic_spans(ast, text, &boxes)?;
+    items::check_items_fit(ast, text)?;
+    let in_order = items::check_item_order(ast)?;
+    let spans = spans::SpanIndex::new(ast, &boxes, &in_order);
+    items::check_each_item(ast, text, &boxes, &ids, &spans)?;
+    items::check_paragraph_end(ast)?;
+    let boundaries = spans::check_boundary_order(ast, &ids)?;
+    spans::check_span_enclosure(ast, &spans, &boundaries)?;
     storage::check_coverage(ast, text)?;
     Ok(policy)
 }

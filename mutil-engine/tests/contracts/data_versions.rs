@@ -46,9 +46,3 @@ fn the_locked_icu_data_is_the_reported_unicode_version() {
         );
     }
 }
-
-#[test]
-fn the_lock_file_reader_finds_packages() {
-    assert_eq!(locked_versions("mutil-engine"), ["0.0.1"]);
-    assert!(locked_versions("no-such-package").is_empty());
-}

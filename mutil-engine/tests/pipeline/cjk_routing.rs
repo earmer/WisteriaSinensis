@@ -60,7 +60,7 @@ fn cjk_style(families: &[&str], locale: Option<&str>) -> TextStyle {
             .iter()
             .map(|f| FontFamily::Named((*f).into()))
             .collect(),
-        locale: locale.map(|l| LocaleTag::parse_lenient(l).expect("a locale")),
+        locale: locale.map(|l| LocaleTag::try_from_str_lenient(l).expect("a locale")),
         ..style(18.0)
     }
 }
@@ -111,7 +111,7 @@ fn faces_are_profiled_from_their_tables() {
 fn a_host_can_state_a_faces_locale() {
     let mut registry = FontRegistry::new();
     let face = |bytes: &'static [u8]| FontFace::new(FontBytes::from_static(bytes), 0);
-    let tag = |t: &str| LocaleTag::parse_lenient(t).expect("a locale");
+    let tag = |t: &str| LocaleTag::try_from_str_lenient(t).expect("a locale");
     let sans = CJK_FONTS[1].1;
     let jp = CJK_FONTS[4].1;
     let as_hk = registry
@@ -153,7 +153,7 @@ fn a_han_run_skips_a_latin_face_that_shares_its_punctuation() {
     let style = cjk_style(&["Noto Serif", "Noto Sans JP"], Some("ja-JP"));
     let options = FrontendOptions {
         quote_policy: QuotePolicy::CjkAware,
-        default_locale: LocaleTag::parse_lenient("ja-JP").unwrap(),
+        default_locale: LocaleTag::try_from_str_lenient("ja-JP").unwrap(),
         ..FrontendOptions::default()
     };
     let ast = compile_with(text, &style, &[], &options);

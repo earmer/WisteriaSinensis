@@ -183,6 +183,60 @@ SHADDA and U+0670 SUPERSCRIPT ALEF (plain الله shapes as four joined
 glyphs). It is 1190 units wide, with carets at 453, 692 and 960, which are
 not evenly spaced.
 
+## `WisteriaVarTest.ttf`
+
+A synthetic variable font for the variable-font tests, built by
+`build_variable_test_font.py` beside this file. It has no upstream and draws
+nothing real: each glyph is a rectangle plus a serif foot whose width grows
+from 0, so the tests can predict every number it gives.
+
+- **Licence:** written for this repository and covered by its licence.
+- **Build:** `python3 -I build_variable_test_font.py` with fontTools 4.60.2
+  (`fontTools.varLib` from seven masters, with the date pinned). SHA-256 of the
+  result:
+  `6283bc286483bd9c0e104821b74dfd2edbe84a40bdf38d3f9403d7a3d431089e`.
+
+What the tests rely on (all in font units, 1000 per em):
+
+- **Axes (`fvar`):** `wght` 100–400–900 and `wdth` 75–100–125 (registered),
+  and `SERF` 0–0–100, a custom sans-to-serif axis. `avar` eases the upper
+  half of `wght`: 650 is normalised to 0.25, not 0.5.
+- **Glyphs:** `.notdef` 0, `space` 1, `H` 2, `a` 3, `a.serif` 4, `f` 5, `i` 6,
+  `f_i` 7, `o` 8, `x` 9. `liga` forms `f_i` from `f i` at every location.
+  From `SERF` 50 (normalised 0.5) a feature variation (`rvrn`) replaces `a`
+  with `a.serif`, a different glyph with a wider advance: a structural change
+  that no delta can make.
+- **Metrics at the default location:** `OS/2` `fsSelection` bit 7
+  (`USE_TYPO_METRICS`) is set. Typo and `hhea` ascender 800, descender −200,
+  line gap 0. Win ascent 900, descent 300. Underline position −100,
+  thickness 50. Strike-out position 300. x-height 500, cap height 700. No
+  `vhea`, `BASE` or `STAT`.
+- **`MVAR`** varies `hasc`, `hdsc`, `hlgp`, `undo`, `unds` and `xhgt`; the
+  `hhea` and typo line metrics move together. The deltas at each master:
+
+  | Location | ascender | descender | line gap | underline pos | underline thick | x-height |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | `wght` 900 | +80 | −40 | +20 | 0 | +40 | +20 |
+  | `wght` 100 | −20 | 0 | 0 | 0 | −20 | 0 |
+  | `wdth` 75 or 125 | 0 | 0 | 0 | 0 | 0 | 0 |
+  | `SERF` 100 | +30 | −30 | 0 | −30 | 0 | 0 |
+  | `wght` 900 + `SERF` 100 | +150 | −70 | +20 | −30 | +40 | +20 |
+
+  The corner is 40 units above the sum of its two axes' ascender deltas, so
+  `MVAR` reaches it only through a two-axis region. Between masters the
+  deltas interpolate linearly in normalised coordinates, unrounded: `SERF` 49
+  gives ascender 814.7.
+- **Advances (`HVAR`, `gvar`):** default `a` 500, `a.serif` 560, `f` 300,
+  `i` 250, `f_i` 500, `H` 700, `space` 250. `wght` 900 adds 100 and `wght`
+  100 subtracts 50 from each, the space excepted. `SERF` 100 adds 40, the
+  space excepted. `wdth` scales each default advance by `wdth / 100`, the
+  space included, and the axes' changes add up: at `wght` 900, `wdth` 125,
+  `SERF` 100, `f_i` advances 765.
+- **Ligature caret (`GDEF`):** `f_i` has one caret, format 3, at 250 by
+  default and 300 at `wght` 900, varying with `wght` only.
+- Values outside an axis's range clamp to its end; a tag the font lacks is
+  ignored.
+
 ## Unicode conformance data (`ucd/`)
 
 `GraphemeBreakTest.txt`, `WordBreakTest.txt`, `LineBreakTest.txt`,

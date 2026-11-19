@@ -27,7 +27,7 @@ beside them. The files are not committed.
 
 - `src/lib.rs` is a `cdylib` with a small C ABI. Through it the page registers
   font bytes, calls `compile_paragraph`, `layout_paragraph` and
-  `ValidatedLayout::new`, and gets back JSON: per line, the slots, caret
+  `ValidatedLayout::try_from_paragraph`, and gets back JSON: per line, the slots, caret
   stops and every run's `font`, `font_size` and glyph ids with paragraph-local
   drawing origins.
 - Outlines come from the same registered bytes through `skrifa`, in font
@@ -59,7 +59,7 @@ Noto Sans SC, `zh-TW` or `zh-Hant` from Noto Sans TC and `ja` from Noto Sans
 JP, and the Latin faces no longer serve the run's shared punctuation.
 
 The engine does not guess Simplified from Traditional Han. Untagged text takes
-the Locale field, which is read with `LocaleTag::parse_lenient` (so `jp`,
+the Locale field, which is read with `LocaleTag::try_from_str_lenient` (so `jp`,
 `cn`, `zh-tc` and the preset buttons all work). For a switch inside a
 paragraph, tag the text:
 

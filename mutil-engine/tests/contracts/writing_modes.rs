@@ -50,7 +50,12 @@ fn orientation_and_tcy_matrix() {
         ),
     ] {
         let mut a = ast("a");
-        orient(&mut a, mode, orientation, BidiLevel::new(level).unwrap());
+        orient(
+            &mut a,
+            mode,
+            orientation,
+            BidiLevel::try_new(level).unwrap(),
+        );
         assert_eq!(
             check(&a, "a").is_ok(),
             valid,
@@ -149,7 +154,7 @@ fn writing_mode_roundtrips_and_over_sides() {
 fn vertical_lr_paragraph_uses_line_under_for_block_start() {
     let mut l = line();
     l.baseline_y = 2.0;
-    let mut r = run(glyph(0.0, 100.0, false));
+    let mut r = run(glyph(0.0, 100.0));
     r.orientation = GlyphOrientation::VerticalUpright;
     l.visual_runs = vec![r];
     let mut p = paragraph(&ctx(), vec![l]);
@@ -174,7 +179,7 @@ fn vertical_lr_under_annotation_moves_first_baseline() {
     l.baseline_y = 3.0;
     l.descent = 3.0;
     l.line_height = 11.0;
-    let mut r = run(glyph(0.0, 100.0, false));
+    let mut r = run(glyph(0.0, 100.0));
     r.orientation = GlyphOrientation::VerticalUpright;
     l.visual_runs = vec![r];
     let mut ann = positioned_annotation();
@@ -210,7 +215,7 @@ fn vertical_rl_over_annotation_needs_line_relative_ascent() {
     l.baseline_y = 11.0;
     l.ascent = 11.0;
     l.line_height = 13.0;
-    let mut r = run(glyph(0.0, 100.0, false));
+    let mut r = run(glyph(0.0, 100.0));
     r.orientation = GlyphOrientation::VerticalUpright;
     l.visual_runs = vec![r];
     let mut ann = positioned_annotation();
@@ -290,7 +295,7 @@ fn tcy_run_split_across_two_boxes_is_rejected() {
 #[test]
 fn tcy_box_covering_part_of_the_run_is_rejected() {
     let mut a = tcy_ast();
-    let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[0] else {
+    let WordNode::Box(BoxNode::Text(TextBox { atom_range, .. })) = &mut a.items[0] else {
         panic!("not a text box");
     };
     atom_range.end = 1;

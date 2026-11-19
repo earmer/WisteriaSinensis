@@ -4,7 +4,7 @@ mod nodes;
 
 pub use nodes::{
     BoxNode, BoxOverflowPolicy, BreakAction, DiscretionaryNode, GlueKind, GlueNode, GlueTier,
-    RepeatedOperator, SpanEdge, WordNode,
+    InlineObjectBox, RepeatedOperator, SpanEdge, TextBox, WordNode,
 };
 
 use super::{AnnotationSpan, AtomicEditSpan, ExplicitBidiSpan, InlineDecorationSpan, ShapingRun};
@@ -32,6 +32,24 @@ pub struct TextBoxView<'a> {
     pub clusters: &'a [ShapedCluster],
     /// The box's cached width.
     pub natural_width: f32,
+}
+
+impl TextBox {
+    /// This box over its resolved `atoms` and `clusters`.
+    fn view<'a>(
+        &self,
+        atoms: &'a [GraphemeAtom],
+        clusters: &'a [ShapedCluster],
+    ) -> TextBoxView<'a> {
+        TextBoxView {
+            run_index: self.run_index,
+            byte_range: self.byte_range,
+            atom_start: self.atom_range.start,
+            atoms,
+            clusters,
+            natural_width: self.natural_width,
+        }
+    }
 }
 
 /// A stretch of one shaping run to re-shape as a unit with
@@ -150,24 +168,25 @@ impl ParagraphAst {
     /// `ValidatedInputs::text_box` (spec AX-3).
     #[must_use]
     pub fn text_box(&self, item: usize) -> Option<TextBoxView<'_>> {
-        let WordNode::Box(BoxNode::Text {
-            run_index,
-            byte_range,
-            atom_range,
-            cluster_range,
-            natural_width,
-        }) = self.items.get(item)?
-        else {
+        let WordNode::Box(BoxNode::Text(text)) = self.items.get(item)? else {
             return None;
         };
-        Some(TextBoxView {
-            run_index: *run_index,
-            byte_range: *byte_range,
-            atom_start: atom_range.start,
-            atoms: self.atoms.get(atom_range.clone())?,
-            clusters: self.clusters.get(cluster_range.clone())?,
-            natural_width: *natural_width,
-        })
+        Some(text.view(
+            self.atoms.get(text.atom_range.clone())?,
+            self.clusters.get(text.cluster_range.clone())?,
+        ))
+    }
+
+    /// `text`, a box of this AST whose ranges the storage check proved
+    /// (spec AST-4), with its slices resolved.
+    ///
+    /// # Panics
+    /// When a range of `text` is out of bounds.
+    pub(crate) fn resolve<'a>(&'a self, text: &'a TextBox) -> TextBoxView<'a> {
+        text.view(
+            &self.atoms[text.atom_range.clone()],
+            &self.clusters[text.cluster_range.clone()],
+        )
     }
 
     /// Checks the [`ShapedCluster`] invariants for the text box at
@@ -178,12 +197,12 @@ impl ParagraphAst {
         let Some(node) = self.items.get(item) else {
             return false;
         };
-        let WordNode::Box(BoxNode::Text {
+        let WordNode::Box(BoxNode::Text(TextBox {
             run_index,
             atom_range,
             cluster_range,
             ..
-        }) = node
+        })) = node
         else {
             return true;
         };
@@ -319,6 +338,7 @@ fn spans_atoms(byte_range: TextRange, atoms: &[GraphemeAtom]) -> bool {
         .first()
         .zip(atoms.last())
         .is_some_and(|(first, last)| {
-            byte_range.start == first.byte_range.start && byte_range.end == last.byte_range.end
+            byte_range.start() == first.byte_range.start()
+                && byte_range.end() == last.byte_range.end()
         })
 }

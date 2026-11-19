@@ -1,9 +1,12 @@
 //! Cursor motion over the caret stops (spec INT-13 to INT-15).
 
-use super::super::ValidatedLayout;
-use super::super::output::{CaretAffinity, CaretStop, HangSide};
-use super::super::tolerance::approx_eq;
-use super::{CursorMove, CursorPosition, FlowMotion, Motion, ParagraphEdge, stop_position};
+use super::{
+    Command, CursorMove, CursorPosition, FlowMotion, Motion, ParagraphEdge, ResolvedMotion,
+    stop_position,
+};
+use crate::middleend::ValidatedLayout;
+use crate::middleend::output::{CaretAffinity, CaretStop, HangSide};
+use crate::middleend::tolerance::approx_eq;
 
 impl ValidatedLayout<'_> {
     /// Moves `position` by `motion` (spec INT-13 to INT-15). Physical arrows
@@ -21,58 +24,70 @@ impl ValidatedLayout<'_> {
     ) -> CursorMove {
         let p = self.paragraph();
         let rtl = p.base_direction.is_rtl();
-        let (line, index) = self.locate(position);
-        if let Some(flow) = motion.flow_direction(p.policy.writing_mode) {
-            return match flow {
-                FlowMotion::InlinePrev => self.move_visual(line, index, false),
-                FlowMotion::InlineNext => self.move_visual(line, index, true),
-                FlowMotion::BlockPrev | FlowMotion::BlockNext => {
-                    let inline =
-                        preferred_inline.unwrap_or_else(|| p.lines[line].caret_stops[index].x);
-                    let forward = flow == FlowMotion::BlockNext;
-                    match adjacent_line(line, p.lines.len(), forward) {
-                        Some(target) => {
-                            CursorMove::Moved(self.hit_test_on_line(target, inline).position)
+        let Some((line, index)) = self.locate(position) else {
+            // No line has a stop, so there is nowhere to move.
+            return CursorMove::Moved(position);
+        };
+        let command = match motion.resolve(p.policy.writing_mode) {
+            ResolvedMotion::Command(command) => command,
+            ResolvedMotion::Flow(flow) => {
+                return match flow {
+                    FlowMotion::InlinePrev => self.move_visual(line, index, false),
+                    FlowMotion::InlineNext => self.move_visual(line, index, true),
+                    FlowMotion::BlockPrev | FlowMotion::BlockNext => {
+                        let inline =
+                            preferred_inline.unwrap_or_else(|| p.lines[line].caret_stops[index].x);
+                        let forward = flow == FlowMotion::BlockNext;
+                        // A block step never stalls: a line whose hit snaps
+                        // back to the caret (an atomic span over several
+                        // lines) is crossed too.
+                        let lines = std::iter::successors(
+                            self.adjacent_line_with_stops(line, forward),
+                            |&l| self.adjacent_line_with_stops(l, forward),
+                        );
+                        let moved = lines
+                            .map(|target| self.hit_test_on_line(target, inline).position)
+                            .find(|hit| hit.byte_offset != position.byte_offset);
+                        match moved {
+                            Some(hit) => CursorMove::Moved(hit),
+                            None => CursorMove::Exited {
+                                edge: ParagraphEdge::ahead(forward),
+                                inline_position: Some(inline),
+                            },
                         }
-                        None => CursorMove::Exited {
-                            edge: ParagraphEdge::ahead(forward),
-                            inline_position: Some(inline),
-                        },
                     }
-                }
-            };
-        }
-        let l = &p.lines[line];
-        match motion {
-            Motion::LineStart | Motion::LineEnd => {
+                };
+            }
+        };
+        match command {
+            Command::LineStart | Command::LineEnd => {
                 // The line start is on the left in LTR text, on the right in RTL.
-                let side = if (motion == Motion::LineStart) != rtl {
+                let side = if (command == Command::LineStart) != rtl {
                     HangSide::Left
                 } else {
                     HangSide::Right
                 };
-                let stop = l
-                    .extreme_caret_stop(side)
-                    .expect("a validated line has caret stops");
-                CursorMove::Moved(stop_position(stop))
+                CursorMove::Moved(
+                    self.edge_caret_stop(line, side)
+                        .map_or(position, stop_position),
+                )
             }
-            Motion::Previous | Motion::Next => {
-                self.move_logical(position.byte_offset, motion == Motion::Next, None)
+            Command::Previous | Command::Next => {
+                self.move_logical(position.byte_offset, command == Command::Next, None)
             }
-            Motion::WordPrevious | Motion::WordNext => {
+            Command::WordPrevious | Command::WordNext => {
                 let words = crate::frontend::word_boundaries(self.text());
                 self.move_logical(
                     position.byte_offset,
-                    motion == Motion::WordNext,
+                    command == Command::WordNext,
                     Some(&words),
                 )
             }
-            Motion::WordLeft | Motion::WordRight => {
+            Command::WordLeft | Command::WordRight => {
                 let words = crate::frontend::word_boundaries(self.text());
-                let forward = (motion == Motion::WordRight) != rtl;
+                let forward = (command == Command::WordRight) != rtl;
                 self.move_logical(position.byte_offset, forward, Some(&words))
             }
-            _ => unreachable!("physical arrows resolved above"),
         }
     }
 
@@ -97,21 +112,16 @@ impl ValidatedLayout<'_> {
         }
         // Past the edge: rightwards is forward in LTR, backward in RTL.
         let forward = rightwards != p.base_direction.is_rtl();
-        let Some(target) = adjacent_line(line, lines.len(), forward) else {
+        let entered = self
+            .adjacent_line_with_stops(line, forward)
+            .and_then(|l| Some((l, self.edge_caret_stop(l, entry_side(rightwards))?)));
+        let Some((target, entry)) = entered else {
             return CursorMove::Exited {
                 edge: ParagraphEdge::ahead(forward),
                 inline_position: None,
             };
         };
-        let side = if rightwards {
-            HangSide::Left
-        } else {
-            HangSide::Right
-        };
         let target_stops = &lines[target].caret_stops;
-        let entry = lines[target]
-            .extreme_caret_stop(side)
-            .expect("a validated line has caret stops");
         if entry.offset != current.offset {
             return CursorMove::Moved(stop_position(entry));
         }
@@ -133,6 +143,17 @@ impl ValidatedLayout<'_> {
         CursorMove::Moved(stop_position(next.unwrap_or(entry)))
     }
 
+    /// The nearest line after (`forward`) or before `line` that has caret
+    /// stops: a line inside an atomic span has none and is crossed whole
+    /// (CRT-1, INT-13).
+    fn adjacent_line_with_stops(&self, line: usize, forward: bool) -> Option<usize> {
+        let lines = &self.paragraph().lines;
+        std::iter::successors(adjacent_line(line, lines.len(), forward), |&l| {
+            adjacent_line(l, lines.len(), forward)
+        })
+        .find(|&l| lines[l].has_caret_stops())
+    }
+
     /// The next or previous caret offset in logical order (spec INT-13),
     /// restricted to `boundaries` when given (word motions, INT-14); the
     /// motion exits at offset 0 and at the text end.
@@ -142,7 +163,11 @@ impl ValidatedLayout<'_> {
         forward: bool,
         boundaries: Option<&[usize]>,
     ) -> CursorMove {
-        let text_end = self.text().len();
+        // A clamped paragraph renders up to its truncated tail (OUT-1).
+        let text_end = self
+            .paragraph()
+            .truncated_range
+            .map_or(self.text().len(), |tail| tail.start());
         if (forward && offset >= text_end) || (!forward && offset == 0) {
             return CursorMove::Exited {
                 edge: ParagraphEdge::ahead(forward),
@@ -165,6 +190,15 @@ impl ValidatedLayout<'_> {
             byte_offset: target,
             affinity: CaretAffinity::Downstream,
         })
+    }
+}
+
+/// The edge a visual step enters a line by: its left one moving right.
+fn entry_side(rightwards: bool) -> HangSide {
+    if rightwards {
+        HangSide::Left
+    } else {
+        HangSide::Right
     }
 }
 

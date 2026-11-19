@@ -66,7 +66,7 @@ fn accessors_never_panic_on_bad_indices() {
     a.runs[1].cluster_range = 2..99;
     assert!(a.run_atoms(1).is_empty());
     assert!(a.run_clusters(1).is_empty());
-    if let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[0] {
+    if let WordNode::Box(BoxNode::Text(TextBox { atom_range, .. })) = &mut a.items[0] {
         *atom_range = 0..99;
     }
     assert!(a.text_box(0).is_none());
@@ -144,7 +144,7 @@ fn runs_must_tile_the_cluster_storage() {
 fn a_box_must_lie_inside_its_own_run() {
     // Box 2 holds run 1's atoms but names run 0.
     let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text { run_index, .. }) = &mut a.items[2] {
+    if let WordNode::Box(BoxNode::Text(TextBox { run_index, .. })) = &mut a.items[2] {
         *run_index = 0;
     }
     assert_eq!(
@@ -153,7 +153,7 @@ fn a_box_must_lie_inside_its_own_run() {
     );
     // A box stretched past the end of its run.
     let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[1] {
+    if let WordNode::Box(BoxNode::Text(TextBox { atom_range, .. })) = &mut a.items[1] {
         *atom_range = 1..3;
     }
     assert_eq!(
@@ -162,7 +162,7 @@ fn a_box_must_lie_inside_its_own_run() {
     );
     // Clusters likewise.
     let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &mut a.items[1] {
+    if let WordNode::Box(BoxNode::Text(TextBox { cluster_range, .. })) = &mut a.items[1] {
         *cluster_range = 1..3;
     }
     assert_eq!(
@@ -183,7 +183,7 @@ fn the_boxes_of_a_run_take_consecutive_ranges_in_item_order() {
     );
     // A gap inside the run: the second box skips an atom.
     let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[1] {
+    if let WordNode::Box(BoxNode::Text(TextBox { atom_range, .. })) = &mut a.items[1] {
         *atom_range = 2..2;
     }
     assert_eq!(
@@ -203,7 +203,7 @@ fn the_boxes_of_a_run_must_cover_all_its_atoms_and_clusters() {
     );
     // Same when only the clusters are left over.
     let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &mut a.items[3] {
+    if let WordNode::Box(BoxNode::Text(TextBox { cluster_range, .. })) = &mut a.items[3] {
         *cluster_range = 3..3;
     }
     assert_eq!(
@@ -254,21 +254,17 @@ fn reshape_window_takes_the_run_slice_of_the_paragraph_storage_directly() {
             .iter()
             .all(|c| c.atom_range.end <= atoms.len())
     );
-    let mut out = vec![cluster(2, 0)];
-    let mut out_glyphs = Vec::new();
+    let mut out = ShapeOutput {
+        clusters: vec![cluster(2, 0)],
+        glyphs: Vec::new(),
+    };
     NoopShaper.reshape_window(
-        TEXT,
-        run,
-        atoms,
-        TextRange::new(2, 4),
-        LeadingEdit::None,
-        TrailingEdit::None,
+        &ReshapeRequest::plain(TEXT, run, atoms, TextRange::new(2, 4)),
         &mut out,
-        &mut out_glyphs,
     );
     // The no-op shaper appends nothing and never clears the buffer.
-    assert_eq!(out, vec![cluster(2, 0)]);
-    assert!(out_glyphs.is_empty());
+    assert_eq!(out.clusters, vec![cluster(2, 0)]);
+    assert!(out.glyphs.is_empty());
 }
 
 #[test]
@@ -276,12 +272,12 @@ fn a_box_reaching_into_the_next_run_is_not_self_contained() {
     // Box 1 (run 0) also claims run 1's first atom and cluster, with byte and
     // atom ranges that would be consistent if the run did not end at 2.
     let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text {
+    if let WordNode::Box(BoxNode::Text(TextBox {
         byte_range,
         atom_range,
         cluster_range,
         ..
-    }) = &mut a.items[1]
+    })) = &mut a.items[1]
     {
         (*byte_range, *atom_range, *cluster_range) = (TextRange::new(1, 3), 1..3, 1..3);
     }
@@ -311,13 +307,6 @@ fn body_runs_progress_through_the_text_without_overlap() {
     );
     // `try_new` refuses an inverted range.
     assert_eq!(TextRange::try_new(4, 2), None);
-    // A literal can express one; `check` rejects it as outside the text.
-    let mut inverted = two_runs();
-    inverted.runs[0].byte_range = TextRange { start: 4, end: 2 };
-    assert_eq!(
-        check(&inverted, TEXT),
-        Err(LayoutInputError::RunOutsideText { run: 0 })
-    );
     // An empty run is allowed anywhere between its neighbours.
     let mut a = two_runs();
     let empty = ShapingRun {
@@ -328,7 +317,7 @@ fn body_runs_progress_through_the_text_without_overlap() {
     };
     a.runs.insert(1, empty);
     for item in &mut a.items {
-        if let WordNode::Box(BoxNode::Text { run_index, .. }) = item {
+        if let WordNode::Box(BoxNode::Text(TextBox { run_index, .. })) = item {
             *run_index += usize::from(*run_index >= 1);
         }
     }
@@ -356,7 +345,7 @@ fn inverted_index_ranges_are_rejected_rather_than_read_as_empty() {
     );
     // A box's ranges.
     let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text { atom_range, .. }) = &mut a.items[3] {
+    if let WordNode::Box(BoxNode::Text(TextBox { atom_range, .. })) = &mut a.items[3] {
         *atom_range = inverted(4, 3);
     }
     assert!(a.text_box(3).is_none());
@@ -365,7 +354,7 @@ fn inverted_index_ranges_are_rejected_rather_than_read_as_empty() {
         Err(LayoutInputError::ItemNotSelfContained { item: 3 })
     );
     let mut a = two_runs();
-    if let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &mut a.items[3] {
+    if let WordNode::Box(BoxNode::Text(TextBox { cluster_range, .. })) = &mut a.items[3] {
         *cluster_range = inverted(4, 3);
     }
     assert_eq!(
@@ -435,7 +424,7 @@ fn cluster_glyph_ranges_tile_the_paragraph_glyphs() {
 
 /// The paragraph-level index of the first cluster of the text box at `item`.
 fn first_cluster(a: &ParagraphAst, item: usize) -> usize {
-    let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &a.items[item] else {
+    let WordNode::Box(BoxNode::Text(TextBox { cluster_range, .. })) = &a.items[item] else {
         panic!("items[{item}] is not a text box");
     };
     cluster_range.start

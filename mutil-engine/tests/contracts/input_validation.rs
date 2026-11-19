@@ -24,8 +24,8 @@ fn reject_level_mismatch(target: usize) {
 /// A level above `BidiLevel::MAX` cannot be built.
 #[test]
 fn bidi_levels_are_bounded() {
-    assert_eq!(BidiLevel::new(BIDI_MAX_DEPTH + 2), None);
-    assert!(BidiLevel::new(BIDI_MAX_DEPTH + 1).is_some());
+    assert_eq!(BidiLevel::try_new(BIDI_MAX_DEPTH + 2), None);
+    assert!(BidiLevel::try_new(BIDI_MAX_DEPTH + 1).is_some());
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn explicit_spacing_and_discretionary_equations() {
     }
     let mut a = ast("a");
     a.clusters[0].natural_width = -1.0;
-    if let WordNode::Box(BoxNode::Text { natural_width, .. }) = &mut a.items[0] {
+    if let WordNode::Box(BoxNode::Text(TextBox { natural_width, .. })) = &mut a.items[0] {
         *natural_width = -1.0;
     }
     assert_eq!(
@@ -343,7 +343,7 @@ fn g1_hyphen_replacement_with_line_or_paragraph_separator_is_rejected() {
 #[test]
 fn a_non_finite_variation_cannot_be_built() {
     for bad in [f32::NAN, f32::INFINITY] {
-        assert_eq!(FontVariation::new(*b"wght", bad), None);
+        assert_eq!(FontVariation::try_new(*b"wght", bad), None);
     }
 }
 
@@ -402,7 +402,7 @@ fn an_inline_object_is_at_a_representable_level() {
         rebuild_items(&mut a, |b| {
             vec![
                 boxed(b, 0, 2),
-                WordNode::Box(BoxNode::InlineObject {
+                WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
                     bidi_level,
                     baseline_align: BaselineAlignment::Auto,
                     byte_range: TextRange::new(2, 5),
@@ -411,7 +411,7 @@ fn an_inline_object_is_at_a_representable_level() {
                     ascent: 8.0,
                     descent: 2.0,
                     overflow_policy: BoxOverflowPolicy::Clip,
-                }),
+                })),
                 end(5),
             ]
         });
@@ -430,7 +430,7 @@ fn a_zero_width_tab_stop_geometry_is_not_constrained() {
         width: 0.,
     };
     let mut l = line();
-    l.visual_runs = vec![run(glyph(0., 100., false))];
+    l.visual_runs = vec![run(glyph(0., 100.))];
     l.tabs = vec![positioned];
     assert_eq!(l.validate(&ctx()), Ok(()));
 }
@@ -447,7 +447,7 @@ fn every_text_box_and_inline_object_owns_source_bytes() {
     assert!(!a.is_self_contained(0));
     // An inline object without bytes: nothing for a caret to address.
     let object = |start, end| {
-        WordNode::Box(BoxNode::InlineObject {
+        WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(start, end),
@@ -456,7 +456,7 @@ fn every_text_box_and_inline_object_owns_source_bytes() {
             ascent: 8.0,
             descent: 2.0,
             overflow_policy: BoxOverflowPolicy::Clip,
-        })
+        }))
     };
     let mut a = ast("ab\u{fffc}");
     rebuild_items(&mut a, |b| vec![boxed(b, 0, 2), object(2, 5), end(5)]);

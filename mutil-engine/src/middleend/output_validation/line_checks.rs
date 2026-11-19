@@ -1,12 +1,12 @@
 //! Line-level finite, envelope, source, caret, and annotation record checks.
 
-use super::super::tolerance::{approx_eq, tolerance};
-use super::super::{
+use super::{RangeIndex, SourcedGlyphs};
+use crate::frontend::AnnotationSide;
+use crate::middleend::tolerance::{approx_eq, approx_lt};
+use crate::middleend::{
     AnnotationErrorReason, LineContext, LineHeight, LineInvariantError, PositionedGlyph,
     PositionedLine,
 };
-use super::{RangeIndex, SourcedGlyphs};
-use crate::frontend::AnnotationSide;
 use crate::types::{BidiLevel, GlyphOrientation, TextRange};
 use std::collections::HashSet;
 
@@ -130,7 +130,7 @@ impl PositionedLine {
                 self.check_fixed_metrics(ctx)
             }
             LineHeight::Normal => {
-                if self.line_height < expected - tolerance(self.line_height, expected) {
+                if approx_lt(self.line_height, expected) {
                     return Err(E::LineHeightBelowStrut {
                         minimum: expected,
                         actual: self.line_height,
@@ -267,11 +267,7 @@ impl PositionedLine {
             }
             // Screen order: a pen position never lies left of the previous one.
             // Marks share their base's position, so only `x` is compared.
-            if let Some(step) = r
-                .glyphs
-                .windows(2)
-                .position(|w| w[1].x < w[0].x - tolerance(w[0].x, w[1].x))
-            {
+            if let Some(step) = r.glyphs.windows(2).position(|w| approx_lt(w[1].x, w[0].x)) {
                 return Err(E::GlyphsOutOfVisualOrder {
                     run,
                     glyph: step + 1,
@@ -279,10 +275,11 @@ impl PositionedLine {
             }
         }
         // And across runs, from the last glyph of one to the first of the next.
-        if let Some(step) = self.visual_runs.windows(2).position(|w| {
-            let (end, start) = (w[0].glyphs[w[0].glyphs.len() - 1].x, w[1].glyphs[0].x);
-            start < end - tolerance(end, start)
-        }) {
+        if let Some(step) = self
+            .visual_runs
+            .windows(2)
+            .position(|w| approx_lt(w[1].glyphs[0].x, w[0].glyphs[w[0].glyphs.len() - 1].x))
+        {
             return Err(E::VisualRunsOutOfOrder { run: step + 1 });
         }
         for (index, b) in self.visual_boxes.iter().enumerate() {
@@ -330,8 +327,9 @@ impl PositionedLine {
         }
     }
 
-    /// Caret stops are in visual order, lie on this line, and carry the bidi
-    /// level of the content they belong to.
+    /// Caret stops are in visual order, lie on this line, carry the bidi
+    /// level of the content they belong to, and no two share an offset at
+    /// one position.
     ///
     /// A stop's owners are the glyphs, inline boxes and tabs whose bytes
     /// contain or touch its `offset`; at a boundary either neighbour qualifies,
@@ -356,11 +354,9 @@ impl PositionedLine {
                 )
                 .collect(),
         );
+        let repeats = self.repeated_caret_stops();
         for (index, stop) in self.caret_stops.iter().enumerate() {
-            let in_order = index == 0 || {
-                let previous = self.caret_stops[index - 1].x;
-                stop.x >= previous - tolerance(previous, stop.x)
-            };
+            let in_order = index == 0 || stop.x >= self.caret_stops[index - 1].x;
             let level_is_owned = || {
                 let mut owners = glyphs
                     .touching(stop.offset)
@@ -397,13 +393,33 @@ impl PositionedLine {
             };
             if !in_order
                 || !(self.byte_range.start()..=self.byte_range.end()).contains(&stop.offset)
-                || stop.line != ctx.line_index
                 || !level_is_owned()
             {
                 return Err(LineInvariantError::InvalidCaretStop { index });
             }
+            if repeats[index] {
+                return Err(LineInvariantError::DuplicateCaretStop { index });
+            }
         }
         Ok(())
+    }
+
+    /// For each caret stop, whether it repeats the offset of an earlier stop
+    /// at the same position, within the tolerance the layout merges at
+    /// (INT-20). Sorting by offset keeps each offset's stops in `x` order, so
+    /// a stop repeats one when it repeats its predecessor there: O(n log n),
+    /// however many stops share a position (PAR-3).
+    fn repeated_caret_stops(&self) -> Vec<bool> {
+        let stops = &self.caret_stops;
+        let mut by_offset: Vec<usize> = (0..stops.len()).collect();
+        // Stable: within an offset, the stops keep their visual order.
+        by_offset.sort_by_key(|&i| stops[i].offset);
+        let mut repeats = vec![false; stops.len()];
+        for pair in by_offset.windows(2) {
+            let (earlier, later) = (&stops[pair[0]], &stops[pair[1]]);
+            repeats[pair[1]] = earlier.offset == later.offset && approx_eq(earlier.x, later.x);
+        }
+        repeats
     }
 
     /// The annotations' own records: metrics, base range, glyphs, unique ids

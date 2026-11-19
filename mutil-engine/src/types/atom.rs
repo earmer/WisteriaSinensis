@@ -1,8 +1,6 @@
 //! Logical atoms: the extended-grapheme-cluster unit (spec §2.2).
 
 use super::{BidiLevel, GlyphOrientation, ScriptTag, TextRange};
-use core::fmt;
-use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub};
 
 /// UAX #14 `Line_Break` property values `[U7]`.
 ///
@@ -118,96 +116,67 @@ pub enum LineBreakClass {
     Xx,
 }
 
-/// Per-atom boolean properties, stored as a 16-bit mask (spec §2.2).
-///
-/// Hand-rolled instead of depending on `bitflags`, to keep the dependency
-/// surface minimal. Thirteen of sixteen bits are assigned; the high three are
-/// reserved and are masked off by [`AtomFlags::from_bits_truncate`] and `!`.
-/// Layout: 2 bytes, alignment 2.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct AtomFlags(u16);
+bitflags::bitflags! {
+    /// Per-atom boolean properties, stored as a 16-bit mask (spec §2.2).
+    ///
+    /// Twelve of sixteen bits are assigned (bits 0 to 11); the high four
+    /// are reserved and are masked off by `from_bits_truncate` and `!`.
+    /// Layout: 2 bytes, alignment 2.
+    #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
+    #[repr(transparent)]
+    pub struct AtomFlags: u16 {
+        /// Han ideographs and full-width Kana.
+        const IS_CJK_IDEOGRAPH = 1 << 0;
+        /// The boundary after this atom is an inter-character justification
+        /// opportunity (replaces explicit zero-width glue nodes).
+        const ALLOW_CJK_JUSTIFY_AFTER = 1 << 1;
+        /// Cursive scripts that admit no gaps for justification or letter-spacing
+        /// (Arabic, Hanifi Rohingya, Mandaic, Mongolian, N'Ko, Phags Pa, Syriac;
+        /// CSS Text 4 Appendix D `[W2]`). Split from the draft's `IS_CURSIVE_CONNECTED`.
+        const NO_LETTER_SPACING = 1 << 2;
+        /// A UTS #51 emoji sequence: core, ZWJ, keycap, flag, tag or modifier `[U5]`.
+        const IS_EMOJI_SEQUENCE = 1 << 3;
+        /// Opening punctuation.
+        const IS_OPEN_PUNCT = 1 << 4;
+        /// Closing punctuation.
+        const IS_CLOSE_PUNCT = 1 << 5;
+        /// Cluster contains U+FE0E, U+FE0F or an IVS selector (U+E0100..U+E01EF);
+        /// set after segmentation (spec §3 Step 1, FE-7).
+        const HAS_VARIATION_SELECTOR = 1 << 6;
+        /// Resolved intra-word apostrophe (spec §3 Step 2, FE-11).
+        const IS_APOSTROPHE = 1 << 7;
+        /// Continues an unbreakable FE-15 dash, ellipsis or middle-dot run (spec §3 Step 3, FE-15).
+        const BINDS_TO_PREVIOUS = 1 << 8;
+        /// UAX #9 L1 resets this atom with whitespace at a line end or before a
+        /// tab: its first code point has class WS, S, BN, an isolate initiator or
+        /// PDI, or an embedding or override control (spec FE-30, ST2-1).
+        const L1_RESETTABLE = 1 << 9;
+        /// An opening mark that may hang at a line start: UAX #14 class OP, or
+        /// General Category Ps or Pi (spec ST1-3).
+        const HANGABLE_START = 1 << 10;
+        /// A stop or comma that may hang at a line end: U+002C, U+002E, U+3001,
+        /// U+3002, U+FF0C or U+FF0E (spec ST1-3).
+        const HANGABLE_END = 1 << 11;
+    }
+}
 
 impl AtomFlags {
-    /// Han ideographs and full-width Kana.
-    pub const IS_CJK_IDEOGRAPH: Self = Self(1 << 0);
-    /// The boundary after this atom is an inter-character justification
-    /// opportunity (replaces explicit zero-width glue nodes).
-    pub const ALLOW_CJK_JUSTIFY_AFTER: Self = Self(1 << 1);
-    /// Cursive scripts that admit no gaps for justification or letter-spacing
-    /// (Arabic, Hanifi Rohingya, Mandaic, Mongolian, N'Ko, Phags Pa, Syriac;
-    /// CSS Text 4 Appendix D `[W2]`). Split from the draft's `IS_CURSIVE_CONNECTED`.
-    pub const NO_LETTER_SPACING: Self = Self(1 << 2);
-    /// Arabic-script atoms eligible for elongation (kashida). Open question 12.
-    pub const KASHIDA_CAPABLE: Self = Self(1 << 3);
-    /// A UTS #51 emoji sequence: core, ZWJ, keycap, flag, tag or modifier `[U5]`.
-    pub const IS_EMOJI_SEQUENCE: Self = Self(1 << 4);
-    /// Opening punctuation.
-    pub const IS_OPEN_PUNCT: Self = Self(1 << 5);
-    /// Closing punctuation.
-    pub const IS_CLOSE_PUNCT: Self = Self(1 << 6);
-    /// Cluster contains U+FE0E, U+FE0F or an IVS selector (U+E0100..U+E01EF);
-    /// set after segmentation (spec §3 Step 1, FE-7).
-    pub const HAS_VARIATION_SELECTOR: Self = Self(1 << 7);
-    /// Resolved intra-word apostrophe (spec §3 Step 2, FE-11).
-    pub const IS_APOSTROPHE: Self = Self(1 << 8);
-    /// Continues an unbreakable FE-15 dash, ellipsis or middle-dot run (spec §3 Step 3, FE-15).
-    pub const BINDS_TO_PREVIOUS: Self = Self(1 << 9);
-    /// UAX #9 L1 resets this atom with whitespace at a line end or before a
-    /// tab: its first code point has class WS, S, BN, an isolate initiator or
-    /// PDI, or an embedding or override control (spec FE-30, ST2-1).
-    pub const L1_RESETTABLE: Self = Self(1 << 10);
-    /// An opening mark that may hang at a line start: UAX #14 class OP, or
-    /// General Category Ps or Pi (spec ST1-3).
-    pub const HANGABLE_START: Self = Self(1 << 11);
-    /// A stop or comma that may hang at a line end: U+002C, U+002E, U+3001,
-    /// U+3002, U+FF0C or U+FF0E (spec ST1-3).
-    pub const HANGABLE_END: Self = Self(1 << 12);
-
     /// No flags set.
-    pub const EMPTY: Self = Self(0);
-
+    pub const EMPTY: Self = Self::empty();
     /// Every assigned bit.
-    pub const ALL: Self = Self(
-        Self::IS_CJK_IDEOGRAPH.0
-            | Self::ALLOW_CJK_JUSTIFY_AFTER.0
-            | Self::NO_LETTER_SPACING.0
-            | Self::KASHIDA_CAPABLE.0
-            | Self::IS_EMOJI_SEQUENCE.0
-            | Self::IS_OPEN_PUNCT.0
-            | Self::IS_CLOSE_PUNCT.0
-            | Self::HAS_VARIATION_SELECTOR.0
-            | Self::IS_APOSTROPHE.0
-            | Self::BINDS_TO_PREVIOUS.0
-            | Self::L1_RESETTABLE.0
-            | Self::HANGABLE_START.0
-            | Self::HANGABLE_END.0,
-    );
-
-    const NAMES: [(Self, &'static str); 13] = [
-        (Self::IS_CJK_IDEOGRAPH, "IS_CJK_IDEOGRAPH"),
-        (Self::ALLOW_CJK_JUSTIFY_AFTER, "ALLOW_CJK_JUSTIFY_AFTER"),
-        (Self::NO_LETTER_SPACING, "NO_LETTER_SPACING"),
-        (Self::KASHIDA_CAPABLE, "KASHIDA_CAPABLE"),
-        (Self::IS_EMOJI_SEQUENCE, "IS_EMOJI_SEQUENCE"),
-        (Self::IS_OPEN_PUNCT, "IS_OPEN_PUNCT"),
-        (Self::IS_CLOSE_PUNCT, "IS_CLOSE_PUNCT"),
-        (Self::HAS_VARIATION_SELECTOR, "HAS_VARIATION_SELECTOR"),
-        (Self::IS_APOSTROPHE, "IS_APOSTROPHE"),
-        (Self::BINDS_TO_PREVIOUS, "BINDS_TO_PREVIOUS"),
-        (Self::L1_RESETTABLE, "L1_RESETTABLE"),
-        (Self::HANGABLE_START, "HANGABLE_START"),
-        (Self::HANGABLE_END, "HANGABLE_END"),
-    ];
-
+    pub const ALL: Self = Self::all();
     /// Flags a cluster takes only from its **first** atom.
-    pub const FIRST_ATOM_ONLY: Self =
-        Self(Self::IS_OPEN_PUNCT.0 | Self::BINDS_TO_PREVIOUS.0 | Self::HANGABLE_START.0);
+    pub const FIRST_ATOM_ONLY: Self = Self::from_bits_truncate(
+        Self::IS_OPEN_PUNCT.bits() | Self::BINDS_TO_PREVIOUS.bits() | Self::HANGABLE_START.bits(),
+    );
     /// Flags a cluster takes only from its **last** atom: the justification
     /// opportunity *after* a ligature is the one after its last component, and
     /// a closing mark closes at the end, and a line-end mark hangs from it.
-    pub const LAST_ATOM_ONLY: Self =
-        Self(Self::ALLOW_CJK_JUSTIFY_AFTER.0 | Self::IS_CLOSE_PUNCT.0 | Self::HANGABLE_END.0);
+    pub const LAST_ATOM_ONLY: Self = Self::from_bits_truncate(
+        Self::ALLOW_CJK_JUSTIFY_AFTER.bits()
+            | Self::IS_CLOSE_PUNCT.bits()
+            | Self::HANGABLE_END.bits(),
+    );
 
     /// Aggregates the flags of the atoms a cluster covers (spec §2.3):
     /// [`FIRST_ATOM_ONLY`](Self::FIRST_ATOM_ONLY) from the first atom,
@@ -223,132 +192,6 @@ impl AtomFlags {
         (ored - Self::FIRST_ATOM_ONLY - Self::LAST_ATOM_ONLY)
             | (first.flags & Self::FIRST_ATOM_ONLY)
             | (last.flags & Self::LAST_ATOM_ONLY)
-    }
-
-    /// The raw bits.
-    #[inline]
-    #[must_use]
-    pub const fn bits(self) -> u16 {
-        self.0
-    }
-
-    /// Builds from raw bits, discarding unassigned ones.
-    #[inline]
-    #[must_use]
-    pub const fn from_bits_truncate(bits: u16) -> Self {
-        Self(bits & Self::ALL.0)
-    }
-
-    /// `true` when no flag is set.
-    #[inline]
-    #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
-    /// `true` when every flag in `other` is set in `self`.
-    #[inline]
-    #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
-    /// `true` when at least one flag in `other` is set in `self`.
-    #[inline]
-    #[must_use]
-    pub const fn intersects(self, other: Self) -> bool {
-        self.0 & other.0 != 0
-    }
-
-    /// Union (usable in `const` context, unlike `|`).
-    #[inline]
-    #[must_use]
-    pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    /// Sets the flags in `other`.
-    #[inline]
-    pub fn insert(&mut self, other: Self) {
-        self.0 |= other.0;
-    }
-
-    /// Clears the flags in `other`.
-    #[inline]
-    pub fn remove(&mut self, other: Self) {
-        self.0 &= !other.0;
-    }
-
-    /// Sets or clears the flags in `other` depending on `value`.
-    #[inline]
-    pub fn set(&mut self, other: Self, value: bool) {
-        if value {
-            self.insert(other);
-        } else {
-            self.remove(other);
-        }
-    }
-}
-
-impl BitOr for AtomFlags {
-    type Output = Self;
-    #[inline]
-    fn bitor(self, rhs: Self) -> Self {
-        Self(self.0 | rhs.0)
-    }
-}
-
-impl BitOrAssign for AtomFlags {
-    #[inline]
-    fn bitor_assign(&mut self, rhs: Self) {
-        self.0 |= rhs.0;
-    }
-}
-
-impl BitAnd for AtomFlags {
-    type Output = Self;
-    #[inline]
-    fn bitand(self, rhs: Self) -> Self {
-        Self(self.0 & rhs.0)
-    }
-}
-
-impl BitAndAssign for AtomFlags {
-    #[inline]
-    fn bitand_assign(&mut self, rhs: Self) {
-        self.0 &= rhs.0;
-    }
-}
-
-impl Sub for AtomFlags {
-    type Output = Self;
-    /// Set difference: flags in `self` that are not in `rhs`.
-    #[inline]
-    fn sub(self, rhs: Self) -> Self {
-        Self(self.0 & !rhs.0)
-    }
-}
-
-impl Not for AtomFlags {
-    type Output = Self;
-    /// Complement within the assigned bits.
-    #[inline]
-    fn not(self) -> Self {
-        Self(!self.0 & Self::ALL.0)
-    }
-}
-
-impl fmt::Debug for AtomFlags {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_empty() {
-            return f.write_str("AtomFlags(EMPTY)");
-        }
-        let names: Vec<&str> = Self::NAMES
-            .iter()
-            .filter(|&&(flag, _)| self.contains(flag))
-            .map(|&(_, name)| name)
-            .collect();
-        write!(f, "AtomFlags({})", names.join(" | "))
     }
 }
 
@@ -395,7 +238,7 @@ mod tests {
         let mut f = AtomFlags::IS_CJK_IDEOGRAPH | AtomFlags::ALLOW_CJK_JUSTIFY_AFTER;
         assert!(f.contains(AtomFlags::IS_CJK_IDEOGRAPH));
         assert!(!f.contains(AtomFlags::NO_LETTER_SPACING));
-        assert!(f.intersects(AtomFlags::IS_CJK_IDEOGRAPH | AtomFlags::KASHIDA_CAPABLE));
+        assert!(f.intersects(AtomFlags::IS_CJK_IDEOGRAPH | AtomFlags::NO_LETTER_SPACING));
 
         f.insert(AtomFlags::IS_EMOJI_SEQUENCE);
         f.remove(AtomFlags::IS_CJK_IDEOGRAPH);
@@ -438,7 +281,7 @@ mod tests {
                 AtomFlags::IS_OPEN_PUNCT
                     | AtomFlags::IS_CLOSE_PUNCT
                     | AtomFlags::ALLOW_CJK_JUSTIFY_AFTER
-                    | AtomFlags::KASHIDA_CAPABLE,
+                    | AtomFlags::HAS_VARIATION_SELECTOR,
             ),
             atom_with(AtomFlags::IS_CLOSE_PUNCT | AtomFlags::IS_EMOJI_SEQUENCE),
         ];
@@ -452,7 +295,7 @@ mod tests {
         // IS_CLOSE_PUNCT: from the last atom only.
         assert!(f.contains(AtomFlags::IS_CLOSE_PUNCT));
         // Everything else is ORed.
-        assert!(f.contains(AtomFlags::KASHIDA_CAPABLE | AtomFlags::IS_EMOJI_SEQUENCE));
+        assert!(f.contains(AtomFlags::HAS_VARIATION_SELECTOR | AtomFlags::IS_EMOJI_SEQUENCE));
 
         // Reverse the roles: first has no open mark or continuation bind, middle
         // atoms do; last has the justification opportunity but no close mark.
@@ -475,30 +318,9 @@ mod tests {
     }
 
     #[test]
-    fn assigned_bits_are_distinct() {
-        let mut seen = 0u16;
-        for (flag, _) in AtomFlags::NAMES {
-            assert_eq!(flag.bits().count_ones(), 1);
-            assert_eq!(seen & flag.bits(), 0, "duplicate bit");
-            seen |= flag.bits();
-        }
-        assert_eq!(seen, AtomFlags::ALL.bits());
-    }
-
-    #[test]
     fn complement_and_truncate_stay_within_assigned_bits() {
         assert_eq!(!AtomFlags::EMPTY, AtomFlags::ALL);
         assert_eq!(!AtomFlags::ALL, AtomFlags::EMPTY);
         assert_eq!(AtomFlags::from_bits_truncate(0xFFFF), AtomFlags::ALL);
-    }
-
-    #[test]
-    fn debug_lists_names() {
-        let f = AtomFlags::NO_LETTER_SPACING | AtomFlags::KASHIDA_CAPABLE;
-        assert_eq!(
-            format!("{f:?}"),
-            "AtomFlags(NO_LETTER_SPACING | KASHIDA_CAPABLE)"
-        );
-        assert_eq!(format!("{:?}", AtomFlags::EMPTY), "AtomFlags(EMPTY)");
     }
 }

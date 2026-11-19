@@ -34,7 +34,9 @@ pub fn push_text(
     let run_local = atom_at - ast.runs[run].atom_range.start;
     let (n_atoms, n_clusters) = (atoms.len(), clusters.len());
     let byte_range = match (atoms.first(), atoms.last()) {
-        (Some(first), Some(last)) => TextRange::new(first.byte_range.start, last.byte_range.end),
+        (Some(first), Some(last)) => {
+            TextRange::new(first.byte_range.start(), last.byte_range.end())
+        }
         _ => TextRange::EMPTY,
     };
     let natural_width = clusters.iter().map(|c| c.natural_width).sum();
@@ -54,12 +56,12 @@ pub fn push_text(
             later.cluster_range.start + n_clusters..later.cluster_range.end + n_clusters;
     }
     for item in &mut ast.items {
-        if let WordNode::Box(BoxNode::Text {
+        if let WordNode::Box(BoxNode::Text(TextBox {
             run_index,
             atom_range,
             cluster_range,
             ..
-        }) = item
+        })) = item
             && *run_index > run
         {
             *atom_range = atom_range.start + n_atoms..atom_range.end + n_atoms;
@@ -67,13 +69,13 @@ pub fn push_text(
         }
     }
     retile_glyphs(ast);
-    WordNode::Box(BoxNode::Text {
+    WordNode::Box(BoxNode::Text(TextBox {
         run_index: run,
         byte_range,
         atom_range: atom_at..atom_at + n_atoms,
         cluster_range: cluster_at..cluster_at + n_clusters,
         natural_width,
-    })
+    }))
 }
 
 /// Rebuilds `ast.glyphs` so that the clusters' `glyph_range`s tile it: each
@@ -201,12 +203,12 @@ pub fn edit_text_box(
     item: usize,
     edit: impl FnOnce(&mut Vec<GraphemeAtom>, &mut Vec<ShapedCluster>),
 ) {
-    let WordNode::Box(BoxNode::Text {
+    let WordNode::Box(BoxNode::Text(TextBox {
         run_index,
         atom_range,
         cluster_range,
         ..
-    }) = &ast.items[item]
+    })) = &ast.items[item]
     else {
         panic!("items[{item}] is not a text box");
     };
@@ -244,11 +246,11 @@ pub fn edit_text_box(
         shift(&mut later.cluster_range, delta_clusters);
     }
     for (i, node) in ast.items.iter_mut().enumerate() {
-        if let WordNode::Box(BoxNode::Text {
+        if let WordNode::Box(BoxNode::Text(TextBox {
             atom_range: a,
             cluster_range: c,
             ..
-        }) = node
+        })) = node
         {
             if i == item {
                 a.end = a.end.wrapping_add_signed(delta_atoms);
@@ -323,7 +325,7 @@ pub fn check(a: &ParagraphAst, t: &str) -> Result<(), LayoutInputError> {
 /// A slot `capacity` wide from `start`, with content from its start.
 pub fn slot(start: f32, visual_width: f32, capacity: f32) -> PositionedSlot {
     PositionedSlot {
-        constraint: InlineSlotConstraint::new(start, start + capacity).unwrap(),
+        constraint: InlineSlotConstraint::try_new(start, start + capacity).unwrap(),
         content_start: start,
         visual_width,
     }
@@ -410,7 +412,7 @@ pub fn paragraph(ctx: &LineContext, lines: Vec<PositionedLine>) -> PositionedPar
     }
 }
 
-pub fn glyph(x: f32, advance: f32, hanging: bool) -> PositionedGlyph {
+pub fn glyph(x: f32, advance: f32) -> PositionedGlyph {
     PositionedGlyph {
         glyph_id: 1,
         x,
@@ -418,7 +420,6 @@ pub fn glyph(x: f32, advance: f32, hanging: bool) -> PositionedGlyph {
         y_offset: 0.,
         advance,
         byte_range: Some(TextRange::new(0, 1)),
-        is_hanging: hanging,
     }
 }
 
@@ -488,9 +489,9 @@ pub fn two_slots() -> (PositionedLine, LineContext) {
     l.byte_range = TextRange::new(0, 2);
     l.visible_byte_end = 2;
     l.slots = smallvec![slot(0.0, 100.0, 100.0), slot(150.0, 100.0, 100.0)];
-    let mut right = glyph(150.0, 100.0, false);
+    let mut right = glyph(150.0, 100.0);
     right.byte_range = Some(TextRange::new(1, 2));
-    let mut r = run(glyph(0.0, 100.0, false));
+    let mut r = run(glyph(0.0, 100.0));
     r.byte_range = l.byte_range;
     r.glyphs.push(right);
     l.visual_runs = vec![r];
@@ -517,7 +518,7 @@ pub fn positioned_annotation() -> PositionedAnnotationRun {
         base_under: 2.0,
         glyphs: vec![PositionedGlyph {
             byte_range: None,
-            ..glyph(25.0, 50.0, false)
+            ..glyph(25.0, 50.0)
         }],
     }
 }
@@ -629,33 +630,13 @@ impl TextShaper for MetricsShaper {
         text: &str,
         run: &ShapingRun,
         atoms: &[GraphemeAtom],
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
+        output: &mut ShapeOutput,
     ) {
-        NoopShaper.shape_run(text, run, atoms, output_clusters, output_glyphs);
+        NoopShaper.shape_run(text, run, atoms, output);
     }
 
-    fn reshape_window(
-        &self,
-        text: &str,
-        run: &ShapingRun,
-        atoms: &[GraphemeAtom],
-        window: TextRange,
-        leading_edit: LeadingEdit,
-        trailing_edit: TrailingEdit,
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
-    ) {
-        NoopShaper.reshape_window(
-            text,
-            run,
-            atoms,
-            window,
-            leading_edit,
-            trailing_edit,
-            output_clusters,
-            output_glyphs,
-        );
+    fn reshape_window(&self, request: &ReshapeRequest<'_>, output: &mut ShapeOutput) {
+        NoopShaper.reshape_window(request, output);
     }
 
     fn ligature_carets(
@@ -670,4 +651,42 @@ impl TextShaper for MetricsShaper {
     fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32 {
         NoopShaper.space_advance(instance, orientation)
     }
+}
+
+/// `n` one-byte decoration spans, each with an atomic span over the same
+/// byte, and their leading and trailing boundaries.
+pub fn spanned(n: usize) -> (String, ParagraphAst) {
+    let t = "a".repeat(n);
+    let mut a = ast(&t);
+    rebuild_items(&mut a, |_| vec![]);
+    for i in 0..n {
+        let r = TextRange::new(i, i + 1);
+        a.decoration_spans.push(InlineDecorationSpan {
+            span_id: i as u64,
+            byte_range: r,
+            start_padding: 0.,
+            end_padding: 0.,
+            break_mode: BoxDecorationBreak::Slice,
+        });
+        a.atomic_spans.push(AtomicEditSpan {
+            span_id: (n + i) as u64,
+            byte_range: r,
+        });
+        for edge in [SpanEdge::Leading, SpanEdge::Trailing] {
+            let off = if edge == SpanEdge::Leading { i } else { i + 1 };
+            a.items.push(WordNode::Box(BoxNode::SpanBoundary {
+                byte_range: TextRange::empty_at(off),
+                span_id: i as u64,
+                edge,
+                width: 0.,
+                bidi_level: BidiLevel::LTR,
+            }));
+            if edge == SpanEdge::Leading {
+                let text = boxed(&mut a, i, i + 1);
+                a.items.push(text);
+            }
+        }
+    }
+    a.items.push(end(n));
+    (t, a)
 }

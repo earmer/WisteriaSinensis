@@ -1,10 +1,11 @@
 //! The input checks of `compile_paragraph` (spec FE-25, FE-27, FE-28).
 
-use super::super::{
-    FrontendOptions, MAX_BIDI_SPAN_DEPTH, MAX_DECORATION_NESTING_DEPTH, ParagraphInput, TextStyle,
-    is_paragraph_separator,
+use super::units::{Unit, Units};
+use super::{Compiler, FrontendError, FrontendFeature};
+use crate::frontend::{
+    FrontendOptions, InlineObjectInput, MAX_BIDI_SPAN_DEPTH, MAX_DECORATION_NESTING_DEPTH,
+    ParagraphInput, TextStyle, is_paragraph_separator,
 };
-use super::{Compiler, FrontendError, FrontendFeature, Unit};
 use crate::types::{TextRange, is_extent, is_measurement};
 use smallvec::SmallVec;
 
@@ -25,6 +26,7 @@ pub(super) fn check_input(
         return Err(unsupported(FrontendFeature::VerticalWritingMode));
     }
     check_decoration_spans(input)?;
+    check_atomic_spans(input)?;
     if !input.annotations.is_empty() {
         return Err(unsupported(FrontendFeature::Annotations));
     }
@@ -32,11 +34,8 @@ pub(super) fn check_input(
     let mut previous_end = 0;
     for (index, span) in input.style_spans.iter().enumerate() {
         let r = span.byte_range;
-        let well_formed = r.start() < r.end()
-            && r.end() <= text.len()
-            && text.is_char_boundary(r.start())
-            && text.is_char_boundary(r.end())
-            && r.start() >= previous_end;
+        let well_formed =
+            r.start() < r.end() && r.slice(text).is_some() && r.start() >= previous_end;
         if !well_formed {
             return Err(FrontendError::InvalidStyleSpan { span: index });
         }
@@ -85,9 +84,7 @@ fn check_bidi_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendError> {
         }
         if !(ids.insert(span.span_id)
             && !r.is_empty()
-            && r.end() <= text.len()
-            && text.is_char_boundary(r.start())
-            && text.is_char_boundary(r.end())
+            && r.slice(text).is_some()
             && is_ordered
             && open.last().is_none_or(|outer| r.end() <= outer.end())
             && open.len() < MAX_BIDI_SPAN_DEPTH)
@@ -99,9 +96,9 @@ fn check_bidi_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendError> {
     Ok(())
 }
 
-/// AST-7 without segmentation: order, nesting, ids, paddings and ranges on
-/// character boundaries. Grapheme and object edges are checked once units
-/// exist.
+/// AST-7 without segmentation, for the decoration spans: order, nesting, ids,
+/// paddings and ranges on character boundaries. Grapheme and object edges are
+/// checked once units exist.
 fn check_decoration_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendError> {
     let text = input.text;
     let mut ids = std::collections::HashSet::new();
@@ -120,9 +117,7 @@ fn check_decoration_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendErro
         }
         if !ids.insert(span.span_id)
             || !span.is_valid()
-            || r.end() > text.len()
-            || !text.is_char_boundary(r.start())
-            || !text.is_char_boundary(r.end())
+            || r.slice(text).is_none()
             || stack.last().is_some_and(|top| !top.contains_range(r))
             || stack.len() >= MAX_DECORATION_NESTING_DEPTH
         {
@@ -130,6 +125,14 @@ fn check_decoration_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendErro
         }
         stack.push(r);
     }
+    Ok(())
+}
+
+/// The atomic spans: unique ids, non-empty ranges inside the text and
+/// disjoint, in byte order. Grapheme and object edges are checked once units
+/// exist.
+fn check_atomic_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendError> {
+    let text = input.text;
     let mut ids = std::collections::HashSet::new();
     for (index, span) in input.atomic_spans.iter().enumerate() {
         let r = span.byte_range;
@@ -154,103 +157,58 @@ fn check_style(style: &TextStyle, span: Option<usize>) -> Result<(), FrontendErr
     Ok(())
 }
 
-impl Compiler<'_> {
-    /// The edge checks of AST-7 and AST-9 that need units: a decoration
-    /// edge lies between units, an atomic edge at the start or end of a text
-    /// atom or object, and an atomic span holds one.
-    pub(super) fn check_span_edges(&self) -> Result<(), FrontendError> {
-        let input = self.input;
-        if !input.decoration_spans.is_empty() {
-            let mut next_span = 0usize;
-            let mut open: SmallVec<[(usize, usize); MAX_DECORATION_NESTING_DEPTH]> =
-                SmallVec::new();
-            let mut first_bad: Option<usize> = None;
-            let mut record_bad = |idx: usize| {
-                first_bad = Some(first_bad.map_or(idx, |cur| cur.min(idx)));
-            };
-            for unit in &self.units {
-                let ur = unit.range(&self.atoms, input.inline_objects);
-                while next_span < input.decoration_spans.len()
-                    && input.decoration_spans[next_span].byte_range.start() == ur.start()
-                {
-                    open.push((
-                        next_span,
-                        input.decoration_spans[next_span].byte_range.end(),
-                    ));
-                    next_span += 1;
-                }
-                while next_span < input.decoration_spans.len()
-                    && input.decoration_spans[next_span].byte_range.start() < ur.end()
-                {
-                    record_bad(next_span);
-                    next_span += 1;
-                }
-                while let Some(&(span_idx, span_end)) = open.last() {
-                    if span_end > ur.end() {
-                        break;
-                    }
-                    open.pop();
-                    if span_end < ur.end() {
-                        record_bad(span_idx);
-                    }
-                }
-            }
-            if let Some(span) = first_bad {
-                return Err(FrontendError::InvalidDecorationSpan { span });
-            }
-        }
-        if !input.atomic_spans.is_empty() {
-            let mut u = 0usize;
-            for (index, span) in input.atomic_spans.iter().enumerate() {
-                let r = span.byte_range;
-                while u < self.units.len()
-                    && self.units[u].range(&self.atoms, input.inline_objects).end() <= r.start()
-                {
-                    u += 1;
-                }
-                let Some(&start_unit) = self.units.get(u) else {
-                    return Err(FrontendError::InvalidAtomicSpan { span: index });
-                };
-                let start_range = start_unit.range(&self.atoms, input.inline_objects);
-                if start_range.start() != r.start()
-                    || !matches!(start_unit, Unit::Atom(_) | Unit::Object(_))
-                    || start_range.end() > r.end()
-                {
-                    return Err(FrontendError::InvalidAtomicSpan { span: index });
-                }
-                while u < self.units.len()
-                    && self.units[u].range(&self.atoms, input.inline_objects).end() < r.end()
-                {
-                    u += 1;
-                }
-                let Some(&end_unit) = self.units.get(u) else {
-                    return Err(FrontendError::InvalidAtomicSpan { span: index });
-                };
-                let end_range = end_unit.range(&self.atoms, input.inline_objects);
-                if end_range.end() != r.end()
-                    || !matches!(end_unit, Unit::Atom(_) | Unit::Object(_))
-                {
-                    return Err(FrontendError::InvalidAtomicSpan { span: index });
-                }
-            }
-        }
-        self.check_bidi_span_edges()
+impl Units {
+    /// The unit that starts at `offset`, if one does.
+    fn starting_at(&self, offset: usize, objects: &[InlineObjectInput]) -> Option<Unit> {
+        let at = self
+            .units
+            .binary_search_by_key(&offset, |u| u.range(&self.atoms, objects).start())
+            .ok()?;
+        Some(self.units[at])
     }
 
-    /// BID-2 with units: every explicit bidi span edge lies between units,
-    /// so on a grapheme boundary and outside every inline object.
-    fn check_bidi_span_edges(&self) -> Result<(), FrontendError> {
-        let objects = self.input.inline_objects;
-        let is_unit_edge = |offset: usize| {
-            offset == self.text.len()
-                || self
-                    .units
-                    .binary_search_by_key(&offset, |u| u.range(&self.atoms, objects).start())
-                    .is_ok()
+    /// The unit that ends at `offset`, if one does.
+    fn ending_at(&self, offset: usize, objects: &[InlineObjectInput]) -> Option<Unit> {
+        let at = self
+            .units
+            .binary_search_by_key(&offset, |u| u.range(&self.atoms, objects).end())
+            .ok()?;
+        Some(self.units[at])
+    }
+}
+
+impl Compiler<'_> {
+    /// Whether `offset` lies between units, so on a grapheme boundary and
+    /// outside every inline object.
+    fn is_unit_edge(&self, units: &Units, offset: usize) -> bool {
+        offset == self.text.len()
+            || units
+                .starting_at(offset, self.input.inline_objects)
+                .is_some()
+    }
+
+    /// The edge checks of AST-7, AST-9 and BID-2 that need units: a
+    /// decoration or bidi edge lies between units, an atomic edge at the
+    /// start or end of a text atom or object, and an atomic span holds one.
+    pub(super) fn check_span_edges(&self, units: &Units) -> Result<(), FrontendError> {
+        let input = self.input;
+        let objects = input.inline_objects;
+        let off_edge = |r: TextRange| {
+            !self.is_unit_edge(units, r.start()) || !self.is_unit_edge(units, r.end())
         };
-        match self.input.bidi_spans.iter().position(|span| {
-            !is_unit_edge(span.byte_range.start()) || !is_unit_edge(span.byte_range.end())
+        if let Some(span) = (input.decoration_spans.iter()).position(|s| off_edge(s.byte_range)) {
+            return Err(FrontendError::InvalidDecorationSpan { span });
+        }
+        let is_text_or_object =
+            |unit: Option<Unit>| matches!(unit, Some(Unit::Atom(_) | Unit::Object(_)));
+        if let Some(span) = input.atomic_spans.iter().position(|span| {
+            let r = span.byte_range;
+            !(is_text_or_object(units.starting_at(r.start(), objects))
+                && is_text_or_object(units.ending_at(r.end(), objects)))
         }) {
+            return Err(FrontendError::InvalidAtomicSpan { span });
+        }
+        match input.bidi_spans.iter().position(|s| off_edge(s.byte_range)) {
             Some(span) => Err(FrontendError::InvalidBidiSpan { span }),
             None => Ok(()),
         }

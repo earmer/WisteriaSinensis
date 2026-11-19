@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use mutil_engine::{
-    FontBytes, FontFace, FontFamily, FontFeatures, FontRegistry, FontStyle, FontVariation,
+    FontBytes, FontFace, FontFamily, FontFeatures, FontId, FontRegistry, FontStyle, FontVariation,
     HarfRustShaper,
 };
 use skrifa::outline::DrawSettings;
@@ -42,53 +42,51 @@ struct FaceEntry {
     bytes: FontBytes,
 }
 
-/// The registered faces and the shaper built over them. The registry is
+/// The registered faces, the engine registry that accepted them and the
+/// shaper built over it. A face enters `faces` only once the registry has
+/// accepted it, so a [`FontId`] is always its index in `faces`. The shaper is
 /// rebuilt only when a face is added, which the page does before laying out.
 #[derive(Default)]
 pub struct Fonts {
     faces: Vec<FaceEntry>,
+    registry: FontRegistry,
     shaper: Option<HarfRustShaper>,
 }
 
 impl Fonts {
     /// Registers `bytes` under `family` and returns the face id and its
-    /// units per em, or `None` for a family already registered or bytes
-    /// that hold no font (a zero units-per-em included).
+    /// units per em, or `None` for a family already registered or bytes the
+    /// engine rejects (no font, or a zero units-per-em).
     pub fn add(&mut self, family: &str, bytes: Vec<u8>) -> Option<(u32, u16)> {
         if self.faces.iter().any(|face| *face.family == *family) {
             return None;
         }
+        // The stated `head.unitsPerEm`, the value the engine reads
+        // (`raw_units_per_em`) and rejects when 0; skrifa does not replace
+        // a 0 with 1000.
         let upem = SkrifaFont::new(bytes.as_slice())
             .ok()?
             .metrics(Size::unscaled(), LocationRef::default())
             .units_per_em;
-        if upem == 0 {
-            return None;
-        }
-        self.faces.push(FaceEntry {
-            family: Arc::from(family),
-            bytes: FontBytes::new(bytes),
-        });
+        let family: Arc<str> = Arc::from(family);
+        let bytes = FontBytes::new(bytes);
+        let FontId(id) = self.registry.add_face(
+            Arc::clone(&family),
+            FontStyle::default(),
+            FontFace::new(bytes.clone(), 0),
+        )?;
+        debug_assert_eq!(usize::try_from(id).ok(), Some(self.faces.len()));
+        self.faces.push(FaceEntry { family, bytes });
         self.shaper = None;
-        let id = u32::try_from(self.faces.len() - 1).ok()?;
         Some((id, upem))
     }
 
     /// The shaper over every registered face, built on first use after a
     /// face was added.
     pub fn shaper(&mut self) -> &HarfRustShaper {
-        let faces = &self.faces;
-        self.shaper.get_or_insert_with(|| {
-            let mut registry = FontRegistry::new();
-            for face in faces {
-                registry.add_face(
-                    Arc::clone(&face.family),
-                    FontStyle::default(),
-                    FontFace::new(face.bytes.clone(), 0),
-                );
-            }
-            HarfRustShaper::new(Arc::new(registry))
-        })
+        let registry = &self.registry;
+        self.shaper
+            .get_or_insert_with(|| HarfRustShaper::new(Arc::new(registry.clone())))
     }
 
     /// The family stack handed to the engine: every registered face, the
@@ -129,8 +127,8 @@ impl Fonts {
 
 /// The font features every style carries: the explicit Regular weight.
 pub fn regular_weight() -> FontFeatures {
-    let mut features = FontFeatures::new();
-    if let Some(weight) = FontVariation::new(*b"wght", WEIGHT) {
+    let mut features = FontFeatures::default();
+    if let Some(weight) = FontVariation::try_new(*b"wght", WEIGHT) {
         features.push_variation(weight);
     }
     features

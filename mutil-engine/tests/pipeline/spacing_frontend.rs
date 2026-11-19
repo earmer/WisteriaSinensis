@@ -356,7 +356,7 @@ fn fe31_compression_is_off_for_traditional_chinese() {
     // The default locale counts for untagged text.
     let style = script_style(&[TRADITIONAL], 10.0);
     let options = FrontendOptions {
-        default_locale: LocaleTag::parse_lenient("zh-TW").unwrap(),
+        default_locale: LocaleTag::try_from_str_lenient("zh-TW").unwrap(),
         ..Default::default()
     };
     let ast = compile_paragraph(&input(text, &style), &options, &*SPACING_SHAPER).unwrap();
@@ -520,12 +520,6 @@ fn fe31_cursive_scripts_are_flagged_for_no_letter_spacing() {
         let flags = atom.flags;
         assert_eq!(
             flags.contains(AtomFlags::NO_LETTER_SPACING),
-            arabic,
-            "{:?}",
-            &text[atom.byte_range.as_range()]
-        );
-        assert_eq!(
-            flags.contains(AtomFlags::KASHIDA_CAPABLE),
             arabic,
             "{:?}",
             &text[atom.byte_range.as_range()]

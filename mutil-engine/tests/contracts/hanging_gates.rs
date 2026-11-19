@@ -12,11 +12,11 @@ fn right_hanging_line() -> PositionedLine {
     let mut l = line();
     l.byte_range = TextRange::new(0, 3);
     l.visible_byte_end = 3;
-    let mut body = run(glyph(0., 97., false));
+    let mut body = run(glyph(0., 97.));
     body.byte_range = l.byte_range;
     body.glyphs.push(PositionedGlyph {
         byte_range: Some(TextRange::new(1, 2)),
-        ..glyph(97., 6., true)
+        ..glyph(97., 6.)
     });
     l.visual_runs = vec![body];
     l
@@ -68,7 +68,7 @@ fn two_characters_hanging_on_one_side_are_too_many() {
     let mut l = right_hanging_line();
     l.visual_runs[0].glyphs.push(PositionedGlyph {
         byte_range: Some(TextRange::new(2, 3)),
-        ..glyph(97., 6., true)
+        ..glyph(97., 6.)
     });
     assert_eq!(
         l.validate(&force_end()),
@@ -80,15 +80,15 @@ fn two_characters_hanging_on_one_side_are_too_many() {
     let mut l = line();
     l.byte_range = TextRange::new(0, 3);
     l.visible_byte_end = 3;
-    let mut r = run(glyph(-3., 6., true));
+    let mut r = run(glyph(-3., 6.));
     r.byte_range = l.byte_range;
     r.glyphs.push(PositionedGlyph {
         byte_range: Some(TextRange::new(1, 2)),
-        ..glyph(-3., 6., true)
+        ..glyph(-3., 6.)
     });
     r.glyphs.push(PositionedGlyph {
         byte_range: Some(TextRange::new(2, 3)),
-        ..glyph(3., 97., false)
+        ..glyph(3., 97.)
     });
     l.visual_runs = vec![r];
     assert_eq!(
@@ -108,7 +108,7 @@ fn a_hanging_mark_must_be_the_outermost_glyph_on_its_side() {
     let mut l = right_hanging_line();
     l.visual_runs[0].glyphs.push(PositionedGlyph {
         byte_range: Some(TextRange::new(2, 3)),
-        ..glyph(104., 0., false)
+        ..glyph(104., 0.)
     });
     assert!(
         matches!(
@@ -122,7 +122,7 @@ fn a_hanging_mark_must_be_the_outermost_glyph_on_its_side() {
     let mut l = right_hanging_line();
     l.visual_runs[0].glyphs.push(PositionedGlyph {
         byte_range: Some(TextRange::new(2, 3)),
-        ..glyph(103., 0., false)
+        ..glyph(103., 0.)
     });
     assert_eq!(l.validate(&force_end()), Ok(()));
 }
@@ -135,9 +135,9 @@ fn atm4_hangable_flags_come_from_the_clusters_edges() {
     };
     // HANGABLE_START is read from the first atom only, HANGABLE_END and
     // ALLOW_CJK_JUSTIFY_AFTER from the last only; NO_LETTER_SPACING and
-    // KASHIDA_CAPABLE from any atom.
+    // IS_CJK_IDEOGRAPH from any atom.
     let atoms = [
-        with(0, AtomFlags::HANGABLE_START | AtomFlags::KASHIDA_CAPABLE),
+        with(0, AtomFlags::HANGABLE_START | AtomFlags::IS_CJK_IDEOGRAPH),
         with(
             1,
             AtomFlags::HANGABLE_START
@@ -150,13 +150,13 @@ fn atm4_hangable_flags_come_from_the_clusters_edges() {
     assert!(f.contains(AtomFlags::HANGABLE_START));
     assert!(f.contains(AtomFlags::HANGABLE_END));
     assert!(f.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER));
-    assert!(f.contains(AtomFlags::NO_LETTER_SPACING | AtomFlags::KASHIDA_CAPABLE));
+    assert!(f.contains(AtomFlags::NO_LETTER_SPACING | AtomFlags::IS_CJK_IDEOGRAPH));
     let reversed = [atoms[1].clone(), atoms[0].clone()];
     let f = AtomFlags::for_cluster(&reversed);
     assert!(f.contains(AtomFlags::HANGABLE_START));
     assert!(!f.contains(AtomFlags::HANGABLE_END));
     assert!(!f.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER));
-    assert!(f.contains(AtomFlags::NO_LETTER_SPACING | AtomFlags::KASHIDA_CAPABLE));
+    assert!(f.contains(AtomFlags::NO_LETTER_SPACING | AtomFlags::IS_CJK_IDEOGRAPH));
     let atoms = [
         with(0, AtomFlags::EMPTY),
         with(1, AtomFlags::HANGABLE_START),
@@ -170,7 +170,7 @@ fn atm4_hangable_flags_come_from_the_clusters_edges() {
     );
     assert!(AtomFlags::ALL.contains(
         AtomFlags::NO_LETTER_SPACING
-            | AtomFlags::KASHIDA_CAPABLE
+            | AtomFlags::IS_CJK_IDEOGRAPH
             | AtomFlags::HANGABLE_START
             | AtomFlags::HANGABLE_END
     ));

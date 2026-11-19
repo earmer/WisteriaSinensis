@@ -136,7 +136,6 @@ fn pen_glyph(range: (usize, usize), x: f32) -> PositionedGlyph {
         y_offset: 0.0,
         advance: ADV,
         byte_range: Some(TextRange::new(range.0, range.1)),
-        is_hanging: false,
     }
 }
 
@@ -176,13 +175,12 @@ fn line(byte_range: (usize, usize), visible_end: usize, y: f32, width: f32) -> P
     }
 }
 
-fn stop(x: f32, offset: usize, affinity: CaretAffinity, line: usize) -> CaretStop {
+fn stop(x: f32, offset: usize, affinity: CaretAffinity) -> CaretStop {
     CaretStop {
         x,
         offset,
         affinity,
         level: BidiLevel::LTR,
-        line,
     }
 }
 
@@ -276,16 +274,16 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
     // Atomic editing: no caret stop strictly inside the chip, even at the wrap
     // (offset 8). Only the logical boundaries 3 and 11 survive.
     l0.caret_stops = vec![
-        stop(0.0, 0, CaretAffinity::Downstream, 0),
-        stop(10.0, 1, CaretAffinity::Downstream, 0),
-        stop(20.0, 2, CaretAffinity::Downstream, 0),
-        stop(24.0, 3, CaretAffinity::Downstream, 0),
+        stop(0.0, 0, CaretAffinity::Downstream),
+        stop(10.0, 1, CaretAffinity::Downstream),
+        stop(20.0, 2, CaretAffinity::Downstream),
+        stop(24.0, 3, CaretAffinity::Downstream),
     ];
     l1.caret_stops = vec![
-        stop(36.0, 11, CaretAffinity::Upstream, 1),
-        stop(40.0, 12, CaretAffinity::Downstream, 1),
-        stop(50.0, 13, CaretAffinity::Downstream, 1),
-        stop(60.0, 14, CaretAffinity::Downstream, 1),
+        stop(36.0, 11, CaretAffinity::Upstream),
+        stop(40.0, 12, CaretAffinity::Downstream),
+        stop(50.0, 13, CaretAffinity::Downstream),
+        stop(60.0, 14, CaretAffinity::Downstream),
     ];
     let chip = &ast.atomic_spans[0];
     for s in l0.caret_stops.iter().chain(&l1.caret_stops) {
@@ -342,7 +340,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
     // $a + b = c$ -> a + | b = | c: top-level relations 500, binary operators 700;
     // everything inside braces, fractions or radicals would stay one object.
     let obj = |id: u64, at: usize| {
-        WordNode::Box(BoxNode::InlineObject {
+        WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(at, at + 1),
@@ -351,7 +349,7 @@ fn a_flattened_inline_formula_is_rigid_boxes_between_penalised_breaks() {
             ascent: 9.0,
             descent: 2.0,
             overflow_policy: BoxOverflowPolicy::AllowOverflow,
-        })
+        }))
     };
     let op_break = |offset: usize, penalty: i32| {
         WordNode::Discretionary(DiscretionaryNode {

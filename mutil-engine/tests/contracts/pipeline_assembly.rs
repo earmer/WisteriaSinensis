@@ -36,7 +36,7 @@ fn word(ast: &mut ParagraphAst, start: usize, end: usize) -> WordNode {
     push_text(ast, 0, atoms, clusters)
 }
 
-fn glyph(c: &ShapedCluster, x: f32, hanging: bool) -> PositionedGlyph {
+fn glyph(c: &ShapedCluster, x: f32) -> PositionedGlyph {
     PositionedGlyph {
         glyph_id: 1,
         x,
@@ -44,7 +44,6 @@ fn glyph(c: &ShapedCluster, x: f32, hanging: bool) -> PositionedGlyph {
         y_offset: 0.0,
         advance: c.natural_width,
         byte_range: Some(c.byte_range),
-        is_hanging: hanging,
     }
 }
 
@@ -119,7 +118,7 @@ fn paragraph_ast() -> ParagraphAst {
             max_shrink: 1.0,
         }),
         WordNode::Discretionary(DiscretionaryNode::direct(8)),
-        WordNode::Box(BoxNode::InlineObject {
+        WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(8, 11),
@@ -128,7 +127,7 @@ fn paragraph_ast() -> ParagraphAst {
             ascent: 10.0,
             descent: 2.0,
             overflow_policy: BoxOverflowPolicy::Clip,
-        }),
+        })),
         WordNode::Tab {
             byte_range: TextRange::new(11, 12),
         },
@@ -220,7 +219,7 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
     let mut l0_glyphs: Vec<_> = oma
         .iter()
         .enumerate()
-        .map(|(i, c)| glyph(c, i as f32 * ADV, false))
+        .map(|(i, c)| glyph(c, i as f32 * ADV))
         .collect();
     l0_glyphs.push(PositionedGlyph {
         glyph_id: b'-' as u32,
@@ -229,7 +228,6 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
         y_offset: 0.0,
         advance: ADV,
         byte_range: None,
-        is_hanging: false,
     });
     let line0 = PositionedLine {
         byte_range: TextRange::new(0, 3),
@@ -246,18 +244,18 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
     let mut pen = 0.0;
     let mut l1_glyphs = Vec::new();
     for c in atje.iter() {
-        l1_glyphs.push(glyph(c, pen, false));
+        l1_glyphs.push(glyph(c, pen));
         pen += c.natural_width;
     }
     pen += SPACE_W;
     let box_x = pen;
     pen += BOX_W + TAB_W;
     for c in word_b {
-        l1_glyphs.push(glyph(c, pen, false));
+        l1_glyphs.push(glyph(c, pen));
         pen += c.natural_width;
     }
     let body_width = pen;
-    l1_glyphs.push(glyph(comma, body_width, true));
+    l1_glyphs.push(glyph(comma, body_width));
     let line1 = PositionedLine {
         byte_range: TextRange::new(3, 18),
         visible_byte_end: 15,
@@ -295,7 +293,6 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
             offset: 18,
             affinity: CaretAffinity::Downstream,
             level: BidiLevel::LTR,
-            line: 2,
         }],
         ..blank_line()
     };
@@ -395,42 +392,50 @@ fn shaping_bridge_applies_both_spelling_edits() {
         }
     );
     // Seeded: shapers append to the buffers and never clear them.
-    let mut out = vec![cluster(0, 0)];
-    let mut out_glyphs = vec![RawShapedGlyph::default()];
+    let mut out = ShapeOutput {
+        clusters: vec![cluster(0, 0)],
+        glyphs: vec![RawShapedGlyph::default()],
+    };
     // Regular break: line 0 ends at the break, line 1 starts after it.
     shaper.reshape_window(
-        TEXT,
-        r,
-        &run_atoms,
-        TextRange::new(0, 3),
-        LeadingEdit::None,
-        trailing_edit.clone(),
+        &ReshapeRequest {
+            text: TEXT,
+            run: r,
+            atoms: &run_atoms,
+            window: TextRange::new(0, 3),
+            leading_edit: &LeadingEdit::None,
+            trailing_edit: &trailing_edit.clone(),
+            context: TextRange::new(0, TEXT.len()),
+        },
         &mut out,
-        &mut out_glyphs,
     );
     shaper.reshape_window(
-        TEXT,
-        r,
-        &run_atoms,
-        TextRange::new(3, 7),
-        leading_edit.clone(),
-        TrailingEdit::None,
+        &ReshapeRequest {
+            text: TEXT,
+            run: r,
+            atoms: &run_atoms,
+            window: TextRange::new(3, 7),
+            leading_edit: &leading_edit.clone(),
+            trailing_edit: &TrailingEdit::None,
+            context: TextRange::new(0, TEXT.len()),
+        },
         &mut out,
-        &mut out_glyphs,
     );
     // Extreme middle fragment: both edges edited in one call.
     shaper.reshape_window(
-        TEXT,
-        r,
-        &run_atoms,
-        TextRange::new(3, 7),
-        leading_edit,
-        trailing_edit,
+        &ReshapeRequest {
+            text: TEXT,
+            run: r,
+            atoms: &run_atoms,
+            window: TextRange::new(3, 7),
+            leading_edit: &leading_edit,
+            trailing_edit: &trailing_edit,
+            context: TextRange::new(0, TEXT.len()),
+        },
         &mut out,
-        &mut out_glyphs,
     );
-    assert_eq!(out, vec![cluster(0, 0)]);
-    assert_eq!(out_glyphs, vec![RawShapedGlyph::default()]);
+    assert_eq!(out.clusters, vec![cluster(0, 0)]);
+    assert_eq!(out.glyphs, vec![RawShapedGlyph::default()]);
 }
 
 #[test]
@@ -443,7 +448,7 @@ fn untaken_hyphenation_seam_is_rejoined_only_when_unsafe_to_concat() {
     );
 
     // The frontend split a multi-atom cluster here: the seam is unsafe.
-    let WordNode::Box(BoxNode::Text { cluster_range, .. }) = &ast.items[2] else {
+    let WordNode::Box(BoxNode::Text(TextBox { cluster_range, .. })) = &ast.items[2] else {
         panic!("items[2] is a text box");
     };
     let first_cluster = cluster_range.start;
@@ -562,19 +567,6 @@ fn assembled_output_owns_its_data() {
 }
 
 #[test]
-fn hanging_comma_counted_in_visual_width_is_rejected() {
-    let (_, ctx, para) = assembled();
-    let mut bad = para.lines[1].clone();
-    let widened = bad.visual_width() + ADV;
-    set_visual_width(&mut bad, widened);
-    // The comma is the last glyph of the run: "atje" (4), "go" (2), ",".
-    assert_eq!(
-        bad.validate(&ctx),
-        Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 6 })
-    );
-}
-
-#[test]
 fn extreme_assembly_every_cluster_belongs_to_one_node() {
     // Words of one atom each, glue between them, 200 nodes: the partition check
     // holds for every node and the cluster byte ranges tile the text without
@@ -605,8 +597,8 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
     assert!(all_self_contained(&ast));
     let mut next = 0;
     for c in (0..ast.items.len()).flat_map(|item| clusters_of(&ast, item)) {
-        assert_eq!(c.byte_range.start, next);
-        next = c.byte_range.end;
+        assert_eq!(c.byte_range.start(), next);
+        next = c.byte_range.end();
     }
     assert_eq!(next, text_len);
 }
@@ -663,7 +655,6 @@ fn small_line() -> PositionedLine {
         y_offset: 0.0,
         advance: 10.0,
         byte_range: Some(TextRange::new(bytes.0, bytes.1)),
-        is_hanging: false,
     };
     PositionedLine {
         slots: single_slot(40.0, f32::INFINITY),
@@ -815,14 +806,14 @@ fn hang_mode_struct_gates_each_physical_edge() {
         y_offset: 0.0,
         advance: 10.0,
         byte_range: Some(TextRange::new(4, 5)),
-        is_hanging: true,
     });
     l.byte_range = TextRange::new(0, 5);
     l.visible_byte_end = 5;
     // The body fills its slot, so the comma would not have fitted: `Allow`
     // and `Force` both let it hang.
     let body = l.visual_width();
-    l.slots[0].constraint = InlineSlotConstraint::new(l.slots[0].constraint.start(), body).unwrap();
+    l.slots[0].constraint =
+        InlineSlotConstraint::try_new(l.slots[0].constraint.start(), body).unwrap();
     let with = |hang_mode, base_direction| LineContext {
         hang_mode,
         base_direction,
@@ -888,7 +879,6 @@ fn trailing_space_line(x: f32) -> PositionedLine {
             y_offset: 0.0,
             advance: 20.0,
             byte_range: Some(TextRange::new(0, 2)),
-            is_hanging: false,
         },
         PositionedGlyph {
             glyph_id: 3,
@@ -897,7 +887,6 @@ fn trailing_space_line(x: f32) -> PositionedLine {
             y_offset: 0.0,
             advance: 5.0,
             byte_range: Some(TextRange::new(2, 3)),
-            is_hanging: false,
         },
     ];
     // A run's glyphs are in screen order.
@@ -1058,7 +1047,6 @@ fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
             y_offset: 0.0,
             advance: 10.0,
             byte_range: Some(TextRange::new(4, 5)),
-            is_hanging: true,
         },
     );
     let ctx = |start, dir, index| LineContext {
@@ -1102,7 +1090,6 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
         offset,
         affinity,
         level,
-        line: 0,
     };
     use CaretAffinity::{Downstream, Upstream};
     // LTR paragraph "ab" + RTL run "אב" (bytes 2..6, two bytes per letter).
@@ -1192,7 +1179,7 @@ fn layout_paragraph_lays_out_an_empty_paragraph_as_one_empty_line() {
         geometry_provider: None,
         hanging_indent: 0.0,
         wrap_width: 120.0,
-        tab_stops: TabStops::new(16.0).unwrap(),
+        tab_stops: TabStops::try_new(16.0).unwrap(),
     };
     let options = LayoutOptions::default();
     let shaper: &dyn TextShaper = &NoopShaper;
@@ -1202,6 +1189,6 @@ fn layout_paragraph_lays_out_an_empty_paragraph_as_one_empty_line() {
     assert_eq!(p.lines[0].byte_range, TextRange::empty_at(0));
     assert_eq!(p.lines[0].line_height, p.policy.strut.line_height());
     assert_eq!(p.total_block_size, p.policy.strut.line_height());
-    assert!(ValidatedLayout::new(&p, "").is_ok());
+    assert!(ValidatedLayout::try_from_paragraph(&p, "").is_ok());
     assert!(check_layout_inputs(&ast, "", &constraints, &options).is_ok());
 }

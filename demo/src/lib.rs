@@ -8,6 +8,7 @@
 //! as integer codes, and results come back as packed pointers to UTF-8 JSON
 //! (or SVG path data). The crate is also an `rlib` so `cargo test` runs natively.
 
+mod buffers;
 mod fonts;
 mod json;
 mod markup;
@@ -126,7 +127,7 @@ impl Demo {
 
     /// [`Demo::layout`], with the error JSON of the stage that failed.
     fn try_layout(&mut self, req: &LayoutRequest<'_>) -> Result<String, String> {
-        let locale = req.locale.map(LocaleTag::parse_lenient).transpose();
+        let locale = req.locale.map(LocaleTag::try_from_str_lenient).transpose();
         let locale = locale.map_err(|_| error_json("input", "not a BCP 47 language tag"))?;
         // The host step: inline locale tags become style spans over the
         // plain paragraph text (spec AX-1, FE-25).
@@ -177,7 +178,7 @@ impl Demo {
             .map_err(|e| error_json("layout", e))?;
         let stored = StoredParagraph { marked, paragraph };
         let validated = ValidatedParagraph::try_new(stored, |s| {
-            ValidatedLayout::new(&s.paragraph, &s.marked.text)
+            ValidatedLayout::try_from_paragraph(&s.paragraph, &s.marked.text)
         })
         .map_err(|(_, e)| error_json("validate", e))?;
         let json = layout_json(validated.borrow_dependent(), self.paragraphs.len());
@@ -243,21 +244,15 @@ fn query(
     leak(json.flatten().unwrap_or_else(|| fallback.to_owned()))
 }
 
-/// Hands `text` to the page as one word it frees with [`demo_free`]: the
-/// pointer in the high 32 bits, the length in the low 32 (both fit in wasm32).
+/// Hands `text` to the page as one word it releases with [`demo_free`]: the
+/// buffer's address in the high 32 bits, its length in the low 32.
 fn leak(text: String) -> u64 {
-    let len = text.len();
-    let ptr = Box::into_raw(text.into_bytes().into_boxed_slice()).cast::<u8>();
-    ((ptr as u64) << 32) | (len as u64 & 0xffff_ffff)
+    let len = text.len() as u64;
+    ((buffers::register(text.into_bytes().into_boxed_slice()) as u64) << 32) | len
 }
 
-fn read_str<'a>(ptr: *const u8, len: u32) -> Option<&'a str> {
-    if len == 0 {
-        return Some("");
-    }
-    // SAFETY: the page wrote `len` bytes at `ptr` before the call.
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    std::str::from_utf8(bytes).ok()
+fn read_str(ptr: u32, len: u32) -> Option<String> {
+    String::from_utf8(buffers::read(ptr as usize, len as usize)?).ok()
 }
 
 /// A caret at `byte_offset`; a non-zero `affinity` is upstream.
@@ -277,72 +272,57 @@ fn clamped_range(layout: &ValidatedLayout<'_>, start: u32, end: u32) -> TextRang
     TextRange::new(start.min(end), start.max(end))
 }
 
-/// Allocates `len` bytes for the page to write into, or returns null when
-/// memory runs out; free with [`demo_free`].
+/// Allocates `len` zeroed bytes for the page to write into and returns their
+/// address, or 0 when memory runs out. Release it with [`demo_free`].
 #[unsafe(no_mangle)]
-pub extern "C" fn demo_alloc(len: u32) -> *mut u8 {
-    let mut bytes = Vec::new();
-    if bytes.try_reserve_exact(len as usize).is_err() {
-        return std::ptr::null_mut();
-    }
-    bytes.resize(len as usize, 0);
-    Box::into_raw(bytes.into_boxed_slice()).cast()
+pub extern "C" fn demo_alloc(len: u32) -> u32 {
+    buffers::zeroed(len as usize).map_or(0, |bytes| buffers::register(bytes) as u32)
 }
 
-/// Releases a buffer from [`demo_alloc`] or a result from any call below.
-///
-/// # Safety
-/// `ptr` must come from this module and `len` must be its exact length.
+/// Releases the buffer at `ptr`, from [`demo_alloc`] or a result word. An
+/// address that is not a live buffer is ignored.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn demo_free(ptr: *mut u8, len: u32) {
-    if ptr.is_null() {
-        return;
-    }
-    // SAFETY: both producers hand out boxed byte slices of exactly `len`.
-    drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len as usize)) });
+pub extern "C" fn demo_free(ptr: u32) {
+    buffers::release(ptr as usize);
+}
+
+/// The number of buffers not yet released; the page expects 0 between calls.
+#[unsafe(no_mangle)]
+pub extern "C" fn demo_live_buffers() -> u32 {
+    buffers::count() as u32
 }
 
 /// Copies `bytes` into the engine's face table and registers it under
 /// `family`. Returns `{"id":n,"upem":n}` or `{"id":null}` when the bytes hold
-/// no font.
-///
-/// # Safety
-/// `family_ptr` and `data_ptr` must each point to the stated number of bytes
-/// that stay readable for the duration of the call.
+/// no font. Both buffers come from [`demo_alloc`] and stay the page's to free.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn demo_add_font(
-    family_ptr: *const u8,
+pub extern "C" fn demo_add_font(
+    family_ptr: u32,
     family_len: u32,
-    data_ptr: *const u8,
+    data_ptr: u32,
     data_len: u32,
 ) -> u64 {
     let registered = read_str(family_ptr, family_len)
         .filter(|_| data_len != 0)
-        .and_then(|family| {
-            // SAFETY: the page wrote `data_len` bytes at `data_ptr`.
-            let bytes = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
-            with_demo(|demo| demo.add_font(family, bytes.to_vec())).flatten()
-        });
+        .zip(buffers::read(data_ptr as usize, data_len as usize))
+        .and_then(|(family, bytes)| with_demo(|demo| demo.add_font(&family, bytes)).flatten());
     leak(json::font_json(registered))
 }
 
 /// Lays out one paragraph. `line_height` 0 means normal; `phase2` packs the
 /// bidi, justification, hanging and autospace options ([`Phase2`]).
-///
-/// # Safety
-/// `text_ptr`, `locale_ptr` and `primary_ptr` must point to the stated number
-/// of bytes that stay readable for the duration of the call.
+/// The three strings come from [`demo_alloc`] and stay the page's to free.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn demo_layout(
-    text_ptr: *const u8,
+pub extern "C" fn demo_layout(
+    text_ptr: u32,
     text_len: u32,
     width: f32,
     font_size: f32,
     line_height: f32,
-    locale_ptr: *const u8,
+    locale_ptr: u32,
     locale_len: u32,
     cjk_quotes: u32,
-    primary_ptr: *const u8,
+    primary_ptr: u32,
     primary_len: u32,
     heuristics: u32,
     phase2: u32,
@@ -360,13 +340,13 @@ pub unsafe extern "C" fn demo_layout(
         }
     };
     let req = LayoutRequest {
-        text,
+        text: &text,
         width,
         font_size,
         line_height,
-        locale: (!locale.is_empty()).then_some(locale),
+        locale: (!locale.is_empty()).then_some(&*locale),
         cjk_quotes: cjk_quotes != 0,
-        primary: (!primary.is_empty()).then_some(primary),
+        primary: (!primary.is_empty()).then_some(&*primary),
         heuristics: heuristics != 0,
         phase2: Phase2(phase2),
     };

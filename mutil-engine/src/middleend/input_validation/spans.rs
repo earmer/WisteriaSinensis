@@ -1,14 +1,15 @@
 //! Span, bidi-span, annotation, and boundary-enclosure checks for input validation.
 
+use super::items::ItemsInOrder;
 use super::storage::{
-    check_glyph_ranges, check_run, check_run_presentation, check_text_payload,
+    TextBoxes, check_glyph_ranges, check_run, check_run_presentation, check_text_payload,
     check_text_presentation,
 };
 use super::{LayoutInputError, fits, in_byte_order, is_range_edge};
 use crate::frontend::{
-    AnnotationKind, AnnotationSide, AnnotationSpan, BoxNode, GlueKind, MAX_BIDI_SPAN_DEPTH,
-    MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge, TextBoxView, WordNode,
-    is_line_or_paragraph_separator,
+    AnnotationKind, AnnotationSide, AnnotationSpan, BoxNode, GlueKind, InlineObjectBox,
+    MAX_BIDI_SPAN_DEPTH, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge, TextBoxView,
+    WordNode, is_line_or_paragraph_separator,
 };
 use crate::types::{BidiLevel, GlyphOrientation, TextRange, WritingMode, is_extent};
 use smallvec::SmallVec;
@@ -16,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 /// The offsets at which the content of a paragraph starts and ends, for the
 /// span streams that must align with it.
-pub(super) struct ContentEdges {
+struct ContentEdges {
     /// Every start and end of an atom, inline object, glue, tab or
     /// discretionary.
     node_edges: HashSet<usize>,
@@ -30,7 +31,7 @@ pub(super) struct ContentEdges {
 }
 
 impl ContentEdges {
-    pub(super) fn new(ast: &ParagraphAst) -> Self {
+    fn new(ast: &ParagraphAst, boxes: &TextBoxes<'_>) -> Self {
         let mut edges = Self {
             node_edges: HashSet::new(),
             cluster_edges: HashSet::new(),
@@ -39,28 +40,21 @@ impl ContentEdges {
         };
         let mut stretch = 0;
         for (item, node) in ast.items.iter().enumerate() {
-            match node {
-                WordNode::Box(BoxNode::Text { .. }) => {
-                    let Some(view) = ast.text_box(item) else {
-                        continue;
-                    };
-                    for atom in view.atoms {
-                        let range = atom.byte_range;
-                        edges.node_edges.extend([range.start(), range.end()]);
-                        edges.atom_starts.insert(range.start(), stretch);
-                        edges.atom_ends.insert(range.end(), stretch);
-                    }
-                    for cluster in view.clusters {
-                        let range = cluster.byte_range;
-                        edges.cluster_edges.extend([range.start, range.end]);
-                    }
+            if let Some(view) = boxes.get(item) {
+                for atom in view.atoms {
+                    let range = atom.byte_range;
+                    edges.node_edges.extend([range.start(), range.end()]);
+                    edges.atom_starts.insert(range.start(), stretch);
+                    edges.atom_ends.insert(range.end(), stretch);
                 }
-                WordNode::Box(BoxNode::SpanBoundary { .. }) => {}
-                _ => {
-                    let range = node.byte_span();
-                    edges.node_edges.extend([range.start, range.end]);
-                    stretch += 1;
+                for cluster in view.clusters {
+                    let range = cluster.byte_range;
+                    edges.cluster_edges.extend([range.start(), range.end()]);
                 }
+            } else if !matches!(node, WordNode::Box(BoxNode::SpanBoundary { .. })) {
+                let range = node.byte_span();
+                edges.node_edges.extend([range.start(), range.end()]);
+                stretch += 1;
             }
         }
         edges
@@ -80,10 +74,25 @@ impl ContentEdges {
     }
 }
 
+/// The two span streams that must align with content edges. Skipped when
+/// both are empty, so the edge index is not built for plain paragraphs.
+pub(super) fn check_bidi_and_annotations(
+    ast: &ParagraphAst,
+    text: &str,
+    boxes: &TextBoxes<'_>,
+) -> Result<(), LayoutInputError> {
+    if ast.bidi_spans.is_empty() && ast.annotations.is_empty() {
+        return Ok(());
+    }
+    let edges = ContentEdges::new(ast, boxes);
+    check_bidi_spans(ast, text, &edges)?;
+    check_annotations(ast, text, &edges)
+}
+
 /// Explicit bidi spans: unique ids; non-empty ranges that fit the text and
 /// start and end on content edges; ordered by start, an outer span before the
 /// spans it contains; properly nested no deeper than [`MAX_BIDI_SPAN_DEPTH`].
-pub(super) fn check_bidi_spans(
+fn check_bidi_spans(
     ast: &ParagraphAst,
     text: &str,
     edges: &ContentEdges,
@@ -119,7 +128,7 @@ pub(super) fn check_bidi_spans(
 /// stretch, disjoint from the other bases on its side and in start order; a
 /// finite extent and overhang; and a self-contained, independently shaped
 /// payload in annotation-local coordinates.
-pub(super) fn check_annotations(
+fn check_annotations(
     ast: &ParagraphAst,
     text: &str,
     edges: &ContentEdges,
@@ -179,34 +188,30 @@ fn annotation_payload_is_valid(ann: &AnnotationSpan, mode: WritingMode) -> bool 
 }
 
 /// The byte ranges of concrete content: every text atom and inline object.
-fn concrete_content(ast: &ParagraphAst) -> Vec<TextRange> {
+fn concrete_content(ast: &ParagraphAst, boxes: &TextBoxes<'_>) -> Vec<TextRange> {
     let mut out = Vec::new();
-    for (item, n) in ast.items.iter().enumerate() {
-        match n {
-            WordNode::Box(BoxNode::Text { .. }) => {
-                if let Some(view) = ast.text_box(item) {
-                    out.extend(view.atoms.iter().map(|a| a.byte_range));
-                }
-            }
-            WordNode::Box(BoxNode::InlineObject { byte_range, .. }) => out.push(*byte_range),
-            _ => {}
+    for (item, node) in ast.items.iter().enumerate() {
+        if let Some(view) = boxes.get(item) {
+            out.extend(view.atoms.iter().map(|a| a.byte_range));
+        } else if let WordNode::Box(BoxNode::InlineObject(InlineObjectBox { byte_range, .. })) =
+            node
+        {
+            out.push(*byte_range);
         }
     }
     out
 }
 
-/// Validates the two span streams.
-///
-/// * Both: ranges fit the text, ids are unique within the stream.
-/// * Decoration spans: finite, non-negative paddings; **proper nesting**
-///   (two spans are disjoint or one contains the other, never a partial
-///   overlap) no deeper than [`MAX_DECORATION_NESTING_DEPTH`].
-/// * Atomic spans: non-empty, **strictly disjoint**, both edges at the start
-///   or end of a text atom or an inline object, and wrapping at least one
-///   atom or object (a span of whitespace alone is not atomic content).
-pub(super) fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
+/// Validates the decoration spans: ranges fit the text, ids are unique,
+/// paddings are finite and non-negative, and the spans **nest properly**
+/// (two spans are disjoint or one contains the other, never a partial
+/// overlap) no deeper than [`MAX_DECORATION_NESTING_DEPTH`].
+pub(super) fn check_decoration_spans(
+    ast: &ParagraphAst,
+    text: &str,
+) -> Result<DecorationIds, LayoutInputError> {
     use LayoutInputError as E;
-    let mut ids = HashSet::new();
+    let mut ids = HashMap::with_capacity(ast.decoration_spans.len());
     let mut stack: Vec<TextRange> = Vec::new();
     for (span, s) in ast.decoration_spans.iter().enumerate() {
         let r = s.byte_range;
@@ -219,7 +224,7 @@ pub(super) fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutIn
         while stack.last().is_some_and(|top| top.end() <= r.start()) {
             stack.pop();
         }
-        if !ids.insert(s.span_id)
+        if ids.insert(s.span_id, span).is_some()
             || !s.is_valid()
             || !fits(text, r)
             || stack.last().is_some_and(|top| !top.contains_range(r))
@@ -229,25 +234,44 @@ pub(super) fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutIn
         }
         stack.push(r);
     }
+    Ok(DecorationIds(ids))
+}
+
+/// Validates the atomic spans: ranges fit the text, ids are unique, and each
+/// span is non-empty, **strictly disjoint** from the others, has both edges
+/// at the start or end of a text atom or an inline object, and wraps at
+/// least one atom or object (a span of whitespace alone is not atomic
+/// content).
+///
+/// Deliberately runs before the item checks, whose errors it takes
+/// precedence over (AST-11), so it cannot take their proof that the content
+/// is in byte order: content out of order, which the edge search would
+/// bisect wrongly, is left to `check_item_order` and `check_each_item`, which
+/// reject it.
+pub(super) fn check_atomic_spans(
+    ast: &ParagraphAst,
+    text: &str,
+    boxes: &TextBoxes<'_>,
+) -> Result<(), LayoutInputError> {
+    use LayoutInputError as E;
     if ast.atomic_spans.is_empty() {
         return Ok(());
     }
-    let content = concrete_content(ast);
+    let content = concrete_content(ast, boxes);
     if !in_byte_order(content.iter().copied()) {
-        // See `in_byte_order`: a later item check rejects this AST.
         return Ok(());
     }
     // The offsets an atomic span may start or end at: the start or end of a
     // text atom or of an inline object. Glue, tabs and line terminators
     // contribute none, so an edge inside whitespace is rejected.
-    let is_edge = |offset: usize| is_range_edge(&content, offset);
+    let is_edge = |offset: usize| is_range_edge(&content, |r| *r, offset);
     let mut content_at = 0;
-    ids.clear();
+    let mut atomic_ids = HashSet::with_capacity(ast.atomic_spans.len());
     for (span, s) in ast.atomic_spans.iter().enumerate() {
         while content_at < content.len() && content[content_at].end() <= s.byte_range.start() {
             content_at += 1;
         }
-        if !ids.insert(s.span_id)
+        if !atomic_ids.insert(s.span_id)
             || s.byte_range.is_empty()
             || !fits(text, s.byte_range)
             || (span > 0 && ast.atomic_spans[span - 1].byte_range.end() > s.byte_range.start())
@@ -263,9 +287,19 @@ pub(super) fn check_spans(ast: &ParagraphAst, text: &str) -> Result<(), LayoutIn
     Ok(())
 }
 
+/// The index into `decoration_spans` of each span id, proved unique by
+/// `check_decoration_spans`.
+pub(super) struct DecorationIds(HashMap<u64, usize>);
+
+impl DecorationIds {
+    /// The index of the decoration span with `span_id`, if there is one.
+    pub(super) fn index_of(&self, span_id: u64) -> Option<usize> {
+        self.0.get(&span_id).copied()
+    }
+}
+
 /// Indexed span membership for item checks; nesting is bounded by eight.
 pub(super) struct SpanIndex {
-    pub(super) by_id: HashMap<u64, usize>,
     /// Span indices touching item `i`: `touching_flat[touching_start[i]..touching_start[i + 1]]`.
     touching_flat: Vec<usize>,
     touching_start: Vec<usize>,
@@ -275,20 +309,16 @@ pub(super) struct SpanIndex {
 }
 
 impl SpanIndex {
-    pub(super) fn new(ast: &ParagraphAst) -> Self {
-        let by_id = ast
-            .decoration_spans
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.span_id, i))
-            .collect();
+    /// Indexes the spans over items [`ItemsInOrder`] proved in byte order,
+    /// which the sweep over both relies on.
+    pub(super) fn new(ast: &ParagraphAst, boxes: &TextBoxes<'_>, _: &ItemsInOrder) -> Self {
         let mut touching_flat = Vec::new();
         let mut touching_start = Vec::with_capacity(ast.items.len() + 1);
         let mut levels = vec![(None, None); ast.decoration_spans.len()];
         let (mut next, mut active) = (0, Vec::<usize>::new());
         for (item, node) in ast.items.iter().enumerate() {
             let r = node.byte_span();
-            active.retain(|&i| ast.decoration_spans[i].byte_range.end >= r.start);
+            active.retain(|&i| ast.decoration_spans[i].byte_range.end() >= r.start());
             while next < ast.decoration_spans.len()
                 && ast.decoration_spans[next].byte_range.start() <= r.end()
             {
@@ -299,18 +329,21 @@ impl SpanIndex {
             }
             // The first and last inline entity inside each span: text
             // atoms and inline objects (WN-8).
-            let entities: SmallVec<[(TextRange, BidiLevel); 1]> = match node {
-                WordNode::Box(BoxNode::InlineObject {
-                    byte_range,
-                    bidi_level,
-                    ..
-                }) => smallvec::smallvec![(*byte_range, *bidi_level)],
-                _ => ast.text_box(item).map_or_else(SmallVec::new, |view| {
-                    view.atoms
-                        .iter()
-                        .map(|a| (a.byte_range, a.bidi_level))
-                        .collect()
-                }),
+            let entities: SmallVec<[(TextRange, BidiLevel); 1]> = match (node, boxes.get(item)) {
+                (_, Some(view)) => view
+                    .atoms
+                    .iter()
+                    .map(|a| (a.byte_range, a.bidi_level))
+                    .collect(),
+                (
+                    WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
+                        byte_range,
+                        bidi_level,
+                        ..
+                    })),
+                    None,
+                ) => smallvec::smallvec![(*byte_range, *bidi_level)],
+                _ => SmallVec::new(),
             };
             for &i in &active {
                 let span = ast.decoration_spans[i].byte_range;
@@ -324,7 +357,6 @@ impl SpanIndex {
         }
         touching_start.push(touching_flat.len());
         Self {
-            by_id,
             touching_flat,
             touching_start,
             levels,
@@ -337,22 +369,23 @@ impl SpanIndex {
     }
 }
 
-/// Enclosure of the boundaries (run after `check_boundary_order`, so both nodes
-/// of every span exist).
+/// Indices into `items` of the `Leading` and `Trailing` nodes of one span.
+#[derive(Clone, Copy)]
+struct BoundaryItems {
+    leading: usize,
+    trailing: usize,
+}
+
+/// The boundary nodes of every decoration span, indexed by span: the proof
+/// [`check_boundary_order`] returns that both exist and nest.
+pub(super) struct SpanBoundaries(Vec<BoundaryItems>);
+
+/// Enclosure of the boundaries [`check_boundary_order`] found.
 pub(super) fn check_span_enclosure(
     ast: &ParagraphAst,
     index: &SpanIndex,
+    SpanBoundaries(boundary_positions): &SpanBoundaries,
 ) -> Result<(), LayoutInputError> {
-    let mut boundary_positions = vec![(0, 0); ast.decoration_spans.len()];
-    for (item, node) in ast.items.iter().enumerate() {
-        if let WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. }) = node {
-            let positions = &mut boundary_positions[index.by_id[span_id]];
-            match edge {
-                SpanEdge::Leading => positions.0 = item,
-                SpanEdge::Trailing => positions.1 = item,
-            }
-        }
-    }
     for (item, node) in ast.items.iter().enumerate() {
         let item_range = node.byte_span();
         for &span_index in index.touching(item) {
@@ -361,14 +394,12 @@ pub(super) fn check_span_enclosure(
             {
                 continue;
             }
-            let (leading_item, trailing_item) = boundary_positions[span_index];
             if !span_enclosure_is_allowed(
                 node,
                 item_range,
                 span.byte_range,
                 item,
-                leading_item,
-                trailing_item,
+                boundary_positions[span_index],
             ) {
                 return Err(LayoutInputError::SpanEnclosure {
                     span: span_index,
@@ -385,10 +416,9 @@ fn span_enclosure_is_allowed(
     item_range: TextRange,
     span_range: TextRange,
     item: usize,
-    leading_item: usize,
-    trailing_item: usize,
+    BoundaryItems { leading, trailing }: BoundaryItems,
 ) -> bool {
-    let is_strictly_between_boundaries = leading_item < item && item < trailing_item;
+    let is_strictly_between_boundaries = leading < item && item < trailing;
     let is_zero_width = item_range.is_empty();
     let is_cjk_autospace =
         matches!(node, WordNode::Glue(glue) if glue.kind == GlueKind::CjkAutospace);
@@ -397,10 +427,10 @@ fn span_enclosure_is_allowed(
         item_range.start() == span_range.start() || item_range.start() == span_range.end();
 
     if is_zero_width_break && item_range.start() == span_range.start() {
-        return item < leading_item;
+        return item < leading;
     }
     if is_zero_width_break && item_range.start() == span_range.end() {
-        return item > trailing_item;
+        return item > trailing;
     }
     if is_zero_width && sits_on_span_edge {
         return true;
@@ -419,45 +449,48 @@ fn span_enclosure_is_allowed(
 /// every decoration span has both of its boundaries.
 pub(super) fn check_boundary_order(
     ast: &ParagraphAst,
-    index: &SpanIndex,
-) -> Result<(), LayoutInputError> {
+    ids: &DecorationIds,
+) -> Result<SpanBoundaries, LayoutInputError> {
     use LayoutInputError as E;
-    let by_id = &index.by_id;
-    let mut open_spans = Vec::new();
+    let mut open_spans: Vec<usize> = Vec::new();
     let mut seen_leading_spans = HashSet::new();
+    let mut positions = vec![(None, None); ast.decoration_spans.len()];
     for (item, node) in ast.items.iter().enumerate() {
         let WordNode::Box(BoxNode::SpanBoundary { span_id, edge, .. }) = node else {
             continue;
         };
+        let span = ids.index_of(*span_id).ok_or(E::UnknownSpan { item })?;
         match edge {
             SpanEdge::Leading => {
                 if !seen_leading_spans.insert(*span_id) {
                     return Err(E::InvalidSpanBoundary { item });
                 }
-                if let Some(outer_span_id) = open_spans.last() {
-                    let outer_index = by_id[outer_span_id];
-                    let inner_index = by_id[span_id];
-                    if ast.decoration_spans[outer_index].byte_range
-                        == ast.decoration_spans[inner_index].byte_range
-                        && outer_index > inner_index
-                    {
-                        return Err(E::InvalidSpanBoundary { item });
-                    }
+                positions[span].0 = Some(item);
+                if let Some(&outer) = open_spans.last()
+                    && ast.decoration_spans[outer].byte_range
+                        == ast.decoration_spans[span].byte_range
+                    && outer > span
+                {
+                    return Err(E::InvalidSpanBoundary { item });
                 }
-                open_spans.push(*span_id);
+                open_spans.push(span);
             }
             SpanEdge::Trailing => {
-                if open_spans.last() != Some(span_id) {
+                if open_spans.last() != Some(&span) {
                     return Err(E::InvalidSpanBoundary { item });
                 }
                 open_spans.pop();
+                positions[span].1 = Some(item);
             }
         }
     }
-    for (span_index, span) in ast.decoration_spans.iter().enumerate() {
-        if !seen_leading_spans.contains(&span.span_id) || open_spans.contains(&span.span_id) {
-            return Err(E::MissingSpanBoundary { span: span_index });
-        }
-    }
-    Ok(())
+    positions
+        .into_iter()
+        .enumerate()
+        .map(|(span, edges)| match edges {
+            (Some(leading), Some(trailing)) => Ok(BoundaryItems { leading, trailing }),
+            _ => Err(E::MissingSpanBoundary { span }),
+        })
+        .collect::<Result<_, _>>()
+        .map(SpanBoundaries)
 }

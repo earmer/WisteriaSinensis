@@ -1,14 +1,15 @@
 //! A line's caret stops (spec §6.1, CRT-1 to CRT-3, INT-4 to INT-6, INT-9).
 
-use super::super::line_builder::LineBuildState;
-use super::super::{Layout, PieceKind, PlacedPiece};
 use crate::frontend::GlueKind;
+use crate::middleend::layout::line_builder::AlignedLine;
+use crate::middleend::layout::{Layout, PieceKind, PlacedPiece, Reshapes};
 use crate::middleend::tolerance::approx_eq;
 use crate::middleend::{
     CaretAffinity, CaretStop, HangingWhitespaceMode, PositionedInlineBox, VisualGlyphRun,
     resolve_ligature_carets,
 };
-use crate::types::{AtomFlags, BidiLevel};
+use crate::types::{AtomFlags, BidiLevel, GlyphOrientation};
+use smallvec::SmallVec;
 
 /// A candidate caret stop, with the affinity and level it takes at a
 /// direction boundary (CRT-3): upstream at its piece's end, downstream at its
@@ -27,11 +28,11 @@ impl Layout<'_, '_> {
     /// content starts, and its glyph runs and boxes.
     pub(in crate::middleend::layout) fn caret_stops(
         &self,
-        line: &LineBuildState<'_>,
+        line: &AlignedLine<'_>,
         visible_end: usize,
-        content_start: f32,
         runs: &[VisualGlyphRun],
         boxes: &[PositionedInlineBox],
+        pending: &Reshapes,
     ) -> Vec<CaretStop> {
         let bytes = line.byte_range;
         // Under `Collapsible`, a soft wrap hides the trailing white space,
@@ -39,11 +40,11 @@ impl Layout<'_, '_> {
         // sits beyond the far edge of the base direction (HNG-3), so the end
         // of a hard-broken line or of the paragraph stays reachable.
         let hides_trailing =
-            line.soft_wrap && self.options.whitespace == HangingWhitespaceMode::Collapsible;
+            line.soft_wrap() && self.options.whitespace == HangingWhitespaceMode::Collapsible;
         let mut raw = Vec::new();
-        if bytes.is_empty() || line.body_len == 0 && (line.placed.is_empty() || hides_trailing) {
+        if bytes.is_empty() || line.body_len() == 0 && (line.placed.is_empty() || hides_trailing) {
             raw.push(RawStop {
-                x: content_start,
+                x: line.content.start,
                 offset: bytes.start(),
                 affinity: CaretAffinity::Downstream,
                 level: None,
@@ -52,7 +53,7 @@ impl Layout<'_, '_> {
         let trailing = if hides_trailing {
             &[][..]
         } else {
-            &line.placed[line.body_len..]
+            &line.placed[line.body_len()..]
         };
         let (forward, backward) = match self.base.is_rtl() {
             false => (trailing, &[][..]),
@@ -60,14 +61,14 @@ impl Layout<'_, '_> {
         };
         let body = line.order.iter().map(|&k| &line.placed[k]);
         for &piece in body.chain(forward).chain(backward.iter().rev()) {
-            self.push_piece_stops(piece, &mut raw);
+            self.push_piece_stops(piece, &mut raw, pending);
         }
         // A hard break's own bytes start the next line.
-        let drops_end = !line.soft_wrap
+        let drops_end = !line.soft_wrap()
             && !bytes.is_empty()
             && line
                 .end_break
-                .is_some_and(|b| b.mandatory && !b.bytes.is_empty());
+                .is_some_and(|b| b.is_mandatory() && !b.byte_range.is_empty());
         let belongs_here = |offset: usize| {
             bytes.start() <= offset
                 && offset <= bytes.end()
@@ -78,18 +79,9 @@ impl Layout<'_, '_> {
                     .is_some_and(|span| span.is_interior(offset))
                 && !(hides_trailing && offset > visible_end && offset != bytes.start())
         };
-        // One stop per distinct `(x, offset)`.
-        let mut stops: Vec<RawStop> = Vec::new();
-        for stop in raw.into_iter().filter(|s| belongs_here(s.offset)) {
-            let recent = &stops[stops.len().saturating_sub(4)..];
-            if !recent
-                .iter()
-                .any(|s| s.offset == stop.offset && approx_eq(s.x, stop.x))
-            {
-                stops.push(stop);
-            }
-        }
-        resolve_shared_offsets(&mut stops, line.soft_wrap);
+        raw.retain(|s| belongs_here(s.offset));
+        let mut stops = distinct_stops(raw);
+        resolve_shared_offsets(&mut stops, line.soft_wrap());
         // The level of an entity touching `offset`, else the paragraph's.
         let level_at = |offset: usize| {
             let glyphs = runs.iter().flat_map(|r| {
@@ -107,7 +99,6 @@ impl Layout<'_, '_> {
             offset: s.offset,
             affinity: s.affinity,
             level: s.level.unwrap_or_else(|| level_at(s.offset)),
-            line: line.index,
         };
         stops.iter().map(to_stop).collect()
     }
@@ -117,19 +108,24 @@ impl Layout<'_, '_> {
     /// positions, none for a single atom or an emoji sequence. Positions
     /// increase from the left edge (SHP-7); in RTL they pair with the atoms
     /// in reverse logical order, and the justification lies before the glyphs.
-    fn push_piece_stops(&self, placed: PlacedPiece, raw: &mut Vec<RawStop>) {
+    fn push_piece_stops(
+        &self,
+        placed: PlacedPiece<'_>,
+        raw: &mut Vec<RawStop>,
+        pending: &Reshapes,
+    ) {
         let p = placed.piece;
         // A compression pool squeezed below zero overlaps its neighbours and
         // owns no bytes: its edges would only duplicate theirs (CRT-3).
         if placed.width < 0.0
-            && matches!(p.kind, PieceKind::Glue { item }
-                if self.glue(item).kind == GlueKind::CjkPunctCompression)
+            && matches!(p.kind, PieceKind::Glue(glue)
+                if glue.kind == GlueKind::CjkPunctCompression)
         {
             return;
         }
         // A glyph-less piece lends no level of its own (spec CRT-2).
         let level = match p.kind {
-            PieceKind::Glue { .. } | PieceKind::SpanEdge { .. } => None,
+            PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => None,
             _ => Some(p.level),
         };
         let edge = |x: f32, affinity: CaretAffinity| RawStop {
@@ -151,14 +147,18 @@ impl Layout<'_, '_> {
             && let c = &self.ast.clusters[cluster]
             && c.atom_count() > 1
             && !c.flags.contains(AtomFlags::IS_EMOJI_SEQUENCE)
+            // A tate-chu-yoko cluster merges several atoms but is no ligature.
+            && c.orientation != GlyphOrientation::HorizontalInVertical
         {
             let direction = p.level.direction();
-            let (glyphs, width) = self.cluster_glyphs(cluster);
-            let first_glyph = glyphs.first().map_or(0, |g| g.glyph_id);
-            let instance = self.ast.runs[run].font_instance(c.font);
-            let carets = self
-                .shaper
-                .ligature_carets(instance, first_glyph, direction);
+            let (glyphs, width) = self.cluster_glyphs(pending, cluster);
+            // A cluster with no glyph has no ligature to ask GDEF about; it
+            // takes the equal slots (INT-5).
+            let carets = glyphs.first().map_or_else(SmallVec::new, |glyph| {
+                let instance = self.ast.runs[run].font_instance(c.font);
+                self.shaper
+                    .ligature_carets(instance, glyph.glyph_id, direction)
+            });
             let atoms = &self.inputs.run_atoms(run)[c.atom_range.clone()];
             let mut offsets: Vec<usize> = atoms[1..].iter().map(|a| a.byte_range.start()).collect();
             let rtl = direction.is_rtl();
@@ -176,6 +176,29 @@ impl Layout<'_, '_> {
         }
         raw.push(edge(placed.x + placed.width, right));
     }
+}
+
+/// One stop per distinct `(x, offset)` (INT-20), the first emitted of each,
+/// in emission order. Two pieces that meet at an offset need not be emitted
+/// next to each other: an RTL line's trailing white space is emitted after
+/// its whole body but sits at its visual left, beside the body's last
+/// logical edge. So every stop is compared with all earlier stops of its
+/// offset, not with its recent neighbours.
+fn distinct_stops(mut raw: Vec<RawStop>) -> Vec<RawStop> {
+    let mut by_offset: Vec<usize> = (0..raw.len()).collect();
+    // Stable: emission order within an offset.
+    by_offset.sort_by_key(|&i| raw[i].offset);
+    let mut duplicate = vec![false; raw.len()];
+    for same in by_offset.chunk_by(|&a, &b| raw[a].offset == raw[b].offset) {
+        for (n, &i) in same.iter().enumerate() {
+            duplicate[i] = same[..n]
+                .iter()
+                .any(|&j| !duplicate[j] && approx_eq(raw[j].x, raw[i].x));
+        }
+    }
+    let mut duplicate = duplicate.into_iter();
+    raw.retain(|_| duplicate.next() == Some(false));
+    raw
 }
 
 /// Resolves the stops, in visual order, that share an offset (CRT-3). Those

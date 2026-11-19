@@ -124,16 +124,16 @@ fn annotation_base_allows_glyph_less_source_gaps() {
     l.ascent += 3.0;
     l.line_height += 3.0;
     l.baseline_y += 3.0;
-    let mut first = glyph(0.0, 10.0, false);
+    let mut first = glyph(0.0, 10.0);
     first.byte_range = Some(TextRange::new(0, 1));
-    let mut last = glyph(70.0, 10.0, false);
+    let mut last = glyph(70.0, 10.0);
     last.byte_range = Some(TextRange::new(2, 3));
     l.visual_runs = vec![run(first), run(last)];
     let mut ann = positioned_annotation();
     ann.base_byte_range = TextRange::new(0, 3);
     ann.glyphs[0] = PositionedGlyph {
         byte_range: None,
-        ..glyph(25.0, 50.0, false)
+        ..glyph(25.0, 50.0)
     };
     l.annotations.push(ann);
     assert_eq!(l.validate(&ctx()), Ok(()));
@@ -192,7 +192,7 @@ fn ruby_rejects_glue_and_cluster_internal_edges() {
     let mut a = ast("ab");
     edit_text_box(&mut a, 0, |_, clusters| {
         clusters.truncate(1);
-        clusters[0].byte_range.end = 2;
+        clusters[0].byte_range = TextRange::new(clusters[0].byte_range.start(), 2);
         clusters[0].atom_range.end = 2;
         clusters[0].natural_width = 2.0;
     });
@@ -305,7 +305,7 @@ fn an_annotation_id_appears_once_per_paragraph() {
         l.ascent += 3.0;
         l.line_height += 3.0;
         l.baseline_y = baseline_y;
-        let mut g = glyph(0.0, 10.0, false);
+        let mut g = glyph(0.0, 10.0);
         g.byte_range = Some(l.byte_range);
         l.visual_runs = vec![run(g)];
         set_visual_width(&mut l, 10.0);
@@ -339,7 +339,7 @@ fn an_annotation_id_appears_once_per_paragraph() {
 /// (ascent 8, descent 2) plus the annotation's block extent of 3 on its side.
 fn single_annotation_line(side: AnnotationSide) -> (PositionedLine, LineContext) {
     let mut l = line();
-    let mut r = run(glyph(0.0, 100.0, false));
+    let mut r = run(glyph(0.0, 100.0));
     r.byte_range = l.byte_range;
     l.visual_runs = vec![r];
     let mut ann = positioned_annotation();

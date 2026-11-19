@@ -1,7 +1,7 @@
 //! In-memory font registry and CJK regional-design detection (spec SHP-25).
 
-use super::super::{FontFace, FontSource};
 use super::metrics::{UnitMetrics, unit_metrics};
+use crate::shaping::{FontFace, FontSource};
 use crate::types::{
     FontFamily, FontId, FontSlant, FontStyle, GenericFamily, LocaleTag, ScriptTag, ShapingRun,
 };
@@ -89,7 +89,7 @@ impl FontRegistry {
 
     /// Registers `face` under `family` and `style` and returns its id, or
     /// `None`, registering nothing, when its bytes hold no font at its face
-    /// index. The bytes are shared, not copied (spec HST-1); they are parsed
+    /// index or the font's `units_per_em` is 0. The bytes are shared, not copied (spec HST-1); they are parsed
     /// here, once.
     ///
     /// The face's [`FaceProfile`] is read from its tables (spec SHP-25).
@@ -139,8 +139,13 @@ impl FontRegistry {
         face: FontFace,
         profile: Option<FaceProfile>,
     ) -> Option<FontId> {
-        let bytes = face.bytes().shared_arc();
+        let bytes = Arc::clone(&face.bytes().0);
         let font = Font::new(bytes, face.face_index())?;
+        // Every metric is scaled by `1 / units_per_em` (SHP-21). The stated
+        // value: `Metrics::units_per_em` replaces a 0 with 1000.
+        if font.metrics().raw_units_per_em == 0 {
+            return None;
+        }
         let id = FontId(u32::try_from(self.faces.len()).ok()?);
         let metrics = unit_metrics(&font);
         let profile = profile.unwrap_or_else(|| face_profile(&font));
@@ -366,87 +371,51 @@ fn gsub_region(font: &Font) -> Option<CjkRegion> {
     let gsub = font.tables().gsub().ok()?;
     let list = gsub.script_list().ok()?;
     let data = list.offset_data();
-    let mut found: Option<CjkRegion> = None;
-    for record in list.script_records() {
-        let Ok(script) = record.script(data) else {
-            continue;
-        };
-        for lang in script.lang_sys_records() {
-            let vote = match &lang.lang_sys_tag().to_be_bytes() {
-                b"ZHS " => CjkRegion::Simplified,
-                b"ZHT " => CjkRegion::Traditional,
-                b"ZHH " | b"ZHTM" => CjkRegion::HongKong,
-                b"JAN " => CjkRegion::Japanese,
-                b"KOR " => CjkRegion::Korean,
-                _ => continue,
-            };
-            match found {
-                None => found = Some(vote),
-                Some(region) if region == vote => {}
-                Some(_) => return Some(CjkRegion::Pan),
-            }
-        }
-    }
-    found
+    let votes = list
+        .script_records()
+        .iter()
+        .filter_map(|record| record.script(data).ok())
+        .flat_map(|script| {
+            script
+                .lang_sys_records()
+                .iter()
+                .filter_map(|lang| match &lang.lang_sys_tag().to_be_bytes() {
+                    b"ZHS " => Some(CjkRegion::Simplified),
+                    b"ZHT " => Some(CjkRegion::Traditional),
+                    b"ZHH " | b"ZHTM" => Some(CjkRegion::HongKong),
+                    b"JAN " => Some(CjkRegion::Japanese),
+                    b"KOR " => Some(CjkRegion::Korean),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    single_region(votes, Some(CjkRegion::Pan))
 }
 
 fn name_region(font: &Font) -> Option<CjkRegion> {
     use read_fonts::model::name::NameId;
     let names = font.names();
-    // Both the typographic and the legacy family name vote: a generic
-    // typographic name must not hide a regional legacy one.
-    let mut found = None;
-    for id in [NameId::TYPOGRAPHIC_FAMILY_NAME, NameId::FAMILY_NAME] {
-        let Some(name) = names.get(id).and_then(|entry| entry.english_or_first()) else {
-            continue;
-        };
-        if !scan_chars_region(name.name().chars(), &mut found) {
-            return None;
-        }
-    }
-    found
+    let families: Vec<String> = [NameId::TYPOGRAPHIC_FAMILY_NAME, NameId::FAMILY_NAME]
+        .into_iter()
+        .filter_map(|id| Some(names.get(id)?.english_or_first()?.name().chars().collect()))
+        .collect();
+    family_region(families.iter().map(String::as_str))
 }
 
-pub(super) fn scan_chars_region(
-    chars: impl IntoIterator<Item = char>,
-    found: &mut Option<CjkRegion>,
-) -> bool {
-    let mut buf = [0u8; 12];
-    let mut len = 0usize;
-    let mut flush = |buf: &[u8; 12], len: &mut usize| -> bool {
-        let word_len = *len;
-        *len = 0;
-        if word_len == 0 || word_len > buf.len() {
-            return true;
-        }
-        let Ok(word) = core::str::from_utf8(&buf[..word_len]) else {
-            return true;
-        };
-        if let Some(vote) = word_region(word) {
-            match *found {
-                None => *found = Some(vote),
-                Some(region) if region == vote => {}
-                Some(_) => return false,
-            }
-        }
-        true
-    };
-    for c in chars {
-        if c.is_ascii_alphanumeric() {
-            if len < buf.len()
-                && let Ok(byte) = u8::try_from(u32::from(c))
-            {
-                buf[len] = byte;
-            }
-            len += 1;
-        } else if !flush(&buf, &mut len) {
-            return false;
-        }
-    }
-    flush(&buf, &mut len)
+/// The region the words of `families` vote for. Both the typographic and the
+/// legacy family name vote: a generic typographic name must not hide a
+/// regional legacy one.
+pub(super) fn family_region<'a>(families: impl IntoIterator<Item = &'a str>) -> Option<CjkRegion> {
+    let votes = families.into_iter().flat_map(|family| {
+        family
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter_map(word_region)
+    });
+    single_region(votes, None)
 }
 
-pub(super) fn word_region(word: &str) -> Option<CjkRegion> {
+fn word_region(word: &str) -> Option<CjkRegion> {
     match word.to_ascii_uppercase().as_str() {
         "SC" | "CN" | "GB" | "HANS" | "SIMPLIFIED" => Some(CjkRegion::Simplified),
         "TC" | "TW" | "HANT" | "TRADITIONAL" => Some(CjkRegion::Traditional),

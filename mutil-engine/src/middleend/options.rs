@@ -2,7 +2,7 @@
 
 use crate::frontend::is_line_or_paragraph_separator;
 use crate::middleend::tolerance::tolerance;
-use crate::middleend::{HangSide, LayoutInputError, SlotSource};
+use crate::middleend::{HangSide, SlotSource};
 use crate::types::{Direction, FontMetrics, WritingMode, is_measurement};
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -20,11 +20,7 @@ pub enum HangingWhitespaceMode {
 
 /// Line-breaking strategy (spec §5 Stage 1.6.1): one beam-lookahead machine `[L3][L6]`.
 ///
-/// | Profile | `beam_width` | `window_depth` | Use |
-/// |---|---|---|---|
-/// | `Greedy` | 1 | 1 | monospace code, logs, UAX #14 oracle tests |
-/// | `Balanced` (default) | 2 | 2 | interactive rich-text editing |
-/// | `Publication` | 8 | 6 | static reading view, print export |
+/// Phase 1 and 2 layout breaks every strategy greedily (spec ME-2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LineBreakStrategy {
     /// First-fit with the overflow ladder; each line depends only on its start.
@@ -34,28 +30,6 @@ pub enum LineBreakStrategy {
     Balanced,
     /// Knuth-Plass quality over a bounded window, with dominator pruning.
     Publication,
-}
-
-impl LineBreakStrategy {
-    /// Number of candidate paths kept alive (`K`).
-    #[must_use]
-    pub const fn beam_width(self) -> usize {
-        match self {
-            Self::Greedy => 1,
-            Self::Balanced => 2,
-            Self::Publication => 8,
-        }
-    }
-
-    /// Lines of lookahead before the oldest is committed (`W`).
-    #[must_use]
-    pub const fn window_depth(self) -> usize {
-        match self {
-            Self::Greedy => 1,
-            Self::Balanced => 2,
-            Self::Publication => 6,
-        }
-    }
 }
 
 /// Copy policy for a source U+00AD (spec §6.6); a generated hyphen is never copied.
@@ -283,7 +257,7 @@ impl TabStops {
 
     /// Stops every `step` units, or `None` unless `step` is finite and positive.
     #[must_use]
-    pub fn new(step: f32) -> Option<Self> {
+    pub fn try_new(step: f32) -> Option<Self> {
         (step.is_finite() && step > 0.0).then_some(Self { step })
     }
 
@@ -364,38 +338,6 @@ impl LayoutConstraints {
             next_feature_block_offset: None,
         }
     }
-
-    /// [`resolve_line_geometry`](Self::resolve_line_geometry), validating a provider's
-    /// untrusted answer, optionally against the `previous` smaller envelope (spec GEO-3,
-    /// AX-3). The envelope must be finite and non-empty (debug-asserted only: it is
-    /// built from gated measurements, spec MSR-1).
-    ///
-    /// # Errors
-    /// `InvalidLineGeometry` for an answer outside the envelope, out of order or
-    /// stalling; `NonMonotonicGeometry` for one not within `previous`.
-    pub fn query_checked_geometry(
-        &self,
-        line_index: usize,
-        block_start: f32,
-        block_end: f32,
-        previous: Option<&LineGeometry>,
-    ) -> Result<LineGeometry, LayoutInputError> {
-        debug_assert!(
-            block_start.is_finite() && block_end.is_finite() && block_end > block_start,
-            "query_checked_geometry precondition violated (spec GEO-3)"
-        );
-        let geometry = self.resolve_line_geometry(line_index, block_start, block_end);
-        if self.geometry_provider.is_none() {
-            return Ok(geometry);
-        }
-        if !geometry.is_valid(block_start, self.wrap_width) || geometry.stalls(block_start) {
-            return Err(LayoutInputError::InvalidLineGeometry);
-        }
-        if previous.is_some_and(|p| !geometry.is_subset_of(p)) {
-            return Err(LayoutInputError::NonMonotonicGeometry);
-        }
-        Ok(geometry)
-    }
 }
 
 /// An available inline interval `[start, end)`; parsed, not validated (spec §1.5, AX-3).
@@ -409,7 +351,7 @@ impl InlineSlotConstraint {
     /// `[start, end)`, or `None` unless `start` is finite and `end` lies beyond
     /// it, at a finite distance or at positive infinity.
     #[must_use]
-    pub fn new(start: f32, end: f32) -> Option<Self> {
+    pub fn try_new(start: f32, end: f32) -> Option<Self> {
         (start.is_finite() && end > start && (end == f32::INFINITY || (end - start).is_finite()))
             .then_some(Self { start, end })
     }
@@ -487,7 +429,7 @@ impl LineGeometry {
 
     /// Whether a fully obstructed answer fails to advance at least
     /// `MIN_CLEARANCE_STEP` past `block_start` (spec GEO-4, G3).
-    fn stalls(&self, block_start: f32) -> bool {
+    pub(super) fn stalls(&self, block_start: f32) -> bool {
         self.slots.is_empty()
             && self
                 .next_feature_block_offset
@@ -510,20 +452,6 @@ pub trait LineGeometryProvider: std::fmt::Debug + Send + Sync {
 mod tests {
     use super::*;
     use smallvec::smallvec;
-
-    #[test]
-    fn strategy_profiles_map_to_beam_parameters() {
-        use LineBreakStrategy as S;
-        assert_eq!((S::Greedy.beam_width(), S::Greedy.window_depth()), (1, 1));
-        assert_eq!(
-            (S::Balanced.beam_width(), S::Balanced.window_depth()),
-            (2, 2)
-        );
-        assert_eq!(
-            (S::Publication.beam_width(), S::Publication.window_depth()),
-            (8, 6)
-        );
-    }
 
     #[test]
     fn a_line_limit_takes_the_field_type() {
@@ -694,7 +622,7 @@ mod tests {
     #[test]
     fn provider_slots_lie_inside_the_wrap_envelope() {
         let geometry = |start: f32, end: f32| LineGeometry {
-            slots: smallvec![InlineSlotConstraint::new(start, end).unwrap()],
+            slots: smallvec![InlineSlotConstraint::try_new(start, end).unwrap()],
             next_feature_block_offset: None,
         };
         // A finite container is `[0, wrap_width]`.
@@ -717,22 +645,22 @@ mod tests {
         assert!(geometry(5.0, 1e9).is_valid(0.0, f32::INFINITY));
         assert!(!geometry(-1.0, 5.0).is_valid(0.0, f32::INFINITY));
         // A malformed interval is not representable at all.
-        assert_eq!(InlineSlotConstraint::new(5.0, 5.0), None);
-        assert_eq!(InlineSlotConstraint::new(f32::NAN, 5.0), None);
-        assert_eq!(InlineSlotConstraint::new(0.0, f32::NAN), None);
-        assert_eq!(InlineSlotConstraint::new(f32::NEG_INFINITY, 5.0), None);
-        assert_eq!(InlineSlotConstraint::new(-f32::MAX, f32::MAX), None);
+        assert_eq!(InlineSlotConstraint::try_new(5.0, 5.0), None);
+        assert_eq!(InlineSlotConstraint::try_new(f32::NAN, 5.0), None);
+        assert_eq!(InlineSlotConstraint::try_new(0.0, f32::NAN), None);
+        assert_eq!(InlineSlotConstraint::try_new(f32::NEG_INFINITY, 5.0), None);
+        assert_eq!(InlineSlotConstraint::try_new(-f32::MAX, f32::MAX), None);
     }
 
     #[test]
     fn tab_stops_step_and_validity() {
         let t = TabStops::DEFAULT;
-        assert_eq!(TabStops::new(8.0), Some(t));
+        assert_eq!(TabStops::try_new(8.0), Some(t));
         assert_eq!(t.next_stop(0.0), Some(8.0));
         assert_eq!(t.next_stop(7.9), Some(8.0));
         assert_eq!(t.next_stop(8.0), Some(16.0)); // on a stop: advance to the next
         for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert_eq!(TabStops::new(bad), None);
+            assert_eq!(TabStops::try_new(bad), None);
         }
         // At large x the f32 product rounds back to x; a stop still lies ahead.
         let x = 3.0e7_f32;

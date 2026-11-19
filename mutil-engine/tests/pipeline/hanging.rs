@@ -32,8 +32,7 @@ fn hang_start(start: HangStartMode) -> LayoutOptions {
 
 /// The byte offsets of `line`'s hanging glyphs.
 fn hanging(line: &PositionedLine) -> Vec<usize> {
-    glyphs(line)
-        .filter(|g| g.is_hanging)
+    line.hanging_glyphs()
         .map(|g| g.byte_range.unwrap().start())
         .collect()
 }
@@ -189,7 +188,7 @@ fn natural_before(ast: &ParagraphAst, end: usize) -> f32 {
         .iter()
         .filter(|item| item.byte_span().end() <= end)
         .map(|item| match item {
-            WordNode::Box(BoxNode::Text { natural_width, .. }) => *natural_width,
+            WordNode::Box(BoxNode::Text(TextBox { natural_width, .. })) => *natural_width,
             WordNode::Glue(g) => g.natural_width,
             _ => 0.0,
         })
@@ -359,7 +358,7 @@ fn lay_out_zh(
 ) -> PositionedParagraph {
     let p = layout_paragraph(ast, text, &*SPACING_SHAPER, &column(wrap_width), options)
         .unwrap_or_else(|e| panic!("{text:?}: {e}"));
-    if let Err((line, error)) = ValidatedLayout::new(&p, text) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&p, text) {
         panic!("{text:?} in {wrap_width}, {options:?}: line {line}: {error}\n{p:#?}");
     }
     p

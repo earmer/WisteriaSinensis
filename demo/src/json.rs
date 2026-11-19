@@ -13,6 +13,10 @@ struct Num(f32);
 
 impl Display for Num {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // An infinity is legitimate: an unbounded slot's end is
+        // `f32::INFINITY`, and the page reads its `null` as "no edge". NaN
+        // never is, because the gates reject it (AX-3).
+        debug_assert!(!self.0.is_nan(), "NaN in demo JSON");
         if self.0.is_finite() {
             write!(f, "{}", self.0)
         } else {
@@ -128,8 +132,7 @@ fn line_json(line: &PositionedLine, runs: String) -> String {
     let columns = list(&line.slots, |slot| {
         interval(slot.constraint.start(), slot.constraint.end())
     });
-    let hanging = line.visual_runs.iter().flat_map(|run| &run.glyphs);
-    let hangs = list(hanging.filter(|glyph| glyph.is_hanging), |glyph| {
+    let hangs = list(line.hanging_glyphs(), |glyph| {
         interval(glyph.x, glyph.x + glyph.advance)
     });
     let carets = list(&line.caret_stops, |stop| Num(stop.x).to_string());

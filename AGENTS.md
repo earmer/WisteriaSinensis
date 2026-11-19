@@ -9,7 +9,8 @@ Operational guide for coding agents working in `WisteriaSinensis`.
   - `mutil-engine/tests/contracts/` — Contract tests.
   - `mutil-engine/tests/pipeline/` — End-to-end pipeline tests.
 - `scripts/check_spec.py` — Verifies that `SPECIFICATION.md` and `mutil-engine` public types/members/rule IDs match.
-- `docs/adr/` — Architecture Decision Records.
+- `docs/adr/` — Architecture Decision Records (ADR-0001 test authoring, ADR-0002 public API, ADR-0003 type-state pipeline).
+- `docs/refactor-plan.md` — Staged plan for the ADR-0003 refactor.
 - `.github/agents/` — Specialized review/verification agent definitions.
 
 ## Required Verification Commands
@@ -26,6 +27,13 @@ cargo +1.88 check --all-targets
 
 # From repository root
 python3 scripts/check_spec.py
+python3 scripts/check_pipeline.py   # ratchet for ADR-0003; lower ceilings with --update
+
+# From demo/, whenever demo/ or the engine's public API changes
+cargo clippy --all-targets -- -D warnings
+cargo test
+./build.sh
+node tests/wasm_roundtrip.mjs       # native tests cannot catch allocator or ABI faults
 ```
 
 ## Co-Development Workflow Rules
@@ -37,6 +45,25 @@ python3 scripts/check_spec.py
 
 2. **Run the Axiom Checker on your diff (`.github/agents/axiom-checker.md`).**
    - Before finishing a feature or PR, run a sub-agent with `.github/agents/axiom-checker.md` against your `git diff` (especially newly added files) to verify `AX-1`–`AX-7` compliance.
+
+3. **The public API is not frozen (`docs/adr/0002-public-api-is-not-frozen.md`).**
+   - Public types, members, functions, variants, rule IDs, the demo's C ABI and its JSON may be renamed, removed or reshaped at any time. No deprecation, compatibility shim or semver bump is needed.
+   - Do not keep an awkward interface only to avoid changing it. Choose the better design, and do not leave aliases or wrappers for old callers.
+   - In the same change, update every caller, the tests, `SPECIFICATION.md` (so `scripts/check_spec.py` passes) and `demo/web/`.
+
+## Pipeline Rules (`docs/adr/0003-type-state-pipeline.md`)
+
+1. **No half-built contexts.** Do not create a struct with empty `Vec`s or placeholder values for later phases to fill. Pass phase outputs as values to the next phase, and build output structs in one literal.
+2. **Phases transform values.** A phase takes earlier outputs by reference and returns its own value. Query-named methods take `&self`. Only `resolve_*`/`mark_*` passes take `&mut`, and only on data the orchestrator owns. A mark pass that reads another pass's output takes that output as a parameter.
+3. **Orchestrators are wiring.** `compile_paragraph`, `validate_layout_inputs`, `PositionedLine::validate` and `Layout::run` contain only named phase calls, with no loops, `match`es or domain logic. Their order is the error precedence.
+4. **Proofs instead of re-checks.** Pass on what a gate or phase establishes as a value (`ValidatedInputs`, `TextBoxes`, `BodyExtent`). Downstream code takes that value and never re-derives or `expect`s the invariant.
+5. **One predicate per concept, as a method on its type** (`Piece::is_edge_transparent`, `PositionedLine::role`). Comment any deliberate deviation where it happens.
+6. **Borrow typed nodes; do not re-match indexes.** If code needs `let X = items[i] else { unreachable!() }`, store `&'a X` instead. Borrow AST nodes as `&'a`. Refer to data that `Layout` produces itself (e.g. `reshaped`) by index.
+7. **Sanitise numbers only at gates (AX-3).** Backends and inner phases do not clamp or zero values.
+8. **One error variant per root cause,** built with `Reason::X.at(index)`.
+9. **Constructors:** `new` is total or panics, `try_new` returns `Option`, `try_from_*` returns `Result`.
+10. **No `super::super::` imports.** Use `crate::…` paths; `crate::middleend::tolerance` included.
+11. **ABI buffers are owned by address** (`demo/src/buffers.rs`). Every ABI change runs `wasm_roundtrip.mjs`.
 
 ## Code Taste & Local Clarity Rules
 

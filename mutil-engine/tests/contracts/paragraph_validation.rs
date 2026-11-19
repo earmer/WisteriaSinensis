@@ -11,7 +11,7 @@ fn text_line(index: usize, start: usize, end: usize) -> PositionedLine {
     l.byte_range = TextRange::new(start, end);
     l.visible_byte_end = end;
     l.baseline_y = 8. + 10. * index as f32;
-    let mut g = glyph(0., 100., false);
+    let mut g = glyph(0., 100.);
     g.byte_range = Some(l.byte_range);
     l.visual_runs = vec![run(g)];
     l
@@ -131,7 +131,7 @@ fn the_policy_records_where_the_slots_came_from() {
     );
     assert_eq!(
         policy.slot_source.standard_slot(1, policy.wrap_width),
-        Some(InlineSlotConstraint::new(7., 100.).unwrap())
+        Some(InlineSlotConstraint::try_new(7., 100.).unwrap())
     );
     assert_eq!(SlotSource::Provider.standard_slot(0, 100.), None);
 }

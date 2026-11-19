@@ -18,8 +18,8 @@ pub struct TextStyle {
     pub font_size: f32,
     /// Weight and slant.
     pub style: FontStyle,
-    /// OpenType features and variation coordinates. The frontend normalises
-    /// them (spec FNT-2); the caller need not.
+    /// OpenType features and variation coordinates. Canonical as
+    /// built (spec FNT-2).
     pub features: FontFeatures,
     /// Underline and strike-through.
     pub decoration: TextDecoration,

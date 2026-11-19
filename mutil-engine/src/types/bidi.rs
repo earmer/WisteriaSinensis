@@ -6,7 +6,7 @@ pub const BIDI_MAX_DEPTH: u8 = 125;
 
 /// A UAX #9 embedding level: even = LTR, odd = RTL (spec §2.1).
 ///
-/// Parsed, not validated (spec §1.5, AX-3): [`new`](Self::new) refuses a level
+/// Parsed, not validated (spec §1.5, AX-3): [`try_new`](Self::try_new) refuses a level
 /// above [`BidiLevel::MAX`] (`BIDI_MAX_DEPTH + 1`, the highest level implicit
 /// resolution reaches), so a level that exists is one UAX #9 can produce.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -22,7 +22,7 @@ impl BidiLevel {
 
     /// The level `level`, or `None` above [`MAX`](Self::MAX).
     #[must_use]
-    pub const fn new(level: u8) -> Option<Self> {
+    pub const fn try_new(level: u8) -> Option<Self> {
         if level <= Self::MAX.0 {
             Some(Self(level))
         } else {
@@ -152,15 +152,15 @@ mod tests {
         assert_eq!(Direction::from_level(BidiLevel::LTR), Direction::Ltr);
         assert_eq!(Direction::from_level(BidiLevel::RTL), Direction::Rtl);
         assert_eq!(
-            Direction::from_level(BidiLevel::new(2).unwrap()),
+            Direction::from_level(BidiLevel::try_new(2).unwrap()),
             Direction::Ltr
         );
         assert_eq!(
-            Direction::from_level(BidiLevel::new(BIDI_MAX_DEPTH).unwrap()),
+            Direction::from_level(BidiLevel::try_new(BIDI_MAX_DEPTH).unwrap()),
             Direction::Rtl
         );
         assert_eq!(BidiLevel::MAX.get(), BIDI_MAX_DEPTH + 1);
-        assert_eq!(BidiLevel::new(BIDI_MAX_DEPTH + 2), None);
+        assert_eq!(BidiLevel::try_new(BIDI_MAX_DEPTH + 2), None);
         assert_eq!(Direction::Rtl.base_level(), BidiLevel::RTL);
     }
 }

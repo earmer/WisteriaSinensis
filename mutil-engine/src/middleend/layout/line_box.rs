@@ -1,9 +1,8 @@
 //! The line box (spec §5 Stage 4, BAS-1): the line's ascent and descent
 //! from the strut and the items on it, and each item's baseline shift.
 
-use super::super::{InlineSlotConstraint, LayoutInputError, LineHeight, StrutMetrics};
 use super::{Layout, PieceKind, PlacedPiece};
-use crate::frontend::{BoxNode, WordNode};
+use crate::middleend::{InlineSlotConstraint, LayoutInputError, LineHeight, StrutMetrics};
 use crate::types::{BaselineAlignment, FontMetrics, TextRange};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,48 +42,40 @@ impl Layout<'_, '_> {
     /// (spec §5 Stage 4, BAS-1).
     pub(super) fn compute_line_box(
         &mut self,
-        placed: &mut [PlacedPiece],
+        placed: &mut [PlacedPiece<'_>],
         order: &[usize],
         byte_range: TextRange,
         slot: InlineSlotConstraint,
     ) -> Result<LineBoxMetrics, LayoutInputError> {
         let normal = matches!(self.options.line_height, LineHeight::Normal);
-        let half = |m: StrutMetrics| (m.ascent + m.line_gap / 2.0, m.descent + m.line_gap / 2.0);
-        let (mut above, mut below) = half(self.strut);
+        let (mut above, mut below) = half_leaded(self.strut);
         let mut line_relative: Vec<LineRelativeItem> = Vec::new();
         for &k in order {
             let piece = placed[k].piece;
-            // The shift is only read for an item on the baseline.
-            let (align, item_above, item_below, shift, is_object) = match piece.kind {
+            // The extent counts under `Normal`, for objects, and for items
+            // placed against the line box; the shift only for items on the
+            // baseline.
+            let (align, extent, shift) = match piece.kind {
                 PieceKind::Cluster { run, cluster } => {
                     let align = self.ast.runs[run].baseline_align;
-                    let edge = LineRelativeEdge::of(align);
-                    let (a, d) = if normal || edge.is_some() {
-                        half(self.cluster_box(run, cluster)?)
+                    let extent = if normal || LineRelativeEdge::of(align).is_some() {
+                        Some(half_leaded(self.cluster_box(run, cluster)?))
                     } else {
-                        (0.0, 0.0)
+                        None
                     };
-                    let shift = match edge {
-                        None => {
-                            let own = self.cluster_metrics(run, cluster)?;
-                            baseline_shift(align, &self.ast.strut_metrics, Some(&own))
-                        }
-                        Some(_) => 0.0,
-                    };
-                    (align, a, d, shift, false)
+                    let own = self.cluster_metrics(run, cluster)?;
+                    let shift = baseline_shift(align, &self.ast.strut_metrics, Some(&own));
+                    (align, extent, shift)
                 }
-                PieceKind::Object { item } => {
-                    let WordNode::Box(BoxNode::InlineObject { baseline_align, .. }) =
-                        &self.ast.items[item]
-                    else {
-                        unreachable!("an object piece names an object item")
-                    };
-                    let (_, a, d) = self.fitted_object(item, slot);
-                    let shift = baseline_shift(*baseline_align, &self.ast.strut_metrics, None);
-                    (*baseline_align, a, d, shift, true)
+                PieceKind::Object(object) => {
+                    let (_, a, d) = Self::fitted_object(object, slot);
+                    let shift =
+                        baseline_shift(object.baseline_align, &self.ast.strut_metrics, None);
+                    (object.baseline_align, Some((a, d)), shift)
                 }
                 _ => continue,
             };
+            let (item_above, item_below) = extent.unwrap_or_default();
             match LineRelativeEdge::of(align) {
                 Some(edge) => line_relative.push(LineRelativeItem {
                     piece_index: k,
@@ -94,27 +85,29 @@ impl Layout<'_, '_> {
                 }),
                 None => {
                     placed[k].y_shift = shift;
-                    if normal || is_object {
+                    if extent.is_some() {
                         above = above.max(item_above + shift);
                         below = below.max(item_below - shift);
                     }
                 }
             }
         }
-        // A line-relative item taller than the line deepens it on its free
-        // side under `Normal` (spec BAS-1).
         if normal {
-            for item in &line_relative {
-                let room = above + below;
-                let item_height = item.above + item.below;
-                if item_height > room {
-                    match item.edge {
-                        LineRelativeEdge::Top => below += item_height - room,
-                        LineRelativeEdge::Bottom => above += item_height - room,
-                    }
-                }
-            }
+            deepen_for_line_relative(&line_relative, &mut above, &mut below);
         }
+        let metrics = self.resolve_line_box(above, below, byte_range);
+        for item in &line_relative {
+            placed[item.piece_index].y_shift = match item.edge {
+                LineRelativeEdge::Top => metrics.ascent - item.above,
+                LineRelativeEdge::Bottom => item.below - metrics.descent,
+            };
+        }
+        Ok(metrics)
+    }
+
+    /// The line box from the content's `above` and `below` the baseline: the
+    /// strut's under a fixed line height, or for an empty line (spec MET-3).
+    fn resolve_line_box(&self, above: f32, below: f32, byte_range: TextRange) -> LineBoxMetrics {
         let (ascent, descent, line_height) = match self.options.line_height {
             LineHeight::Fixed(_) => (
                 self.strut.ascent,
@@ -122,22 +115,36 @@ impl Layout<'_, '_> {
                 self.strut.line_height(),
             ),
             LineHeight::Normal if byte_range.is_empty() => {
-                let (a, d) = half(self.strut);
+                let (a, d) = half_leaded(self.strut);
                 (a, d, self.strut.line_height())
             }
             LineHeight::Normal => (above, below, above + below),
         };
-        for item in &line_relative {
-            placed[item.piece_index].y_shift = match item.edge {
-                LineRelativeEdge::Top => ascent - item.above,
-                LineRelativeEdge::Bottom => item.below - descent,
-            };
-        }
-        Ok(LineBoxMetrics {
+        LineBoxMetrics {
             ascent,
             descent,
             line_height,
-        })
+        }
+    }
+}
+
+/// A strut's or box's ascent and descent with half its line gap added to each.
+fn half_leaded(m: StrutMetrics) -> (f32, f32) {
+    (m.ascent + m.line_gap / 2.0, m.descent + m.line_gap / 2.0)
+}
+
+/// A line-relative item taller than the line deepens it on its free side
+/// under `Normal` (spec BAS-1).
+fn deepen_for_line_relative(items: &[LineRelativeItem], above: &mut f32, below: &mut f32) {
+    for item in items {
+        let room = *above + *below;
+        let item_height = item.above + item.below;
+        if item_height > room {
+            match item.edge {
+                LineRelativeEdge::Top => *below += item_height - room,
+                LineRelativeEdge::Bottom => *above += item_height - room,
+            }
+        }
     }
 }
 

@@ -12,16 +12,14 @@
 //! adapter has no ligature carets: a ligature takes INT-5's equal slots.
 
 use super::clusters::{
-    attach_synthesized, finite_nonnegative, finite_or_zero, plan_window, push_clusters,
+    EdgeFonts, TaggedGlyph, atom_containing, finish_window, plan_window, push_clusters,
     push_empty_clusters,
 };
-use super::{LeadingEdit, ShaperProfile, TextShaper, TrailingEdit};
+use super::{ReshapeRequest, ShapeOutput, TextShaper};
 use crate::types::{
-    Direction, FontFamily, FontFeatures, FontId, FontInstanceRef, FontMetrics, FontRef, FontStyle,
-    FontVariation, GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag,
-    ShapedCluster, ShapingRun, TextRange,
+    FontFamily, FontFeatures, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
+    GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapingRun,
 };
-use smallvec::SmallVec;
 
 /// One glyph of a [`LineShaper`]'s output.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -85,9 +83,6 @@ pub struct LineOnlyShaper<B> {
 }
 
 impl<B: LineShaper> LineOnlyShaper<B> {
-    /// The profile this adapter runs as.
-    pub const PROFILE: ShaperProfile = ShaperProfile::LineOnly;
-
     /// The adapter over `backend`.
     pub fn new(backend: B) -> Self {
         Self { backend }
@@ -98,66 +93,25 @@ impl<B: LineShaper> LineOnlyShaper<B> {
         &self.backend
     }
 
-    /// Shapes `string` and appends the clusters of `atoms[range]`, whose text
-    /// is `string[lead..string.len() - trail]` starting at paragraph offset
-    /// `start`; the glyphs of the `lead` and `trail` bytes are returned,
-    /// marked synthesized, for the caller to attach.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the shaping context of one window"
-    )]
+    /// Shapes `window.string` and appends the clusters of `window.range`;
+    /// the glyphs of the `lead` and `trail` bytes are returned, marked
+    /// synthesized, for the caller to attach, with the face the cut edges
+    /// take.
     fn shape_atoms(
         &self,
-        string: &str,
-        (lead, trail): (usize, usize),
-        start: usize,
-        run: &ShapingRun,
-        atoms: &[GraphemeAtom],
-        range: core::ops::Range<usize>,
-        text: &str,
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
-    ) -> (Vec<RawShapedGlyph>, Vec<RawShapedGlyph>, FontId) {
+        window: &LineWindow<'_>,
+        output: &mut ShapeOutput,
+    ) -> (EdgeFonts, Synthesized) {
+        let run = window.run;
+        let range = &window.range;
         let glyphs = self.backend.shape_line(
-            string,
+            window.string,
             &run.families,
             run.style,
             run.font_size,
             &run.features,
         );
-        let kept_end = string.len() - trail;
-        let raw = |g: &LineGlyph, synthesized: bool| RawShapedGlyph {
-            glyph_id: g.glyph_id,
-            x_advance: finite_or_zero(g.x_advance),
-            x_offset: finite_or_zero(g.x_offset),
-            y_offset: finite_or_zero(g.y_offset),
-            is_synthesized: synthesized,
-        };
-        let mut leading = Vec::new();
-        let mut trailing = Vec::new();
-        // (atom, font, glyph) for the kept text.
-        let mut kept: Vec<(usize, FontId, RawShapedGlyph)> = Vec::new();
-        for g in &glyphs {
-            if g.byte_index < lead {
-                leading.push(raw(g, true));
-            } else if g.byte_index >= kept_end || range.is_empty() {
-                trailing.push(raw(g, true));
-            } else {
-                let byte = start + (g.byte_index - lead);
-                let atom = range.start
-                    + atoms[range.clone()]
-                        .partition_point(|a| a.byte_range.start() <= byte)
-                        .saturating_sub(1);
-                // A glyph of a gap between atoms (a word space, a tab, an
-                // object's bytes) belongs to no cluster: the frontend sizes
-                // the gap itself (SHP-5, WN-10).
-                let bytes = atoms[atom].byte_range;
-                if byte < bytes.start() || byte >= bytes.end() {
-                    continue;
-                }
-                kept.push((atom, g.font, raw(g, false)));
-            }
-        }
+        let (kept, synthesized) = window.split_glyphs(&glyphs);
         // With no glyph to name it, a cluster takes the run's primary face.
         let fallback = glyphs.first().map_or_else(
             || {
@@ -174,13 +128,75 @@ impl<B: LineShaper> LineOnlyShaper<B> {
             },
             |g| g.font,
         );
+        let mut edges = EdgeFonts {
+            first: fallback,
+            last: fallback,
+        };
         if range.is_empty() {
-            return (leading, trailing, fallback);
+            return (edges, synthesized);
         }
         if kept.is_empty() {
-            push_empty_clusters(run, atoms, range, fallback, output_clusters, output_glyphs);
-            return (leading, trailing, fallback);
+            push_empty_clusters(run, window.atoms, range.clone(), fallback, output);
+        } else {
+            let kept_first = output.clusters.len();
+            push_clusters(run, window.atoms, range.clone(), &kept, fallback, output);
+            // The cut edges take the face of the kept cluster beside them
+            // (SHP-6).
+            if let (Some(first), Some(last)) = (
+                output.clusters[kept_first..].first(),
+                output.clusters.last(),
+            ) {
+                edges = EdgeFonts {
+                    first: first.font.font_id,
+                    last: last.font.font_id,
+                };
+            }
         }
+        (edges, synthesized)
+    }
+}
+
+/// One string handed to the backend, and the atoms whose clusters it
+/// rebuilds.
+struct LineWindow<'a> {
+    /// The text shaped: the leading edit text, the kept text, the trailing
+    /// edit text.
+    string: &'a str,
+    /// Byte lengths of the leading and trailing edit text in `string`.
+    lead: usize,
+    trail: usize,
+    /// The paragraph offset of the kept text.
+    start: usize,
+    run: &'a ShapingRun,
+    atoms: &'a [GraphemeAtom],
+    /// The atoms of the kept text.
+    range: core::ops::Range<usize>,
+    /// The paragraph text.
+    text: &'a str,
+}
+
+impl LineWindow<'_> {
+    /// Sorts the backend's glyphs into the kept text's, tagged with their
+    /// atoms, and the edit text's at the two edges, marked synthesized.
+    fn split_glyphs(&self, glyphs: &[LineGlyph]) -> (Vec<TaggedGlyph>, Synthesized) {
+        let Self {
+            string,
+            lead,
+            trail,
+            start,
+            atoms,
+            ref range,
+            text,
+            ..
+        } = *self;
+        let kept_end = string.len() - trail;
+        let raw = |g: &LineGlyph, synthesized: bool| RawShapedGlyph {
+            glyph_id: g.glyph_id,
+            x_advance: g.x_advance,
+            x_offset: g.x_offset,
+            y_offset: g.y_offset,
+            is_synthesized: synthesized,
+        };
         // A seam is unambiguous at the start of the shaped text and after
         // white space; every other seam is reported unsafe (SHP-18).
         let safe_before = |atom: usize| {
@@ -190,110 +206,41 @@ impl<B: LineShaper> LineOnlyShaper<B> {
                     .next_back()
                     .is_some_and(char::is_whitespace)
         };
-        let segments = face_segments(run, range.clone(), &mut kept);
-        for (k, segment) in segments.iter().enumerate() {
-            let FaceSegment {
-                first_atom,
-                font,
-                first_glyph,
-                ..
-            } = *segment;
-            let (end_atom, end_glyph) =
-                segments.get(k + 1).map_or((range.end, kept.len()), |next| {
-                    (next.first_atom, next.first_glyph)
-                });
-            let tagged: Vec<(usize, RawShapedGlyph, bool, bool)> = kept[first_glyph..end_glyph]
-                .iter()
-                .map(|&(atom, _, glyph)| {
-                    let unsafe_seam = !safe_before(atom.max(first_atom));
-                    (atom.max(first_atom), glyph, unsafe_seam, unsafe_seam)
-                })
-                .collect();
-            push_clusters(
-                run,
-                atoms,
-                first_atom..end_atom,
-                FontRef::unscaled(font),
-                &tagged,
-                output_clusters,
-                output_glyphs,
-            );
-        }
-        (leading, trailing, fallback)
-    }
-}
-
-/// A run of kept glyphs shaped by one face, over the atoms
-/// `first_atom..=last_atom`, starting at `kept[first_glyph]`.
-#[derive(Clone, Copy, Debug)]
-struct FaceSegment {
-    first_atom: usize,
-    last_atom: usize,
-    font: FontId,
-    first_glyph: usize,
-}
-
-/// Splits the kept `(atom, face, glyph)` triples of `atoms[range]` by face at
-/// atom boundaries. Segments partition the atoms in ascending order and every
-/// glyph's atom lies in the segment that emits it: a face change inside an
-/// atom, or atom ranges that overlap because the glyphs are not monotonic,
-/// merge into the earlier segment and keep its face. A tate-chu-yoko run is
-/// one segment, as SHP-5 makes it one cluster.
-///
-/// A glyph left in a segment of another face becomes the segment face's
-/// `.notdef` (glyph 0), with its advance kept: its id means nothing in the
-/// cluster's face (SHP-5, SHP-24).
-fn face_segments(
-    run: &ShapingRun,
-    range: core::ops::Range<usize>,
-    kept: &mut [(usize, FontId, RawShapedGlyph)],
-) -> Vec<FaceSegment> {
-    let mut segments: Vec<FaceSegment> = Vec::new();
-    if run.orientation == GlyphOrientation::HorizontalInVertical {
-        segments.push(FaceSegment {
-            first_atom: range.start,
-            last_atom: range.end - 1,
-            font: kept[0].1,
-            first_glyph: 0,
-        });
-    } else {
-        for (i, &(atom, font, _)) in kept.iter().enumerate() {
-            match segments.last_mut() {
-                Some(last) if last.font == font || atom <= last.last_atom => {
-                    last.first_atom = last.first_atom.min(atom);
-                    last.last_atom = last.last_atom.max(atom);
-                    // Absorb earlier segments this one now overlaps.
-                    while let [.., prev, cur] = segments.as_mut_slice() {
-                        if cur.first_atom > prev.last_atom {
-                            break;
-                        }
-                        prev.first_atom = prev.first_atom.min(cur.first_atom);
-                        prev.last_atom = prev.last_atom.max(cur.last_atom);
-                        segments.pop();
-                    }
+        let mut synthesized = Synthesized::default();
+        let mut kept: Vec<TaggedGlyph> = Vec::new();
+        for g in glyphs {
+            if g.byte_index < lead {
+                synthesized.leading.push(raw(g, true));
+            } else if g.byte_index >= kept_end || range.is_empty() {
+                synthesized.trailing.push(raw(g, true));
+            } else {
+                let byte = start + (g.byte_index - lead);
+                let atom = atom_containing(atoms, range.clone(), byte);
+                // A glyph of a gap between atoms (a word space, a tab, an
+                // object's bytes) belongs to no cluster: the frontend sizes
+                // the gap itself (SHP-5, WN-10).
+                if !atoms[atom].byte_range.contains(byte) {
+                    continue;
                 }
-                _ => segments.push(FaceSegment {
-                    first_atom: atom,
-                    last_atom: atom,
-                    font,
-                    first_glyph: i,
-                }),
+                let unsafe_seam = !safe_before(atom);
+                kept.push(TaggedGlyph {
+                    atom,
+                    font: g.font,
+                    glyph: raw(g, false),
+                    unsafe_break: unsafe_seam,
+                    unsafe_concat: unsafe_seam,
+                });
             }
         }
-        segments[0].first_atom = range.start;
+        (kept, synthesized)
     }
-    for (k, segment) in segments.iter().enumerate() {
-        let end = segments
-            .get(k + 1)
-            .map_or(kept.len(), |next| next.first_glyph);
-        for (_, font, glyph) in &mut kept[segment.first_glyph..end] {
-            if *font != segment.font {
-                *font = segment.font;
-                glyph.glyph_id = 0;
-            }
-        }
-    }
-    segments
+}
+
+/// The glyphs the backend returned for the edit text at the two edges.
+#[derive(Default)]
+struct Synthesized {
+    leading: Vec<RawShapedGlyph>,
+    trailing: Vec<RawShapedGlyph>,
 }
 
 impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
@@ -319,38 +266,38 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
         text: &str,
         run: &ShapingRun,
         atoms: &[GraphemeAtom],
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
+        output: &mut ShapeOutput,
     ) {
         if atoms.is_empty() {
             return;
         }
         let bytes = run.byte_range;
-        self.shape_atoms(
-            &text[bytes.as_range()],
-            (0, 0),
-            bytes.start(),
+        let window = LineWindow {
+            string: &text[bytes.as_range()],
+            lead: 0,
+            trail: 0,
+            start: bytes.start(),
             run,
             atoms,
-            0..atoms.len(),
+            range: 0..atoms.len(),
             text,
-            output_clusters,
-            output_glyphs,
-        );
+        };
+        self.shape_atoms(&window, output);
     }
 
-    fn reshape_window(
-        &self,
-        text: &str,
-        run: &ShapingRun,
-        atoms: &[GraphemeAtom],
-        window: TextRange,
-        leading_edit: LeadingEdit,
-        trailing_edit: TrailingEdit,
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
-    ) {
-        let Some(plan) = plan_window(atoms, window, &leading_edit, &trailing_edit) else {
+    fn reshape_window(&self, request: &ReshapeRequest<'_>, output: &mut ShapeOutput) {
+        let ReshapeRequest {
+            text,
+            run,
+            atoms,
+            window,
+            leading_edit,
+            trailing_edit,
+            // The backend shapes each string without context (SHP-24), so
+            // every window edge already reads as a text edge.
+            context: _,
+        } = *request;
+        let Some(plan) = plan_window(atoms, window, leading_edit, trailing_edit) else {
             return;
         };
         let kept_bytes = if plan.kept_start < plan.kept_end {
@@ -358,7 +305,7 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
         } else {
             0..0
         };
-        let trailing_str = plan.trailing_text.as_str();
+        let trailing_str = &plan.trailing_text;
         let kept_text = &text[kept_bytes.clone()];
         let shaped_input: std::borrow::Cow<'_, str> =
             if plan.leading_text.is_empty() && trailing_str.is_empty() {
@@ -366,63 +313,29 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
             } else {
                 [plan.leading_text, kept_text, trailing_str].concat().into()
             };
-        let first_cluster = output_clusters.len();
-        // Emit any cut leading atoms directly with a placeholder face, then
-        // patch them once `shape_atoms` reports the backend's chosen face.
-        push_empty_clusters(
+        finish_window(
             run,
             atoms,
-            plan.first..plan.kept_start,
-            FontId::default(),
-            output_clusters,
-            output_glyphs,
+            &plan,
+            output,
+            |output| {
+                let window = LineWindow {
+                    string: &shaped_input,
+                    lead: plan.leading_text.len(),
+                    trail: trailing_str.len(),
+                    start: kept_bytes.start,
+                    run,
+                    atoms,
+                    range: plan.kept_start..plan.kept_end,
+                    text,
+                };
+                self.shape_atoms(&window, output)
+            },
+            |synthesized, _| (synthesized.leading, synthesized.trailing),
         );
-        let (leading, trailing, font) = self.shape_atoms(
-            &shaped_input,
-            (plan.leading_text.len(), trailing_str.len()),
-            kept_bytes.start,
-            run,
-            atoms,
-            plan.kept_start..plan.kept_end,
-            text,
-            output_clusters,
-            output_glyphs,
-        );
-        let lead_count = plan.kept_start - plan.first;
-        for cluster in &mut output_clusters[first_cluster..first_cluster + lead_count] {
-            cluster.font = FontRef::unscaled(font);
-        }
-        push_empty_clusters(
-            run,
-            atoms,
-            plan.kept_end..plan.end,
-            font,
-            output_clusters,
-            output_glyphs,
-        );
-        let Some(head) = output_clusters.get_mut(first_cluster) else {
-            return;
-        };
-        head.safe_to_concat_before = false;
-        head.safe_to_break_before &= plan.leading_text.is_empty();
-        attach_synthesized(
-            &mut output_clusters[first_cluster..],
-            output_glyphs,
-            leading,
-            trailing,
-        );
-    }
-
-    fn ligature_carets(
-        &self,
-        _instance: FontInstanceRef<'_>,
-        _glyph_id: u32,
-        _direction: Direction,
-    ) -> SmallVec<[f32; 4]> {
-        SmallVec::new()
     }
 
     fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32 {
-        finite_nonnegative(self.backend.space_advance(instance, orientation))
+        self.backend.space_advance(instance, orientation)
     }
 }

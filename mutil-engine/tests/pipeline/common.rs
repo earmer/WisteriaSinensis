@@ -91,10 +91,10 @@ pub fn shape_of(ast: &ParagraphAst, text: &str) -> String {
     ast.items
         .iter()
         .map(|item| match item {
-            WordNode::Box(BoxNode::Text { byte_range, .. }) => {
+            WordNode::Box(BoxNode::Text(TextBox { byte_range, .. })) => {
                 format!("[{}]", &text[byte_range.as_range()])
             }
-            WordNode::Box(BoxNode::InlineObject { .. }) => "O".into(),
+            WordNode::Box(BoxNode::InlineObject(InlineObjectBox { .. })) => "O".into(),
             WordNode::Box(BoxNode::SpanBoundary { .. }) => "S".into(),
             WordNode::Glue(_) => "_".into(),
             WordNode::Tab { .. } => "T".into(),
@@ -116,7 +116,7 @@ pub fn lay_out(
     let ast = compile(text);
     let paragraph = layout_paragraph(&ast, text, &*SHAPER, constraints, options)
         .unwrap_or_else(|e| panic!("{text:?}: {e}"));
-    if let Err((line, error)) = ValidatedLayout::new(&paragraph, text) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&paragraph, text) {
         panic!("{text:?} in {constraints:?}, {options:?}: line {line}: {error}\n{paragraph:#?}");
     }
     paragraph
@@ -225,7 +225,7 @@ pub fn lay_out_in(
     let ast = compile_in(text, families);
     let paragraph = layout_paragraph(&ast, text, &*SCRIPT_SHAPER, constraints, options)
         .unwrap_or_else(|e| panic!("{text:?}: {e}"));
-    if let Err((line, error)) = ValidatedLayout::new(&paragraph, text) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&paragraph, text) {
         panic!("{text:?} in {constraints:?}: line {line}: {error}\n{paragraph:#?}");
     }
     paragraph
@@ -298,7 +298,7 @@ pub fn lay_out_bidi_ast(
 ) -> PositionedParagraph {
     let paragraph = layout_paragraph(ast, text, &*BIDI_SHAPER, constraints, options)
         .unwrap_or_else(|e| panic!("{text:?}: {e}"));
-    if let Err((line, error)) = ValidatedLayout::new(&paragraph, text) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&paragraph, text) {
         panic!("{text:?} in {constraints:?}, {options:?}: line {line}: {error}\n{paragraph:#?}");
     }
     paragraph
@@ -364,7 +364,7 @@ pub static SPACING_SHAPER: LazyLock<HarfRustShaper> = LazyLock::new(|| {
 /// `families` at `font_size` in `locale`.
 pub fn localized_style(families: &[&str], font_size: f32, locale: &str) -> TextStyle {
     TextStyle {
-        locale: Some(LocaleTag::parse_lenient(locale).expect("a locale")),
+        locale: Some(LocaleTag::try_from_str_lenient(locale).expect("a locale")),
         ..script_style(families, font_size)
     }
 }

@@ -10,6 +10,10 @@ fn layout_input_error_messages() {
             "orientation does not match writing mode or bidi level",
         ),
         (LayoutInputError::InvalidFontMetrics, "invalid font metrics"),
+        (
+            LayoutInputError::InvalidShaperMetrics,
+            "the shaper answered invalid font metrics",
+        ),
         (LayoutInputError::InvalidSpacing, "invalid explicit spacing"),
         (
             LayoutInputError::InvalidBidiSpan { span: 3 },
@@ -245,10 +249,6 @@ fn line_invariant_error_messages() {
             "trailing whitespace glyph 5 of run 1 has width in Collapsible mode",
         ),
         (
-            LineInvariantError::HangingGlyphInsideBlock { run: 1, glyph: 5 },
-            "hanging glyph 5 of run 1 overlaps the text block",
-        ),
-        (
             LineInvariantError::BodyGlyphOutsideBlock { run: 1, glyph: 5 },
             "body glyph 5 of run 1 lies outside the content of every slot",
         ),
@@ -340,15 +340,11 @@ fn line_invariant_error_messages() {
         ),
         (
             LineInvariantError::InvalidCaretStop { index: 4 },
-            "caret stop 4 is non-finite, out of visual order, outside the line, or at a bidi level that nothing owning its offset has",
+            "caret stop 4 is non-finite, out of visual order, outside the line or off a character boundary, or at a bidi level that nothing owning its offset has",
         ),
         (
             LineInvariantError::InvalidDecoration { index: 4 },
             "decoration 4 has a non-finite or negative extent or bytes outside the line",
-        ),
-        (
-            LineInvariantError::TrailingWhitespaceMarkedHanging { run: 1, glyph: 5 },
-            "trailing whitespace glyph 5 of run 1 is flagged as hanging",
         ),
         (
             LineInvariantError::HangingNotAllowed {

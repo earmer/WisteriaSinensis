@@ -3,6 +3,14 @@
 use super::{AtomFlags, BidiLevel, FontRef, GlyphOrientation, TextRange};
 use core::ops::Range;
 
+/// The natural width of a cluster: its glyphs' advances plus `letter_spacing`,
+/// floored at zero. A non-finite sum is returned as it is, never clamped
+/// into range, so that the gate that checks the width rejects it (AX-3, G2).
+pub(crate) fn natural_width(glyphs: &[RawShapedGlyph], letter_spacing: f32) -> f32 {
+    let raw = glyphs.iter().map(|g| g.x_advance).sum::<f32>() + letter_spacing;
+    if raw.is_finite() { raw.max(0.0) } else { raw }
+}
+
 /// One glyph as produced by a shaping backend, before line layout.
 ///
 /// **[Design decision]** The spec names `RawShapedGlyph` (§2.3) without
@@ -125,6 +133,13 @@ pub struct ShapedCluster {
 }
 
 impl ShapedCluster {
+    /// The sum of the clusters' `natural_width`, in `f32`, in slice order. The
+    /// frontend stores it as a text box's `natural_width` and G1 recomputes it
+    /// with this same function, so the cache (WN-6) is compared bit for bit.
+    pub(crate) fn total_width(clusters: &[Self]) -> f32 {
+        clusters.iter().map(|c| c.natural_width).sum()
+    }
+
     /// Number of atoms covered (`K`). Assumes a validated cluster
     /// (`atom_range.start <= atom_range.end`); an inverted range counts as 0
     /// rather than panicking or wrapping.

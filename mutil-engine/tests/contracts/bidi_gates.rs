@@ -15,7 +15,7 @@ fn every_level_of_the_body_lies_at_or_above_the_base_level() {
         Err(LayoutInputError::InvalidBidiLevel { item: 0 })
     );
     // At level 1 or 2 it is not.
-    for level in [BidiLevel::RTL, BidiLevel::new(2).unwrap()] {
+    for level in [BidiLevel::RTL, BidiLevel::try_new(2).unwrap()] {
         orient(
             &mut a,
             WritingMode::HorizontalTb,
@@ -32,7 +32,7 @@ fn every_level_of_the_body_lies_at_or_above_the_base_level() {
         rebuild_items(&mut a, |b| {
             vec![
                 boxed(b, 0, 1),
-                WordNode::Box(BoxNode::InlineObject {
+                WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
                     bidi_level: object,
                     baseline_align: BaselineAlignment::Auto,
                     byte_range: TextRange::new(1, 4),
@@ -41,7 +41,7 @@ fn every_level_of_the_body_lies_at_or_above_the_base_level() {
                     ascent: 1.0,
                     descent: 1.0,
                     overflow_policy: BoxOverflowPolicy::Clip,
-                }),
+                })),
                 WordNode::Glue(GlueNode {
                     original_bidi_class: BidiClass::Ws,
                     bidi_level: glue,
@@ -80,11 +80,11 @@ fn two_run_line(left_run_x: f32, right_run_x: f32) -> PositionedLine {
     let mut l = line();
     l.byte_range = TextRange::new(0, 2);
     l.visible_byte_end = 2;
-    let mut second = glyph(right_run_x, 50., false);
+    let mut second = glyph(right_run_x, 50.);
     second.byte_range = Some(TextRange::new(1, 2));
     let mut second_run = run(second);
     second_run.bidi_level = BidiLevel::RTL;
-    l.visual_runs = vec![run(glyph(left_run_x, 50., false)), second_run];
+    l.visual_runs = vec![run(glyph(left_run_x, 50.)), second_run];
     l
 }
 

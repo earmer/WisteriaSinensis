@@ -45,7 +45,7 @@ fn a_font_source_resolves_faces_without_copying() {
 fn placed(mode: WritingMode, orientation: GlyphOrientation, baseline_y: f32) -> Point {
     let mut l = line();
     l.baseline_y = baseline_y;
-    let mut g = glyph(0.0, 100.0, false);
+    let mut g = glyph(0.0, 100.0);
     g.x_offset = 3.0;
     g.y_offset = 2.0;
     let mut r = run(g);
@@ -54,7 +54,7 @@ fn placed(mode: WritingMode, orientation: GlyphOrientation, baseline_y: f32) -> 
     let mut p = paragraph(&ctx(), vec![l]);
     p.policy.writing_mode = mode;
     p.total_block_size = 10.0;
-    let layout = ValidatedLayout::new(&p, "a").expect("valid output");
+    let layout = ValidatedLayout::try_from_paragraph(&p, "a").expect("valid output");
     let runs: Vec<_> = layout.glyph_runs().collect();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].line(), 0);
@@ -96,14 +96,14 @@ fn drawing_origins_are_physical_in_every_writing_mode() {
 fn the_output_gate_rejects_unplaced_tate_chu_yoko() {
     let mut l = line();
     l.baseline_y = 8.0;
-    let mut r = run(glyph(0.0, 100.0, false));
+    let mut r = run(glyph(0.0, 100.0));
     r.orientation = GlyphOrientation::HorizontalInVertical;
     l.visual_runs = vec![r];
     let mut p = paragraph(&ctx(), vec![l]);
     p.policy.writing_mode = WritingMode::VerticalRl;
     p.total_block_size = 10.0;
     assert_eq!(
-        ValidatedLayout::new(&p, "a").map(drop),
+        ValidatedLayout::try_from_paragraph(&p, "a").map(drop),
         Err((0, LineInvariantError::UnplacedTateChuYoko { run: 0 }))
     );
 }
@@ -112,7 +112,7 @@ fn the_output_gate_rejects_unplaced_tate_chu_yoko() {
 /// 25, `baseline_offset` 8 towards line-over, in `mode`.
 fn annotated(mode: WritingMode, orientation: GlyphOrientation, baseline_y: f32) -> Vec<Point> {
     let mut l = line();
-    let mut r = run(glyph(0.0, 100.0, false));
+    let mut r = run(glyph(0.0, 100.0));
     r.orientation = orientation;
     l.visual_runs = vec![r];
     let mut ann = positioned_annotation();
@@ -124,7 +124,7 @@ fn annotated(mode: WritingMode, orientation: GlyphOrientation, baseline_y: f32) 
     let mut p = paragraph(&ctx(), vec![l]);
     p.policy.writing_mode = mode;
     p.total_block_size = 13.0;
-    let layout = ValidatedLayout::new(&p, "a").expect("valid output");
+    let layout = ValidatedLayout::try_from_paragraph(&p, "a").expect("valid output");
     let runs: Vec<_> = layout.glyph_runs().collect();
     assert_eq!(runs.len(), 2);
     assert!(matches!(runs[0].source(), PlacedRunSource::Body(_)));
@@ -164,13 +164,13 @@ fn annotation_runs_are_placed_beyond_the_base() {
 fn the_output_gate_rejects_overflowing_drawing_origins() {
     let mut l = line();
     l.baseline_y = 3.0e38;
-    let mut g = glyph(0.0, 100.0, false);
+    let mut g = glyph(0.0, 100.0);
     g.y_offset = -3.0e38;
     l.visual_runs = vec![run(g)];
     let mut p = paragraph(&ctx(), vec![l]);
     p.total_block_size = 3.1e38;
     assert_eq!(
-        ValidatedLayout::new(&p, "a").map(drop),
+        ValidatedLayout::try_from_paragraph(&p, "a").map(drop),
         Err((0, LineInvariantError::NonFiniteGlyph { run: 0, glyph: 0 }))
     );
 }

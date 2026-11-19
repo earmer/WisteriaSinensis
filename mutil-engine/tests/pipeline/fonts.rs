@@ -195,18 +195,20 @@ fn window_edits_append_and_replace_with_synthesized_glyphs() {
     let ast = compile_in(text, &["Noto Serif"]);
     let (run, atoms) = (&ast.runs[0], ast.run_atoms(0));
     let reshape = |window: TextRange, leading: LeadingEdit, trailing: TrailingEdit| {
-        let mut clusters = Vec::new();
-        let mut glyphs = Vec::new();
+        let mut out = ShapeOutput::default();
         SCRIPT_SHAPER.reshape_window(
-            text,
-            run,
-            atoms,
-            window,
-            leading,
-            trailing,
-            &mut clusters,
-            &mut glyphs,
+            &ReshapeRequest {
+                text,
+                run,
+                atoms,
+                window,
+                leading_edit: &leading,
+                trailing_edit: &trailing,
+                context: TextRange::new(0, text.len()),
+            },
+            &mut out,
         );
+        let ShapeOutput { clusters, glyphs } = out;
         let covered: Vec<String> = clusters
             .iter()
             .map(|c| text[c.byte_range.as_range()].to_owned())
@@ -269,18 +271,20 @@ fn shp6_a_cut_cluster_takes_the_face_of_the_nearest_kept_cluster() {
         .unwrap()
         .1;
     let reshape = |window: TextRange, leading: LeadingEdit, trailing: TrailingEdit| {
-        let mut clusters = Vec::new();
-        let mut glyphs = Vec::new();
+        let mut out = ShapeOutput::default();
         SCRIPT_SHAPER.reshape_window(
-            text,
-            run,
-            atoms,
-            window,
-            leading,
-            trailing,
-            &mut clusters,
-            &mut glyphs,
+            &ReshapeRequest {
+                text,
+                run,
+                atoms,
+                window,
+                leading_edit: &leading,
+                trailing_edit: &trailing,
+                context: TextRange::new(0, text.len()),
+            },
+            &mut out,
         );
+        let ShapeOutput { clusters, glyphs } = out;
         (clusters, glyphs)
     };
     let cjk_face = ast.clusters[0].font.font_id;

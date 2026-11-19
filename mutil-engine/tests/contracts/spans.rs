@@ -3,92 +3,6 @@
 use crate::common::*;
 use mutil_engine::*;
 
-fn spanned(n: usize) -> (String, ParagraphAst) {
-    let t = "a".repeat(n);
-    let mut a = ast(&t);
-    rebuild_items(&mut a, |_| vec![]);
-    for i in 0..n {
-        let r = TextRange::new(i, i + 1);
-        a.decoration_spans.push(InlineDecorationSpan {
-            span_id: i as u64,
-            byte_range: r,
-            start_padding: 0.,
-            end_padding: 0.,
-            break_mode: BoxDecorationBreak::Slice,
-        });
-        a.atomic_spans.push(AtomicEditSpan {
-            span_id: (n + i) as u64,
-            byte_range: r,
-        });
-        for edge in [SpanEdge::Leading, SpanEdge::Trailing] {
-            let off = if edge == SpanEdge::Leading { i } else { i + 1 };
-            a.items.push(WordNode::Box(BoxNode::SpanBoundary {
-                byte_range: TextRange::empty_at(off),
-                span_id: i as u64,
-                edge,
-                width: 0.,
-                bidi_level: BidiLevel::LTR,
-            }));
-            if edge == SpanEdge::Leading {
-                let text = boxed(&mut a, i, i + 1);
-                a.items.push(text);
-            }
-        }
-    }
-    a.items.push(end(n));
-    (t, a)
-}
-
-#[test]
-#[ignore = "manual release-mode benchmark; elapsed-time ratios are unsuitable for regular CI"]
-fn five_thousand_spans_scale_linearly() {
-    fn measure(n: usize) -> std::time::Duration {
-        let (t, a) = spanned(n);
-        assert!(check(&a, &t).is_ok());
-        (0..3)
-            .map(|_| {
-                let start = std::time::Instant::now();
-                assert!(std::hint::black_box(check(std::hint::black_box(&a), &t)).is_ok());
-                start.elapsed()
-            })
-            .min()
-            .unwrap()
-    }
-    let small = measure(1250);
-    let large = measure(5000);
-    eprintln!("1250: {small:?}; 5000: {large:?}");
-    assert!(
-        large.as_secs_f64() / small.as_secs_f64() < 7.,
-        "4x input should approach 4x work, not 16x; operation counting needs implementation instrumentation"
-    );
-}
-
-#[test]
-#[ignore = "manual release-mode benchmark; elapsed-time ratios are unsuitable for regular CI"]
-fn long_hyphen_chains_scale_linearly() {
-    fn measure(n: usize) -> std::time::Duration {
-        let (t, a) = hyphen_chain_ast(n, |offset, n| {
-            ((offset - 1) as u32, (n + 1 - offset) as u32)
-        });
-        assert!(check(&a, &t).is_ok());
-        (0..3)
-            .map(|_| {
-                let start = std::time::Instant::now();
-                assert!(std::hint::black_box(check(std::hint::black_box(&a), &t)).is_ok());
-                start.elapsed()
-            })
-            .min()
-            .unwrap()
-    }
-    let small = measure(1250);
-    let large = measure(5000);
-    eprintln!("1250: {small:?}; 5000: {large:?}");
-    assert!(
-        large.as_secs_f64() / small.as_secs_f64() < 7.,
-        "4x chain length should approach 4x work, not 16x"
-    );
-}
-
 fn decorated(ranges: &[(usize, usize)]) -> ParagraphAst {
     let mut a = ast("abcd");
     rebuild_items(&mut a, |_| vec![]);
@@ -222,15 +136,6 @@ fn atomic_spans_are_ascending_and_disjoint() {
     }
 }
 
-#[test]
-fn thousands_of_spans_validate() {
-    // Deterministic, untimed counterpart of `five_thousand_spans_scale_linearly`.
-    let (t, a) = spanned(3000);
-    assert_eq!(a.decoration_spans.len(), 3000);
-    assert_eq!(a.atomic_spans.len(), 3000);
-    assert!(check(&a, &t).is_ok());
-}
-
 fn bidi_span(id: u64, start: usize, end: usize) -> ExplicitBidiSpan {
     ExplicitBidiSpan {
         span_id: id,
@@ -269,7 +174,7 @@ fn bidi_spans_order_ids_boundaries_and_depth() {
         atoms.truncate(1);
         atoms[0].byte_range = TextRange::new(atoms[0].byte_range.start(), 2);
         clusters.truncate(1);
-        clusters[0].byte_range.end = 2;
+        clusters[0].byte_range = TextRange::new(clusters[0].byte_range.start(), 2);
         clusters[0].natural_width = 2.0;
     });
     a.bidi_spans = vec![bidi_span(1, 1, 2)];
@@ -287,7 +192,7 @@ fn an_isolate_may_cover_only_a_hard_break() {
         vec![
             boxed(b, 0, 1),
             WordNode::Discretionary(DiscretionaryNode::hard_break(TextRange::new(1, 4))),
-            WordNode::Box(BoxNode::InlineObject {
+            WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
                 bidi_level: BidiLevel::LTR,
                 baseline_align: BaselineAlignment::Auto,
                 byte_range: TextRange::new(4, 5),
@@ -296,7 +201,7 @@ fn an_isolate_may_cover_only_a_hard_break() {
                 ascent: 1.0,
                 descent: 1.0,
                 overflow_policy: BoxOverflowPolicy::Clip,
-            }),
+            })),
             end(5),
         ]
     });

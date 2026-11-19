@@ -21,7 +21,9 @@ fn run() -> ShapingRun {
 
 fn word(ast: &mut ParagraphAst, range: TextRange) -> WordNode {
     let atoms: Vec<_> = range.as_range().map(atom).collect();
-    let clusters: Vec<_> = (0..atoms.len()).map(|i| cluster(range.start, i)).collect();
+    let clusters: Vec<_> = (0..atoms.len())
+        .map(|i| cluster(range.start(), i))
+        .collect();
     push_text(ast, 0, atoms, clusters)
 }
 
@@ -82,21 +84,23 @@ fn test_pipeline_types_compile() {
     assert_eq!(font_id, FontId(0));
     assert_eq!(metrics, FontMetrics::default());
 
-    let (mut out, mut out_glyphs) = (Vec::new(), Vec::new());
-    shaper.shape_run(TEXT, r, &[], &mut out, &mut out_glyphs);
+    let mut out = ShapeOutput::default();
+    shaper.shape_run(TEXT, r, &[], &mut out);
     let run_atoms = ast.run_atoms(0);
     assert_eq!(run_atoms.len(), 10); // "Hello" and "world"; the space is glue
     shaper.reshape_window(
-        TEXT,
-        r,
-        run_atoms,
-        TextRange::new(0, 5),
-        LeadingEdit::None,
-        TrailingEdit::AppendHyphen { hyphen: '-' },
+        &ReshapeRequest {
+            text: TEXT,
+            run: r,
+            atoms: run_atoms,
+            window: TextRange::new(0, 5),
+            leading_edit: &LeadingEdit::None,
+            trailing_edit: &TrailingEdit::AppendHyphen { hyphen: '-' },
+            context: TextRange::new(0, TEXT.len()),
+        },
         &mut out,
-        &mut out_glyphs,
     );
-    assert!(out.is_empty() && out_glyphs.is_empty());
+    assert!(out.clusters.is_empty() && out.glyphs.is_empty());
     assert!(
         shaper
             .ligature_carets(
@@ -125,7 +129,6 @@ fn test_pipeline_types_compile() {
                     y_offset: g.y_offset,
                     advance: g.x_advance,
                     byte_range: Some(c.byte_range),
-                    is_hanging: false,
                 });
                 pen += c.natural_width;
             }
@@ -139,7 +142,6 @@ fn test_pipeline_types_compile() {
         y_offset: 0.0,
         advance: ADV,
         byte_range: None,
-        is_hanging: false,
     });
     assert_eq!(line_glyphs.len(), 11);
     assert!(
@@ -178,7 +180,6 @@ fn test_pipeline_types_compile() {
             offset: 0,
             affinity: CaretAffinity::Downstream,
             level: BidiLevel::LTR,
-            line: 0,
         }],
         visual_boxes: vec![],
         decorations: vec![],
@@ -253,7 +254,7 @@ fn every_word_node_variant_is_constructible() {
     let mut ast = crate::common::ast("");
     let nodes = [
         word(&mut ast, TextRange::new(0, 5)),
-        WordNode::Box(BoxNode::InlineObject {
+        WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
             bidi_level: BidiLevel::LTR,
             baseline_align: BaselineAlignment::Auto,
             byte_range: TextRange::new(7, 8),
@@ -262,7 +263,7 @@ fn every_word_node_variant_is_constructible() {
             ascent: 10.0,
             descent: 2.0,
             overflow_policy: BoxOverflowPolicy::ScaleToFit,
-        }),
+        })),
         WordNode::Box(BoxNode::SpanBoundary {
             byte_range: TextRange::empty_at(5),
             span_id: 3,
@@ -291,8 +292,8 @@ fn every_word_node_variant_is_constructible() {
     for n in &nodes {
         match n {
             WordNode::Box(b) => match b {
-                BoxNode::Text { .. }
-                | BoxNode::InlineObject { .. }
+                BoxNode::Text(TextBox { .. })
+                | BoxNode::InlineObject(InlineObjectBox { .. })
                 | BoxNode::SpanBoundary { .. } => {}
             },
             WordNode::Glue(_) | WordNode::Discretionary(_) | WordNode::Tab { .. } => {}
@@ -363,19 +364,6 @@ fn canonical_penalty_scale_is_ordered_and_tiers_are_ranked() {
 }
 
 #[test]
-fn hyphen_opportunity_carries_prefix_and_suffix_replacements() {
-    let h = HyphenOpportunity {
-        prefix_replacement: Some("a".into()),
-        suffix_replacement: Some("tje".into()),
-        prefix_cut_bytes: 1,
-        suffix_cut_bytes: 2,
-    };
-    assert_eq!(h.prefix_replacement.as_deref(), Some("a"));
-    assert_eq!(h.suffix_replacement.as_deref(), Some("tje"));
-    assert_eq!((h.prefix_cut_bytes, h.suffix_cut_bytes), (1, 2));
-}
-
-#[test]
 fn clusters_partition_atoms_and_split_clusters_are_detected() {
     // Fixture words satisfy both invariants.
     let mut ast = crate::common::ast("");
@@ -396,7 +384,7 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
         let mut ast = crate::common::ast("");
         rebuild_items(&mut ast, |ast| {
             let mut node = push_text(ast, 0, atoms, clusters);
-            if let WordNode::Box(BoxNode::Text { byte_range, .. }) = &mut node {
+            if let WordNode::Box(BoxNode::Text(TextBox { byte_range, .. })) = &mut node {
                 *byte_range = range;
             }
             vec![node]
@@ -482,86 +470,11 @@ fn clusters_partition_atoms_and_split_clusters_are_detected() {
 }
 
 #[test]
-fn full_spec_type_surface_is_nameable() {
-    let pos = CursorPosition {
-        byte_offset: 3,
-        affinity: CaretAffinity::Downstream,
-    };
-    let hit = HitResult {
-        position: pos,
-        inside: false,
-    };
-    let sel = Selection {
-        anchor: pos,
-        focus: CursorPosition {
-            byte_offset: 7,
-            ..pos
-        },
-    };
-    let caret = CaretVisual {
-        primary_rect: Rect::new(10.0, 0.0, 1.0, 16.0),
-        secondary_rect: None,
-    };
-    assert!(!hit.inside && sel.anchor != sel.focus && caret.secondary_rect.is_none());
-
-    let motions = [
-        Motion::Left,
-        Motion::Right,
-        Motion::Previous,
-        Motion::Next,
-        Motion::WordLeft,
-        Motion::WordRight,
-        Motion::WordPrevious,
-        Motion::WordNext,
-        Motion::LineStart,
-        Motion::LineEnd,
-        Motion::Up,
-        Motion::Down,
-    ];
-    assert_eq!(motions.len(), 12);
-    assert_ne!(
-        HangMode {
-            start: HangStartMode::FirstLine,
-            end: HangEndMode::None
-        },
-        HangMode {
-            start: HangStartMode::None,
-            end: HangEndMode::Allow
-        }
-    );
-    assert_ne!(QuotePolicy::CjkAware, QuotePolicy::Standard);
-}
-
-#[test]
-fn hanging_punctuation_fits_negative_x_and_synthesized_flag_round_trips() {
-    // A hanging opening bracket sits left of the line edge.
-    let hanging = PositionedGlyph {
-        glyph_id: 1,
-        x: -ADV,
-        x_offset: 0.0,
-        y_offset: 0.0,
-        advance: ADV,
-        byte_range: Some(TextRange::new(0, 1)),
-        is_hanging: true,
-    };
-    assert!(hanging.x < 0.0);
-
-    // The shaper marks a glyph it inserts (the hyphen of a `TrailingEdit`),
-    // since a raw glyph has no source range of its own; once positioned, the
-    // glyph carries `byte_range: None` instead.
-    let g = RawShapedGlyph {
-        is_synthesized: true,
-        ..Default::default()
-    };
-    assert!(g.is_synthesized);
-}
-
-#[test]
 fn font_variation_is_nameable_and_canonical() {
-    let mut f = FontFeatures::new();
-    f.push_variation(FontVariation::new(*b"wght", 650.0).unwrap());
-    f.push_variation(FontVariation::new(*b"slnt", -0.0).unwrap());
+    let mut f = FontFeatures::default();
+    f.push_variation(FontVariation::try_new(*b"wght", 650.0).unwrap());
+    f.push_variation(FontVariation::try_new(*b"slnt", -0.0).unwrap());
     let v: &[FontVariation] = f.variations();
-    assert_eq!(Some(v[0]), FontVariation::new(*b"wght", 650.0));
-    assert_eq!(v[1].value().to_bits(), 0.0_f32.to_bits());
+    assert_eq!(Some(v[1]), FontVariation::try_new(*b"wght", 650.0));
+    assert_eq!(v[0].value().to_bits(), 0.0_f32.to_bits());
 }

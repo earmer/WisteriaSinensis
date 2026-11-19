@@ -1,23 +1,60 @@
 //! Item-level ordering and node-by-node validation for input validation.
 
-use super::super::tolerance::{approx_eq, approx_eq_f64, tolerance};
-use super::spans::SpanIndex;
-use super::storage::check_text_payload;
-use super::{LayoutInputError, in_byte_order, is_atom_boundary};
+use super::spans::{DecorationIds, SpanIndex};
+use super::storage::{TextBoxes, check_text_payload};
+use super::{LayoutInputError, fits, in_byte_order, is_range_edge};
 use crate::frontend::{
     BoxDecorationBreak, BoxNode, BreakAction, DiscretionaryNode, GlueKind, GlueNode,
-    HyphenOpportunity, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge,
-    WordNode, is_word_space,
+    HyphenOpportunity, InlineDecorationSpan, InlineObjectBox, MAX_DECORATION_NESTING_DEPTH,
+    ParagraphAst, SpanEdge, TextBox, WordNode, is_word_space,
 };
+use crate::middleend::tolerance::{approx_eq, approx_eq_f64, tolerance};
 use crate::types::{BidiClass, BidiLevel, TextRange, is_extent, is_measurement};
+
+/// Every item fits inside `text`. Run before indexing spans against items, so
+/// the index is built on ordered ranges and cannot scan or clone unboundedly
+/// for a malformed AST; the item checks may assume it.
+pub(super) fn check_items_fit(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
+    match ast
+        .items
+        .iter()
+        .position(|node| !fits(text, node.byte_span()))
+    {
+        Some(item) => Err(LayoutInputError::ItemOutsideText { item }),
+        None => Ok(()),
+    }
+}
+
+/// Each item on its own, in item order.
+pub(super) fn check_each_item(
+    ast: &ParagraphAst,
+    text: &str,
+    boxes: &TextBoxes<'_>,
+    ids: &DecorationIds,
+    spans: &SpanIndex,
+) -> Result<(), LayoutInputError> {
+    let mut checks = ItemChecks::new(ast, text, boxes, ids, spans);
+    for (item, node) in ast.items.iter().enumerate() {
+        checks.check(item, node)?;
+    }
+    Ok(())
+}
+
+/// `items` ends with the paragraph-end sentinel.
+pub(super) fn check_paragraph_end(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
+    match ast.items.last() {
+        Some(WordNode::Discretionary(d)) if d.is_paragraph_end() => Ok(()),
+        _ => Err(LayoutInputError::MissingParagraphEnd),
+    }
+}
 
 /// Monotone progression: each item starts at or after the end of the previous
 /// one (zero-width nodes may share an offset). Among the zero-width nodes at one
 /// offset a `CjkAutospace` glue precedes every break opportunity, as a
 /// breakable space's glue precedes its discretionary (so the spacing stays on
 /// the line that ends there): `[Glue(CjkAutospace), Discretionary]`.
-pub(super) fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
-    let out_of_order = |w: &[WordNode]| w[0].byte_span().end > w[1].byte_span().start;
+pub(super) fn check_item_order(ast: &ParagraphAst) -> Result<ItemsInOrder, LayoutInputError> {
+    let out_of_order = |w: &[WordNode]| w[0].byte_span().end() > w[1].byte_span().start();
     if let Some(i) = ast.items.windows(2).position(out_of_order) {
         return Err(LayoutInputError::ItemsOutOfOrder { item: i + 1 });
     }
@@ -26,7 +63,7 @@ pub(super) fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputErro
     let mut break_opportunity_offset: Option<usize> = None;
     for (item, node) in ast.items.iter().enumerate() {
         let range = node.byte_span();
-        if !range.is_empty() || break_opportunity_offset != Some(range.start) {
+        if !range.is_empty() || break_opportunity_offset != Some(range.start()) {
             break_opportunity_offset = None;
         }
         if node.is_break_opportunity() && range.is_empty() {
@@ -37,8 +74,12 @@ pub(super) fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputErro
             return Err(LayoutInputError::ItemsOutOfOrder { item });
         }
     }
-    Ok(())
+    Ok(ItemsInOrder(()))
 }
+
+/// Proof from [`check_item_order`] that the items' byte spans ascend (the
+/// atoms inside a box are proved in order later, by `check_each_item`).
+pub(super) struct ItemsInOrder(());
 
 /// Byte bounds of the **hyphen chain** of every text box, indexed by item
 /// (entries of other items are unspecified). A chain is a maximal sequence of
@@ -48,11 +89,11 @@ pub(super) fn check_item_order(ast: &ParagraphAst) -> Result<(), LayoutInputErro
 ///
 /// Built in two passes over the items, so the cost is linear however long a
 /// chain is.
-fn hyphen_chains(ast: &ParagraphAst) -> Vec<(usize, usize)> {
+fn hyphen_chains(ast: &ParagraphAst, boxes: &TextBoxes<'_>) -> Vec<(usize, usize)> {
     let len = ast.items.len();
     let mut chains: Vec<(usize, usize)> = (0..len)
         .map(|item| {
-            ast.text_box(item).map_or((0, 0), |view| {
+            boxes.get(item).map_or((0, 0), |view| {
                 (view.byte_range.start(), view.byte_range.end())
             })
         })
@@ -70,23 +111,21 @@ fn hyphen_chains(ast: &ParagraphAst) -> Vec<(usize, usize)> {
     chains
 }
 
-/// The `natural_width` of the last (`last == true`) or first cluster of the
-/// text box at `items[index]`, or `None` if that item is not a text box with a
-/// cluster.
-fn edge_cluster_width(ast: &ParagraphAst, index: Option<usize>, last: bool) -> Option<f32> {
-    let view = ast.text_box(index?)?;
-    let cluster = if last {
-        view.clusters.last()
-    } else {
-        view.clusters.first()
-    };
-    cluster.map(|c| c.natural_width)
+/// A discretionary's break widths net of its cloned spans' padding.
+#[derive(Clone, Copy)]
+struct NetWidths {
+    /// Net of `pre_break_width`.
+    pre: f64,
+    /// Net of `post_break_width`.
+    post: f64,
 }
 
 /// Everything the per-item checks share.
-pub(super) struct ItemChecks<'a> {
+struct ItemChecks<'a> {
     ast: &'a ParagraphAst,
     text: &'a str,
+    boxes: &'a TextBoxes<'a>,
+    ids: &'a DecorationIds,
     spans: &'a SpanIndex,
     /// Hyphen-chain bounds per item ([`hyphen_chains`]).
     chains: Vec<(usize, usize)>,
@@ -99,12 +138,20 @@ pub(super) struct ItemChecks<'a> {
 }
 
 impl<'a> ItemChecks<'a> {
-    pub(super) fn new(ast: &'a ParagraphAst, text: &'a str, spans: &'a SpanIndex) -> Self {
+    fn new(
+        ast: &'a ParagraphAst,
+        text: &'a str,
+        boxes: &'a TextBoxes<'a>,
+        ids: &'a DecorationIds,
+        spans: &'a SpanIndex,
+    ) -> Self {
         Self {
             ast,
             text,
+            boxes,
+            ids,
             spans,
-            chains: hyphen_chains(ast),
+            chains: hyphen_chains(ast, boxes),
             runs_in_byte_order: (0..ast.runs.len())
                 .map(|run| in_byte_order(ast.run_atoms(run).iter().map(|a| a.byte_range)))
                 .collect(),
@@ -113,33 +160,49 @@ impl<'a> ItemChecks<'a> {
         }
     }
 
-    /// Checks `items[item]` on its own. Items are checked in order.
-    pub(super) fn check(&mut self, item: usize, node: &WordNode) -> Result<(), LayoutInputError> {
-        // UAX #9 never resolves a level below the paragraph's (AST-13).
-        let level = match node {
-            WordNode::Box(BoxNode::Text { run_index, .. }) => {
-                self.last_text_font_size = Some(self.ast.runs[*run_index].font_size);
+    /// The bidi level `node` carries, if it carries one.
+    fn bidi_level(&self, node: &WordNode) -> Option<BidiLevel> {
+        match node {
+            WordNode::Box(BoxNode::Text(TextBox { run_index, .. })) => {
                 Some(self.ast.runs[*run_index].bidi_level)
             }
             WordNode::Box(
-                BoxNode::InlineObject { bidi_level, .. } | BoxNode::SpanBoundary { bidi_level, .. },
+                BoxNode::InlineObject(InlineObjectBox { bidi_level, .. })
+                | BoxNode::SpanBoundary { bidi_level, .. },
             )
             | WordNode::Glue(GlueNode { bidi_level, .. }) => Some(*bidi_level),
             WordNode::Discretionary(_) | WordNode::Tab { .. } => None,
-        };
-        if level.is_some_and(|level| level < self.ast.base_direction.base_level()) {
+        }
+    }
+
+    /// Checks `items[item]` on its own. Items are checked in order.
+    fn check(&mut self, item: usize, node: &WordNode) -> Result<(), LayoutInputError> {
+        // UAX #9 never resolves a level below the paragraph's (AST-13).
+        if self
+            .bidi_level(node)
+            .is_some_and(|level| level < self.ast.base_direction.base_level())
+        {
             return Err(LayoutInputError::InvalidBidiLevel { item });
         }
         match node {
-            WordNode::Box(BoxNode::Text { .. }) => self.check_text_box(item),
-            WordNode::Box(BoxNode::InlineObject {
+            WordNode::Box(BoxNode::Text(text)) => {
+                let run = &self.ast.runs[text.run_index];
+                self.last_text_font_size = Some(run.font_size);
+                // Resolved from the matched box rather than read back from
+                // `boxes` by index, which would need an `Option` for a fact
+                // the match already states (pipeline rules 5 and 6).
+                let view = &self.ast.resolve(text);
+                let base = view.atom_start - run.atom_range.start;
+                check_text_payload(self.text, run, view, &self.ast.glyphs, base, item)
+            }
+            WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
                 baseline_align,
                 byte_range,
                 width,
                 ascent,
                 descent,
                 ..
-            }) => {
+            })) => {
                 // An object owns the bytes carets and selections address it by.
                 if byte_range.is_empty()
                     || !baseline_align.is_valid()
@@ -168,19 +231,6 @@ impl<'a> ItemChecks<'a> {
         }
     }
 
-    /// A text box: its payload against its run.
-    fn check_text_box(&mut self, item: usize) -> Result<(), LayoutInputError> {
-        let ast = self.ast;
-        // `check_storage` proved the run index and that the box's ranges lie
-        // inside its run's.
-        let view = ast
-            .text_box(item)
-            .expect("check_storage resolves every text box");
-        let run = &ast.runs[view.run_index];
-        let base = view.atom_start - run.atom_range.start;
-        check_text_payload(self.text, run, &view, &ast.glyphs, base, item)
-    }
-
     /// A span boundary: an empty range at its span's start (`Leading`) or end
     /// (`Trailing`), as wide as that edge's padding, at the bidi level of the
     /// first or last atom inside the span.
@@ -197,7 +247,7 @@ impl<'a> ItemChecks<'a> {
         if !(byte_range.is_empty() && is_extent(width)) {
             return Err(E::InvalidSpanBoundary { item });
         }
-        let Some(&span_index) = self.spans.by_id.get(&span_id) else {
+        let Some(span_index) = self.ids.index_of(span_id) else {
             return Err(E::UnknownSpan { item });
         };
         let span = &self.ast.decoration_spans[span_index];
@@ -257,8 +307,18 @@ impl<'a> ItemChecks<'a> {
         item: usize,
         d: &DiscretionaryNode,
     ) -> Result<(), LayoutInputError> {
-        use LayoutInputError as E;
-        let invalid = Err(E::InvalidDiscretionary { item });
+        let invalid = LayoutInputError::InvalidDiscretionary { item };
+        if !self.discretionary_is_well_formed(item, d) {
+            return Err(invalid);
+        }
+        let net = self.net_break_widths(item, d)?;
+        self.check_break_action(item, d, net)
+    }
+
+    /// The discretionary's own fields: finite widths, a penalty in range, a
+    /// mandatory break exactly when hard, the bytes it owns and unique
+    /// cloned spans.
+    fn discretionary_is_well_formed(&self, item: usize, d: &DiscretionaryNode) -> bool {
         let widths_are_finite = [d.pre_break_width, d.post_break_width, d.no_break_width]
             .into_iter()
             .all(is_measurement);
@@ -278,20 +338,27 @@ impl<'a> ItemChecks<'a> {
                 .iter()
                 .enumerate()
                 .all(|(i, id)| !d.cloned_spans[..i].contains(id));
-        if !(widths_are_finite
+        widths_are_finite
             && d.penalty >= DiscretionaryNode::MANDATORY_BREAK_PENALTY
             && d.penalty < DiscretionaryNode::FORBIDDEN_BREAK_PENALTY
             && is_hard == d.is_mandatory()
             && (!is_hard || d.no_break_width == 0.0)
             && owns_its_bytes
-            && clones_are_unique)
-        {
-            return invalid;
-        }
+            && clones_are_unique
+    }
 
-        // `cloned_spans` is exactly the set of `Clone` spans the break falls
-        // strictly inside: a chip split without its cloned padding is wrong,
-        // and so is cloning a span the break does not cut.
+    /// The break widths net of cloned padding. `cloned_spans` is exactly the
+    /// set of `Clone` spans the break falls strictly inside: a chip split
+    /// without its cloned padding is wrong, and so is cloning a span the
+    /// break does not cut. Line `k` gains each listed span's `end_padding`,
+    /// line `k + 1` its `start_padding`; what remains of the widths is the
+    /// action's own delta.
+    fn net_break_widths(
+        &self,
+        item: usize,
+        d: &DiscretionaryNode,
+    ) -> Result<NetWidths, LayoutInputError> {
+        use LayoutInputError as E;
         let offset = d.byte_offset();
         let is_cut = |span: &InlineDecorationSpan| {
             span.break_mode == BoxDecorationBreak::Clone
@@ -305,17 +372,14 @@ impl<'a> ItemChecks<'a> {
             .iter()
             .any(|&i| is_cut(&spans[i]) && !d.cloned_spans.contains(&spans[i].span_id))
         {
-            return invalid;
+            return Err(E::InvalidDiscretionary { item });
         }
-        // Cloned padding is part of the break widths: line `k` gains each
-        // listed span's `end_padding`, line `k + 1` its `start_padding`.
         let (mut clone_pre, mut clone_post) = (0.0_f64, 0.0_f64);
         for id in &d.cloned_spans {
             let Some(span) = self
-                .spans
-                .by_id
-                .get(id)
-                .map(|&i| &spans[i])
+                .ids
+                .index_of(*id)
+                .map(|i| &spans[i])
                 .filter(|s| is_cut(s))
             else {
                 return Err(E::UnknownSpan { item });
@@ -323,9 +387,21 @@ impl<'a> ItemChecks<'a> {
             clone_pre += f64::from(span.end_padding);
             clone_post += f64::from(span.start_padding);
         }
-        // What remains of the widths is the action's own delta.
-        let net_pre = f64::from(d.pre_break_width) - clone_pre;
-        let net_post = f64::from(d.post_break_width) - clone_post;
+        Ok(NetWidths {
+            pre: f64::from(d.pre_break_width) - clone_pre,
+            post: f64::from(d.post_break_width) - clone_post,
+        })
+    }
+
+    /// The widths the break's action implies.
+    fn check_break_action(
+        &self,
+        item: usize,
+        d: &DiscretionaryNode,
+        net: NetWidths,
+    ) -> Result<(), LayoutInputError> {
+        use LayoutInputError as E;
+        let invalid = Err(E::InvalidDiscretionary { item });
         let is_zero = |net: f64| approx_eq_f64(net, 0.0);
         match &d.action {
             // A hyphenation's net deltas are its reshaping deltas.
@@ -342,17 +418,22 @@ impl<'a> ItemChecks<'a> {
                         || width
                             .is_some_and(|w| f64::from(w) + net >= -f64::from(tolerance(w, 0.0)))
                 };
-                let trailing = edge_cluster_width(self.ast, item.checked_sub(1), true);
-                let leading = edge_cluster_width(self.ast, item.checked_add(1), false);
-                if (is_zero(net_pre) && is_zero(net_post))
-                    || !fits_cluster(net_pre, trailing)
-                    || !fits_cluster(net_post, leading)
+                let trailing = item
+                    .checked_sub(1)
+                    .and_then(|i| self.boxes.get(i)?.clusters.last().map(|c| c.natural_width));
+                let leading = self
+                    .boxes
+                    .get(item + 1)
+                    .and_then(|v| v.clusters.first().map(|c| c.natural_width));
+                if (is_zero(net.pre) && is_zero(net.post))
+                    || !fits_cluster(net.pre, trailing)
+                    || !fits_cluster(net.post, leading)
                 {
                     return invalid;
                 }
             }
             BreakAction::Direct | BreakAction::HardBreak => {
-                if !(is_zero(net_pre) && is_zero(net_post)) {
+                if !(is_zero(net.pre) && is_zero(net.post)) {
                     return invalid;
                 }
             }
@@ -360,8 +441,8 @@ impl<'a> ItemChecks<'a> {
             BreakAction::MathOperator { repeat } => {
                 let advance = repeat.map_or(0.0, |operator| operator.advance);
                 if !(is_extent(advance)
-                    && is_zero(net_pre)
-                    && approx_eq_f64(net_post, f64::from(advance)))
+                    && is_zero(net.pre)
+                    && approx_eq_f64(net.post, f64::from(advance)))
                 {
                     return invalid;
                 }
@@ -402,6 +483,7 @@ impl<'a> ItemChecks<'a> {
             && suffix_end <= self.chains[item + 1].1
             // See `in_byte_order`: unordered atoms are reported by the box.
             && (!self.runs_in_byte_order[before.run_index]
-                || (is_atom_boundary(atoms, prefix_start) && is_atom_boundary(atoms, suffix_end)))
+                || (is_range_edge(atoms, |a| a.byte_range, prefix_start)
+                    && is_range_edge(atoms, |a| a.byte_range, suffix_end)))
     }
 }
