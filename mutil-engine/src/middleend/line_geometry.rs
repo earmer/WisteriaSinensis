@@ -22,6 +22,14 @@ pub enum GlyphRole {
     Body,
 }
 
+impl GlyphRole {
+    /// `true` for a glyph that is neither hanging nor trailing whitespace:
+    /// what the body of the line is made of, zero-advance glyphs included.
+    pub(crate) const fn is_inside_body(self) -> bool {
+        matches!(self, Self::ZeroAdvance | Self::Body)
+    }
+}
+
 /// The overflow of hanging glyphs beyond the body's edges.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct HangExtents {
