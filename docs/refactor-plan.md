@@ -272,6 +272,7 @@ Each PR is self-contained. It passes every AGENTS.md check plus the axiom checke
 - **A dynamic pass manager or `trait Pass` over a shared IR (LLVM/GCC/FFmpeg style).** Our order is static and fixed by the spec. A shared IR would bring back unchecked field dependencies.
 - **A new `pipeline/` module with gradual migration.** Two styles would coexist for weeks. Agents with limited context would mix them and write glue code. Changing in place lets `rustc` guide each step.
 - **Swapping `unicode-bidi` in for our own bidi code, or `icu_locale_core` in for our locale-tag parser.** SCO-8 and FE-30 forbid the first. The second would narrow which tags we accept (SCAN_TEMP §4).
+- **`IndexRange` for the cluster, atom and glyph ranges (stage 5, skipped on purpose).** It would turn six public `Range<usize>` fields into a new type, and every test that builds an inverted range to exercise a gate check with it, for little gain: the gates already check these ranges, and `TextRange` (the byte ranges) is non-invertible. Not forgotten.
 - **One content block per line in the output.** GEO-6 and SLT-3/4 need content in several slots.
 - **A big-bang rewrite.** The scan shows the code is not rotten: 6–10% is redundant, and most of the size is validation the spec requires. The value is in explicit ordering, not in starting over.
 
