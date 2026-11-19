@@ -180,7 +180,7 @@ export function createRenderer(canvas) {
     if (!caret) {
       return;
     }
-    const focused = document.activeElement === canvas;
+    const focused = canvas.ownerDocument?.activeElement === canvas;
     ctx.save();
     const px = Math.round(caret.primary.x) + 0.5;
     ctx.strokeStyle = focused ? '#2563eb' : '#1b1a17';
