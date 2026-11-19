@@ -50,9 +50,12 @@ impl UnitMetrics {
 /// `OS/2` already store the underline and strike-out positions that way.
 pub(super) fn unit_metrics(font: &Font) -> UnitMetrics {
     let metrics = font.metrics();
-    // `FontRegistry::add_face` refuses a face whose `units_per_em` is 0.
-    let upem = f32::from(metrics.units_per_em);
-    let (ascent, descent, line_gap) = horizontal_line(metrics, upem);
+    // The stated value, not `Metrics::units_per_em`, which replaces one
+    // outside 16..=16384 with 1000: glyph advances are in the stated units.
+    // `FontRegistry::add_face` refuses a face whose value is 0 (SHP-21).
+    let upem = f32::from(metrics.raw_units_per_em);
+    let lines = signed_lines(font);
+    let (ascent, descent, line_gap) = horizontal_line(&lines, metrics, upem);
     let (x_height, cap_height) = ink_heights(font, metrics, upem);
     let style = font.style_metrics();
     let (underline_position, underline_thickness) = style
@@ -63,7 +66,7 @@ pub(super) fn unit_metrics(font: &Font) -> UnitMetrics {
         .strike_through
         .map(|d| f(d.position))
         .unwrap_or(x_height / 2.0);
-    let (vertical_ascent, vertical_descent, vertical_line_gap) = nonzero(&metrics.vhea_line)
+    let (vertical_ascent, vertical_descent, vertical_line_gap) = nonzero(&lines.vhea)
         .map(|l| (f(l.ascender), -f(l.descender), f(l.line_gap)))
         .unwrap_or((0.5 * upem, 0.5 * upem, 0.0));
     let base = base_offsets(font);
@@ -99,6 +102,49 @@ fn f(v: read_fonts::types::F48Dot16) -> f32 {
     v.to_f32()
 }
 
+/// The `hhea`, `OS/2` typo and `vhea` lines with the signs the font stores
+/// them with. `Metrics` makes every ascender positive and every descender
+/// negative, which would repair a negative ascent or descent that the shaper
+/// gate must see (SHP-18, AX-3). Read at the face's default location, where
+/// a face is registered.
+struct SignedLines {
+    hhea: Option<LineBox>,
+    typo: Option<LineBox>,
+    vhea: Option<LineBox>,
+}
+
+fn signed_lines(font: &Font) -> SignedLines {
+    let tables = font.tables();
+    let line = |ascender: i16, descender: i16, line_gap: i16| LineBox {
+        ascender: F48Dot16::from_i32(ascender.into()),
+        descender: F48Dot16::from_i32(descender.into()),
+        line_gap: F48Dot16::from_i32(line_gap.into()),
+    };
+    SignedLines {
+        hhea: tables.selected_hhea().ok().map(|t| {
+            line(
+                t.ascender().to_i16(),
+                t.descender().to_i16(),
+                t.line_gap().to_i16(),
+            )
+        }),
+        typo: tables.os2().ok().map(|t| {
+            line(
+                t.s_typo_ascender(),
+                t.s_typo_descender(),
+                t.s_typo_line_gap(),
+            )
+        }),
+        vhea: tables.selected_vhea().ok().map(|t| {
+            line(
+                t.ascender().to_i16(),
+                t.descender().to_i16(),
+                t.line_gap().to_i16(),
+            )
+        }),
+    }
+}
+
 /// The line box of a table, when it spans a positive height; a table that
 /// does not is skipped in favour of the next (spec SHP-17).
 fn nonzero(line: &Option<LineBox>) -> Option<LineBox> {
@@ -107,9 +153,9 @@ fn nonzero(line: &Option<LineBox>) -> Option<LineBox> {
 
 /// Ascent, descent and line gap from `OS/2` typo or `hhea` (by
 /// `use_typo_metrics`), else `OS/2` win, else 0.8 / 0.2 em (spec SHP-17).
-fn horizontal_line(metrics: &Metrics, upem: f32) -> (f32, f32, f32) {
-    let typo = nonzero(&metrics.typo_line);
-    let hhea = nonzero(&metrics.hhea_line);
+fn horizontal_line(lines: &SignedLines, metrics: &Metrics, upem: f32) -> (f32, f32, f32) {
+    let typo = nonzero(&lines.typo);
+    let hhea = nonzero(&lines.hhea);
     let chosen = if metrics.use_typo_metrics {
         typo.or(hhea)
     } else {

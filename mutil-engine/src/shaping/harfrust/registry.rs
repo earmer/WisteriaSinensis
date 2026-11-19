@@ -141,8 +141,9 @@ impl FontRegistry {
     ) -> Option<FontId> {
         let bytes = Arc::clone(&face.bytes().0);
         let font = Font::new(bytes, face.face_index())?;
-        // Every metric is scaled by `1 / units_per_em` (SHP-21).
-        if font.metrics().units_per_em == 0 {
+        // Every metric is scaled by `1 / units_per_em` (SHP-21). The stated
+        // value: `Metrics::units_per_em` replaces a 0 with 1000.
+        if font.metrics().raw_units_per_em == 0 {
             return None;
         }
         let id = FontId(u32::try_from(self.faces.len()).ok()?);
