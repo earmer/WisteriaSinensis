@@ -12,6 +12,7 @@ use crate::middleend::{
 };
 use crate::types::{BidiLevel, FontMetrics, TextDecoration, TextRange};
 use smallvec::SmallVec;
+use std::ops::Range;
 
 /// One group of a span's pieces on a line: contiguous in visual order and in
 /// logical order (spec ST2-3, FRG-1, FRG-3).
@@ -25,41 +26,74 @@ pub(super) struct VisualGroup {
     is_bare_boundary: bool,
 }
 
-/// The visual groups, left to right, of the pieces `is_member` selects. A
-/// piece outside the selection splits a group, except another span's
-/// boundary, which neither joins nor splits it: a nested span's padding lies
-/// inside the enclosing one. Visually adjacent members join only when they
-/// are also adjacent among the members in logical order, `placed` being in
-/// logical order.
+/// A line's visual order, indexed for grouping (ST2-3): each piece's
+/// visual position, and how many pieces other than span boundaries come
+/// before each visual position. Built once per line.
+pub(super) struct VisualIndex {
+    /// The visual position of each piece in logical order; `None` for the
+    /// trailing whitespace, which has none.
+    position: Vec<Option<usize>>,
+    /// `solid_before[v]`: the pieces at visual positions below `v` that are
+    /// not span boundaries.
+    solid_before: Vec<usize>,
+}
+
+impl VisualIndex {
+    pub(super) fn new(placed: &[PlacedPiece<'_>], order: &[usize]) -> Self {
+        let mut position = vec![None; placed.len()];
+        let mut solid_before = Vec::with_capacity(order.len() + 1);
+        let mut solid = 0;
+        for (v, &k) in order.iter().enumerate() {
+            position[k] = Some(v);
+            solid_before.push(solid);
+            solid += usize::from(!matches!(placed[k].piece.kind, PieceKind::SpanEdge { .. }));
+        }
+        solid_before.push(solid);
+        Self {
+            position,
+            solid_before,
+        }
+    }
+
+    /// Whether a piece other than a span boundary lies strictly between
+    /// visual positions `a < b`.
+    fn solid_between(&self, a: usize, b: usize) -> bool {
+        self.solid_before[b] > self.solid_before[a + 1]
+    }
+}
+
+/// The visual groups, left to right, of the pieces `is_member` selects,
+/// all of which lie in the logical range `candidates`. A piece outside the
+/// selection splits a group, except another span's boundary, which neither
+/// joins nor splits it: a nested span's padding lies inside the enclosing
+/// one. Visually adjacent members join only when they are also adjacent
+/// among the members in logical order, `placed` being in logical order.
+///
+/// Only the candidates are read, so a line with many spans costs the sum of
+/// their pieces, not pieces × spans.
 fn visual_groups(
     placed: &[PlacedPiece<'_>],
-    order: &[usize],
+    index: &VisualIndex,
+    candidates: Range<usize>,
     is_member: impl Fn(&Piece<'_>) -> bool,
 ) -> Vec<VisualGroup> {
-    let mut rank = vec![None; placed.len()];
-    for (r, k) in (0..placed.len())
+    // (visual position, rank among the members in logical order, piece).
+    let mut members: SmallVec<[(usize, usize, usize); 16]> = candidates
         .filter(|&k| is_member(&placed[k].piece))
         .enumerate()
-    {
-        rank[k] = Some(r);
-    }
+        .filter_map(|(rank, k)| Some((index.position[k]?, rank, k)))
+        .collect();
+    members.sort_unstable_by_key(|&(v, ..)| v);
     let mut groups: Vec<VisualGroup> = Vec::new();
-    let mut previous: Option<usize> = None;
-    for &k in order {
+    let mut previous: Option<(usize, usize)> = None;
+    for (v, rank, k) in members {
         let p = &placed[k];
         let is_edge = matches!(p.piece.kind, PieceKind::SpanEdge { .. });
-        let Some(r) = rank[k] else {
-            if !is_edge {
-                previous = None;
-            }
-            continue;
-        };
         let (lo, hi) = (p.x, p.x + p.width);
         let is_bare_boundary = is_edge && p.width == 0.0;
-        match groups
-            .last_mut()
-            .filter(|_| previous.is_some_and(|q| q.abs_diff(r) == 1))
-        {
+        let joins =
+            previous.is_some_and(|(pv, pr)| pr.abs_diff(rank) == 1 && !index.solid_between(pv, v));
+        match groups.last_mut().filter(|_| joins) {
             Some(g) => {
                 g.lo = g.lo.min(lo);
                 g.hi = g.hi.max(hi);
@@ -74,9 +108,25 @@ fn visual_groups(
                 is_bare_boundary,
             }),
         }
-        previous = Some(r);
+        previous = Some((v, rank));
     }
     groups
+}
+
+/// The pieces whose bytes may lie inside `range`, as a logical range: G1
+/// proves the items in byte order (AST-3, `ItemsOutOfOrder`), so the pieces'
+/// starts and ends both ascend and bisect.
+fn pieces_within(placed: &[PlacedPiece<'_>], range: TextRange) -> Range<usize> {
+    let lo = placed.partition_point(|p| p.piece.bytes.start() < range.start());
+    let hi = placed.partition_point(|p| p.piece.bytes.end() <= range.end());
+    lo..hi.max(lo)
+}
+
+/// The pieces whose bytes may meet `range`, as a logical range (AST-3).
+fn pieces_meeting(placed: &[PlacedPiece<'_>], range: TextRange) -> Range<usize> {
+    let lo = placed.partition_point(|p| p.piece.bytes.end() <= range.start());
+    let hi = placed.partition_point(|p| p.piece.bytes.start() < range.end());
+    lo..hi.max(lo)
 }
 
 /// One line edge's break as decoration spans see it (ST2-3): the spans it
@@ -179,6 +229,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             |b| b.pre_break_width,
             bytes.end(),
         );
+        let visual = VisualIndex::new(&line.placed, &line.order);
         for (index, span) in spans.iter().enumerate() {
             let range = span.byte_range;
             if range.end() < bytes.start() || range.start() > bytes.end() {
@@ -193,7 +244,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 _ => !p.bytes.is_empty() && range.contains_range(p.bytes),
             };
-            let mut groups = visual_groups(&line.placed, &line.order, is_member);
+            let candidates = pieces_within(&line.placed, range);
+            let mut groups = visual_groups(&line.placed, &visual, candidates, is_member);
             if groups.iter().any(|g| !g.is_bare_boundary) {
                 groups.retain(|g| !g.is_bare_boundary);
             }
@@ -316,6 +368,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// own end, at least one byte, and the last takes the rest.
     pub(super) fn atomic_fragments(&self, line: &AlignedLine<'_>) -> Vec<AtomicFragment> {
         let mut out = Vec::new();
+        let visual = VisualIndex::new(&line.placed, &line.order);
         for span in &self.ast.atomic_spans {
             let full = span.byte_range;
             let part_end = full.end().min(line.byte_range.end());
@@ -323,7 +376,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             if covered >= part_end {
                 continue;
             }
-            let mut groups = visual_groups(&line.placed, &line.order, |p| {
+            let candidates = pieces_meeting(&line.placed, full);
+            let mut groups = visual_groups(&line.placed, &visual, candidates, |p| {
                 !p.bytes.is_empty() && p.bytes.start() < full.end() && p.bytes.end() > full.start()
             });
             groups.sort_by_key(|g| g.bytes.start());
