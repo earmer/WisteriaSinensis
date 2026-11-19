@@ -20,5 +20,6 @@ mod line_only;
 mod long_word;
 mod queries;
 mod shaper;
+mod shaper_numbers;
 mod spacing_frontend;
 mod steps;
