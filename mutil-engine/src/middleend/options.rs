@@ -2,7 +2,7 @@
 
 use crate::frontend::is_line_or_paragraph_separator;
 use crate::middleend::tolerance::tolerance;
-use crate::middleend::{HangSide, LayoutInputError, SlotSource};
+use crate::middleend::{GeometryAnswer, HangSide, LayoutInputError, SlotSource};
 use crate::types::{Direction, FontMetrics, WritingMode, is_measurement};
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -353,14 +353,14 @@ impl LayoutConstraints {
         block_start: f32,
         block_end: f32,
         previous: Option<&LineGeometry>,
-    ) -> Result<LineGeometry, LayoutInputError> {
+    ) -> Result<GeometryAnswer, LayoutInputError> {
         debug_assert!(
             block_start.is_finite() && block_end.is_finite() && block_end > block_start,
             "query_checked_geometry precondition violated (spec GEO-3)"
         );
         let geometry = self.resolve_line_geometry(line_index, block_start, block_end);
         if self.geometry_provider.is_none() {
-            return Ok(geometry);
+            return Ok(GeometryAnswer::from_checked(geometry));
         }
         if !geometry.is_valid(block_start, self.wrap_width) || geometry.stalls(block_start) {
             return Err(LayoutInputError::InvalidLineGeometry);
@@ -368,7 +368,7 @@ impl LayoutConstraints {
         if previous.is_some_and(|p| !geometry.is_subset_of(p)) {
             return Err(LayoutInputError::NonMonotonicGeometry);
         }
-        Ok(geometry)
+        Ok(GeometryAnswer::from_checked(geometry))
     }
 }
 

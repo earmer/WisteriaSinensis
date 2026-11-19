@@ -395,7 +395,6 @@ impl<'a> ItemChecks<'a> {
     ) -> Result<(), LayoutInputError> {
         use LayoutInputError as E;
         let invalid = Err(E::InvalidDiscretionary { item });
-        let (net_pre, net_post) = (net.pre, net.post);
         let is_zero = |net: f64| approx_eq_f64(net, 0.0);
         match &d.action {
             // A hyphenation's net deltas are its reshaping deltas.
@@ -419,15 +418,15 @@ impl<'a> ItemChecks<'a> {
                     .boxes
                     .get(item + 1)
                     .and_then(|v| v.clusters.first().map(|c| c.natural_width));
-                if (is_zero(net_pre) && is_zero(net_post))
-                    || !fits_cluster(net_pre, trailing)
-                    || !fits_cluster(net_post, leading)
+                if (is_zero(net.pre) && is_zero(net.post))
+                    || !fits_cluster(net.pre, trailing)
+                    || !fits_cluster(net.post, leading)
                 {
                     return invalid;
                 }
             }
             BreakAction::Direct | BreakAction::HardBreak => {
-                if !(is_zero(net_pre) && is_zero(net_post)) {
+                if !(is_zero(net.pre) && is_zero(net.post)) {
                     return invalid;
                 }
             }
@@ -435,8 +434,8 @@ impl<'a> ItemChecks<'a> {
             BreakAction::MathOperator { repeat } => {
                 let advance = repeat.map_or(0.0, |operator| operator.advance);
                 if !(is_extent(advance)
-                    && is_zero(net_pre)
-                    && approx_eq_f64(net_post, f64::from(advance)))
+                    && is_zero(net.pre)
+                    && approx_eq_f64(net.post, f64::from(advance)))
                 {
                     return invalid;
                 }
