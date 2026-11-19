@@ -13,6 +13,9 @@ struct Num(f32);
 
 impl Display for Num {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The engine's gates reject a non-finite number, so none reaches the
+        // output (AX-3); `null` keeps the JSON valid should one slip through.
+        debug_assert!(self.0.is_finite(), "non-finite number in demo JSON");
         if self.0.is_finite() {
             write!(f, "{}", self.0)
         } else {

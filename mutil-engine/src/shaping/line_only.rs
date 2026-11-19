@@ -102,67 +102,16 @@ impl<B: LineShaper> LineOnlyShaper<B> {
         window: &LineWindow<'_>,
         output: &mut ShapeOutput,
     ) -> (EdgeFonts, Synthesized) {
-        let LineWindow {
-            string,
-            lead,
-            trail,
-            start,
-            run,
-            atoms,
-            ref range,
-            text,
-        } = *window;
+        let run = window.run;
+        let range = &window.range;
         let glyphs = self.backend.shape_line(
-            string,
+            window.string,
             &run.families,
             run.style,
             run.font_size,
             &run.features,
         );
-        let kept_end = string.len() - trail;
-        let raw = |g: &LineGlyph, synthesized: bool| RawShapedGlyph {
-            glyph_id: g.glyph_id,
-            x_advance: g.x_advance,
-            x_offset: g.x_offset,
-            y_offset: g.y_offset,
-            is_synthesized: synthesized,
-        };
-        // A seam is unambiguous at the start of the shaped text and after
-        // white space; every other seam is reported unsafe (SHP-18).
-        let safe_before = |atom: usize| {
-            (atom == range.start && lead == 0)
-                || text[..atoms[atom].byte_range.start()]
-                    .chars()
-                    .next_back()
-                    .is_some_and(char::is_whitespace)
-        };
-        let mut synthesized = Synthesized::default();
-        let mut kept: Vec<TaggedGlyph> = Vec::new();
-        for g in &glyphs {
-            if g.byte_index < lead {
-                synthesized.leading.push(raw(g, true));
-            } else if g.byte_index >= kept_end || range.is_empty() {
-                synthesized.trailing.push(raw(g, true));
-            } else {
-                let byte = start + (g.byte_index - lead);
-                let atom = atom_containing(atoms, range.clone(), byte);
-                // A glyph of a gap between atoms (a word space, a tab, an
-                // object's bytes) belongs to no cluster: the frontend sizes
-                // the gap itself (SHP-5, WN-10).
-                let bytes = atoms[atom].byte_range;
-                if !bytes.contains(byte) {
-                    continue;
-                }
-                let unsafe_seam = !safe_before(atom);
-                kept.push(TaggedGlyph {
-                    atom,
-                    font: g.font,
-                    glyph: raw(g, false),
-                    unsafe_break: unsafe_seam,
-                    unsafe_concat: unsafe_seam,
-                });
-            }
-        }
+        let (kept, synthesized) = window.split_glyphs(&glyphs);
         // With no glyph to name it, a cluster takes the run's primary face.
         let fallback = glyphs.first().map_or_else(
             || {
@@ -187,10 +136,10 @@ impl<B: LineShaper> LineOnlyShaper<B> {
             return (edges, synthesized);
         }
         if kept.is_empty() {
-            push_empty_clusters(run, atoms, range.clone(), fallback, output);
+            push_empty_clusters(run, window.atoms, range.clone(), fallback, output);
         } else {
             let kept_first = output.clusters.len();
-            push_clusters(run, atoms, range.clone(), &kept, fallback, output);
+            push_clusters(run, window.atoms, range.clone(), &kept, fallback, output);
             // The cut edges take the face of the kept cluster beside them
             // (SHP-6).
             if let (Some(first), Some(last)) = (
@@ -224,6 +173,67 @@ struct LineWindow<'a> {
     range: core::ops::Range<usize>,
     /// The paragraph text.
     text: &'a str,
+}
+
+impl LineWindow<'_> {
+    /// Sorts the backend's glyphs into the kept text's, tagged with their
+    /// atoms, and the edit text's at the two edges, marked synthesized.
+    fn split_glyphs(&self, glyphs: &[LineGlyph]) -> (Vec<TaggedGlyph>, Synthesized) {
+        let Self {
+            string,
+            lead,
+            trail,
+            start,
+            atoms,
+            ref range,
+            text,
+            ..
+        } = *self;
+        let kept_end = string.len() - trail;
+        let raw = |g: &LineGlyph, synthesized: bool| RawShapedGlyph {
+            glyph_id: g.glyph_id,
+            x_advance: g.x_advance,
+            x_offset: g.x_offset,
+            y_offset: g.y_offset,
+            is_synthesized: synthesized,
+        };
+        // A seam is unambiguous at the start of the shaped text and after
+        // white space; every other seam is reported unsafe (SHP-18).
+        let safe_before = |atom: usize| {
+            (atom == range.start && lead == 0)
+                || text[..atoms[atom].byte_range.start()]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace)
+        };
+        let mut synthesized = Synthesized::default();
+        let mut kept: Vec<TaggedGlyph> = Vec::new();
+        for g in glyphs {
+            if g.byte_index < lead {
+                synthesized.leading.push(raw(g, true));
+            } else if g.byte_index >= kept_end || range.is_empty() {
+                synthesized.trailing.push(raw(g, true));
+            } else {
+                let byte = start + (g.byte_index - lead);
+                let atom = atom_containing(atoms, range.clone(), byte);
+                // A glyph of a gap between atoms (a word space, a tab, an
+                // object's bytes) belongs to no cluster: the frontend sizes
+                // the gap itself (SHP-5, WN-10).
+                if !atoms[atom].byte_range.contains(byte) {
+                    continue;
+                }
+                let unsafe_seam = !safe_before(atom);
+                kept.push(TaggedGlyph {
+                    atom,
+                    font: g.font,
+                    glyph: raw(g, false),
+                    unsafe_break: unsafe_seam,
+                    unsafe_concat: unsafe_seam,
+                });
+            }
+        }
+        (kept, synthesized)
+    }
 }
 
 /// The glyphs the backend returned for the edit text at the two edges.

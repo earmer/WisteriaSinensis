@@ -4,6 +4,7 @@
 use super::{LeadingEdit, ShapeOutput, TrailingEdit};
 use crate::types::{
     AtomFlags, FontId, FontRef, GraphemeAtom, RawShapedGlyph, ShapedCluster, ShapingRun, TextRange,
+    natural_width,
 };
 use smallvec::SmallVec;
 
@@ -80,6 +81,76 @@ pub(crate) fn atom_containing(
             .saturating_sub(1)
 }
 
+/// A run of glyphs whose atoms merged into one cluster: the atoms it spans
+/// and its slice of the tagged glyphs.
+struct Group {
+    min_atom: usize,
+    max_atom: usize,
+    glyphs: core::ops::Range<usize>,
+}
+
+/// Groups `glyphs` so `atom_range` partitions stay strictly monotonic and
+/// non-overlapping (`prev.max_atom < next.min_atom`) with contiguous glyph
+/// slices (`prev.glyphs.end == next.glyphs.start`): a glyph that reaches back
+/// into an earlier group merges them. A `HorizontalInVertical` run is one
+/// group.
+fn group_glyphs(
+    run: &ShapingRun,
+    range: &core::ops::Range<usize>,
+    glyphs: &[TaggedGlyph],
+) -> SmallVec<[Group; 8]> {
+    let mut groups: SmallVec<[Group; 8]> = SmallVec::new();
+    if run.orientation == crate::types::GlyphOrientation::HorizontalInVertical {
+        groups.push(Group {
+            min_atom: range.start,
+            max_atom: range.end - 1,
+            glyphs: 0..glyphs.len(),
+        });
+        return groups;
+    }
+    for (index, tagged) in glyphs.iter().enumerate() {
+        let atom = tagged.atom;
+        match groups.last_mut() {
+            Some(last) if atom >= last.min_atom && atom <= last.max_atom => {
+                last.glyphs.end = index + 1;
+            }
+            Some(last) if atom < last.min_atom => {
+                let mut min_atom = atom;
+                let mut max_atom = atom;
+                let mut members_start = index;
+                while let Some(prev) = groups.last() {
+                    if prev.max_atom < atom {
+                        break;
+                    }
+                    min_atom = min_atom.min(prev.min_atom);
+                    max_atom = max_atom.max(prev.max_atom);
+                    members_start = prev.glyphs.start;
+                    groups.pop();
+                }
+                groups.push(Group {
+                    min_atom,
+                    max_atom,
+                    glyphs: members_start..index + 1,
+                });
+            }
+            _ => groups.push(Group {
+                min_atom: atom,
+                max_atom: atom,
+                glyphs: index..index + 1,
+            }),
+        }
+    }
+    if groups.is_empty() {
+        groups.push(Group {
+            min_atom: range.start,
+            max_atom: range.start,
+            glyphs: 0..0,
+        });
+    }
+    groups[0].min_atom = range.start;
+    groups
+}
+
 /// Groups glyphs into clusters of whole atoms (spec SHP-13): a glyph that
 /// reaches back into an earlier cluster merges the two, and an atom with no
 /// glyph of its own (a ligature component) joins the cluster before it.
@@ -87,7 +158,8 @@ pub(crate) fn atom_containing(
 /// A cluster has one face, its first glyph's (`fallback_font` when there is
 /// no glyph at all). A later glyph of another face has no meaning in that
 /// face, so it becomes the face's `.notdef` (glyph 0) with its advance kept
-/// (spec SHP-5, SHP-24).
+/// (spec SHP-5, SHP-24). The width is `types::natural_width`, never
+/// repaired here (SHP-18).
 pub(crate) fn push_clusters(
     run: &ShapingRun,
     atoms: &[GraphemeAtom],
@@ -99,87 +171,21 @@ pub(crate) fn push_clusters(
     if range.is_empty() {
         return;
     }
-    let ShapeOutput {
-        clusters: output_clusters,
-        glyphs: output_glyphs,
-    } = output;
-    struct Group {
-        min_atom: usize,
-        max_atom: usize,
-        glyphs: core::ops::Range<usize>,
-    }
-
-    // Group glyphs so `atom_range` partitions stay strictly monotonic and
-    // non-overlapping (`prev.max_atom < next.min_atom`) with contiguous glyph
-    // slices (`prev.glyphs.end == next.glyphs.start`).
-    let mut groups: SmallVec<[Group; 8]> = SmallVec::new();
-    if run.orientation == crate::types::GlyphOrientation::HorizontalInVertical {
-        groups.push(Group {
-            min_atom: range.start,
-            max_atom: range.end - 1,
-            glyphs: 0..glyphs.len(),
-        });
-    } else {
-        for (index, tagged) in glyphs.iter().enumerate() {
-            let atom = tagged.atom;
-            match groups.last_mut() {
-                Some(last) if atom >= last.min_atom && atom <= last.max_atom => {
-                    last.glyphs.end = index + 1;
-                }
-                Some(last) if atom < last.min_atom => {
-                    let mut min_atom = atom;
-                    let mut max_atom = atom;
-                    let mut members_start = index;
-                    while let Some(prev) = groups.last() {
-                        if prev.max_atom < atom {
-                            break;
-                        }
-                        min_atom = min_atom.min(prev.min_atom);
-                        max_atom = max_atom.max(prev.max_atom);
-                        members_start = prev.glyphs.start;
-                        groups.pop();
-                    }
-                    groups.push(Group {
-                        min_atom,
-                        max_atom,
-                        glyphs: members_start..index + 1,
-                    });
-                }
-                _ => groups.push(Group {
-                    min_atom: atom,
-                    max_atom: atom,
-                    glyphs: index..index + 1,
-                }),
-            }
-        }
-        if groups.is_empty() {
-            groups.push(Group {
-                min_atom: range.start,
-                max_atom: range.start,
-                glyphs: 0..0,
-            });
-        }
-        groups[0].min_atom = range.start;
-    }
+    let groups = group_glyphs(run, &range, glyphs);
     for (k, group) in groups.iter().enumerate() {
         let start = group.min_atom;
         let end = groups.get(k + 1).map_or(range.end, |next| next.min_atom);
-        let first = output_glyphs.len();
+        let first = output.glyphs.len();
         let slice = &glyphs[group.glyphs.clone()];
         let font = slice.first().map_or(fallback_font, |g| g.font);
-        output_glyphs.extend(slice.iter().map(|g| RawShapedGlyph {
+        output.glyphs.extend(slice.iter().map(|g| RawShapedGlyph {
             glyph_id: if g.font == font { g.glyph.glyph_id } else { 0 },
             ..g.glyph
         }));
         let (unsafe_break, unsafe_concat) = slice
             .first()
             .map_or((false, false), |g| (g.unsafe_break, g.unsafe_concat));
-        let natural_width = slice
-            .iter()
-            .map(|g| g.glyph.x_advance)
-            .sum::<f32>()
-            .max(0.0);
-        output_clusters.push(ShapedCluster {
+        output.clusters.push(ShapedCluster {
             orientation: run.orientation,
             byte_range: TextRange::new(
                 atoms[start].byte_range.start(),
@@ -189,8 +195,8 @@ pub(crate) fn push_clusters(
             font: FontRef::unscaled(font),
             bidi_level: run.bidi_level,
             flags: AtomFlags::for_cluster(&atoms[start..end]),
-            glyph_range: first..output_glyphs.len(),
-            natural_width,
+            glyph_range: first..output.glyphs.len(),
+            natural_width: natural_width(&output.glyphs[first..], 0.0),
             safe_to_break_before: !unsafe_break,
             safe_to_concat_before: !unsafe_break && !unsafe_concat,
         });
@@ -271,22 +277,19 @@ pub(crate) fn attach_synthesized(
     leading: Vec<RawShapedGlyph>,
     trailing: Vec<RawShapedGlyph>,
 ) {
-    let width = |gs: &[RawShapedGlyph]| gs.iter().map(|g| g.x_advance).sum::<f32>();
     if !trailing.is_empty() {
-        let w = width(&trailing);
         glyphs.extend(trailing);
         if let Some(last) = clusters.last_mut() {
             last.glyph_range.end = glyphs.len();
-            last.natural_width = (last.natural_width + w).max(0.0);
+            last.natural_width = natural_width(&glyphs[last.glyph_range.clone()], 0.0);
         }
     }
     if !leading.is_empty() && !clusters.is_empty() {
-        let w = width(&leading);
         let count = leading.len();
         let at = clusters[0].glyph_range.start;
         glyphs.splice(at..at, leading);
         clusters[0].glyph_range.end += count;
-        clusters[0].natural_width = (clusters[0].natural_width + w).max(0.0);
+        clusters[0].natural_width = natural_width(&glyphs[clusters[0].glyph_range.clone()], 0.0);
         for cluster in &mut clusters[1..] {
             cluster.glyph_range =
                 cluster.glyph_range.start + count..cluster.glyph_range.end + count;

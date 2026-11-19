@@ -119,7 +119,7 @@ pub enum LineBreakClass {
 bitflags::bitflags! {
     /// Per-atom boolean properties, stored as a 16-bit mask (spec §2.2).
     ///
-    /// Twelve of sixteen bits are assigned (bit 3 is unused); the high three
+    /// Twelve of sixteen bits are assigned (bits 0 to 11); the high four
     /// are reserved and are masked off by `from_bits_truncate` and `!`.
     /// Layout: 2 bytes, alignment 2.
     #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
@@ -135,28 +135,28 @@ bitflags::bitflags! {
         /// CSS Text 4 Appendix D `[W2]`). Split from the draft's `IS_CURSIVE_CONNECTED`.
         const NO_LETTER_SPACING = 1 << 2;
         /// A UTS #51 emoji sequence: core, ZWJ, keycap, flag, tag or modifier `[U5]`.
-        const IS_EMOJI_SEQUENCE = 1 << 4;
+        const IS_EMOJI_SEQUENCE = 1 << 3;
         /// Opening punctuation.
-        const IS_OPEN_PUNCT = 1 << 5;
+        const IS_OPEN_PUNCT = 1 << 4;
         /// Closing punctuation.
-        const IS_CLOSE_PUNCT = 1 << 6;
+        const IS_CLOSE_PUNCT = 1 << 5;
         /// Cluster contains U+FE0E, U+FE0F or an IVS selector (U+E0100..U+E01EF);
         /// set after segmentation (spec §3 Step 1, FE-7).
-        const HAS_VARIATION_SELECTOR = 1 << 7;
+        const HAS_VARIATION_SELECTOR = 1 << 6;
         /// Resolved intra-word apostrophe (spec §3 Step 2, FE-11).
-        const IS_APOSTROPHE = 1 << 8;
+        const IS_APOSTROPHE = 1 << 7;
         /// Continues an unbreakable FE-15 dash, ellipsis or middle-dot run (spec §3 Step 3, FE-15).
-        const BINDS_TO_PREVIOUS = 1 << 9;
+        const BINDS_TO_PREVIOUS = 1 << 8;
         /// UAX #9 L1 resets this atom with whitespace at a line end or before a
         /// tab: its first code point has class WS, S, BN, an isolate initiator or
         /// PDI, or an embedding or override control (spec FE-30, ST2-1).
-        const L1_RESETTABLE = 1 << 10;
+        const L1_RESETTABLE = 1 << 9;
         /// An opening mark that may hang at a line start: UAX #14 class OP, or
         /// General Category Ps or Pi (spec ST1-3).
-        const HANGABLE_START = 1 << 11;
+        const HANGABLE_START = 1 << 10;
         /// A stop or comma that may hang at a line end: U+002C, U+002E, U+3001,
         /// U+3002, U+FF0C or U+FF0E (spec ST1-3).
-        const HANGABLE_END = 1 << 12;
+        const HANGABLE_END = 1 << 11;
     }
 }
 

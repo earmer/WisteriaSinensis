@@ -42,6 +42,57 @@ pub(super) struct Units {
     pub(super) atom_styles: Vec<usize>,
 }
 
+/// Every inline object lies on grapheme boundaries (FE-25).
+fn check_objects(objects: &[InlineObjectInput], graphemes: &[usize]) -> Result<(), FrontendError> {
+    for (index, object) in objects.iter().enumerate() {
+        let r = object.byte_range;
+        if graphemes.binary_search(&r.start()).is_err()
+            || graphemes.binary_search(&r.end()).is_err()
+        {
+            return Err(FrontendError::InvalidInlineObject { object: index });
+        }
+    }
+    Ok(())
+}
+
+/// The break class and the flags of the atom over `range`, whose first code
+/// point is `first`, known at segmentation: punctuation, variation
+/// selectors, emoji, L1 resettability, apostrophes and CJK ideographs.
+fn atom_properties(text: &str, range: TextRange, first: char) -> (LineBreakClass, AtomFlags) {
+    let grapheme = &text[range.as_range()];
+    let class = segment::line_break_class(first);
+    let mut flags = AtomFlags::EMPTY;
+    flags.set(AtomFlags::IS_OPEN_PUNCT, class == LineBreakClass::Op);
+    flags.set(
+        AtomFlags::IS_CLOSE_PUNCT,
+        matches!(class, LineBreakClass::Cl | LineBreakClass::Cp),
+    );
+    flags.set(
+        AtomFlags::HAS_VARIATION_SELECTOR,
+        grapheme
+            .chars()
+            .any(|c| matches!(c, '\u{FE0E}' | '\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')),
+    );
+    flags.set(
+        AtomFlags::IS_EMOJI_SEQUENCE,
+        emoji::is_emoji_sequence(grapheme),
+    );
+    flags.set(
+        AtomFlags::L1_RESETTABLE,
+        bidi::line_class(bidi::char_class(first)) != bidi::LineClass::Other,
+    );
+    flags.set(AtomFlags::IS_APOSTROPHE, script::is_apostrophe(text, range));
+    flags.set(
+        AtomFlags::IS_CJK_IDEOGRAPH,
+        script::is_wide(first)
+            && matches!(
+                &script::char_script(first).as_bytes(),
+                b"Hani" | b"Hira" | b"Kana"
+            ),
+    );
+    (class, flags)
+}
+
 impl<'a> Compiler<'a> {
     /// Step 1 (FE-25): splits the text into atoms, glue, tabs, hard breaks
     /// and objects. Each atom takes the level of its first code point (FE-10,
@@ -53,14 +104,7 @@ impl<'a> Compiler<'a> {
     ) -> Result<Units, FrontendError> {
         let text = self.text;
         let objects = self.input.inline_objects;
-        for (index, object) in objects.iter().enumerate() {
-            let r = object.byte_range;
-            if graphemes.binary_search(&r.start()).is_err()
-                || graphemes.binary_search(&r.end()).is_err()
-            {
-                return Err(FrontendError::InvalidInlineObject { object: index });
-            }
-        }
+        check_objects(objects, graphemes)?;
         let mut built = Units {
             units: Vec::new(),
             atoms: Vec::new(),
@@ -91,36 +135,7 @@ impl<'a> Compiler<'a> {
                 '\u{2028}' if single => Unit::HardBreak(range),
                 c if single && is_word_space(c) => Unit::Glue(range, self.style_at(range.start())),
                 _ => {
-                    let mut flags = AtomFlags::EMPTY;
-                    let class = segment::line_break_class(first);
-                    flags.set(AtomFlags::IS_OPEN_PUNCT, class == LineBreakClass::Op);
-                    flags.set(
-                        AtomFlags::IS_CLOSE_PUNCT,
-                        matches!(class, LineBreakClass::Cl | LineBreakClass::Cp),
-                    );
-                    flags.set(
-                        AtomFlags::HAS_VARIATION_SELECTOR,
-                        grapheme.chars().any(|c| {
-                            matches!(c, '\u{FE0E}' | '\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
-                        }),
-                    );
-                    flags.set(
-                        AtomFlags::IS_EMOJI_SEQUENCE,
-                        emoji::is_emoji_sequence(grapheme),
-                    );
-                    flags.set(
-                        AtomFlags::L1_RESETTABLE,
-                        bidi::line_class(bidi::char_class(first)) != bidi::LineClass::Other,
-                    );
-                    flags.set(AtomFlags::IS_APOSTROPHE, script::is_apostrophe(text, range));
-                    flags.set(
-                        AtomFlags::IS_CJK_IDEOGRAPH,
-                        script::is_wide(first)
-                            && matches!(
-                                &script::char_script(first).as_bytes(),
-                                b"Hani" | b"Hira" | b"Kana"
-                            ),
-                    );
+                    let (class, flags) = atom_properties(text, range, first);
                     built.atoms.push(GraphemeAtom {
                         orientation: GlyphOrientation::Horizontal,
                         byte_range: range,

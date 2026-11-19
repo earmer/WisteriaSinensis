@@ -4,6 +4,8 @@ use crate::types::FontMetrics;
 use harfrust::Tag;
 use read_fonts::TableProvider;
 use read_fonts::model::Font;
+use read_fonts::model::metrics::{LineBox, Metrics};
+use read_fonts::types::F48Dot16;
 use read_fonts::types::GlyphId;
 use smallvec::SmallVec;
 
@@ -41,46 +43,16 @@ impl UnitMetrics {
 }
 
 /// The font's [`FontMetrics`] in font units, with the documented fallbacks
-/// for whatever its tables leave out (spec FNT-4, SHP-17). Every offset is
-/// positive towards line-over: `post` and `OS/2` already store the
-/// underline and strike-out positions that way.
+/// for whatever its tables leave out (spec SHP-17). A value the tables do
+/// give is passed on as read, negative or not: the shaper gate judges it
+/// against FNT-4 (`InvalidShaperMetrics`) and the backend never repairs it
+/// (SHP-18, AX-3). Every offset is positive towards line-over: `post` and
+/// `OS/2` already store the underline and strike-out positions that way.
 pub(super) fn unit_metrics(font: &Font) -> UnitMetrics {
     let metrics = font.metrics();
     let upem = f32::from(metrics.units_per_em.max(1));
-    let f = |v: read_fonts::types::F48Dot16| v.to_f32();
-    let nonzero = |line: &Option<read_fonts::model::metrics::LineBox>| {
-        line.filter(|l| l.ascender.to_f32() - l.descender.to_f32() > 0.0)
-    };
-    let typo = nonzero(&metrics.typo_line);
-    let hhea = nonzero(&metrics.hhea_line);
-    let chosen = if metrics.use_typo_metrics {
-        typo.or(hhea)
-    } else {
-        hhea.or(typo)
-    };
-    let (ascent, descent, line_gap) = match (chosen, metrics.win_line) {
-        (Some(line), _) => (
-            f(line.ascender),
-            -f(line.descender),
-            f(line.line_gap).max(0.0),
-        ),
-        (None, Some(win)) if f(win.ascender) - f(win.descender) > 0.0 => {
-            (f(win.ascender), -f(win.descender), 0.0)
-        }
-        _ => (0.8 * upem, 0.2 * upem, 0.0),
-    };
-    let (ascent, descent) = (ascent.max(0.0), descent.max(0.0));
-    let ink_top = |c: char, default: f32| metrics_value(font, c).unwrap_or(default);
-    let x_height = metrics
-        .x_height
-        .map(f)
-        .filter(|v| *v > 0.0)
-        .unwrap_or_else(|| ink_top('x', 0.5 * upem));
-    let cap_height = metrics
-        .cap_height
-        .map(f)
-        .filter(|v| *v > 0.0)
-        .unwrap_or_else(|| ink_top('H', 0.7 * upem));
+    let (ascent, descent, line_gap) = horizontal_line(metrics, upem);
+    let (x_height, cap_height) = ink_heights(font, metrics, upem);
     let style = font.style_metrics();
     let (underline_position, underline_thickness) = style
         .underline
@@ -91,13 +63,7 @@ pub(super) fn unit_metrics(font: &Font) -> UnitMetrics {
         .map(|d| f(d.position))
         .unwrap_or(x_height / 2.0);
     let (vertical_ascent, vertical_descent, vertical_line_gap) = nonzero(&metrics.vhea_line)
-        .map(|l| {
-            (
-                f(l.ascender).max(0.0),
-                (-f(l.descender)).max(0.0),
-                f(l.line_gap).max(0.0),
-            )
-        })
+        .map(|l| (f(l.ascender), -f(l.descender), f(l.line_gap)))
         .unwrap_or((0.5 * upem, 0.5 * upem, 0.0));
     let base = base_offsets(font);
     let ideographic = base.ideo.unwrap_or(-descent);
@@ -121,11 +87,55 @@ pub(super) fn unit_metrics(font: &Font) -> UnitMetrics {
             underline_position,
             underline_thickness,
             strikeout_position,
-            x_height: x_height.max(0.0),
-            cap_height: cap_height.max(0.0),
+            x_height,
+            cap_height,
             use_typo_metrics: metrics.use_typo_metrics,
         },
     }
+}
+
+fn f(v: read_fonts::types::F48Dot16) -> f32 {
+    v.to_f32()
+}
+
+/// The line box of a table, when it spans a positive height; a table that
+/// does not is skipped in favour of the next (spec SHP-17).
+fn nonzero(line: &Option<LineBox>) -> Option<LineBox> {
+    line.filter(|l| l.ascender.to_f32() - l.descender.to_f32() > 0.0)
+}
+
+/// Ascent, descent and line gap from `OS/2` typo or `hhea` (by
+/// `use_typo_metrics`), else `OS/2` win, else 0.8 / 0.2 em (spec SHP-17).
+fn horizontal_line(metrics: &Metrics, upem: f32) -> (f32, f32, f32) {
+    let typo = nonzero(&metrics.typo_line);
+    let hhea = nonzero(&metrics.hhea_line);
+    let chosen = if metrics.use_typo_metrics {
+        typo.or(hhea)
+    } else {
+        hhea.or(typo)
+    };
+    match (chosen, metrics.win_line) {
+        (Some(line), _) => (f(line.ascender), -f(line.descender), f(line.line_gap)),
+        (None, Some(win)) if f(win.ascender) - f(win.descender) > 0.0 => {
+            (f(win.ascender), -f(win.descender), 0.0)
+        }
+        _ => (0.8 * upem, 0.2 * upem, 0.0),
+    }
+}
+
+/// The x-height and cap height: the table value when positive, else the
+/// ink top of `x` and `H`, else 0.5 / 0.7 em (spec SHP-17).
+fn ink_heights(font: &Font, metrics: &Metrics, upem: f32) -> (f32, f32) {
+    let height = |table: Option<F48Dot16>, c: char, default: f32| {
+        table
+            .map(f)
+            .filter(|v| *v > 0.0)
+            .unwrap_or_else(|| metrics_value(font, c).unwrap_or(default))
+    };
+    (
+        height(metrics.x_height, 'x', 0.5 * upem),
+        height(metrics.cap_height, 'H', 0.7 * upem),
+    )
 }
 
 /// The top of the ink of `c`'s glyph, in font units.

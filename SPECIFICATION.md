@@ -1228,6 +1228,7 @@ pub trait TextShaper: Send + Sync {
     fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32;
 }
 pub struct ShapeOutput { pub clusters: Vec<ShapedCluster>, pub glyphs: Vec<RawShapedGlyph> }
+impl ShapeOutput { pub fn clear(&mut self); }
 pub struct ReshapeRequest<'a> {
     pub text: &'a str, pub run: &'a ShapingRun, pub atoms: &'a [GraphemeAtom], pub window: TextRange,
     pub leading_edit: &'a LeadingEdit, pub trailing_edit: &'a TrailingEdit,
@@ -1245,7 +1246,7 @@ pub struct NoopShaper;
 
 **[SHP-3] Text.** `text` is the whole paragraph text and `run.byte_range` selects the run, so atom offsets are absolute paragraph indices; the backend MAY use text outside the run as shaping context. `atoms` is the run's atom slice (`ParagraphAst::run_atoms`).
 
-**[SHP-4] Output buffers.** `shape_run` and `reshape_window` write to a caller-owned `ShapeOutput`: they **append** clusters to `ShapeOutput::clusters` and glyphs to `ShapeOutput::glyphs`, never clearing either. A cluster's `atom_range` indexes `atoms`; its `glyph_range` indexes `ShapeOutput::glyphs` in absolute positions of that vector. In cluster order the new glyph ranges tile the glyphs the call appended.
+**[SHP-4] Output buffers.** `shape_run` and `reshape_window` write to a caller-owned `ShapeOutput`: they **append** clusters to `ShapeOutput::clusters` and glyphs to `ShapeOutput::glyphs`, never clearing either; `ShapeOutput::clear` empties both vectors, keeping their allocations, for a host that reuses one buffer. A cluster's `atom_range` indexes `atoms`; its `glyph_range` indexes `ShapeOutput::glyphs` in absolute positions of that vector. In cluster order the new glyph ranges tile the glyphs the call appended.
 
 **[SHP-5] `shape_run`** shapes one complete run, in logical order (SHP-11), with the clusters partitioning `atoms`. It shapes the run's atom slices, each contiguous in bytes, and never the bytes of the run's `byte_range` that no atom covers (glue, tabs, inline objects: AST-5), which reach it only as shaping context. For a `HorizontalInVertical` run it returns exactly one cluster covering all atoms, with every glyph in logical order, `natural_width` the group's advance along the vertical line, and both safety flags as for the start of the run. The group takes one face: the first atom's face if it covers every atom, else the first face, among those chosen for its atoms and then the run's candidates, that does, else the first atom's. A `LineOnly` backend chooses faces itself; when it sets the group in more than one face, the cluster takes its first glyph's face and a glyph from another face becomes that face's `.notdef` (glyph 0), keeping its advance.
 
