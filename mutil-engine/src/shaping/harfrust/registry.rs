@@ -8,7 +8,7 @@ use crate::types::{
 use core::fmt;
 use read_fonts::TableProvider;
 use read_fonts::model::Font;
-use std::collections::HashSet;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// The regional design a CJK face is built for (spec SHP-25).
@@ -171,36 +171,92 @@ impl FontRegistry {
         self.faces.get(usize::try_from(id.0).ok()?)
     }
 
-    /// The faces to try for `families` and `style`, best first: the best
-    /// style match of each family of the stack in order, then every other
-    /// face in registration order (the deterministic last resort, SHP-12).
-    pub(super) fn candidates(&self, families: &[FontFamily], style: FontStyle) -> Vec<FontId> {
-        let mut order: Vec<FontId> = Vec::new();
+    fn resolve_family_name<'a>(&'a self, family: &'a FontFamily) -> Option<&'a str> {
+        match family {
+            FontFamily::Named(name) => Some(name.as_ref()),
+            FontFamily::Generic(generic) => self
+                .generics
+                .iter()
+                .find(|(keyword, _)| keyword == generic)
+                .map(|(_, name)| name.as_ref()),
+        }
+    }
+
+    /// The first candidate face for `families` and `style`, without allocating
+    /// the full fallback order.
+    pub(super) fn primary_candidate(
+        &self,
+        families: &[FontFamily],
+        style: FontStyle,
+    ) -> Option<FontId> {
         for family in families {
-            let name: Option<&str> = match family {
-                FontFamily::Named(name) => Some(name.as_ref()),
-                FontFamily::Generic(generic) => self
-                    .generics
-                    .iter()
-                    .find(|(keyword, _)| keyword == generic)
-                    .map(|(_, name)| name.as_ref()),
+            let Some(name) = self.resolve_family_name(family) else {
+                continue;
             };
-            let Some(name) = name else { continue };
-            let mut members: Vec<(u32, FontId)> = self
+            if let Some(best) = self
                 .faces
                 .iter()
                 .enumerate()
                 .filter(|(_, face)| face.family.eq_ignore_ascii_case(name))
-                .map(|(index, face)| (style_distance(face.style, style), id_of(index)))
-                .collect();
-            members.sort_by_key(|&(distance, id)| (distance, id.0));
-            order.extend(members.into_iter().map(|(_, id)| id));
+                .min_by_key(|&(index, face)| (style_distance(face.style, style), id_of(index).0))
+                .map(|(index, _)| id_of(index))
+            {
+                return Some(best);
+            }
         }
-        order.extend((0..self.faces.len()).map(id_of));
-        // Each face keeps its first position.
-        let mut seen = HashSet::new();
-        order.retain(|&id| seen.insert(id));
+        (!self.faces.is_empty()).then_some(FontId(0))
+    }
+
+    /// The pre-resolved faces to try for `families` and `style`, best first:
+    /// the best style match of each family of the stack in order, then every
+    /// other face in registration order (the deterministic last resort, SHP-12).
+    pub(super) fn resolve_candidates(
+        &self,
+        families: &[FontFamily],
+        style: FontStyle,
+    ) -> SmallVec<[ResolvedCandidate<'_>; 8]> {
+        let mut order: SmallVec<[ResolvedCandidate<'_>; 8]> = SmallVec::new();
+        let mut seen: SmallVec<[bool; 64]> = SmallVec::from_elem(false, self.faces.len());
+        for family in families {
+            let Some(name) = self.resolve_family_name(family) else {
+                continue;
+            };
+            let start = order.len();
+            for (index, face) in self.faces.iter().enumerate() {
+                if !seen[index] && face.family.eq_ignore_ascii_case(name) {
+                    seen[index] = true;
+                    order.push(ResolvedCandidate {
+                        id: id_of(index),
+                        face,
+                    });
+                }
+            }
+            order[start..].sort_by_key(|cand| (style_distance(cand.face.style, style), cand.id.0));
+        }
+        for (index, face) in self.faces.iter().enumerate() {
+            if !seen[index] {
+                seen[index] = true;
+                order.push(ResolvedCandidate {
+                    id: id_of(index),
+                    face,
+                });
+            }
+        }
         order
+    }
+}
+
+/// One candidate face resolved once per run so face selection works directly
+/// on in-memory references with zero registry lookups inside the per-atom loop.
+#[derive(Clone, Copy)]
+pub(super) struct ResolvedCandidate<'a> {
+    pub(super) id: FontId,
+    pub(super) face: &'a RegisteredFace,
+}
+
+impl ResolvedCandidate<'_> {
+    pub(super) fn profile(self) -> FaceProfile {
+        self.face.profile
     }
 }
 

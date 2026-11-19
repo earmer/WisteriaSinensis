@@ -7,16 +7,16 @@ use crate::types::{FontSlant, GenericFamily};
 
 #[test]
 fn the_instance_cache_is_bounded() {
-    let mut cache: HashMap<u32, u32> = HashMap::new();
+    let mut cache: TwoGenCache<u32, u32> = TwoGenCache::default();
     for key in 0..1000 {
-        let built = *bounded_entry(&mut cache, key, MAX_CACHED_INSTANCES, || key * 2);
+        let built = *cache.get_or_insert_with(key, MAX_CACHED_INSTANCES, || key * 2);
         assert_eq!(built, key * 2);
         assert!(cache.len() <= MAX_CACHED_INSTANCES);
     }
     // A cached key is served without rebuilding, even when full.
     let full = cache.len();
     let key = *cache.keys().next().expect("an entry");
-    let served = *bounded_entry(&mut cache, key, full, || unreachable!("cached"));
+    let served = *cache.get_or_insert_with(key, MAX_CACHED_INSTANCES, || unreachable!("cached"));
     assert_eq!(served, key * 2);
     assert_eq!(cache.len(), full);
 }
