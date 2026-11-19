@@ -110,8 +110,9 @@ pub struct ShapeOutput {
 }
 
 impl ShapeOutput {
-    /// Empties both vectors, keeping their allocations.
-    pub(crate) fn clear(&mut self) {
+    /// Empties both vectors, keeping their allocations, so a host can reuse
+    /// one buffer across calls (spec SHP-4).
+    pub fn clear(&mut self) {
         self.clusters.clear();
         self.glyphs.clear();
     }
