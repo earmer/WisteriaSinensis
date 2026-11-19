@@ -83,16 +83,11 @@ impl Layout<'_, '_> {
         let mut stops = distinct_stops(raw);
         resolve_shared_offsets(&mut stops, line.soft_wrap());
         // The level of an entity touching `offset`, else the paragraph's.
+        let entities = EntityLevels::new(runs, boxes);
         let level_at = |offset: usize| {
-            let glyphs = runs.iter().flat_map(|r| {
-                r.glyphs
-                    .iter()
-                    .filter_map(|g| Some((g.byte_range?, r.bidi_level)))
-            });
-            glyphs
-                .chain(boxes.iter().map(|b| (b.byte_range, b.bidi_level)))
-                .find(|(r, _)| r.start() <= offset && offset <= r.end())
-                .map_or_else(|| self.base.base_level(), |(_, level)| level)
+            entities
+                .at(offset)
+                .unwrap_or_else(|| self.base.base_level())
         };
         let to_stop = |s: &RawStop| CaretStop {
             x: s.x,
@@ -240,4 +235,53 @@ fn resolve_shared_offsets(stops: &mut Vec<RawStop>, soft_wrap: bool) {
     let mut merged = merged.into_iter();
     stops.retain(|_| merged.next() == Some(false));
     stops.sort_by(|a, b| a.x.total_cmp(&b.x));
+}
+
+/// The levels of the entities (glyph clusters and boxes) of a line, by byte
+/// range, so that "the first entity in visual order whose closed range holds
+/// `offset`" is a binary search, not a scan of every glyph.
+struct EntityLevels {
+    /// `(start, end, rank, level)` sorted by `start`; `rank` is the position in
+    /// visual order (glyphs of all runs, then boxes).
+    sorted: Vec<(usize, usize, usize, BidiLevel)>,
+    /// `reach[i]` is the greatest `end` among `sorted[..=i]`.
+    reach: Vec<usize>,
+}
+
+impl EntityLevels {
+    fn new(runs: &[VisualGlyphRun], boxes: &[PositionedInlineBox]) -> Self {
+        let glyphs = runs.iter().flat_map(|r| {
+            r.glyphs
+                .iter()
+                .filter_map(|g| Some((g.byte_range?, r.bidi_level)))
+        });
+        let mut sorted: Vec<(usize, usize, usize, BidiLevel)> = glyphs
+            .chain(boxes.iter().map(|b| (b.byte_range, b.bidi_level)))
+            .enumerate()
+            .map(|(rank, (r, level))| (r.start(), r.end(), rank, level))
+            .collect();
+        sorted.sort_unstable_by_key(|&(start, _, rank, _)| (start, rank));
+        let mut reach = Vec::with_capacity(sorted.len());
+        let mut max_end = 0;
+        for &(_, end, _, _) in &sorted {
+            max_end = max_end.max(end);
+            reach.push(max_end);
+        }
+        Self { sorted, reach }
+    }
+
+    fn at(&self, offset: usize) -> Option<BidiLevel> {
+        let upto = self.sorted.partition_point(|&(start, ..)| start <= offset);
+        let mut best: Option<(usize, BidiLevel)> = None;
+        for i in (0..upto).rev() {
+            if self.reach[i] < offset {
+                break;
+            }
+            let (_, end, rank, level) = self.sorted[i];
+            if end >= offset && best.is_none_or(|(r, _)| rank < r) {
+                best = Some((rank, level));
+            }
+        }
+        best.map(|(_, level)| level)
+    }
 }
