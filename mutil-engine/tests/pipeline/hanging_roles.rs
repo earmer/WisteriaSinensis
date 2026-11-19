@@ -19,7 +19,7 @@ fn out4_hanging_glyphs_are_exactly_the_hanging_cjk_marks() {
         ..Default::default()
     };
     let p = lay_out_bidi(text, &[JAPANESE], &column(100.0), &options);
-    ValidatedLayout::new(&p, text).unwrap();
+    ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     assert_eq!(p.lines.len(), 1);
     let line = &p.lines[0];
     let hanging: Vec<usize> = line
@@ -43,7 +43,7 @@ fn out4_hanging_glyphs_are_exactly_the_hanging_cjk_marks() {
 fn out4_without_a_hang_mode_nothing_has_the_hanging_role() {
     let text = "「漢字、漢字。";
     let p = lay_out_bidi(text, &[JAPANESE], &column(100.0), &LayoutOptions::default());
-    ValidatedLayout::new(&p, text).unwrap();
+    ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let line = &p.lines[0];
     assert_eq!(line.hanging_glyphs().count(), 0);
     assert!(glyphs(line).all(|g| line.role(g) == GlyphRole::Body));
