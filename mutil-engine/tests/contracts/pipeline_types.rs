@@ -82,21 +82,22 @@ fn test_pipeline_types_compile() {
     assert_eq!(font_id, FontId(0));
     assert_eq!(metrics, FontMetrics::default());
 
-    let (mut out, mut out_glyphs) = (Vec::new(), Vec::new());
-    shaper.shape_run(TEXT, r, &[], &mut out, &mut out_glyphs);
+    let mut out = ShapeOutput::default();
+    shaper.shape_run(TEXT, r, &[], &mut out);
     let run_atoms = ast.run_atoms(0);
     assert_eq!(run_atoms.len(), 10); // "Hello" and "world"; the space is glue
     shaper.reshape_window(
-        TEXT,
-        r,
-        run_atoms,
-        TextRange::new(0, 5),
-        LeadingEdit::None,
-        TrailingEdit::AppendHyphen { hyphen: '-' },
+        &ReshapeRequest {
+            text: TEXT,
+            run: r,
+            atoms: run_atoms,
+            window: TextRange::new(0, 5),
+            leading_edit: &LeadingEdit::None,
+            trailing_edit: &TrailingEdit::AppendHyphen { hyphen: '-' },
+        },
         &mut out,
-        &mut out_glyphs,
     );
-    assert!(out.is_empty() && out_glyphs.is_empty());
+    assert!(out.clusters.is_empty() && out.glyphs.is_empty());
     assert!(
         shaper
             .ligature_carets(

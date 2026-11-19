@@ -234,20 +234,21 @@ fn a_window_takes_its_edits_as_synthesized_glyphs() {
     let ast = compile_lines(text, &["Noto Serif"]);
     let run = &ast.runs[0];
     let atoms = ast.run_atoms(0);
-    let mut clusters = Vec::new();
-    let mut glyphs = Vec::new();
+    let mut out = ShapeOutput::default();
     // "off" + hyphen: the window's atoms stay partitioned, the hyphen is the
     // last cluster's last glyph.
     LINES.reshape_window(
-        text,
-        run,
-        atoms,
-        TextRange::new(0, 3),
-        LeadingEdit::None,
-        TrailingEdit::AppendHyphen { hyphen: '-' },
-        &mut clusters,
-        &mut glyphs,
+        &ReshapeRequest {
+            text,
+            run,
+            atoms,
+            window: TextRange::new(0, 3),
+            leading_edit: &LeadingEdit::None,
+            trailing_edit: &TrailingEdit::AppendHyphen { hyphen: '-' },
+        },
+        &mut out,
     );
+    let ShapeOutput { clusters, glyphs } = out;
     let covered: Vec<&str> = clusters
         .iter()
         .map(|c| &text[c.byte_range.as_range()])
@@ -318,9 +319,9 @@ fn shp5_line_only_horizontal_in_vertical_shapes_into_one_valid_cluster() {
         atom_range: 0..2,
         cluster_range: 0..1,
     };
-    let mut clusters = Vec::new();
-    let mut glyphs = Vec::new();
-    LINES.shape_run(text, &run, &atoms, &mut clusters, &mut glyphs);
+    let mut out = ShapeOutput::default();
+    LINES.shape_run(text, &run, &atoms, &mut out);
+    let ShapeOutput { clusters, glyphs } = out;
 
     assert_eq!(clusters.len(), 1, "{clusters:?}");
     let cluster = &clusters[0];
@@ -368,9 +369,9 @@ fn shp5_line_only_horizontal_in_vertical_across_faces_keeps_one_face() {
     // that face's .notdef rather than an id read in the wrong face.
     let text = "1漢";
     let (atoms, run) = crate::shaper::tate_chu_yoko(text, &[FAMILY]);
-    let mut clusters = Vec::new();
-    let mut glyphs = Vec::new();
-    LINES.shape_run(text, &run, &atoms, &mut clusters, &mut glyphs);
+    let mut out = ShapeOutput::default();
+    LINES.shape_run(text, &run, &atoms, &mut out);
+    let ShapeOutput { clusters, glyphs } = out;
 
     assert_eq!(clusters.len(), 1, "{clusters:?}");
     assert_eq!(clusters[0].font.font_id, FontId(0));
@@ -442,9 +443,9 @@ fn shp24_out_of_order_glyphs_across_faces_stay_on_their_own_atoms() {
         atom.orientation = GlyphOrientation::Horizontal;
     }
     let shaper = LineOnlyShaper::new(ScriptedLines(vec![(0, 0, 10), (2, 1, 20), (1, 2, 30)]));
-    let mut clusters = Vec::new();
-    let mut glyphs = Vec::new();
-    shaper.shape_run(text, &run, &atoms, &mut clusters, &mut glyphs);
+    let mut out = ShapeOutput::default();
+    shaper.shape_run(text, &run, &atoms, &mut out);
+    let ShapeOutput { clusters, glyphs } = out;
 
     let atom_of_glyph = |glyph_id: u32| {
         let at = glyphs.iter().position(|g| g.glyph_id == glyph_id).unwrap();
@@ -484,21 +485,22 @@ fn shp6_line_only_horizontal_in_vertical_leading_cut_takes_the_first_kept_face()
     let (atoms, run) = crate::shaper::tate_chu_yoko(text, &[FAMILY]);
     // The string shaped is the (empty) replacement plus the kept text "1漢".
     let shaper = LineOnlyShaper::new(ScriptedLines(vec![(0, 1, 10), (1, 2, 20)]));
-    let mut clusters = Vec::new();
-    let mut glyphs = Vec::new();
+    let mut out = ShapeOutput::default();
     shaper.reshape_window(
-        text,
-        &run,
-        &atoms,
-        TextRange::new(0, text.len()),
-        LeadingEdit::ReplaceSuffix {
-            replacement: "".into(),
-            cut_bytes: 1,
+        &ReshapeRequest {
+            text,
+            run: &run,
+            atoms: &atoms,
+            window: TextRange::new(0, text.len()),
+            leading_edit: &LeadingEdit::ReplaceSuffix {
+                replacement: "".into(),
+                cut_bytes: 1,
+            },
+            trailing_edit: &TrailingEdit::None,
         },
-        TrailingEdit::None,
-        &mut clusters,
-        &mut glyphs,
+        &mut out,
     );
+    let ShapeOutput { clusters, glyphs } = out;
 
     // The clusters partition the window's atoms, in order.
     let mut next = 0;
@@ -549,9 +551,9 @@ fn shp13_shp24_two_faces_in_one_cluster_keep_the_first_face_and_notdef_the_rest(
         atom.orientation = GlyphOrientation::Horizontal;
     }
     let shaper = LineOnlyShaper::new(ScriptedLines(vec![(0, 1, 10), (0, 2, 20), (1, 1, 30)]));
-    let mut clusters = Vec::new();
-    let mut glyphs = Vec::new();
-    shaper.shape_run(text, &run, &atoms, &mut clusters, &mut glyphs);
+    let mut out = ShapeOutput::default();
+    shaper.shape_run(text, &run, &atoms, &mut out);
+    let ShapeOutput { clusters, glyphs } = out;
 
     assert_eq!(clusters.len(), 2, "{clusters:?}");
     assert_eq!(clusters[0].atom_range, 0..1);

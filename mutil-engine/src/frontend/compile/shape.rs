@@ -1,7 +1,7 @@
 //! Shaping the runs into the AST's storage (spec FE-27, CLU-8, AST-4).
 
 use super::{Compiler, FrontendError, Shaped};
-use crate::shaping::{LeadingEdit, TrailingEdit};
+use crate::shaping::{ReshapeRequest, ShapeOutput};
 use crate::types::{GraphemeAtom, RawShapedGlyph, ShapedCluster, ShapingRun, TextRange};
 
 impl Compiler<'_> {
@@ -18,18 +18,15 @@ impl Compiler<'_> {
             clusters: Vec::new(),
             glyphs: Vec::new(),
         };
-        let mut clusters: Vec<ShapedCluster> = Vec::new();
-        let mut glyphs: Vec<RawShapedGlyph> = Vec::new();
-        let mut out_clusters: Vec<ShapedCluster> = Vec::new();
-        let mut out_glyphs: Vec<RawShapedGlyph> = Vec::new();
+        let mut shaped = ShapeOutput::default();
+        let mut window_out = ShapeOutput::default();
         for (run_index, run) in runs.iter().enumerate() {
             let contract = FrontendError::ShaperContract { run: run_index };
             let atoms = &all_atoms[run.atom_range.clone()];
-            clusters.clear();
-            glyphs.clear();
-            self.shaper
-                .shape_run(self.text, run, atoms, &mut clusters, &mut glyphs);
-            if !partitions(&clusters, &glyphs, 0..atoms.len()) {
+            shaped.clusters.clear();
+            shaped.glyphs.clear();
+            self.shaper.shape_run(self.text, run, atoms, &mut shaped);
+            if !partitions(&shaped.clusters, &shaped.glyphs, 0..atoms.len()) {
                 return Err(contract);
             }
             // Cuts are the run-local atoms that start a box, except the first.
@@ -46,41 +43,33 @@ impl Compiler<'_> {
                     ast.clusters.push(cluster);
                 };
             let cluster_start = ast.clusters.len();
-            for cluster in clusters.drain(..) {
+            for cluster in shaped.clusters.drain(..) {
                 let range = cluster.atom_range.clone();
                 let mut bounds = vec![range.start];
                 bounds.extend((range.start + 1..range.end).filter(|&a| is_cut(a)));
                 bounds.push(range.end);
                 if bounds.len() == 2 {
-                    push_cluster(cluster, &glyphs, &mut ast);
+                    push_cluster(cluster, &shaped.glyphs, &mut ast);
                     continue;
                 }
                 for (k, window) in bounds.windows(2).enumerate() {
                     let (w_start, w_end) = (window[0], window[1]);
-                    out_clusters.clear();
-                    out_glyphs.clear();
+                    window_out.clusters.clear();
+                    window_out.glyphs.clear();
                     let bytes = TextRange::new(
                         atoms[w_start].byte_range.start(),
                         atoms[w_end - 1].byte_range.end(),
                     );
-                    self.shaper.reshape_window(
-                        self.text,
-                        run,
-                        atoms,
-                        bytes,
-                        LeadingEdit::None,
-                        TrailingEdit::None,
-                        &mut out_clusters,
-                        &mut out_glyphs,
-                    );
-                    if !partitions(&out_clusters, &out_glyphs, w_start..w_end) {
+                    let request = ReshapeRequest::plain(self.text, run, atoms, bytes);
+                    self.shaper.reshape_window(&request, &mut window_out);
+                    if !partitions(&window_out.clusters, &window_out.glyphs, w_start..w_end) {
                         return Err(contract);
                     }
-                    for (j, mut c) in out_clusters.drain(..).enumerate() {
+                    for (j, mut c) in window_out.clusters.drain(..).enumerate() {
                         if k > 0 && j == 0 {
                             c.safe_to_concat_before = false;
                         }
-                        push_cluster(c, &out_glyphs, &mut ast);
+                        push_cluster(c, &window_out.glyphs, &mut ast);
                     }
                 }
             }

@@ -395,42 +395,47 @@ fn shaping_bridge_applies_both_spelling_edits() {
         }
     );
     // Seeded: shapers append to the buffers and never clear them.
-    let mut out = vec![cluster(0, 0)];
-    let mut out_glyphs = vec![RawShapedGlyph::default()];
+    let mut out = ShapeOutput {
+        clusters: vec![cluster(0, 0)],
+        glyphs: vec![RawShapedGlyph::default()],
+    };
     // Regular break: line 0 ends at the break, line 1 starts after it.
     shaper.reshape_window(
-        TEXT,
-        r,
-        &run_atoms,
-        TextRange::new(0, 3),
-        LeadingEdit::None,
-        trailing_edit.clone(),
+        &ReshapeRequest {
+            text: TEXT,
+            run: r,
+            atoms: &run_atoms,
+            window: TextRange::new(0, 3),
+            leading_edit: &LeadingEdit::None,
+            trailing_edit: &trailing_edit.clone(),
+        },
         &mut out,
-        &mut out_glyphs,
     );
     shaper.reshape_window(
-        TEXT,
-        r,
-        &run_atoms,
-        TextRange::new(3, 7),
-        leading_edit.clone(),
-        TrailingEdit::None,
+        &ReshapeRequest {
+            text: TEXT,
+            run: r,
+            atoms: &run_atoms,
+            window: TextRange::new(3, 7),
+            leading_edit: &leading_edit.clone(),
+            trailing_edit: &TrailingEdit::None,
+        },
         &mut out,
-        &mut out_glyphs,
     );
     // Extreme middle fragment: both edges edited in one call.
     shaper.reshape_window(
-        TEXT,
-        r,
-        &run_atoms,
-        TextRange::new(3, 7),
-        leading_edit,
-        trailing_edit,
+        &ReshapeRequest {
+            text: TEXT,
+            run: r,
+            atoms: &run_atoms,
+            window: TextRange::new(3, 7),
+            leading_edit: &leading_edit,
+            trailing_edit: &trailing_edit,
+        },
         &mut out,
-        &mut out_glyphs,
     );
-    assert_eq!(out, vec![cluster(0, 0)]);
-    assert_eq!(out_glyphs, vec![RawShapedGlyph::default()]);
+    assert_eq!(out.clusters, vec![cluster(0, 0)]);
+    assert_eq!(out.glyphs, vec![RawShapedGlyph::default()]);
 }
 
 #[test]

@@ -93,6 +93,61 @@ impl TrailingEdit {
     }
 }
 
+/// The caller-owned buffers a shaping call appends to (spec SHP-4).
+///
+/// Both vectors are **appended to, never cleared**, so a caller can reuse their
+/// capacity or shape a whole paragraph into them run by run. Every appended
+/// cluster names its glyphs by a `glyph_range` of `glyphs` in **absolute**
+/// positions of that vector (not relative to the call's first glyph). In
+/// cluster order the appended ranges are contiguous: the first starts at the
+/// vector's length before the call and the last ends at its length after it.
+#[derive(Clone, Debug, Default)]
+pub struct ShapeOutput {
+    /// The clusters, in logical order.
+    pub clusters: Vec<ShapedCluster>,
+    /// The glyphs the clusters' `glyph_range`s index.
+    pub glyphs: Vec<RawShapedGlyph>,
+}
+
+/// What [`TextShaper::reshape_window`] re-shapes (spec SHP-6): the run, the
+/// window in it and the edits at the window's two edges.
+#[derive(Clone, Copy, Debug)]
+pub struct ReshapeRequest<'a> {
+    /// The whole paragraph text; `run.byte_range` selects the run (SHP-3).
+    pub text: &'a str,
+    /// The run the window lies in; its settings configure the shaping (SHP-2).
+    pub run: &'a ShapingRun,
+    /// The run's atom slice, `&ast.atoms[run.atom_range]`.
+    pub atoms: &'a [GraphemeAtom],
+    /// The window, in paragraph text coordinates.
+    pub window: TextRange,
+    /// The edit at the window's start.
+    pub leading_edit: &'a LeadingEdit,
+    /// The edit at the window's end.
+    pub trailing_edit: &'a TrailingEdit,
+}
+
+impl<'a> ReshapeRequest<'a> {
+    /// A plain, symmetric, text-preserving re-shape of `window`: no edit at
+    /// either edge (SHP-6).
+    #[must_use]
+    pub fn plain(
+        text: &'a str,
+        run: &'a ShapingRun,
+        atoms: &'a [GraphemeAtom],
+        window: TextRange,
+    ) -> Self {
+        Self {
+            text,
+            run,
+            atoms,
+            window,
+            leading_edit: &LeadingEdit::None,
+            trailing_edit: &TrailingEdit::None,
+        }
+    }
+}
+
 /// Contract between the engine and a shaping backend (HarfRust, CoreText,
 /// DirectWrite, a test double). Object-safe, so a backend can be chosen at run
 /// time as `&dyn TextShaper`. `Send + Sync`: methods take `&self`, so one
@@ -101,15 +156,9 @@ impl TrailingEdit {
 ///
 /// ## Output buffers
 ///
-/// `shape_run` and `reshape_window` write to two caller-owned vectors,
-/// `output_clusters` and `output_glyphs`. Both are **appended to, never
-/// cleared**, so a caller can reuse their capacity or shape a whole paragraph
-/// into its `ParagraphAst::clusters` and `ParagraphAst::glyphs` run by run.
-/// Every appended cluster names its glyphs by a `glyph_range` of
-/// `output_glyphs` in **absolute** positions of that vector (not relative to
-/// the call's first glyph). In cluster order the appended ranges are
-/// contiguous: the first starts at the vector's length before the call and
-/// the last ends at its length after it.
+/// `shape_run` and `reshape_window` write to a caller-owned [`ShapeOutput`],
+/// appending to it and never clearing it (see there for the `glyph_range`
+/// convention).
 pub trait TextShaper: Send + Sync {
     /// Metrics of the actual font instance, without line-height policy.
     fn font_metrics(&self, instance: FontInstanceRef<'_>) -> FontMetrics;
@@ -130,7 +179,7 @@ pub trait TextShaper: Send + Sync {
     /// Shapes one complete run. Output is in **logical** order (§4.2 req. 2);
     /// `atoms` is the run's atom slice, `&ast.atoms[run.atom_range]`, and
     /// `ShapedCluster::atom_range` indexes it; `ShapedCluster::glyph_range`
-    /// indexes `output_glyphs` (see "Output buffers"). Implementations read the run's
+    /// indexes `output.glyphs` (see "Output buffers"). Implementations read the run's
     /// settings from `run` but ignore `run.atom_range` and `run.cluster_range`,
     /// which locate the slices in the AST and are not meaningful to a shaper.
     ///
@@ -165,14 +214,13 @@ pub trait TextShaper: Send + Sync {
         text: &str,
         run: &ShapingRun,
         atoms: &[GraphemeAtom],
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
+        output: &mut ShapeOutput,
     );
 
     /// Re-shapes a window around a break, hyphenation point or word split
     /// (§5 Stage 1.4).
     ///
-    /// `atoms` is the *same* run atom slice, `&ast.atoms[run.atom_range]`, that
+    /// `request.atoms` is the *same* run atom slice, `&ast.atoms[run.atom_range]`, that
     /// was given to `shape_run` for this run (O(1) to obtain, no copy). All
     /// features, variations, size and families come from `run`.
     ///
@@ -183,7 +231,7 @@ pub trait TextShaper: Send + Sync {
     ///   re-based to the window), i.e. in the same coordinate space as the
     ///   clusters `shape_run` produced for the run. The caller splices by
     ///   replacing the clusters whose `atom_range` lies inside the window.
-    ///   Output `glyph_range`s index `output_glyphs` (see "Output buffers").
+    ///   Output `glyph_range`s index `output.glyphs` (see "Output buffers").
     /// * The output clusters partition exactly the atoms inside the window, in
     ///   logical order, and never split an atom.
     /// * For a run whose `orientation` is
@@ -206,18 +254,7 @@ pub trait TextShaper: Send + Sync {
     ///   removed bytes: the glyphs belong to the window's last cluster for
     ///   `ReplacePrefix` and to its first cluster for `ReplaceSuffix`.
     ///   **[Design decision]**; to be refined with the HarfRust backend.
-    #[allow(clippy::too_many_arguments)] // signature derived from spec §4.1
-    fn reshape_window(
-        &self,
-        text: &str,
-        run: &ShapingRun,
-        atoms: &[GraphemeAtom],
-        window: TextRange,
-        leading_edit: LeadingEdit,
-        trailing_edit: TrailingEdit,
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
-    );
+    fn reshape_window(&self, request: &ReshapeRequest<'_>, output: &mut ShapeOutput);
 
     /// GDEF ligature caret positions: `n - 1` for `n` components, empty if the
     /// font has none (§6.2). Positions are unshaped and may need kerning
