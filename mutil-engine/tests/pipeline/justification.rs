@@ -35,7 +35,7 @@ pub fn lay_out_mono(
     let text = paragraph.text;
     let p = layout_paragraph(&ast, text, &*SHAPER, constraints, options)
         .unwrap_or_else(|e| panic!("{text:?}: {e}"));
-    if let Err((line, error)) = ValidatedLayout::new(&p, text) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&p, text) {
         panic!("{text:?}: line {line}: {error}\n{p:#?}");
     }
     p
@@ -111,7 +111,7 @@ fn st3_1_glue_before_a_tab_takes_no_part_in_justification() {
     // at 70 in a 72-unit column. Only the space after the tab stretches.
     let text = "aa bb\tcc dd eeeeeeee";
     let constraints = LayoutConstraints {
-        tab_stops: TabStops::new(40.0).unwrap(),
+        tab_stops: TabStops::try_new(40.0).unwrap(),
         ..column(72.0)
     };
     let ragged = lay_out(text, &constraints, &LayoutOptions::default());
@@ -472,7 +472,10 @@ fn crt1_crt3_compressed_cjk_seam_has_no_false_split_caret() {
 
     for shortfall in [4.0, 6.0] {
         let p = lay_out_bidi_ast(&ast, text, &column(natural - shortfall), &justified());
-        assert!(ValidatedLayout::new(&p, text).is_ok(), "{shortfall}");
+        assert!(
+            ValidatedLayout::try_from_paragraph(&p, text).is_ok(),
+            "{shortfall}"
+        );
         let line = &p.lines[0];
         assert!(line.is_justified, "{shortfall}");
 
@@ -859,7 +862,7 @@ fn crt1_a_word_space_shrunk_below_zero_keeps_its_caret_stops() {
     // "ab  cd" is 6 characters; the gap must give 14 of its 12 units.
     let width = 6.0 * CHAR - 14.0;
     let p = layout_paragraph(&ast, text, &*SHAPER, &column(width), &justified()).unwrap();
-    if let Err((line, error)) = ValidatedLayout::new(&p, text) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&p, text) {
         panic!("line {line}: {error}\n{p:#?}");
     }
     assert_eq!(line_texts(&p, text)[0], "ab  cd ");

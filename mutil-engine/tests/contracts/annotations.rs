@@ -192,7 +192,7 @@ fn ruby_rejects_glue_and_cluster_internal_edges() {
     let mut a = ast("ab");
     edit_text_box(&mut a, 0, |_, clusters| {
         clusters.truncate(1);
-        clusters[0].byte_range.end = 2;
+        clusters[0].byte_range = TextRange::new(clusters[0].byte_range.start(), 2);
         clusters[0].atom_range.end = 2;
         clusters[0].natural_width = 2.0;
     });

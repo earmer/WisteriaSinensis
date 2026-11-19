@@ -121,7 +121,7 @@ fn line_boxes_stack_from_the_strut_and_the_fonts() {
 #[test]
 fn tabs_advance_to_the_next_stop() {
     let constraints = LayoutConstraints {
-        tab_stops: TabStops::new(40.0).unwrap(),
+        tab_stops: TabStops::try_new(40.0).unwrap(),
         ..column(200.0)
     };
     let p = lay_out("ab\tc", &constraints, &LayoutOptions::default());
@@ -175,7 +175,7 @@ fn caret_stops_cover_every_grapheme_boundary_of_a_line() {
 fn glyph_runs_place_every_glyph_with_a_finite_origin() {
     let text = "Hello, world";
     let p = lay_out(text, &column(100.0), &LayoutOptions::default());
-    let layout = ValidatedLayout::new(&p, text).unwrap();
+    let layout = ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let glyphs: usize = layout.glyph_runs().map(|run| run.glyphs().count()).sum();
     assert_eq!(glyphs, text.chars().filter(|c| *c != ' ').count());
 }
@@ -216,7 +216,8 @@ fn inline_objects_follow_their_overflow_policy() {
             },
         ] {
             let p = layout_paragraph(&ast, text, &*SHAPER, &column(30.0), &options).unwrap();
-            ValidatedLayout::new(&p, text).unwrap_or_else(|e| panic!("{policy:?}: {e:?}"));
+            ValidatedLayout::try_from_paragraph(&p, text)
+                .unwrap_or_else(|e| panic!("{policy:?}: {e:?}"));
             let b = p.lines.iter().flat_map(|l| &l.visual_boxes).next().unwrap();
             assert_eq!((b.width, b.ascent), expected, "{policy:?}");
             if options.line_height == LineHeight::Normal {
@@ -247,7 +248,7 @@ fn decorations_merge_across_words_and_spaces() {
         &LayoutOptions::default(),
     )
     .unwrap();
-    ValidatedLayout::new(&p, text).unwrap();
+    ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     let lines = &p.lines[0].decorations;
     assert_eq!(lines.len(), 2);
     let underline = lines
@@ -293,7 +294,7 @@ fn st5_1_trailing_whitespace_in_decoration_span_collapses_at_wrap() {
         &LayoutOptions::default(),
     )
     .expect("lays out");
-    ValidatedLayout::new(&p, text).expect("validates");
+    ValidatedLayout::try_from_paragraph(&p, text).expect("validates");
     assert_eq!(line_texts(&p, text), ["word ", "next"]);
     assert_eq!(p.lines[0].visible_byte_end, 4);
     assert_close(p.lines[0].slots[0].visual_width, 24.0);
@@ -344,7 +345,7 @@ fn st5_1_nested_zero_padding_decoration_span_does_not_split_underline() {
         &LayoutOptions::default(),
     )
     .expect("lays out");
-    ValidatedLayout::new(&p, text).expect("validates");
+    ValidatedLayout::try_from_paragraph(&p, text).expect("validates");
     assert_eq!(p.lines.len(), 1);
     assert_eq!(
         p.lines[0].decorations.len(),
@@ -379,7 +380,7 @@ fn styled_runs_lay_out_with_the_tallest_line_box() {
         &LayoutOptions::default(),
     )
     .unwrap();
-    ValidatedLayout::new(&p, text).unwrap();
+    ValidatedLayout::try_from_paragraph(&p, text).unwrap();
     assert_close(p.lines[0].ascent, 20.4);
     assert_close(p.lines[0].visual_width(), 6.0 * 12.0 + 12.0 * 3.0);
 }
@@ -399,8 +400,8 @@ impl LineGeometryProvider for Obstacle {
         }
         LineGeometry {
             slots: [
-                InlineSlotConstraint::new(0.0, 40.0).unwrap(),
-                InlineSlotConstraint::new(60.0, 100.0).unwrap(),
+                InlineSlotConstraint::try_new(0.0, 40.0).unwrap(),
+                InlineSlotConstraint::try_new(60.0, 100.0).unwrap(),
             ]
             .into_iter()
             .collect(),

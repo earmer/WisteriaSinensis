@@ -48,11 +48,11 @@ impl ContentEdges {
                 }
                 for cluster in view.clusters {
                     let range = cluster.byte_range;
-                    edges.cluster_edges.extend([range.start, range.end]);
+                    edges.cluster_edges.extend([range.start(), range.end()]);
                 }
             } else if !matches!(node, WordNode::Box(BoxNode::SpanBoundary { .. })) {
                 let range = node.byte_span();
-                edges.node_edges.extend([range.start, range.end]);
+                edges.node_edges.extend([range.start(), range.end()]);
                 stretch += 1;
             }
         }
@@ -303,7 +303,7 @@ impl SpanIndex {
         let (mut next, mut active) = (0, Vec::<usize>::new());
         for (item, node) in ast.items.iter().enumerate() {
             let r = node.byte_span();
-            active.retain(|&i| ast.decoration_spans[i].byte_range.end >= r.start);
+            active.retain(|&i| ast.decoration_spans[i].byte_range.end() >= r.start());
             while next < ast.decoration_spans.len()
                 && ast.decoration_spans[next].byte_range.start() <= r.end()
             {

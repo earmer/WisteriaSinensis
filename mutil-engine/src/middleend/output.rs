@@ -421,7 +421,7 @@ impl SlotSource {
             0 => first_line_indent,
             _ => hanging_indent,
         };
-        InlineSlotConstraint::new(indent, wrap_width)
+        InlineSlotConstraint::try_new(indent, wrap_width)
     }
 
     /// The slot source `constraints` lay lines out from.

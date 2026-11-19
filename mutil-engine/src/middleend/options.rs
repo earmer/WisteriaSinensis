@@ -283,7 +283,7 @@ impl TabStops {
 
     /// Stops every `step` units, or `None` unless `step` is finite and positive.
     #[must_use]
-    pub fn new(step: f32) -> Option<Self> {
+    pub fn try_new(step: f32) -> Option<Self> {
         (step.is_finite() && step > 0.0).then_some(Self { step })
     }
 
@@ -409,7 +409,7 @@ impl InlineSlotConstraint {
     /// `[start, end)`, or `None` unless `start` is finite and `end` lies beyond
     /// it, at a finite distance or at positive infinity.
     #[must_use]
-    pub fn new(start: f32, end: f32) -> Option<Self> {
+    pub fn try_new(start: f32, end: f32) -> Option<Self> {
         (start.is_finite() && end > start && (end == f32::INFINITY || (end - start).is_finite()))
             .then_some(Self { start, end })
     }
@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn provider_slots_lie_inside_the_wrap_envelope() {
         let geometry = |start: f32, end: f32| LineGeometry {
-            slots: smallvec![InlineSlotConstraint::new(start, end).unwrap()],
+            slots: smallvec![InlineSlotConstraint::try_new(start, end).unwrap()],
             next_feature_block_offset: None,
         };
         // A finite container is `[0, wrap_width]`.
@@ -717,22 +717,22 @@ mod tests {
         assert!(geometry(5.0, 1e9).is_valid(0.0, f32::INFINITY));
         assert!(!geometry(-1.0, 5.0).is_valid(0.0, f32::INFINITY));
         // A malformed interval is not representable at all.
-        assert_eq!(InlineSlotConstraint::new(5.0, 5.0), None);
-        assert_eq!(InlineSlotConstraint::new(f32::NAN, 5.0), None);
-        assert_eq!(InlineSlotConstraint::new(0.0, f32::NAN), None);
-        assert_eq!(InlineSlotConstraint::new(f32::NEG_INFINITY, 5.0), None);
-        assert_eq!(InlineSlotConstraint::new(-f32::MAX, f32::MAX), None);
+        assert_eq!(InlineSlotConstraint::try_new(5.0, 5.0), None);
+        assert_eq!(InlineSlotConstraint::try_new(f32::NAN, 5.0), None);
+        assert_eq!(InlineSlotConstraint::try_new(0.0, f32::NAN), None);
+        assert_eq!(InlineSlotConstraint::try_new(f32::NEG_INFINITY, 5.0), None);
+        assert_eq!(InlineSlotConstraint::try_new(-f32::MAX, f32::MAX), None);
     }
 
     #[test]
     fn tab_stops_step_and_validity() {
         let t = TabStops::DEFAULT;
-        assert_eq!(TabStops::new(8.0), Some(t));
+        assert_eq!(TabStops::try_new(8.0), Some(t));
         assert_eq!(t.next_stop(0.0), Some(8.0));
         assert_eq!(t.next_stop(7.9), Some(8.0));
         assert_eq!(t.next_stop(8.0), Some(16.0)); // on a stop: advance to the next
         for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert_eq!(TabStops::new(bad), None);
+            assert_eq!(TabStops::try_new(bad), None);
         }
         // At large x the f32 product rounds back to x; a stop still lies ahead.
         let x = 3.0e7_f32;

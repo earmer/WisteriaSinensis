@@ -131,7 +131,7 @@ fn a_slant_mismatch_outweighs_any_weight() {
         ..regular
     };
     let black = FontStyle {
-        weight: crate::types::FontWeight::new(900).unwrap(),
+        weight: crate::types::FontWeight::try_new(900).unwrap(),
         ..regular
     };
     assert!(style_distance(black, regular) < style_distance(italic, regular));

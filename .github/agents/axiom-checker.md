@@ -25,7 +25,7 @@ You are an **Axiom Checker** for `WisteriaSinensis`. Your sole responsibility is
 
 - **[AX-3] Parse where types enforce; validate once at trust boundaries.**
   - Can invalid values be made unconstructible by the type system (enums, bounded types, `Option` instead of sentinels)?
-  - Is validation performed strictly at the four gates (`G1` input gate `ValidatedInputs::new`, `G2` shaper gate, `G3` provider gate `LayoutConstraints::query_checked_geometry`, `G4` output gate `ValidatedLayout::new`)?
+  - Is validation performed strictly at the four gates (`G1` input gate `ValidatedInputs::try_from_ast`, `G2` shaper gate, `G3` provider gate `LayoutConstraints::query_checked_geometry`, `G4` output gate `ValidatedLayout::try_from_paragraph`)?
   - Does code *behind* a gate (`ValidatedInputs` / `ValidatedLayout`) re-check invariants that the gate already proved?
 
 - **[AX-4] Orthogonal streams; a solver that never classifies characters.**

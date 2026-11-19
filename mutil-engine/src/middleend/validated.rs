@@ -36,7 +36,7 @@ impl<'a> ValidatedInputs<'a> {
     /// # Errors
     /// The first violation, as [`check_layout_inputs`](super::check_layout_inputs)
     /// reports it.
-    pub fn new(
+    pub fn try_from_ast(
         ast: &'a ParagraphAst,
         text: &'a str,
         constraints: &'a LayoutConstraints,
@@ -170,7 +170,7 @@ impl<'a> ValidatedLayout<'a> {
     ///
     /// # Errors
     /// The first violation, with the index of its line.
-    pub fn new(
+    pub fn try_from_paragraph(
         paragraph: &'a PositionedParagraph,
         text: &'a str,
     ) -> Result<Self, (usize, LineInvariantError)> {

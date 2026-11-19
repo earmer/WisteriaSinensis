@@ -27,7 +27,7 @@ beside them. The files are not committed.
 
 - `src/lib.rs` is a `cdylib` with a small C ABI. Through it the page registers
   font bytes, calls `compile_paragraph`, `layout_paragraph` and
-  `ValidatedLayout::new`, and gets back JSON: per line, the slots, caret
+  `ValidatedLayout::try_from_paragraph`, and gets back JSON: per line, the slots, caret
   stops and every run's `font`, `font_size` and glyph ids with paragraph-local
   drawing origins.
 - Outlines come from the same registered bytes through `skrifa`, in font

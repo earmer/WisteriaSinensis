@@ -595,8 +595,8 @@ fn extreme_assembly_every_cluster_belongs_to_one_node() {
     assert!(all_self_contained(&ast));
     let mut next = 0;
     for c in (0..ast.items.len()).flat_map(|item| clusters_of(&ast, item)) {
-        assert_eq!(c.byte_range.start, next);
-        next = c.byte_range.end;
+        assert_eq!(c.byte_range.start(), next);
+        next = c.byte_range.end();
     }
     assert_eq!(next, text_len);
 }
@@ -810,7 +810,8 @@ fn hang_mode_struct_gates_each_physical_edge() {
     // The body fills its slot, so the comma would not have fitted: `Allow`
     // and `Force` both let it hang.
     let body = l.visual_width();
-    l.slots[0].constraint = InlineSlotConstraint::new(l.slots[0].constraint.start(), body).unwrap();
+    l.slots[0].constraint =
+        InlineSlotConstraint::try_new(l.slots[0].constraint.start(), body).unwrap();
     let with = |hang_mode, base_direction| LineContext {
         hang_mode,
         base_direction,
@@ -1177,7 +1178,7 @@ fn layout_paragraph_lays_out_an_empty_paragraph_as_one_empty_line() {
         geometry_provider: None,
         hanging_indent: 0.0,
         wrap_width: 120.0,
-        tab_stops: TabStops::new(16.0).unwrap(),
+        tab_stops: TabStops::try_new(16.0).unwrap(),
     };
     let options = LayoutOptions::default();
     let shaper: &dyn TextShaper = &NoopShaper;
@@ -1187,6 +1188,6 @@ fn layout_paragraph_lays_out_an_empty_paragraph_as_one_empty_line() {
     assert_eq!(p.lines[0].byte_range, TextRange::empty_at(0));
     assert_eq!(p.lines[0].line_height, p.policy.strut.line_height());
     assert_eq!(p.total_block_size, p.policy.strut.line_height());
-    assert!(ValidatedLayout::new(&p, "").is_ok());
+    assert!(ValidatedLayout::try_from_paragraph(&p, "").is_ok());
     assert!(check_layout_inputs(&ast, "", &constraints, &options).is_ok());
 }

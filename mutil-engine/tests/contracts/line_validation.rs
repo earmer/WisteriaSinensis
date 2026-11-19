@@ -71,23 +71,6 @@ fn malformed_atomic_fragments_are_rejected() {
         bidi_level: BidiLevel::LTR,
     }];
     assert_eq!(l.validate(&ctx()), Ok(()));
-    // Inverted ranges, which the public fields can express, are rejected
-    // rather than accepted as coverage.
-    for (full, fragment) in [((2, 1), (2, 1)), ((0, 1), (1, 0))] {
-        let mut inverted = l.clone();
-        inverted.atomic_fragments[0].full_byte_range = TextRange {
-            start: full.0,
-            end: full.1,
-        };
-        inverted.atomic_fragments[0].fragment_byte_range = TextRange {
-            start: fragment.0,
-            end: fragment.1,
-        };
-        assert_eq!(
-            inverted.validate(&ctx()),
-            Err(LineInvariantError::InvalidAtomicFragment { index: 0 })
-        );
-    }
     l.atomic_fragments[0].width = f32::NAN;
     assert_eq!(
         l.validate(&ctx()),
@@ -813,7 +796,7 @@ fn the_content_block_separates_alignment_offset_from_leading_glue() {
     // The block starts inside its constraint ...
     let mut before = aligned_line(-5., -5., 60.);
     before.slots[0].constraint =
-        InlineSlotConstraint::new(0., before.slots[0].constraint.end()).unwrap();
+        InlineSlotConstraint::try_new(0., before.slots[0].constraint.end()).unwrap();
     assert_eq!(
         before.validate(&ctx()),
         Err(LineInvariantError::InvalidSlots {
@@ -919,7 +902,7 @@ fn a_caret_stop_carries_the_level_of_a_run_owning_its_offset() {
     );
     // A level no run has is wrong even at the boundary.
     assert_eq!(
-        with(vec![caret(50., 1, BidiLevel::new(2).unwrap())]),
+        with(vec![caret(50., 1, BidiLevel::try_new(2).unwrap())]),
         invalid(0)
     );
 
@@ -1007,7 +990,8 @@ fn allow_end_hangs_a_mark_only_when_it_would_otherwise_wrap() {
     // An unbounded line never needs to hang anything.
     let mut unbounded = end_hanging_line(100.);
     unbounded.slots[0].constraint =
-        InlineSlotConstraint::new(unbounded.slots[0].constraint.start(), f32::INFINITY).unwrap();
+        InlineSlotConstraint::try_new(unbounded.slots[0].constraint.start(), f32::INFINITY)
+            .unwrap();
     let no_wrap = LineContext {
         wrap_width: f32::INFINITY,
         ..hang(HangEndMode::Allow)

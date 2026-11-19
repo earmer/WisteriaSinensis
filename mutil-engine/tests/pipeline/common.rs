@@ -116,7 +116,7 @@ pub fn lay_out(
     let ast = compile(text);
     let paragraph = layout_paragraph(&ast, text, &*SHAPER, constraints, options)
         .unwrap_or_else(|e| panic!("{text:?}: {e}"));
-    if let Err((line, error)) = ValidatedLayout::new(&paragraph, text) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&paragraph, text) {
         panic!("{text:?} in {constraints:?}, {options:?}: line {line}: {error}\n{paragraph:#?}");
     }
     paragraph
@@ -225,7 +225,7 @@ pub fn lay_out_in(
     let ast = compile_in(text, families);
     let paragraph = layout_paragraph(&ast, text, &*SCRIPT_SHAPER, constraints, options)
         .unwrap_or_else(|e| panic!("{text:?}: {e}"));
-    if let Err((line, error)) = ValidatedLayout::new(&paragraph, text) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&paragraph, text) {
         panic!("{text:?} in {constraints:?}: line {line}: {error}\n{paragraph:#?}");
     }
     paragraph
@@ -298,7 +298,7 @@ pub fn lay_out_bidi_ast(
 ) -> PositionedParagraph {
     let paragraph = layout_paragraph(ast, text, &*BIDI_SHAPER, constraints, options)
         .unwrap_or_else(|e| panic!("{text:?}: {e}"));
-    if let Err((line, error)) = ValidatedLayout::new(&paragraph, text) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&paragraph, text) {
         panic!("{text:?} in {constraints:?}, {options:?}: line {line}: {error}\n{paragraph:#?}");
     }
     paragraph

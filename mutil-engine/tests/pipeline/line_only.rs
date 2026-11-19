@@ -190,7 +190,7 @@ fn the_profile_has_no_ligature_carets_and_divides_ligatures_equally() {
         &LayoutOptions::default(),
     )
     .expect("the paragraph lays out");
-    ValidatedLayout::new(&p, text).expect("the output gate accepts it");
+    ValidatedLayout::try_from_paragraph(&p, text).expect("the output gate accepts it");
     let start = ast.clusters[0].natural_width;
     let third = ffi.natural_width / 3.0;
     let inner: Vec<f32> = p.lines[0]
@@ -221,7 +221,7 @@ fn mixed_scripts_lay_out_and_wrap_through_the_profile() {
             &LayoutOptions::default(),
         )
         .unwrap_or_else(|e| panic!("{text:?}: {e}"));
-        if let Err((line, error)) = ValidatedLayout::new(&p, text) {
+        if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&p, text) {
             panic!("{text:?}: line {line}: {error}");
         }
         assert!(p.lines.len() > 1, "{text:?} wraps at {width}");
@@ -602,7 +602,7 @@ fn shp13_backward_atom_order_across_faces_lays_out_and_validates() {
         &LayoutOptions::default(),
     )
     .expect("the paragraph lays out");
-    if let Err((line, error)) = ValidatedLayout::new(&p, text) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&p, text) {
         panic!("line {line}: {error}\n{p:#?}");
     }
 }

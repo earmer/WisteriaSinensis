@@ -21,7 +21,9 @@ fn run() -> ShapingRun {
 
 fn word(ast: &mut ParagraphAst, range: TextRange) -> WordNode {
     let atoms: Vec<_> = range.as_range().map(atom).collect();
-    let clusters: Vec<_> = (0..atoms.len()).map(|i| cluster(range.start, i)).collect();
+    let clusters: Vec<_> = (0..atoms.len())
+        .map(|i| cluster(range.start(), i))
+        .collect();
     push_text(ast, 0, atoms, clusters)
 }
 
@@ -556,10 +558,10 @@ fn hanging_punctuation_fits_negative_x_and_synthesized_flag_round_trips() {
 
 #[test]
 fn font_variation_is_nameable_and_canonical() {
-    let mut f = FontFeatures::new();
-    f.push_variation(FontVariation::new(*b"wght", 650.0).unwrap());
-    f.push_variation(FontVariation::new(*b"slnt", -0.0).unwrap());
+    let mut f = FontFeatures::default();
+    f.push_variation(FontVariation::try_new(*b"wght", 650.0).unwrap());
+    f.push_variation(FontVariation::try_new(*b"slnt", -0.0).unwrap());
     let v: &[FontVariation] = f.variations();
-    assert_eq!(Some(v[0]), FontVariation::new(*b"wght", 650.0));
-    assert_eq!(v[1].value().to_bits(), 0.0_f32.to_bits());
+    assert_eq!(Some(v[1]), FontVariation::try_new(*b"wght", 650.0));
+    assert_eq!(v[0].value().to_bits(), 0.0_f32.to_bits());
 }

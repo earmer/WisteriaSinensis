@@ -520,7 +520,7 @@ fn anchored_unit_range(ast: &crate::frontend::ParagraphAst, byte: ByteIndex) -> 
 fn object_holding(ast: &crate::frontend::ParagraphAst, byte: ByteIndex) -> Option<TextRange> {
     let i = ast
         .items
-        .partition_point(|item| item.byte_span().end <= byte);
+        .partition_point(|item| item.byte_span().end() <= byte);
     match ast.items.get(i)? {
         crate::frontend::WordNode::Box(crate::frontend::BoxNode::InlineObject(
             crate::frontend::InlineObjectBox { byte_range, .. },

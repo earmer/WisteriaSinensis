@@ -29,23 +29,6 @@ fn measurements_beyond_the_bound_are_rejected_at_the_input_gate() {
     );
 }
 
-/// FNT-2: only canonical features pass the gate, so `Eq` and `Hash` agree
-/// with effective equality behind it.
-#[test]
-fn features_must_be_canonical() {
-    let mut a = ast("a");
-    a.runs[0].features.push(*b"liga", 1);
-    a.runs[0].features.push(*b"kern", 1);
-    assert!(!a.runs[0].features.is_normalized());
-    assert_eq!(
-        check(&a, "a"),
-        Err(LayoutInputError::InvalidShapingRun { run: 0 })
-    );
-    a.runs[0].features.normalize();
-    assert!(a.runs[0].features.is_normalized());
-    assert_eq!(check(&a, "a"), Ok(()));
-}
-
 /// G1: `ValidatedInputs` exists only for gated inputs, and its lookups say
 /// `None` only for an item that is not text.
 #[test]
@@ -53,7 +36,8 @@ fn validated_inputs_prove_the_input_gate() {
     let a = ast("ab");
     let constraints = constraints();
     let options = LayoutOptions::default();
-    let inputs = ValidatedInputs::new(&a, "ab", &constraints, &options).expect("valid inputs");
+    let inputs =
+        ValidatedInputs::try_from_ast(&a, "ab", &constraints, &options).expect("valid inputs");
     let view = inputs.text_box(0).expect("item 0 is text");
     assert_eq!(view.byte_range, TextRange::new(0, 2));
     assert!(inputs.text_box(1).is_none(), "the sentinel is not text");
@@ -65,7 +49,7 @@ fn validated_inputs_prove_the_input_gate() {
     let mut bad = ast("ab");
     bad.runs[0].font_size = f32::NAN;
     assert_eq!(
-        ValidatedInputs::new(&bad, "ab", &constraints, &options).map(drop),
+        ValidatedInputs::try_from_ast(&bad, "ab", &constraints, &options).map(drop),
         Err(LayoutInputError::InvalidShapingRun { run: 0 })
     );
 }
@@ -102,11 +86,11 @@ fn validated_layout_proves_the_output_gate() {
     good.total_block_size = good.lines[0].line_height;
     let text = "a";
     assert_eq!(good.validate(text), Ok(()));
-    let layout = ValidatedLayout::new(&good, text).expect("valid output");
+    let layout = ValidatedLayout::try_from_paragraph(&good, text).expect("valid output");
     assert_eq!(layout.paragraph().lines.len(), 1);
     assert_eq!(layout.text(), text);
     let empty = paragraph(&ctx, vec![]);
-    assert!(ValidatedLayout::new(&empty, text).is_err());
+    assert!(ValidatedLayout::try_from_paragraph(&empty, text).is_err());
 }
 
 #[derive(Debug)]
@@ -115,7 +99,7 @@ struct Everywhere;
 impl LineGeometryProvider for Everywhere {
     fn query_line_geometry(&self, _line: usize, _start: f32, _end: f32) -> LineGeometry {
         LineGeometry {
-            slots: smallvec::smallvec![InlineSlotConstraint::new(0.0, 100.0).unwrap()],
+            slots: smallvec::smallvec![InlineSlotConstraint::try_new(0.0, 100.0).unwrap()],
             next_feature_block_offset: None,
         }
     }

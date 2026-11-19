@@ -178,7 +178,7 @@ impl Demo {
             .map_err(|e| error_json("layout", e))?;
         let stored = StoredParagraph { marked, paragraph };
         let validated = ValidatedParagraph::try_new(stored, |s| {
-            ValidatedLayout::new(&s.paragraph, &s.marked.text)
+            ValidatedLayout::try_from_paragraph(&s.paragraph, &s.marked.text)
         })
         .map_err(|(_, e)| error_json("validate", e))?;
         let json = layout_json(validated.borrow_dependent(), self.paragraphs.len());

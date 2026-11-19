@@ -34,7 +34,9 @@ pub fn push_text(
     let run_local = atom_at - ast.runs[run].atom_range.start;
     let (n_atoms, n_clusters) = (atoms.len(), clusters.len());
     let byte_range = match (atoms.first(), atoms.last()) {
-        (Some(first), Some(last)) => TextRange::new(first.byte_range.start, last.byte_range.end),
+        (Some(first), Some(last)) => {
+            TextRange::new(first.byte_range.start(), last.byte_range.end())
+        }
         _ => TextRange::EMPTY,
     };
     let natural_width = clusters.iter().map(|c| c.natural_width).sum();
@@ -323,7 +325,7 @@ pub fn check(a: &ParagraphAst, t: &str) -> Result<(), LayoutInputError> {
 /// A slot `capacity` wide from `start`, with content from its start.
 pub fn slot(start: f32, visual_width: f32, capacity: f32) -> PositionedSlot {
     PositionedSlot {
-        constraint: InlineSlotConstraint::new(start, start + capacity).unwrap(),
+        constraint: InlineSlotConstraint::try_new(start, start + capacity).unwrap(),
         content_start: start,
         visual_width,
     }

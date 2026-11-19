@@ -24,8 +24,8 @@ fn reject_level_mismatch(target: usize) {
 /// A level above `BidiLevel::MAX` cannot be built.
 #[test]
 fn bidi_levels_are_bounded() {
-    assert_eq!(BidiLevel::new(BIDI_MAX_DEPTH + 2), None);
-    assert!(BidiLevel::new(BIDI_MAX_DEPTH + 1).is_some());
+    assert_eq!(BidiLevel::try_new(BIDI_MAX_DEPTH + 2), None);
+    assert!(BidiLevel::try_new(BIDI_MAX_DEPTH + 1).is_some());
 }
 
 #[test]
@@ -343,7 +343,7 @@ fn g1_hyphen_replacement_with_line_or_paragraph_separator_is_rejected() {
 #[test]
 fn a_non_finite_variation_cannot_be_built() {
     for bad in [f32::NAN, f32::INFINITY] {
-        assert_eq!(FontVariation::new(*b"wght", bad), None);
+        assert_eq!(FontVariation::try_new(*b"wght", bad), None);
     }
 }
 

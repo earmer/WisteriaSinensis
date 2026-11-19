@@ -358,7 +358,7 @@ fn lay_out_zh(
 ) -> PositionedParagraph {
     let p = layout_paragraph(ast, text, &*SPACING_SHAPER, &column(wrap_width), options)
         .unwrap_or_else(|e| panic!("{text:?}: {e}"));
-    if let Err((line, error)) = ValidatedLayout::new(&p, text) {
+    if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&p, text) {
         panic!("{text:?} in {wrap_width}, {options:?}: line {line}: {error}\n{p:#?}");
     }
     p

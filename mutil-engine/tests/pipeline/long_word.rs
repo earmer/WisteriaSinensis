@@ -29,7 +29,7 @@ fn a_long_unbreakable_word_lays_out_and_passes_the_output_gate() {
             &LayoutOptions::default(),
         )
         .unwrap_or_else(|e| panic!("n = {n}: {e}"));
-        if let Err((line, error)) = ValidatedLayout::new(&paragraph, &text) {
+        if let Err((line, error)) = ValidatedLayout::try_from_paragraph(&paragraph, &text) {
             panic!("n = {n}: line {line}: {error}");
         }
     }

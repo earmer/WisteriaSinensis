@@ -129,8 +129,8 @@ impl Fonts {
 
 /// The font features every style carries: the explicit Regular weight.
 pub fn regular_weight() -> FontFeatures {
-    let mut features = FontFeatures::new();
-    if let Some(weight) = FontVariation::new(*b"wght", WEIGHT) {
+    let mut features = FontFeatures::default();
+    if let Some(weight) = FontVariation::try_new(*b"wght", WEIGHT) {
         features.push_variation(weight);
     }
     features

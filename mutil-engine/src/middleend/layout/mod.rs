@@ -53,7 +53,7 @@ const MAX_ENVELOPE_REFITS: usize = 16;
 ///   seam.
 /// * `constraints`: container geometry; `options`: layout policy.
 ///
-/// The inputs pass the input gate ([`ValidatedInputs::new`]) first; with a
+/// The inputs pass the input gate ([`ValidatedInputs::try_from_ast`]) first; with a
 /// geometry provider, the first line is probed (spec GEO-5) and every answer
 /// passes the provider gate. Every strategy breaks greedily; `justify` and
 /// the hang mode apply (spec ME-3), while the clamp is not applied yet, so
@@ -69,7 +69,7 @@ pub fn layout_paragraph(
     constraints: &LayoutConstraints,
     options: &LayoutOptions,
 ) -> Result<PositionedParagraph, LayoutInputError> {
-    let inputs = ValidatedInputs::new(ast, text, constraints, options)?;
+    let inputs = ValidatedInputs::try_from_ast(ast, text, constraints, options)?;
     if constraints.geometry_provider.is_some() {
         probe_first_line(&inputs, shaper)?;
     }
@@ -141,7 +141,7 @@ fn tallest_first_line(
     let content_end = ast
         .items
         .get(first_break)
-        .map_or(usize::MAX, |node| node.byte_span().start);
+        .map_or(usize::MAX, |node| node.byte_span().start());
     let mut content_height = strut_height;
     for (item, node) in ast.items[..first_break].iter().enumerate() {
         if let WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
@@ -611,7 +611,7 @@ mod tests {
             piece: Piece {
                 kind: PieceKind::Tab,
                 bytes: TextRange::empty_at(0),
-                level: BidiLevel::new(v).unwrap(),
+                level: BidiLevel::try_new(v).unwrap(),
                 width: 0.0,
             },
             gap: 0.0,
