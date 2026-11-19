@@ -72,3 +72,59 @@ fn out4_the_glyph_inside_the_third_block_is_not_hanging_under_validation() {
         l.validate(&c)
     );
 }
+
+/// Blocks `[0, 5]`, `[20, 100]` (past the next slot's `[40, 45]`) and
+/// `[110, 115]` and `[130, 135]` after it.
+fn far_line(glyphs: Vec<PositionedGlyph>) -> PositionedLine {
+    let mut l = overflowing_line(glyphs);
+    l.slots = smallvec![
+        slot(0., 5., 10.),
+        slot(20., 80., 10.),
+        slot(40., 5., 10.),
+        slot(110., 5., 10.),
+        slot(130., 5., 10.),
+    ];
+    l
+}
+
+#[test]
+fn out4_every_glyph_held_by_a_block_is_body_wherever_the_overflow_ends() {
+    let held = [
+        at(0, 1, 0., 5.),
+        at(1, 2, 20., 5.),
+        at(2, 3, 40., 5.),
+        at(3, 4, 110., 5.),
+        at(4, 5, 130., 5.),
+    ];
+    let l = far_line(held.to_vec());
+    for g in &held {
+        assert_eq!(l.role(g), GlyphRole::Body, "{g:?}");
+    }
+    assert_eq!(l.hanging_glyphs().count(), 0);
+}
+
+#[test]
+fn out4_validation_reports_the_overflowing_slot_not_a_role_of_a_later_glyph() {
+    // Blocks `[0, 5]`, `[20, 100]`, `[40, 45]` and `[60, 65]` over slots
+    // whose capacity is 10: the second slot is the one that overflows, and
+    // the glyphs inside the third and fourth blocks are held, not hanging.
+    let l = overflowing_line(vec![
+        at(0, 1, 0., 5.),
+        at(1, 2, 20., 80.),
+        at(2, 3, 40., 5.),
+        at(3, 4, 60., 5.),
+    ]);
+    let c = LineContext {
+        wrap_width: 100.,
+        ..ctx()
+    };
+    assert_eq!(
+        l.validate(&c),
+        Err(LineInvariantError::SlotOverflow {
+            slot: 1,
+            extent: 80.,
+            capacity: 10.
+        })
+    );
+    assert_eq!(l.hanging_glyphs().count(), 0);
+}
