@@ -59,7 +59,7 @@ Noto Sans SC, `zh-TW` or `zh-Hant` from Noto Sans TC and `ja` from Noto Sans
 JP, and the Latin faces no longer serve the run's shared punctuation.
 
 The engine does not guess Simplified from Traditional Han. Untagged text takes
-the Locale field, which is read with `LocaleTag::parse_lenient` (so `jp`,
+the Locale field, which is read with `LocaleTag::try_from_str_lenient` (so `jp`,
 `cn`, `zh-tc` and the preset buttons all work). For a switch inside a
 paragraph, tag the text:
 

@@ -5,7 +5,7 @@
 //! language switches as `StyleSpan`s. This module is that host step for the
 //! page: it strips tags such as `<zh-TW>…</zh-TW>`, `<ja>…</ja>` or
 //! `<lang=zh-Hant>…</lang>` and returns the plain text with the byte ranges
-//! each tag covered and its locale, read with `LocaleTag::parse_lenient`.
+//! each tag covered and its locale, read with `LocaleTag::try_from_str_lenient`.
 //!
 //! A tag is markup only when it parses as a locale and is closed by its own
 //! closing tag (`</lang>` for the `lang=` form), which pairs with the nearest
@@ -109,7 +109,7 @@ fn tag_at(source: &str, at: usize) -> Option<(Token, usize)> {
     if !name_ok(value) {
         return None;
     }
-    let locale = LocaleTag::parse_lenient(value).ok()?;
+    let locale = LocaleTag::try_from_str_lenient(value).ok()?;
     Some((
         Token::Open {
             close,

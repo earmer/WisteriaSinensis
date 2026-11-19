@@ -364,7 +364,7 @@ pub static SPACING_SHAPER: LazyLock<HarfRustShaper> = LazyLock::new(|| {
 /// `families` at `font_size` in `locale`.
 pub fn localized_style(families: &[&str], font_size: f32, locale: &str) -> TextStyle {
     TextStyle {
-        locale: Some(LocaleTag::parse_lenient(locale).expect("a locale")),
+        locale: Some(LocaleTag::try_from_str_lenient(locale).expect("a locale")),
         ..script_style(families, font_size)
     }
 }

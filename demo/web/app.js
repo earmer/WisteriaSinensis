@@ -851,7 +851,7 @@ localeInput.addEventListener('change', () => {
 });
 
 // Each preset only fills the locale field; the engine reads it with
-// `LocaleTag::parse_lenient`, so shorthand such as `jp` or `zh-tc` works too.
+// `LocaleTag::try_from_str_lenient`, so shorthand such as `jp` or `zh-tc` works too.
 localePresets.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-locale]');
   if (!button) {
