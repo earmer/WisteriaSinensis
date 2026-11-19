@@ -1,14 +1,14 @@
 //! Selection geometry (spec INT-16, INT-18): the rectangles a logical range
 //! covers, merged over visual order, at the requested block height.
 
-use super::{BoxHeightStyle, SelectionRect, line_block};
+use super::{BoxHeightStyle, SelectionRect, line_box};
 use crate::middleend::ValidatedLayout;
-use crate::middleend::output::PositionedParagraph;
+use crate::middleend::output::{PositionedLine, PositionedParagraph};
 use crate::middleend::tolerance::{approx_eq, tolerance};
 use crate::types::{BidiLevel, Rect, TextRange};
 
-/// Calls `emit(line, x0, x1, level)` for each inline interval that `range`
-/// selects (spec INT-16), line by line from the first line that holds the
+/// Calls `emit(index, line, x0, x1, level)` for each inline interval that
+/// `range` selects (spec INT-16), line by line from the first line that holds the
 /// range: visually adjacent selected slots (the stretches between two
 /// neighbouring caret stops) merge, a zero-width slot between two selected
 /// ones bridges them, and an unselected slot breaks the merge. An empty
@@ -16,7 +16,7 @@ use crate::types::{BidiLevel, Rect, TextRange};
 fn for_each_selected_interval(
     paragraph: &PositionedParagraph,
     range: TextRange,
-    mut emit: impl FnMut(usize, f32, f32, BidiLevel),
+    mut emit: impl FnMut(usize, &PositionedLine, f32, f32, BidiLevel),
 ) {
     if range.is_empty() {
         return;
@@ -29,13 +29,14 @@ fn for_each_selected_interval(
             break;
         }
         let mut open: Option<(f32, f32, BidiLevel)> = None;
-        for pair in line.caret_stops.windows(2) {
-            let (a, b) = (&pair[0], &pair[1]);
+        let stops = &line.caret_stops;
+        for (a, b) in stops.iter().zip(stops.iter().skip(1)) {
             let bytes = TextRange::new(a.offset.min(b.offset), a.offset.max(b.offset));
             if bytes.is_empty() {
                 continue;
             }
-            let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+            // G4 proved the stops in non-decreasing `x` (InvalidCaretStop).
+            let (x0, x1) = (a.x, b.x);
             if range.contains_range(bytes) {
                 open = Some(match open {
                     Some((lo, hi, level)) => (
@@ -46,11 +47,11 @@ fn for_each_selected_interval(
                     None => (x0, x1, a.level),
                 });
             } else if let Some((lo, hi, level)) = open.take() {
-                emit(index, lo, hi, level);
+                emit(index, line, lo, hi, level);
             }
         }
         if let Some((lo, hi, level)) = open {
-            emit(index, lo, hi, level);
+            emit(index, line, lo, hi, level);
         }
     }
 }
@@ -73,15 +74,15 @@ impl ValidatedLayout<'_> {
         let p = self.paragraph();
         let mode = p.policy.writing_mode;
         let mut out = Vec::new();
-        for_each_selected_interval(p, range, |index, x0, x1, level| {
+        for_each_selected_interval(p, range, |index, line, x0, x1, level| {
             let (top, bottom) = match height {
-                BoxHeightStyle::Max => line_block(p, index),
+                BoxHeightStyle::Max => line_box(p, line),
                 BoxHeightStyle::Strut => mode.line_bounds(
-                    p.lines[index].baseline_y,
+                    line.baseline_y,
                     p.policy.strut.ascent,
                     p.policy.strut.descent,
                 ),
-                BoxHeightStyle::Tight => self.tight_block(shaper, index, x0, x1, range),
+                BoxHeightStyle::Tight => self.tight_block(shaper, line, x0, x1, range),
             };
             out.push(SelectionRect {
                 rect: mode.flow_to_physical_rect(
@@ -102,8 +103,8 @@ impl ValidatedLayout<'_> {
     pub fn range_rects(&self, range: TextRange) -> Vec<Rect> {
         let p = self.paragraph();
         let mut out = Vec::new();
-        for_each_selected_interval(p, range, |index, x0, x1, _| {
-            let (top, bottom) = line_block(p, index);
+        for_each_selected_interval(p, range, |_, line, x0, x1, _| {
+            let (top, bottom) = line_box(p, line);
             out.push(p.policy.writing_mode.flow_to_physical_rect(
                 Rect::new(x0, top, x1 - x0, bottom - top),
                 p.total_block_size,
@@ -112,20 +113,23 @@ impl ValidatedLayout<'_> {
         out
     }
 
-    /// The block interval of a `Tight` piece `[x0, x1]` of line `line`: the
+    /// The block interval of a `Tight` piece `[x0, x1]` of `line`: the
     /// union of the ascents and descents of the selected glyph runs' font
     /// instances (through the shaper gate) and inline boxes, else the strut.
     fn tight_block(
         &self,
         shaper: &dyn crate::shaping::TextShaper,
-        line: usize,
+        l: &PositionedLine,
         x0: f32,
         x1: f32,
         range: TextRange,
     ) -> (f32, f32) {
         let p = self.paragraph();
-        let l = &p.lines[line];
-        let (mut above, mut below) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        // The union of the selected extents: above and below the baseline.
+        let mut extent: Option<(f32, f32)> = None;
+        let mut include = |above: f32, below: f32| {
+            extent = Some(extent.map_or((above, below), |(a, b)| (a.max(above), b.max(below))));
+        };
         let eps = tolerance(x0, x1);
         // An entity counts when its extent meets the piece.
         let meets = |lo: f32, hi: f32| lo < x1 - eps && hi > x0 + eps;
@@ -156,25 +160,27 @@ impl ValidatedLayout<'_> {
             } else {
                 (metrics.ascent, metrics.descent)
             };
-            above = above.max(ascent);
-            below = below.max(descent);
+            include(ascent, descent);
         }
         for b in &l.visual_boxes {
             if meets(b.x, b.x + b.width) && range.contains_range(b.byte_range) {
-                above = above.max(b.ascent - b.y);
-                below = below.max(b.descent + b.y);
+                include(b.ascent - b.y, b.descent + b.y);
             }
         }
-        if !above.is_finite() || !below.is_finite() {
-            above = p.policy.strut.ascent;
-            below = p.policy.strut.descent;
-        }
-        // Raw font metrics may sum to a negative height; the line box and
-        // the strut never do.
-        let (top, bottom) = p
-            .policy
+        // Deliberate deviation from pipeline rule 7: G4 proves a box's `y`,
+        // `ascent` and `descent` finite (`check_finite`) but not bounded, so
+        // `ascent - y` may overflow. Until G4 checks them as measurements, a
+        // non-finite union falls back to the strut, as for no selected entity.
+        let (above, below) = extent
+            .filter(|(above, below)| above.is_finite() && below.is_finite())
+            .unwrap_or((p.policy.strut.ascent, p.policy.strut.descent));
+        // The height `above + below` is not negative: the shaper gate proves
+        // font ascents and descents non-negative (FontMetrics::is_valid), G4
+        // an inline box's (`check_finite`), and every box adds to both sides,
+        // its `y` cancelling; G4 proves the strut's box non-negative
+        // (`LayoutPolicySnapshot::is_valid`).
+        p.policy
             .writing_mode
-            .line_bounds(l.baseline_y, above, below);
-        (top, bottom.max(top))
+            .line_bounds(l.baseline_y, above, below)
     }
 }
