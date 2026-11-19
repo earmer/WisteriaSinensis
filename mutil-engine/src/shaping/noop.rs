@@ -1,10 +1,10 @@
 //! A shaper that produces nothing, to prove the trait contract closes over the
 //! pipeline types.
 
-use super::{LeadingEdit, TextShaper, TrailingEdit};
+use super::{ReshapeRequest, ShapeOutput, TextShaper};
 use crate::types::{
     FontFamily, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation, GlyphOrientation,
-    GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster, ShapingRun, TextRange,
+    GraphemeAtom, LocaleTag, ScriptTag, ShapingRun,
 };
 
 /// Returns empty data and all-zero metrics. Performs no shaping, measurement or
@@ -36,23 +36,11 @@ impl TextShaper for NoopShaper {
         _text: &str,
         _run: &ShapingRun,
         _atoms: &[GraphemeAtom],
-        _output_clusters: &mut Vec<ShapedCluster>,
-        _output_glyphs: &mut Vec<RawShapedGlyph>,
+        _output: &mut ShapeOutput,
     ) {
     }
 
-    fn reshape_window(
-        &self,
-        _text: &str,
-        _run: &ShapingRun,
-        _atoms: &[GraphemeAtom],
-        _window: TextRange,
-        _leading_edit: LeadingEdit,
-        _trailing_edit: TrailingEdit,
-        _output_clusters: &mut Vec<ShapedCluster>,
-        _output_glyphs: &mut Vec<RawShapedGlyph>,
-    ) {
-    }
+    fn reshape_window(&self, _request: &ReshapeRequest<'_>, _output: &mut ShapeOutput) {}
 
     fn space_advance(&self, _instance: FontInstanceRef<'_>, _orientation: GlyphOrientation) -> f32 {
         0.0

@@ -9,7 +9,7 @@ use super::clusters::{
     EdgeFonts, TaggedGlyph, atom_containing, finish_window, plan_window, push_clusters,
     push_empty_clusters,
 };
-use super::{FontFace, FontSource, LeadingEdit, TextShaper, TrailingEdit, finite_nonnegative};
+use super::{FontFace, FontSource, ReshapeRequest, ShapeOutput, TextShaper};
 use crate::types::{
     Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontRef, FontStyle, FontVariation,
     GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster,
@@ -439,8 +439,7 @@ impl TextShaper for HarfRustShaper {
         text: &str,
         run: &ShapingRun,
         atoms: &[GraphemeAtom],
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
+        output: &mut ShapeOutput,
     ) {
         let candidates = self.registry.candidates(&run.families, run.style);
         let mut buffer = Buffer::new();
@@ -448,8 +447,8 @@ impl TextShaper for HarfRustShaper {
             text,
             run,
             atoms,
-            clusters: output_clusters,
-            glyphs: output_glyphs,
+            clusters: &mut output.clusters,
+            glyphs: &mut output.glyphs,
             buffer: &mut buffer,
         };
         for segment in contiguous_segments(atoms, 0..atoms.len()) {
@@ -457,18 +456,16 @@ impl TextShaper for HarfRustShaper {
         }
     }
 
-    fn reshape_window(
-        &self,
-        text: &str,
-        run: &ShapingRun,
-        atoms: &[GraphemeAtom],
-        window: TextRange,
-        leading_edit: LeadingEdit,
-        trailing_edit: TrailingEdit,
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
-    ) {
-        let Some(plan) = plan_window(atoms, window, &leading_edit, &trailing_edit) else {
+    fn reshape_window(&self, request: &ReshapeRequest<'_>, output: &mut ShapeOutput) {
+        let ReshapeRequest {
+            text,
+            run,
+            atoms,
+            window,
+            leading_edit,
+            trailing_edit,
+        } = *request;
+        let Some(plan) = plan_window(atoms, window, leading_edit, trailing_edit) else {
             return;
         };
         let candidates = self.registry.candidates(&run.families, run.style);
@@ -477,8 +474,8 @@ impl TextShaper for HarfRustShaper {
             run,
             atoms,
             &plan,
-            output_clusters,
-            output_glyphs,
+            &mut output.clusters,
+            &mut output.glyphs,
             |clusters, glyphs| {
                 // A cut atom's empty cluster takes the face of the kept text
                 // beside it, so a replacement attached to it is shaped in
@@ -552,8 +549,7 @@ impl TextShaper for HarfRustShaper {
     fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32 {
         let size = instance.font_size * instance.font.scale;
         // A face without a space falls back to a quarter em.
-        let advance = self
-            .instance(instance.font.font_id, instance.variations)
+        self.instance(instance.font.font_id, instance.variations)
             .and_then(|(font, units)| {
                 let glyph = font.charmap().map_unicode(' ')?;
                 let metrics = font.glyph_metrics();
@@ -564,8 +560,7 @@ impl TextShaper for HarfRustShaper {
                 };
                 Some(advance * size / units.units_per_em)
             })
-            .unwrap_or(0.25 * size);
-        finite_nonnegative(advance)
+            .unwrap_or(0.25 * size)
     }
 }
 

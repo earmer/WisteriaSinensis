@@ -15,17 +15,12 @@ use super::clusters::{
     EdgeFonts, TaggedGlyph, atom_containing, finish_window, plan_window, push_clusters,
     push_empty_clusters,
 };
-use super::{LeadingEdit, ShaperProfile, TextShaper, TrailingEdit, finite_nonnegative};
+use super::{ReshapeRequest, ShapeOutput, ShaperProfile, TextShaper};
 use crate::types::{
     FontFamily, FontFeatures, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
     GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster,
-    ShapingRun, TextRange,
+    ShapingRun,
 };
-
-/// `v` when it is finite, else zero.
-fn finite_or_zero(v: f32) -> f32 {
-    if v.is_finite() { v } else { 0.0 }
-}
 
 /// One glyph of a [`LineShaper`]'s output.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,9 +127,9 @@ impl<B: LineShaper> LineOnlyShaper<B> {
         let kept_end = string.len() - trail;
         let raw = |g: &LineGlyph, synthesized: bool| RawShapedGlyph {
             glyph_id: g.glyph_id,
-            x_advance: finite_or_zero(g.x_advance),
-            x_offset: finite_or_zero(g.x_offset),
-            y_offset: finite_or_zero(g.y_offset),
+            x_advance: g.x_advance,
+            x_offset: g.x_offset,
+            y_offset: g.y_offset,
             is_synthesized: synthesized,
         };
         // A seam is unambiguous at the start of the shaped text and after
@@ -269,8 +264,7 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
         text: &str,
         run: &ShapingRun,
         atoms: &[GraphemeAtom],
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
+        output: &mut ShapeOutput,
     ) {
         if atoms.is_empty() {
             return;
@@ -286,21 +280,19 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
             range: 0..atoms.len(),
             text,
         };
-        self.shape_atoms(&window, output_clusters, output_glyphs);
+        self.shape_atoms(&window, &mut output.clusters, &mut output.glyphs);
     }
 
-    fn reshape_window(
-        &self,
-        text: &str,
-        run: &ShapingRun,
-        atoms: &[GraphemeAtom],
-        window: TextRange,
-        leading_edit: LeadingEdit,
-        trailing_edit: TrailingEdit,
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
-    ) {
-        let Some(plan) = plan_window(atoms, window, &leading_edit, &trailing_edit) else {
+    fn reshape_window(&self, request: &ReshapeRequest<'_>, output: &mut ShapeOutput) {
+        let ReshapeRequest {
+            text,
+            run,
+            atoms,
+            window,
+            leading_edit,
+            trailing_edit,
+        } = *request;
+        let Some(plan) = plan_window(atoms, window, leading_edit, trailing_edit) else {
             return;
         };
         let kept_bytes = if plan.kept_start < plan.kept_end {
@@ -320,8 +312,8 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
             run,
             atoms,
             &plan,
-            output_clusters,
-            output_glyphs,
+            &mut output.clusters,
+            &mut output.glyphs,
             |clusters, glyphs| {
                 let window = LineWindow {
                     string: &shaped_input,
@@ -340,6 +332,6 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
     }
 
     fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32 {
-        finite_nonnegative(self.backend.space_advance(instance, orientation))
+        self.backend.space_advance(instance, orientation)
     }
 }

@@ -254,21 +254,17 @@ fn reshape_window_takes_the_run_slice_of_the_paragraph_storage_directly() {
             .iter()
             .all(|c| c.atom_range.end <= atoms.len())
     );
-    let mut out = vec![cluster(2, 0)];
-    let mut out_glyphs = Vec::new();
+    let mut out = ShapeOutput {
+        clusters: vec![cluster(2, 0)],
+        glyphs: Vec::new(),
+    };
     NoopShaper.reshape_window(
-        TEXT,
-        run,
-        atoms,
-        TextRange::new(2, 4),
-        LeadingEdit::None,
-        TrailingEdit::None,
+        &ReshapeRequest::plain(TEXT, run, atoms, TextRange::new(2, 4)),
         &mut out,
-        &mut out_glyphs,
     );
     // The no-op shaper appends nothing and never clears the buffer.
-    assert_eq!(out, vec![cluster(2, 0)]);
-    assert!(out_glyphs.is_empty());
+    assert_eq!(out.clusters, vec![cluster(2, 0)]);
+    assert!(out.glyphs.is_empty());
 }
 
 #[test]

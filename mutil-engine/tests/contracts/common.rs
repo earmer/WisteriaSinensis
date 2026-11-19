@@ -629,33 +629,13 @@ impl TextShaper for MetricsShaper {
         text: &str,
         run: &ShapingRun,
         atoms: &[GraphemeAtom],
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
+        output: &mut ShapeOutput,
     ) {
-        NoopShaper.shape_run(text, run, atoms, output_clusters, output_glyphs);
+        NoopShaper.shape_run(text, run, atoms, output);
     }
 
-    fn reshape_window(
-        &self,
-        text: &str,
-        run: &ShapingRun,
-        atoms: &[GraphemeAtom],
-        window: TextRange,
-        leading_edit: LeadingEdit,
-        trailing_edit: TrailingEdit,
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
-    ) {
-        NoopShaper.reshape_window(
-            text,
-            run,
-            atoms,
-            window,
-            leading_edit,
-            trailing_edit,
-            output_clusters,
-            output_glyphs,
-        );
+    fn reshape_window(&self, request: &ReshapeRequest<'_>, output: &mut ShapeOutput) {
+        NoopShaper.reshape_window(request, output);
     }
 
     fn ligature_carets(

@@ -91,9 +91,9 @@ fn shp5_horizontal_in_vertical_shapes_into_one_valid_cluster() {
         atom_range: 0..2,
         cluster_range: 0..1,
     };
-    let mut clusters = Vec::new();
-    let mut glyphs = Vec::new();
-    SHAPER.shape_run(text, &run, &atoms, &mut clusters, &mut glyphs);
+    let mut out = ShapeOutput::default();
+    SHAPER.shape_run(text, &run, &atoms, &mut out);
+    let ShapeOutput { clusters, glyphs } = out;
 
     assert_eq!(clusters.len(), 1, "{clusters:?}");
     let cluster = &clusters[0];
@@ -185,9 +185,9 @@ fn shp5_horizontal_in_vertical_takes_one_face_that_covers_the_whole_group() {
     assert!(glyph_for(japanese, '…').is_some() && glyph_for(japanese, '漢').is_some());
 
     let (atoms, run) = tate_chu_yoko(text, &[FAMILY, JAPANESE]);
-    let mut clusters = Vec::new();
-    let mut glyphs = Vec::new();
-    SCRIPT_SHAPER.shape_run(text, &run, &atoms, &mut clusters, &mut glyphs);
+    let mut out = ShapeOutput::default();
+    SCRIPT_SHAPER.shape_run(text, &run, &atoms, &mut out);
+    let ShapeOutput { clusters, glyphs } = out;
 
     assert_eq!(clusters.len(), 1, "{clusters:?}");
     let jp_id = FontId(

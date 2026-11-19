@@ -6,7 +6,7 @@
 //! [`resolve_ligature_carets`](super::resolve_ligature_carets) (spec INT-5).
 
 use super::{LayoutInputError, LineHeight, StrutMetrics};
-use crate::shaping::{LeadingEdit, TextShaper, TrailingEdit};
+use crate::shaping::{ReshapeRequest, ShapeOutput, TextShaper};
 use crate::types::{
     FontInstanceRef, FontMetrics, GraphemeAtom, RawShapedGlyph, ShapingRun, TextRange, WritingMode,
     is_extent, is_measurement,
@@ -83,18 +83,12 @@ pub(crate) fn checked_reshape_window(
     window: TextRange,
     expected_atom_range: core::ops::Range<usize>,
 ) -> Option<(Vec<RawShapedGlyph>, f32)> {
-    let mut clusters = Vec::new();
-    let mut glyphs = Vec::new();
+    let mut output = ShapeOutput::default();
     shaper.reshape_window(
-        text,
-        run,
-        atoms,
-        window,
-        LeadingEdit::None,
-        TrailingEdit::None,
-        &mut clusters,
-        &mut glyphs,
+        &ReshapeRequest::plain(text, run, atoms, window),
+        &mut output,
     );
+    let ShapeOutput { clusters, glyphs } = output;
     let [only] = clusters.as_slice() else {
         return None;
     };
