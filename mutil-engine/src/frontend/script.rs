@@ -36,22 +36,14 @@ static EXTENSIONS: LazyLock<ScriptWithExtensionsBorrowed<'static>> =
 /// The depth of the Table S stack (FE-4).
 const STACK_DEPTH: usize = 63;
 
-/// A script tag known to be well formed.
-const fn tag(bytes: [u8; 4]) -> ScriptTag {
-    match ScriptTag::try_from_bytes(bytes) {
-        Ok(tag) => tag,
-        Err(_) => panic!("a well-formed script tag"),
-    }
-}
-
-const HAN: ScriptTag = tag(*b"Hani");
+const HAN: ScriptTag = ScriptTag::HAN;
 /// The Han script list of FE-13 and the CJK scripts of FE-14.
-const HAN_LIST: [ScriptTag; 5] = [
+pub(crate) const HAN_LIST: [ScriptTag; 5] = [
     HAN,
-    tag(*b"Hira"),
-    tag(*b"Kana"),
-    tag(*b"Hang"),
-    tag(*b"Bopo"),
+    ScriptTag::HIRAGANA,
+    ScriptTag::KATAKANA,
+    ScriptTag::HANGUL,
+    ScriptTag::BOPOMOFO,
 ];
 
 /// Table S's quotation pairs beyond `BidiBrackets.txt` (FE-9): opener and
@@ -147,9 +139,11 @@ pub(crate) fn is_apostrophe(text: &str, range: TextRange) -> bool {
             .is_some_and(is_ah_letter)
 }
 
+type ScriptSet = SmallVec<[ScriptTag; 8]>;
+
 /// The non-trivial `Script_Extensions` of `c`: none for a character whose
 /// extensions are just its own Common or Inherited script.
-fn extensions(c: char) -> SmallVec<[ScriptTag; 8]> {
+fn extensions(c: char) -> ScriptSet {
     EXTENSIONS
         .get_script_extensions_val(c)
         .iter()
@@ -168,72 +162,42 @@ fn preferred(set: &[ScriptTag]) -> ScriptTag {
     }
 }
 
-/// What a Common atom waits for.
-#[derive(Clone)]
-enum Pending {
-    /// Any strong script.
-    Any,
-    /// A strong script in the set, else the set's preferred member.
-    In(SmallVec<[ScriptTag; 8]>),
-}
-
-/// A Table S pairing role.
-enum Role {
-    Opener(char),
-    Closer(char),
-    /// U+201C and U+2018 open English-style pairs and close German-style
-    /// ones, and a toggling pair of the override closes itself: a closer
-    /// when an opener `closes_for` waiting for `closes` is on the stack,
-    /// else an opener waiting for `opens`.
-    Either {
-        closes: char,
-        closes_for: char,
-        opens: char,
-    },
-    None,
+/// A Table S pairing role: the closer a character opens a pair for, and
+/// whether it may close a pair. U+201C and U+2018 do both (they close
+/// German-style pairs and open English-style ones), and so does a toggling
+/// pair of the override: it closes when its opener is on the stack, else
+/// opens.
+struct Role {
+    opens: Option<char>,
+    closes: bool,
 }
 
 fn role(c: char, overrides: &[(char, char)]) -> Role {
     if let Some(&(opener, closer)) = overrides.iter().find(|&&(o, k)| o == c || k == c) {
-        return if opener == closer {
-            Role::Either {
-                closes: c,
-                closes_for: c,
-                opens: c,
-            }
-        } else if opener == c {
-            Role::Opener(closer)
-        } else {
-            Role::Closer(c)
+        return Role {
+            opens: (opener == c).then_some(closer),
+            closes: closer == c,
         };
     }
-    match c {
-        '\u{201C}' => Role::Either {
-            closes: '\u{201C}',
-            closes_for: '\u{201E}',
-            opens: '\u{201D}',
+    let opens = QUOTE_PAIRS.iter().find(|&&(o, _)| o == c).map(|&(_, k)| k);
+    let closes = QUOTE_PAIRS.iter().any(|&(_, k)| k == c);
+    if opens.is_some() || closes {
+        return Role { opens, closes };
+    }
+    let glyph = MIRRORING.get(c);
+    match glyph.paired_bracket_type {
+        BidiPairedBracketType::Open => Role {
+            opens: glyph.mirroring_glyph,
+            closes: false,
         },
-        '\u{2018}' => Role::Either {
-            closes: '\u{2018}',
-            closes_for: '\u{201A}',
-            opens: '\u{2019}',
+        BidiPairedBracketType::Close => Role {
+            opens: None,
+            closes: true,
         },
-        _ => {
-            if let Some(&(_, closer)) = QUOTE_PAIRS.iter().find(|(o, _)| *o == c) {
-                return Role::Opener(closer);
-            }
-            if QUOTE_PAIRS.iter().any(|(_, k)| *k == c) {
-                return Role::Closer(c);
-            }
-            let glyph = MIRRORING.get(c);
-            match glyph.paired_bracket_type {
-                BidiPairedBracketType::Open => {
-                    glyph.mirroring_glyph.map_or(Role::None, Role::Opener)
-                }
-                BidiPairedBracketType::Close => Role::Closer(c),
-                _ => Role::None,
-            }
-        }
+        _ => Role {
+            opens: None,
+            closes: false,
+        },
     }
 }
 
@@ -257,23 +221,22 @@ pub(crate) struct ScriptAtom<'a> {
 
 /// Resolves the script of every atom of a paragraph, in order.
 pub(crate) fn resolve(atoms: &[ScriptAtom<'_>], policy: QuotePolicy) -> Vec<ScriptTag> {
-    let n = atoms.len();
-    let mut scripts: Vec<Option<ScriptTag>> = vec![None; n];
+    let mut scripts: Vec<Option<ScriptTag>> = vec![None; atoms.len()];
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     // Table S: (closer it waits for, opener atom).
     let mut stack: Vec<(char, usize)> = Vec::new();
-    let mut pending: Vec<(usize, Pending)> = Vec::new();
+    // Common atoms waiting for the next strong script, with the set it must
+    // belong to: empty for any.
+    let mut pending: Vec<(usize, ScriptSet)> = Vec::new();
     let mut strong: Option<ScriptTag> = None;
-    let settle = |pending: &mut Vec<(usize, Pending)>,
+    let settle = |pending: &mut Vec<(usize, ScriptSet)>,
                   scripts: &mut Vec<Option<ScriptTag>>,
                   next: Option<ScriptTag>| {
-        for (atom, wants) in pending.drain(..) {
-            scripts[atom] = Some(match (wants, next) {
-                (Pending::Any, Some(s)) => s,
-                (Pending::Any, None) => ScriptTag::LATIN,
-                (Pending::In(set), Some(s)) if set.contains(&s) => s,
-                (Pending::In(set), _) => preferred(&set),
-            });
+        for (atom, set) in pending.drain(..) {
+            scripts[atom] = Some(
+                next.filter(|s| set.is_empty() || set.contains(s))
+                    .unwrap_or_else(|| preferred(&set)),
+            );
         }
     };
     for (index, atom) in atoms.iter().enumerate() {
@@ -292,55 +255,27 @@ pub(crate) fn resolve(atoms: &[ScriptAtom<'_>], policy: QuotePolicy) -> Vec<Scri
             continue;
         };
         // Table S pairing.
-        let mut is_opener = None;
+        let mut opens = None;
         if !atom.is_apostrophe {
-            let closes = match role(c, atom.quotes) {
-                Role::Opener(closer) => {
-                    is_opener = Some(closer);
-                    None
-                }
-                Role::Closer(closer) => Some(closer),
-                Role::Either {
-                    closes,
-                    closes_for,
-                    opens,
-                } => {
-                    if stack
-                        .iter()
-                        .any(|&(k, o)| k == closes && atoms[o].text.starts_with(closes_for))
-                    {
-                        Some(closes)
-                    } else {
-                        is_opener = Some(opens);
-                        None
-                    }
-                }
-                Role::None => None,
-            };
-            if let Some(closer) = closes
-                && let Some(at) = stack.iter().rposition(|&(k, _)| k == closer)
+            let role = role(c, atom.quotes);
+            if role.closes
+                && let Some(at) = stack.iter().rposition(|&(k, _)| k == c)
             {
-                let opener = stack[at].1;
+                pairs.push((stack[at].1, index));
                 stack.truncate(at);
-                pairs.push((opener, index));
                 continue;
             }
+            opens = role.opens;
         }
         let mut set = extensions(c);
         if set.is_empty() && is_wide(c) {
             set = SmallVec::from_slice(&HAN_LIST);
         }
-        if set.is_empty() {
-            match strong {
-                Some(s) => scripts[index] = Some(s),
-                None => pending.push((index, Pending::Any)),
-            }
-        } else if let Some(s) = strong.filter(|s| set.contains(s)) {
-            scripts[index] = Some(s);
-        } else {
-            pending.push((index, Pending::In(set)));
+        match strong.filter(|s| set.is_empty() || set.contains(s)) {
+            Some(s) => scripts[index] = Some(s),
+            None => pending.push((index, set)),
         }
-        if let Some(closer) = is_opener {
+        if let Some(closer) = opens {
             if stack.len() == STACK_DEPTH {
                 stack.remove(0);
             }
@@ -469,34 +404,24 @@ use super::spacing::is_punctuation;
 /// which allows a break after an ideograph (`号·`).
 pub(crate) fn is_cjk_middle_dot(text: &str, atoms: &[GraphemeAtom], index: usize) -> bool {
     atoms.get(index).is_some_and(|a| {
-        HAN_LIST.contains(&a.script)
-            && text
-                .get(a.byte_range.as_range())
-                .and_then(|s| s.chars().next())
-                .is_some_and(|c| matches!(c, '\u{00B7}' | '\u{2027}'))
+        HAN_LIST.contains(&a.script) && matches!(first_char(text, a), Some('\u{00B7}' | '\u{2027}'))
     })
+}
+
+fn first_char(text: &str, atom: &GraphemeAtom) -> Option<char> {
+    text[atom.byte_range.as_range()].chars().next()
 }
 
 /// Atoms whose dash, ellipsis or middle-dot run must not break inside
 /// (FE-15): `true` for every atom of such a run but its last.
 pub(crate) fn binds_to_next(text: &str, atoms: &[GraphemeAtom], index: usize) -> bool {
-    let (Some(a), Some(b)) = (
-        atoms.get(index),
-        index.checked_add(1).and_then(|i| atoms.get(i)),
-    ) else {
+    let Some([a, b]) = atoms.get(index..).and_then(<[_]>::first_chunk) else {
         return false;
     };
-    if a.byte_range.end() != b.byte_range.start() || a.script != b.script {
-        return false;
-    }
-    let (Some(sa), Some(sb)) = (
-        text.get(a.byte_range.as_range()),
-        text.get(b.byte_range.as_range()),
-    ) else {
-        return false;
-    };
-    matches!((sa.chars().next(), sb.chars().next()),
-        (Some(ch_a), Some(ch_b)) if ch_a == ch_b && is_dash_run_char(ch_a))
+    a.byte_range.end() == b.byte_range.start()
+        && a.script == b.script
+        && first_char(text, a) == first_char(text, b)
+        && first_char(text, a).is_some_and(is_dash_run_char)
 }
 
 #[cfg(test)]
@@ -599,13 +524,13 @@ mod tests {
         // H: Hani or Hira (both start with H); check the tags directly.
         let text = "かな、abc";
         let r = resolve(&atoms(text), QuotePolicy::Standard);
-        assert_eq!(r[2], tag(*b"Hira"));
+        assert_eq!(r[2], ScriptTag::HIRAGANA);
         // A corner bracket after Latin takes the following kana's script,
         // and its closer the opener's.
         let text = "ab「カナ」";
         let r = resolve(&atoms(text), QuotePolicy::Standard);
-        assert_eq!(r[2], tag(*b"Kana"));
-        assert_eq!(r[5], tag(*b"Kana"));
+        assert_eq!(r[2], ScriptTag::KATAKANA);
+        assert_eq!(r[5], ScriptTag::KATAKANA);
     }
 
     #[test]

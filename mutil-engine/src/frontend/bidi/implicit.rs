@@ -2,7 +2,7 @@
 //! W7, N0 to N2, I1 and I2) on one isolating run sequence (spec FE-30).
 
 use super::Bracket;
-use super::explicit::{RunSequence, is_isolate_initiator};
+use super::explicit::{RunSequence, direction_class, is_isolate_initiator};
 use crate::types::BidiClass;
 
 /// BD16's bracket stack depth.
@@ -138,37 +138,23 @@ fn bracket_pairs(ctx: &Context<'_>, seq: &RunSequence, t: &[BidiClass]) -> Vec<(
 
 /// N0: paired brackets take the direction their content and context give.
 fn resolve_brackets(ctx: &Context<'_>, seq: &RunSequence, t: &mut [BidiClass]) {
-    let embedding = if seq.level % 2 == 1 {
-        BidiClass::R
-    } else {
-        BidiClass::L
-    };
+    let embedding = direction_class(seq.level);
     for (open, close) in bracket_pairs(ctx, seq, t) {
-        let inside = t[open + 1..close]
-            .iter()
-            .filter_map(|&x| strong_for_neutrals(x));
-        let mut found_opposite = false;
-        let mut resolved = None;
-        for strong in inside {
-            if strong == embedding {
-                resolved = Some(embedding);
-                break;
-            }
-            found_opposite = true;
-        }
-        if resolved.is_none() && found_opposite {
-            let context = t[..open]
+        let inside = || {
+            t[open + 1..close]
+                .iter()
+                .filter_map(|&x| strong_for_neutrals(x))
+        };
+        // N0 c: opposite strong types only take the direction of the context.
+        let direction = if inside().any(|strong| strong == embedding) {
+            embedding
+        } else if inside().next().is_some() {
+            t[..open]
                 .iter()
                 .rev()
                 .find_map(|&x| strong_for_neutrals(x))
-                .unwrap_or(seq.sos);
-            resolved = Some(if context == embedding {
-                embedding
-            } else {
-                context
-            });
-        }
-        let Some(direction) = resolved else {
+                .unwrap_or(seq.sos)
+        } else {
             continue;
         };
         for bracket in [open, close] {
@@ -200,11 +186,7 @@ fn is_neutral(t: BidiClass) -> bool {
 
 /// N1 and N2.
 fn resolve_neutrals(t: &mut [BidiClass], seq: &RunSequence) {
-    let embedding = if seq.level % 2 == 1 {
-        BidiClass::R
-    } else {
-        BidiClass::L
-    };
+    let embedding = direction_class(seq.level);
     let mut k = 0;
     while k < t.len() {
         if !is_neutral(t[k]) {

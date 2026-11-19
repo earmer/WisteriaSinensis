@@ -2,9 +2,10 @@
 //! autospace classes, the punctuation of compression and hanging, and the
 //! locales that turn compression off. Each answer reads one code point.
 
-use super::segment::{LINE_BREAK, SCRIPT, SCRIPT_NAMES};
+use super::script::{HAN_LIST, char_script};
+use super::segment::LINE_BREAK;
 use crate::types::{LocaleTag, ScriptTag};
-use icu_properties::props::{EastAsianWidth, GeneralCategory, LineBreak};
+use icu_properties::props::{EastAsianWidth, GeneralCategory, GeneralCategoryGroup, LineBreak};
 use icu_properties::{CodePointMapData, CodePointMapDataBorrowed};
 
 static WIDTH: CodePointMapDataBorrowed<'static, EastAsianWidth> =
@@ -19,11 +20,6 @@ pub(crate) enum AutospaceClass {
     Western,
 }
 
-/// The `Script` property of `c` by its short name, without extensions.
-fn script_name(c: char) -> &'static str {
-    SCRIPT_NAMES.get(SCRIPT.get(c)).unwrap_or_default()
-}
-
 /// East Asian Width W or F.
 fn is_wide_or_full(c: char) -> bool {
     matches!(
@@ -34,23 +30,14 @@ fn is_wide_or_full(c: char) -> bool {
 
 /// General Category P*.
 pub(crate) fn is_punctuation(c: char) -> bool {
-    matches!(
-        CATEGORY.get(c),
-        GeneralCategory::ConnectorPunctuation
-            | GeneralCategory::DashPunctuation
-            | GeneralCategory::OpenPunctuation
-            | GeneralCategory::ClosePunctuation
-            | GeneralCategory::InitialPunctuation
-            | GeneralCategory::FinalPunctuation
-            | GeneralCategory::OtherPunctuation
-    )
+    GeneralCategoryGroup::Punctuation.contains(CATEGORY.get(c))
 }
 
 /// The autospace class of `c`, if any (FE-20). Punctuation is of neither.
 pub(crate) fn autospace_class(c: char) -> Option<AutospaceClass> {
     let category = CATEGORY.get(c);
     if is_wide_or_full(c) {
-        let cjk = matches!(script_name(c), "Hani" | "Hira" | "Kana" | "Hang" | "Bopo")
+        let cjk = HAN_LIST.contains(&char_script(c))
             && !is_punctuation(c)
             && category != GeneralCategory::Format
             && !matches!(
@@ -63,14 +50,11 @@ pub(crate) fn autospace_class(c: char) -> Option<AutospaceClass> {
             );
         return cjk.then_some(AutospaceClass::Cjk);
     }
-    let letter = matches!(
-        category,
-        GeneralCategory::UppercaseLetter
-            | GeneralCategory::LowercaseLetter
-            | GeneralCategory::TitlecaseLetter
-            | GeneralCategory::ModifierLetter
-            | GeneralCategory::OtherLetter
-    ) && matches!(script_name(c), "Latn" | "Grek" | "Cyrl");
+    let letter = GeneralCategoryGroup::Letter.contains(category)
+        && matches!(
+            char_script(c),
+            ScriptTag::LATIN | ScriptTag::GREEK | ScriptTag::CYRILLIC
+        );
     (letter || category == GeneralCategory::DecimalNumber).then_some(AutospaceClass::Western)
 }
 
