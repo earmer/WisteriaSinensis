@@ -50,7 +50,8 @@ impl UnitMetrics {
 /// `OS/2` already store the underline and strike-out positions that way.
 pub(super) fn unit_metrics(font: &Font) -> UnitMetrics {
     let metrics = font.metrics();
-    let upem = f32::from(metrics.units_per_em.max(1));
+    // `FontRegistry::add_face` refuses a face whose `units_per_em` is 0.
+    let upem = f32::from(metrics.units_per_em);
     let (ascent, descent, line_gap) = horizontal_line(metrics, upem);
     let (x_height, cap_height) = ink_heights(font, metrics, upem);
     let style = font.style_metrics();

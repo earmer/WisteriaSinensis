@@ -89,7 +89,7 @@ impl FontRegistry {
 
     /// Registers `face` under `family` and `style` and returns its id, or
     /// `None`, registering nothing, when its bytes hold no font at its face
-    /// index. The bytes are shared, not copied (spec HST-1); they are parsed
+    /// index or the font's `units_per_em` is 0. The bytes are shared, not copied (spec HST-1); they are parsed
     /// here, once.
     ///
     /// The face's [`FaceProfile`] is read from its tables (spec SHP-25).
@@ -141,6 +141,10 @@ impl FontRegistry {
     ) -> Option<FontId> {
         let bytes = Arc::clone(&face.bytes().0);
         let font = Font::new(bytes, face.face_index())?;
+        // Every metric is scaled by `1 / units_per_em` (SHP-21).
+        if font.metrics().units_per_em == 0 {
+            return None;
+        }
         let id = FontId(u32::try_from(self.faces.len()).ok()?);
         let metrics = unit_metrics(&font);
         let profile = profile.unwrap_or_else(|| face_profile(&font));
