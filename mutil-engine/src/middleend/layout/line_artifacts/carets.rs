@@ -2,7 +2,7 @@
 
 use crate::frontend::GlueKind;
 use crate::middleend::layout::line_builder::AlignedLine;
-use crate::middleend::layout::{Layout, PieceKind, PlacedPiece};
+use crate::middleend::layout::{Layout, PieceKind, PlacedPiece, Reshapes};
 use crate::middleend::tolerance::approx_eq;
 use crate::middleend::{
     CaretAffinity, CaretStop, HangingWhitespaceMode, PositionedInlineBox, VisualGlyphRun,
@@ -31,6 +31,7 @@ impl Layout<'_, '_> {
         visible_end: usize,
         runs: &[VisualGlyphRun],
         boxes: &[PositionedInlineBox],
+        pending: &Reshapes,
     ) -> Vec<CaretStop> {
         let bytes = line.byte_range;
         // Under `Collapsible`, a soft wrap hides the trailing white space,
@@ -59,7 +60,7 @@ impl Layout<'_, '_> {
         };
         let body = line.order.iter().map(|&k| &line.placed[k]);
         for &piece in body.chain(forward).chain(backward.iter().rev()) {
-            self.push_piece_stops(piece, &mut raw);
+            self.push_piece_stops(piece, &mut raw, pending);
         }
         // A hard break's own bytes start the next line.
         let drops_end = !line.soft_wrap()
@@ -106,7 +107,6 @@ impl Layout<'_, '_> {
             offset: s.offset,
             affinity: s.affinity,
             level: s.level.unwrap_or_else(|| level_at(s.offset)),
-            line: line.index,
         };
         stops.iter().map(to_stop).collect()
     }
@@ -116,7 +116,12 @@ impl Layout<'_, '_> {
     /// positions, none for a single atom or an emoji sequence. Positions
     /// increase from the left edge (SHP-7); in RTL they pair with the atoms
     /// in reverse logical order, and the justification lies before the glyphs.
-    fn push_piece_stops(&self, placed: PlacedPiece<'_>, raw: &mut Vec<RawStop>) {
+    fn push_piece_stops(
+        &self,
+        placed: PlacedPiece<'_>,
+        raw: &mut Vec<RawStop>,
+        pending: &Reshapes,
+    ) {
         let p = placed.piece;
         // A compression pool squeezed below zero overlaps its neighbours and
         // owns no bytes: its edges would only duplicate theirs (CRT-3).
@@ -152,7 +157,7 @@ impl Layout<'_, '_> {
             && !c.flags.contains(AtomFlags::IS_EMOJI_SEQUENCE)
         {
             let direction = p.level.direction();
-            let (glyphs, width) = self.cluster_glyphs(cluster);
+            let (glyphs, width) = self.cluster_glyphs(pending, cluster);
             let first_glyph = glyphs.first().map_or(0, |g| g.glyph_id);
             let instance = self.ast.runs[run].font_instance(c.font);
             let carets = self

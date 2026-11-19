@@ -12,8 +12,7 @@ use super::clusters::{
 use super::{FontFace, FontSource, ReshapeRequest, ShapeOutput, TextShaper};
 use crate::types::{
     Direction, FontFamily, FontId, FontInstanceRef, FontMetrics, FontRef, FontStyle, FontVariation,
-    GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster,
-    ShapingRun, TextRange,
+    GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapingRun, TextRange,
 };
 use core::fmt;
 use harfrust::{
@@ -66,8 +65,7 @@ struct ShapingTarget<'a> {
     text: &'a str,
     run: &'a ShapingRun,
     atoms: &'a [GraphemeAtom],
-    clusters: &'a mut Vec<ShapedCluster>,
-    glyphs: &'a mut Vec<RawShapedGlyph>,
+    output: &'a mut ShapeOutput,
     /// One HarfRust buffer reused by every font run of the call.
     buffer: &'a mut Buffer,
 }
@@ -157,11 +155,11 @@ impl HarfRustShaper {
                     .unwrap_or(range.end)
             };
             pending = (end < range.end).then(|| face_at(target, end));
-            let first_cluster = target.clusters.len();
+            let first_cluster = target.output.clusters.len();
             self.shape_font_run(target, start..end, font);
             if cut_before
                 && start == range.start
-                && let Some(cluster) = target.clusters.get_mut(first_cluster)
+                && let Some(cluster) = target.output.clusters.get_mut(first_cluster)
             {
                 cluster.safe_to_concat_before = false;
             }
@@ -180,21 +178,12 @@ impl HarfRustShaper {
         let text = target.text;
         let run = target.run;
         let atoms = target.atoms;
-        let output_clusters = &mut *target.clusters;
-        let output_glyphs = &mut *target.glyphs;
         let bytes = TextRange::new(
             atoms[range.start].byte_range.start(),
             atoms[range.end - 1].byte_range.end(),
         );
         let Some(font_id) = font else {
-            push_empty_clusters(
-                run,
-                atoms,
-                range,
-                FontId::default(),
-                output_clusters,
-                output_glyphs,
-            );
+            push_empty_clusters(run, atoms, range, FontId::default(), target.output);
             return;
         };
         let buffer = &mut *target.buffer;
@@ -213,7 +202,7 @@ impl HarfRustShaper {
         }
         buffer.set_flags(flags);
         let Some(k) = self.shape_run_buffer(run, font_id, buffer) else {
-            push_empty_clusters(run, atoms, range, font_id, output_clusters, output_glyphs);
+            push_empty_clusters(run, atoms, range, font_id, target.output);
             return;
         };
         let vertical = run.orientation == GlyphOrientation::VerticalUpright;
@@ -233,15 +222,7 @@ impl HarfRustShaper {
             // HarfRust returns visual order; the contract is logical (SHP-11).
             glyphs.reverse();
         }
-        push_clusters(
-            run,
-            atoms,
-            range,
-            &glyphs,
-            font_id,
-            output_clusters,
-            output_glyphs,
-        );
+        push_clusters(run, atoms, range, &glyphs, font_id, target.output);
     }
 
     /// Glyphs of `replacement` in `font`, marked synthesized, for a
@@ -447,8 +428,7 @@ impl TextShaper for HarfRustShaper {
             text,
             run,
             atoms,
-            clusters: &mut output.clusters,
-            glyphs: &mut output.glyphs,
+            output,
             buffer: &mut buffer,
         };
         for segment in contiguous_segments(atoms, 0..atoms.len()) {
@@ -474,21 +454,19 @@ impl TextShaper for HarfRustShaper {
             run,
             atoms,
             &plan,
-            &mut output.clusters,
-            &mut output.glyphs,
-            |clusters, glyphs| {
+            output,
+            |output| {
                 // A cut atom's empty cluster takes the face of the kept text
                 // beside it, so a replacement attached to it is shaped in
                 // that face rather than in the stack's first one.
-                let kept_first = clusters.len();
+                let kept_first = output.clusters.len();
                 if plan.kept_start < plan.kept_end {
                     let mut buffer = Buffer::new();
                     let mut target = ShapingTarget {
                         text,
                         run,
                         atoms,
-                        clusters: &mut *clusters,
-                        glyphs,
+                        output: &mut *output,
                         buffer: &mut buffer,
                     };
                     for (k, segment) in contiguous_segments(atoms, plan.kept_start..plan.kept_end)
@@ -498,7 +476,7 @@ impl TextShaper for HarfRustShaper {
                         self.shape_segment(&mut target, segment, &candidates, k == 0);
                     }
                 }
-                let kept = &clusters[kept_first..];
+                let kept = &output.clusters[kept_first..];
                 let edges = match (kept.first(), kept.last()) {
                     (Some(first), Some(last)) => EdgeFonts {
                         first: first.font.font_id,

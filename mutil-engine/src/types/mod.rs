@@ -17,6 +17,7 @@ mod writing;
 
 pub use atom::{AtomFlags, GraphemeAtom, LineBreakClass};
 pub use bidi::{BIDI_MAX_DEPTH, BidiClass, BidiDirection, BidiLevel, Direction};
+pub(crate) use cluster::natural_width;
 pub use cluster::{RawShapedGlyph, ShapedCluster};
 pub use font::{
     FamilyStack, FontFamily, FontFeature, FontFeatures, FontId, FontInstanceRef, FontMetrics,

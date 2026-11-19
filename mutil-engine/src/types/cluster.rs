@@ -3,6 +3,14 @@
 use super::{AtomFlags, BidiLevel, FontRef, GlyphOrientation, TextRange};
 use core::ops::Range;
 
+/// The natural width of a cluster: its glyphs' advances plus `letter_spacing`,
+/// floored at zero. A non-finite sum is returned as it is, never clamped
+/// into range, so that the gate that checks the width rejects it (AX-3, G2).
+pub(crate) fn natural_width(glyphs: &[RawShapedGlyph], letter_spacing: f32) -> f32 {
+    let raw = glyphs.iter().map(|g| g.x_advance).sum::<f32>() + letter_spacing;
+    if raw.is_finite() { raw.max(0.0) } else { raw }
+}
+
 /// One glyph as produced by a shaping backend, before line layout.
 ///
 /// **[Design decision]** The spec names `RawShapedGlyph` (§2.3) without

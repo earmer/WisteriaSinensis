@@ -179,7 +179,6 @@ fn test_pipeline_types_compile() {
             offset: 0,
             affinity: CaretAffinity::Downstream,
             level: BidiLevel::LTR,
-            line: 0,
         }],
         visual_boxes: vec![],
         decorations: vec![],

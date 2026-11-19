@@ -109,6 +109,14 @@ pub struct ShapeOutput {
     pub glyphs: Vec<RawShapedGlyph>,
 }
 
+impl ShapeOutput {
+    /// Empties both vectors, keeping their allocations.
+    pub(crate) fn clear(&mut self) {
+        self.clusters.clear();
+        self.glyphs.clear();
+    }
+}
+
 /// What [`TextShaper::reshape_window`] re-shapes (spec SHP-6): the run, the
 /// window in it and the edits at the window's two edges.
 #[derive(Clone, Copy, Debug)]

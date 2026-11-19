@@ -568,7 +568,6 @@ fn caret(x: f32, offset: ByteIndex) -> CaretStop {
         offset,
         affinity: crate::middleend::CaretAffinity::Downstream,
         level: BidiLevel::LTR,
-        line: 0,
     }
 }
 
@@ -604,21 +603,6 @@ fn caret_stops_must_be_finite_ordered_and_inside_the_line() {
     assert_eq!(l.validate(&ctx()), invalid);
     l.caret_stops = vec![caret(0.0, 0), caret(5.0, 5)];
     assert_eq!(l.validate(&ctx()), invalid);
-    l.caret_stops = vec![
-        caret(0.0, 0),
-        CaretStop {
-            line: 1,
-            ..caret(5.0, 4)
-        },
-    ];
-    assert_eq!(l.validate(&ctx()), invalid);
-    assert_eq!(
-        l.validate(&LineContext {
-            line_index: 1,
-            ..ctx()
-        }),
-        Err(LineInvariantError::InvalidCaretStop { index: 0 })
-    );
 }
 
 #[test]

@@ -97,36 +97,15 @@ pub enum FrontendError {
 pub enum FrontendFeature {
     /// A vertical `FrontendOptions::writing_mode`.
     VerticalWritingMode,
-    /// `FrontendOptions::base_direction` set to right-to-left.
-    RtlBaseDirection,
-    /// A non-empty `ParagraphInput::decoration_spans`.
-    DecorationSpans,
-    /// A non-empty `ParagraphInput::atomic_spans`.
-    AtomicSpans,
-    /// A non-empty `ParagraphInput::bidi_spans`.
-    BidiSpans,
     /// A non-empty `ParagraphInput::annotations`.
     Annotations,
-    /// Text whose UAX #9 levels are not all zero in a left-to-right
-    /// paragraph: a strong right-to-left character, an Arabic number or an
-    /// explicit directional formatting character (spec RM-11).
-    BidiText,
-    /// A style or an inline object aligned to a baseline other than the
-    /// alphabetic one or an explicit offset from it.
-    BaselineAlignment,
 }
 
 impl fmt::Display for FrontendFeature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::VerticalWritingMode => "a vertical writing mode",
-            Self::RtlBaseDirection => "a right-to-left base direction",
-            Self::DecorationSpans => "decoration spans",
-            Self::AtomicSpans => "atomic edit spans",
-            Self::BidiSpans => "explicit bidi spans",
             Self::Annotations => "annotations",
-            Self::BidiText => "right-to-left or explicitly embedded text",
-            Self::BaselineAlignment => "a baseline alignment other than alphabetic or an offset",
         })
     }
 }
@@ -343,11 +322,11 @@ mod tests {
     #[test]
     fn errors_display_and_implement_std_error() {
         let error: Box<dyn std::error::Error> = Box::new(FrontendError::Unsupported {
-            feature: FrontendFeature::RtlBaseDirection,
+            feature: FrontendFeature::VerticalWritingMode,
         });
         assert_eq!(
             error.to_string(),
-            "not supported yet: a right-to-left base direction"
+            "not supported yet: a vertical writing mode"
         );
         assert_eq!(
             FrontendError::InvalidStyle { span: None }.to_string(),

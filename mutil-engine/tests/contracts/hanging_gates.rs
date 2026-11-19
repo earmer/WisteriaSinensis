@@ -135,9 +135,9 @@ fn atm4_hangable_flags_come_from_the_clusters_edges() {
     };
     // HANGABLE_START is read from the first atom only, HANGABLE_END and
     // ALLOW_CJK_JUSTIFY_AFTER from the last only; NO_LETTER_SPACING and
-    // KASHIDA_CAPABLE from any atom.
+    // IS_CJK_IDEOGRAPH from any atom.
     let atoms = [
-        with(0, AtomFlags::HANGABLE_START | AtomFlags::KASHIDA_CAPABLE),
+        with(0, AtomFlags::HANGABLE_START | AtomFlags::IS_CJK_IDEOGRAPH),
         with(
             1,
             AtomFlags::HANGABLE_START
@@ -150,13 +150,13 @@ fn atm4_hangable_flags_come_from_the_clusters_edges() {
     assert!(f.contains(AtomFlags::HANGABLE_START));
     assert!(f.contains(AtomFlags::HANGABLE_END));
     assert!(f.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER));
-    assert!(f.contains(AtomFlags::NO_LETTER_SPACING | AtomFlags::KASHIDA_CAPABLE));
+    assert!(f.contains(AtomFlags::NO_LETTER_SPACING | AtomFlags::IS_CJK_IDEOGRAPH));
     let reversed = [atoms[1].clone(), atoms[0].clone()];
     let f = AtomFlags::for_cluster(&reversed);
     assert!(f.contains(AtomFlags::HANGABLE_START));
     assert!(!f.contains(AtomFlags::HANGABLE_END));
     assert!(!f.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER));
-    assert!(f.contains(AtomFlags::NO_LETTER_SPACING | AtomFlags::KASHIDA_CAPABLE));
+    assert!(f.contains(AtomFlags::NO_LETTER_SPACING | AtomFlags::IS_CJK_IDEOGRAPH));
     let atoms = [
         with(0, AtomFlags::EMPTY),
         with(1, AtomFlags::HANGABLE_START),
@@ -170,7 +170,7 @@ fn atm4_hangable_flags_come_from_the_clusters_edges() {
     );
     assert!(AtomFlags::ALL.contains(
         AtomFlags::NO_LETTER_SPACING
-            | AtomFlags::KASHIDA_CAPABLE
+            | AtomFlags::IS_CJK_IDEOGRAPH
             | AtomFlags::HANGABLE_START
             | AtomFlags::HANGABLE_END
     ));

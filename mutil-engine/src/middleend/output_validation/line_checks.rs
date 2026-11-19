@@ -391,7 +391,6 @@ impl PositionedLine {
             };
             if !in_order
                 || !(self.byte_range.start()..=self.byte_range.end()).contains(&stop.offset)
-                || stop.line != ctx.line_index
                 || !level_is_owned()
             {
                 return Err(LineInvariantError::InvalidCaretStop { index });

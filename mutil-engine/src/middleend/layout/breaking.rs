@@ -79,7 +79,7 @@ pub(super) fn within(used: f32, limit: f32) -> bool {
 
 /// The outcome of fitting a line: where it ends, and the emergency re-shapes
 /// of the seam it needs. [`Layout::fit`] only proposes them; the caller
-/// commits them with [`Layout::commit_reshapes`].
+/// places the line with them pending and commits them only if it keeps it.
 pub(super) struct LineFit<'a> {
     pub(super) end: LineEnd<'a>,
     pub(super) reshapes: Reshapes,
@@ -176,9 +176,14 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// The glyphs and width of a cluster, after any emergency re-shape.
-    pub(super) fn cluster_glyphs(&self, cluster: usize) -> (&[RawShapedGlyph], f32) {
-        self.cluster_glyphs_over(None, cluster)
+    /// The glyphs and width of a cluster, after any emergency re-shape,
+    /// `pending` ones taking precedence over the committed.
+    pub(super) fn cluster_glyphs<'s>(
+        &'s self,
+        pending: &'s Reshapes,
+        cluster: usize,
+    ) -> (&'s [RawShapedGlyph], f32) {
+        self.cluster_glyphs_over(Some(pending), cluster)
     }
 
     /// [`cluster_glyphs`](Self::cluster_glyphs) as `pending` re-shapes, not
@@ -396,8 +401,8 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// An emergency break before piece `t` that is not safe to break
     /// re-shapes the clusters on both sides of the seam (spec ST1-5), with no
     /// edit. A re-shape that does not return exactly one cluster per side is
-    /// not used. The re-shapes go into `reshapes`; the result names those of
-    /// clusters neither it nor the committed re-shapes already held.
+    /// not used. The re-shapes go into `reshapes`; the result names the clusters
+    /// it newly added there.
     fn repair_seam(&self, t: usize, reshapes: &mut Reshapes) -> SmallVec<[usize; 2]> {
         let mut added = SmallVec::new();
         let Some(Token::Piece(Piece {
@@ -424,39 +429,12 @@ impl<'i, 'a> Layout<'i, 'a> {
                 atoms,
                 cluster.byte_range,
                 cluster.atom_range.clone(),
-            ) {
-                let committed = self.reshaped.contains_key(&c);
-                let pending = reshapes.insert(c, Reshaped { glyphs, width });
-                if !committed && pending.is_none() {
-                    added.push(c);
-                }
+            ) && reshapes.insert(c, Reshaped { glyphs, width }).is_none()
+            {
+                added.push(c);
             }
         }
         added
-    }
-
-    /// Commits the re-shapes of an accepted [`LineFit`] and returns the
-    /// clusters that had none before, so that [`discard_reshapes`] can undo
-    /// them.
-    ///
-    /// [`discard_reshapes`]: Self::discard_reshapes
-    pub(super) fn commit_reshapes(&mut self, reshapes: Reshapes) -> Vec<usize> {
-        reshapes
-            .into_iter()
-            .filter_map(|(cluster, r)| {
-                self.reshaped
-                    .insert(cluster, r)
-                    .is_none()
-                    .then_some(cluster)
-            })
-            .collect()
-    }
-
-    /// Drops the re-shapes `added` by a line that was not kept.
-    pub(super) fn discard_reshapes(&mut self, added: &[usize]) {
-        for cluster in added {
-            self.reshaped.remove(cluster);
-        }
     }
 
     /// The used width of a line from `line.token_start` that stops before

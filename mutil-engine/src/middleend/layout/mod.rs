@@ -465,9 +465,9 @@ impl<'i, 'a> Layout<'i, 'a> {
             for _ in 0..MAX_ENVELOPE_REFITS {
                 let slot = geometry.slots[0];
                 let LineFit { end, reshapes } = self.fit(cursor, slot);
-                let added = self.commit_reshapes(reshapes);
-                let line = self.place(cursor, end, &geometry)?;
+                let line = self.place(cursor, end, &geometry, &reshapes)?;
                 if within(line.line_height, envelope) || !has_provider {
+                    self.reshaped.extend(reshapes);
                     return Ok((line, end));
                 }
                 envelope = line.line_height;
@@ -478,11 +478,9 @@ impl<'i, 'a> Layout<'i, 'a> {
                     Some(&geometry),
                 )?;
                 if expanded == geometry {
+                    self.reshaped.extend(reshapes);
                     return Ok((line, end));
                 }
-                // This attempt was not committed: discard its speculative
-                // seam re-shapes before refitting in `expanded` or relocating.
-                self.discard_reshapes(&added);
                 if expanded.slots.is_empty() {
                     cursor.block_top = advance_clearance(&mut obstructed, &expanded)?;
                     continue 'place;

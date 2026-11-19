@@ -4,7 +4,7 @@
 use super::units::{Unit, Units};
 use super::{Compiler, Shaped};
 use crate::frontend::{AutospaceProfile, GlueKind, GlueNode, WordNode, spacing};
-use crate::types::{AtomFlags, BidiClass, GraphemeAtom, LocaleTag, ScriptTag, TextRange};
+use crate::types::{AtomFlags, BidiClass, GraphemeAtom, LocaleTag, TextRange};
 
 /// Share of the run's font size each cluster of a compressible pair must
 /// exceed, or the shaper has already compressed the pair (FE-31).
@@ -55,8 +55,6 @@ impl Compiler<'_> {
             let atom = &mut atoms[a];
             let cursive = spacing::takes_no_letter_spacing(atom.script);
             atom.flags.set(AtomFlags::NO_LETTER_SPACING, cursive);
-            atom.flags
-                .set(AtomFlags::KASHIDA_CAPABLE, atom.script == ScriptTag::ARABIC);
             atom.flags
                 .set(AtomFlags::HANGABLE_START, spacing::is_hangable_start(first));
             atom.flags

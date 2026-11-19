@@ -18,8 +18,7 @@ use super::clusters::{
 use super::{ReshapeRequest, ShapeOutput, TextShaper};
 use crate::types::{
     FontFamily, FontFeatures, FontId, FontInstanceRef, FontMetrics, FontStyle, FontVariation,
-    GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapedCluster,
-    ShapingRun,
+    GlyphOrientation, GraphemeAtom, LocaleTag, RawShapedGlyph, ScriptTag, ShapingRun,
 };
 
 /// One glyph of a [`LineShaper`]'s output.
@@ -101,8 +100,7 @@ impl<B: LineShaper> LineOnlyShaper<B> {
     fn shape_atoms(
         &self,
         window: &LineWindow<'_>,
-        output_clusters: &mut Vec<ShapedCluster>,
-        output_glyphs: &mut Vec<RawShapedGlyph>,
+        output: &mut ShapeOutput,
     ) -> (EdgeFonts, Synthesized) {
         let LineWindow {
             string,
@@ -152,7 +150,7 @@ impl<B: LineShaper> LineOnlyShaper<B> {
                 // object's bytes) belongs to no cluster: the frontend sizes
                 // the gap itself (SHP-5, WN-10).
                 let bytes = atoms[atom].byte_range;
-                if byte < bytes.start() || byte >= bytes.end() {
+                if !bytes.contains(byte) {
                     continue;
                 }
                 let unsafe_seam = !safe_before(atom);
@@ -181,7 +179,7 @@ impl<B: LineShaper> LineOnlyShaper<B> {
             },
             |g| g.font,
         );
-        let edges = EdgeFonts {
+        let mut edges = EdgeFonts {
             first: fallback,
             last: fallback,
         };
@@ -189,24 +187,21 @@ impl<B: LineShaper> LineOnlyShaper<B> {
             return (edges, synthesized);
         }
         if kept.is_empty() {
-            push_empty_clusters(
-                run,
-                atoms,
-                range.clone(),
-                fallback,
-                output_clusters,
-                output_glyphs,
-            );
+            push_empty_clusters(run, atoms, range.clone(), fallback, output);
         } else {
-            push_clusters(
-                run,
-                atoms,
-                range.clone(),
-                &kept,
-                fallback,
-                output_clusters,
-                output_glyphs,
-            );
+            let kept_first = output.clusters.len();
+            push_clusters(run, atoms, range.clone(), &kept, fallback, output);
+            // The cut edges take the face of the kept cluster beside them
+            // (SHP-6).
+            if let (Some(first), Some(last)) = (
+                output.clusters[kept_first..].first(),
+                output.clusters.last(),
+            ) {
+                edges = EdgeFonts {
+                    first: first.font.font_id,
+                    last: last.font.font_id,
+                };
+            }
         }
         (edges, synthesized)
     }
@@ -277,7 +272,7 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
             range: 0..atoms.len(),
             text,
         };
-        self.shape_atoms(&window, &mut output.clusters, &mut output.glyphs);
+        self.shape_atoms(&window, output);
     }
 
     fn reshape_window(&self, request: &ReshapeRequest<'_>, output: &mut ShapeOutput) {
@@ -309,9 +304,8 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
             run,
             atoms,
             &plan,
-            &mut output.clusters,
-            &mut output.glyphs,
-            |clusters, glyphs| {
+            output,
+            |output| {
                 let window = LineWindow {
                     string: &shaped_input,
                     lead: plan.leading_text.len(),
@@ -322,7 +316,7 @@ impl<B: LineShaper> TextShaper for LineOnlyShaper<B> {
                     range: plan.kept_start..plan.kept_end,
                     text,
                 };
-                self.shape_atoms(&window, clusters, glyphs)
+                self.shape_atoms(&window, output)
             },
             |synthesized, _| (synthesized.leading, synthesized.trailing),
         );

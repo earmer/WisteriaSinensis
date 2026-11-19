@@ -1,7 +1,7 @@
 //! Stage 3 justification (spec ST3-2 to ST3-5): the priority ladder that
 //! spends a line's slack on its glue and inter-cluster gaps.
 
-use super::{Layout, PieceKind, PlacedPiece};
+use super::{Layout, PieceKind, PlacedPiece, Reshapes};
 use crate::frontend::GlueTier;
 use crate::middleend::FIT_EPSILON;
 use crate::types::{AtomFlags, ScriptTag};
@@ -34,7 +34,7 @@ impl Layout<'_, '_> {
     /// The capacities of the pieces after the line's last tab (ST3-1): glue
     /// by its tier, and the gap after each cluster that another cluster
     /// follows, with no inline object between them (ST1-7, ST3-2).
-    fn capacities(&self, body: &[PlacedPiece<'_>]) -> Vec<Capacity> {
+    fn capacities(&self, body: &[PlacedPiece<'_>], pending: &Reshapes) -> Vec<Capacity> {
         // Whether the next cluster or object after each piece is a cluster.
         let mut cluster_follows = vec![false; body.len()];
         let mut next_is_cluster = false;
@@ -55,7 +55,7 @@ impl Layout<'_, '_> {
                     shrink: glue.max_shrink,
                 },
                 PieceKind::Cluster { run, cluster } if cluster_follows => {
-                    if self.cluster_glyphs(cluster).0.is_empty() {
+                    if self.cluster_glyphs(pending, cluster).0.is_empty() {
                         return Capacity::default();
                     }
                     let run = &self.ast.runs[run];
@@ -107,10 +107,15 @@ impl Layout<'_, '_> {
     /// ST3-3). Expansion after a cluster widens it; the cluster's glyphs
     /// place it by direction. Returns whether the line came out flush
     /// (ST3-4).
-    pub(super) fn justify(&self, body: &mut [PlacedPiece<'_>], slack: f32) -> bool {
+    pub(super) fn justify(
+        &self,
+        body: &mut [PlacedPiece<'_>],
+        slack: f32,
+        pending: &Reshapes,
+    ) -> bool {
         let first = Self::after_last_tab(body);
         let body = &mut body[first..];
-        let capacities = self.capacities(body);
+        let capacities = self.capacities(body, pending);
         let mut remaining = slack.abs();
         let level_count = if slack < 0.0 { 2 } else { LEVELS };
         for level in 0..level_count {

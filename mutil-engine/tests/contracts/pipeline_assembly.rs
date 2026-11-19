@@ -293,7 +293,6 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
             offset: 18,
             affinity: CaretAffinity::Downstream,
             level: BidiLevel::LTR,
-            line: 2,
         }],
         ..blank_line()
     };
@@ -1088,7 +1087,6 @@ fn out_of_bounds_clicks_converge_on_the_physical_extreme_stop() {
         offset,
         affinity,
         level,
-        line: 0,
     };
     use CaretAffinity::{Downstream, Upstream};
     // LTR paragraph "ab" + RTL run "אב" (bytes 2..6, two bytes per letter).

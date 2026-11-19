@@ -331,7 +331,6 @@ fn ellipsis_only_line_rejects_every_body_entity() {
         offset: 0,
         affinity: CaretAffinity::Downstream,
         level: BidiLevel::LTR,
-        line: 0,
     }];
     assert_eq!(anchored.validate(&ctx()), Ok(()));
     anchored.caret_stops[0].level = BidiLevel::RTL;
@@ -859,7 +858,6 @@ fn caret(x: f32, offset: usize, level: BidiLevel) -> CaretStop {
         offset,
         affinity: CaretAffinity::Downstream,
         level,
-        line: 0,
     }
 }
 

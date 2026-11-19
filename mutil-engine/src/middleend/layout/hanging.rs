@@ -18,6 +18,17 @@ pub(super) enum LineEdge {
     End,
 }
 
+/// What the end mark's hang depends on besides the body (ST1-3).
+#[derive(Clone, Copy)]
+pub(super) struct EndHang {
+    /// Cloned padding after the mark.
+    pub(super) pre: f32,
+    /// The start mark, which the end mark may not be.
+    pub(super) start: Option<(usize, f32)>,
+    /// Whether the line fits without hanging the mark.
+    pub(super) fits_without: bool,
+}
+
 /// The marks hanging on one line: for each, its index into the placed
 /// pieces and the part of its advance that protrudes (ST1-3).
 #[derive(Clone, Copy, Default)]
@@ -90,11 +101,12 @@ impl Layout<'_, '_> {
         edge: LineEdge,
         first_line: bool,
         allowed: impl FnOnce(usize) -> bool,
+        pending: &Reshapes,
     ) -> Option<(usize, f32)> {
         let k = Self::outermost(body, edge).filter(|&k| allowed(k))?;
         Some((
             k,
-            self.hang_protrusion(&body[k].piece, edge, first_line, None)?,
+            self.hang_protrusion(&body[k].piece, edge, first_line, Some(pending))?,
         ))
     }
 
@@ -105,8 +117,9 @@ impl Layout<'_, '_> {
         body: &[PlacedPiece<'_>],
         first_line: bool,
         post: f32,
+        pending: &Reshapes,
     ) -> Option<(usize, f32)> {
-        self.hang_at(body, LineEdge::Start, first_line, |_| post == 0.0)
+        self.hang_at(body, LineEdge::Start, first_line, |_| post == 0.0, pending)
     }
 
     /// The mark hanging at the end of a line whose body is `body`, with no
@@ -116,15 +129,24 @@ impl Layout<'_, '_> {
         &self,
         body: &[PlacedPiece<'_>],
         first_line: bool,
-        pre: f32,
-        start: Option<(usize, f32)>,
-        fits_without: bool,
+        EndHang {
+            pre,
+            start,
+            fits_without,
+        }: EndHang,
+        pending: &Reshapes,
     ) -> Option<(usize, f32)> {
-        self.hang_at(body, LineEdge::End, first_line, |k| {
-            pre == 0.0
-                && start.is_none_or(|(s, _)| s != k)
-                && (self.options.hang_mode.end == HangEndMode::Force || !fits_without)
-        })
+        self.hang_at(
+            body,
+            LineEdge::End,
+            first_line,
+            |k| {
+                pre == 0.0
+                    && start.is_none_or(|(s, _)| s != k)
+                    && (self.options.hang_mode.end == HangEndMode::Force || !fits_without)
+            },
+            pending,
+        )
     }
 }
 

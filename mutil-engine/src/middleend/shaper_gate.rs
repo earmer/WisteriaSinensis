@@ -9,7 +9,7 @@ use super::{LayoutInputError, LineHeight, StrutMetrics};
 use crate::shaping::{ReshapeRequest, ShapeOutput, TextShaper};
 use crate::types::{
     FontInstanceRef, FontMetrics, GraphemeAtom, RawShapedGlyph, ShapingRun, TextRange, WritingMode,
-    is_extent, is_measurement,
+    is_extent, is_measurement, natural_width,
 };
 
 /// The shaper's metrics for one font instance, checked against MSR-1 and
@@ -99,7 +99,6 @@ pub(crate) fn checked_reshape_window(
     {
         return None;
     }
-    let advance: f32 = glyphs.iter().map(|g| g.x_advance).sum();
-    let width = (advance + run.letter_spacing).max(0.0);
+    let width = natural_width(&glyphs, run.letter_spacing);
     is_extent(width).then_some((glyphs, width))
 }

@@ -26,6 +26,7 @@ pub(super) fn check_input(
         return Err(unsupported(FrontendFeature::VerticalWritingMode));
     }
     check_decoration_spans(input)?;
+    check_atomic_spans(input)?;
     if !input.annotations.is_empty() {
         return Err(unsupported(FrontendFeature::Annotations));
     }
@@ -33,11 +34,8 @@ pub(super) fn check_input(
     let mut previous_end = 0;
     for (index, span) in input.style_spans.iter().enumerate() {
         let r = span.byte_range;
-        let well_formed = r.start() < r.end()
-            && r.end() <= text.len()
-            && text.is_char_boundary(r.start())
-            && text.is_char_boundary(r.end())
-            && r.start() >= previous_end;
+        let well_formed =
+            r.start() < r.end() && r.slice(text).is_some() && r.start() >= previous_end;
         if !well_formed {
             return Err(FrontendError::InvalidStyleSpan { span: index });
         }
@@ -86,9 +84,7 @@ fn check_bidi_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendError> {
         }
         if !(ids.insert(span.span_id)
             && !r.is_empty()
-            && r.end() <= text.len()
-            && text.is_char_boundary(r.start())
-            && text.is_char_boundary(r.end())
+            && r.slice(text).is_some()
             && is_ordered
             && open.last().is_none_or(|outer| r.end() <= outer.end())
             && open.len() < MAX_BIDI_SPAN_DEPTH)
@@ -100,9 +96,9 @@ fn check_bidi_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendError> {
     Ok(())
 }
 
-/// AST-7 without segmentation: order, nesting, ids, paddings and ranges on
-/// character boundaries. Grapheme and object edges are checked once units
-/// exist.
+/// AST-7 without segmentation, for the decoration spans: order, nesting, ids,
+/// paddings and ranges on character boundaries. Grapheme and object edges are
+/// checked once units exist.
 fn check_decoration_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendError> {
     let text = input.text;
     let mut ids = std::collections::HashSet::new();
@@ -121,9 +117,7 @@ fn check_decoration_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendErro
         }
         if !ids.insert(span.span_id)
             || !span.is_valid()
-            || r.end() > text.len()
-            || !text.is_char_boundary(r.start())
-            || !text.is_char_boundary(r.end())
+            || r.slice(text).is_none()
             || stack.last().is_some_and(|top| !top.contains_range(r))
             || stack.len() >= MAX_DECORATION_NESTING_DEPTH
         {
@@ -131,6 +125,14 @@ fn check_decoration_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendErro
         }
         stack.push(r);
     }
+    Ok(())
+}
+
+/// The atomic spans: unique ids, non-empty ranges inside the text and
+/// disjoint, in byte order. Grapheme and object edges are checked once units
+/// exist.
+fn check_atomic_spans(input: &ParagraphInput<'_>) -> Result<(), FrontendError> {
+    let text = input.text;
     let mut ids = std::collections::HashSet::new();
     for (index, span) in input.atomic_spans.iter().enumerate() {
         let r = span.byte_range;

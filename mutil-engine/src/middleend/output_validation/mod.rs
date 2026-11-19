@@ -492,14 +492,17 @@ impl PositionedLine {
     /// 1. every number is finite and no extent or size is negative;
     /// 2. the envelope: byte range, empty-line state, line box;
     /// 3. source ownership: every run, glyph, box, tab, decoration, caret
-    ///    stop and annotation refers to bytes of this line, runs are in screen
-    ///    order and caret stops carry the level of the text they belong to;
-    /// 4. the slots: valid constraints inside the wrap envelope, content
-    ///    inside its constraint; they yield the body extent;
-    /// 5. containment: every entity lies in the content of one slot, each
-    ///    slot's content block is exactly the span of what it holds, and
-    ///    hanging punctuation, preserved whitespace, span fragments and
-    ///    annotations sit where their rules put them.
+    ///    stop and annotation refers to bytes of this line, and runs are in
+    ///    screen order;
+    /// 4. the caret stops carry the level of the text they belong to;
+    /// 5. the annotations' own records;
+    /// 6. the slots: constraints inside the wrap envelope, content blocks
+    ///    starting inside their constraint; they yield the body extent (a
+    ///    line with no body holds nothing outside its slots and stops here);
+    /// 7. placement of glyphs, then hanging punctuation, then inline boxes,
+    ///    tabs and fragments, then annotations, then span fragments;
+    /// 8. overflow: each slot's content ends inside its constraint;
+    /// 9. each slot's content block is exactly the span of what it holds.
     ///
     /// A slot's content may end beyond its constraint only when the line has a
     /// single slot that holds, from its start, one indivisible entity wider

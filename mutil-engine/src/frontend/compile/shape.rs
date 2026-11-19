@@ -2,7 +2,9 @@
 
 use super::{Compiler, FrontendError, Shaped};
 use crate::shaping::{ReshapeRequest, ShapeOutput};
-use crate::types::{GraphemeAtom, RawShapedGlyph, ShapedCluster, ShapingRun, TextRange};
+use crate::types::{
+    GraphemeAtom, RawShapedGlyph, ShapedCluster, ShapingRun, TextRange, natural_width,
+};
 
 impl Compiler<'_> {
     /// Shapes every run, splits clusters that straddle a text box boundary
@@ -23,8 +25,7 @@ impl Compiler<'_> {
         for (run_index, run) in runs.iter().enumerate() {
             let contract = FrontendError::ShaperContract { run: run_index };
             let atoms = &all_atoms[run.atom_range.clone()];
-            shaped.clusters.clear();
-            shaped.glyphs.clear();
+            shaped.clear();
             self.shaper.shape_run(self.text, run, atoms, &mut shaped);
             if !partitions(&shaped.clusters, &shaped.glyphs, 0..atoms.len()) {
                 return Err(contract);
@@ -34,9 +35,7 @@ impl Compiler<'_> {
             let push_cluster =
                 |mut cluster: ShapedCluster, source_glyphs: &[RawShapedGlyph], ast: &mut Shaped| {
                     let own = &source_glyphs[cluster.glyph_range.clone()];
-                    let advance: f32 = own.iter().map(|g| g.x_advance).sum();
-                    let raw = advance + run.letter_spacing;
-                    cluster.natural_width = if raw.is_finite() { raw.max(0.0) } else { raw };
+                    cluster.natural_width = natural_width(own, run.letter_spacing);
                     let at = ast.glyphs.len();
                     ast.glyphs.extend_from_slice(own);
                     cluster.glyph_range = at..ast.glyphs.len();
@@ -45,17 +44,20 @@ impl Compiler<'_> {
             let cluster_start = ast.clusters.len();
             for cluster in shaped.clusters.drain(..) {
                 let range = cluster.atom_range.clone();
-                let mut bounds = vec![range.start];
-                bounds.extend((range.start + 1..range.end).filter(|&a| is_cut(a)));
-                bounds.push(range.end);
-                if bounds.len() == 2 {
+                let mut cuts = (range.start + 1..range.end)
+                    .filter(|&a| is_cut(a))
+                    .peekable();
+                if cuts.peek().is_none() {
                     push_cluster(cluster, &shaped.glyphs, &mut ast);
                     continue;
                 }
+                let bounds: Vec<usize> = std::iter::once(range.start)
+                    .chain(cuts)
+                    .chain(std::iter::once(range.end))
+                    .collect();
                 for (k, window) in bounds.windows(2).enumerate() {
                     let (w_start, w_end) = (window[0], window[1]);
-                    window_out.clusters.clear();
-                    window_out.glyphs.clear();
+                    window_out.clear();
                     let bytes = TextRange::new(
                         atoms[w_start].byte_range.start(),
                         atoms[w_end - 1].byte_range.end(),

@@ -2,8 +2,8 @@
 //! (spec §5 Stages 2–4).
 
 use super::breaking::within;
-use super::hanging::{LineHangs, clip_to_content};
-use super::{Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Token};
+use super::hanging::{EndHang, LineHangs, clip_to_content};
+use super::{Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Reshapes, Token};
 use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_order};
 use crate::frontend::{DiscretionaryNode, SpanEdge};
 use crate::middleend::{
@@ -58,7 +58,6 @@ impl ContentBlock {
 /// visual order, and what the line's end and hanging marks leave. Its `x`
 /// coordinates are relative to the body's start.
 pub(super) struct PlacedLine<'a> {
-    pub(super) index: usize,
     pub(super) placed: Vec<PlacedPiece<'a>>,
     pub(super) order: Vec<usize>,
     pub(super) byte_range: TextRange,
@@ -111,6 +110,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         cursor: &LineCursor,
         end: LineEnd<'a>,
         geometry: &LineGeometry,
+        pending: &Reshapes,
     ) -> Result<PositionedLine, LayoutInputError> {
         let slot = geometry.slots[0];
         let (last_piece, end_break, byte_end, pre) = match end {
@@ -133,13 +133,13 @@ impl<'i, 'a> Layout<'i, 'a> {
         let post = cursor.post_break_width;
         let (left_pad, right_pad) = if rtl { (pre, post) } else { (post, pre) };
         let first_line = cursor.first_line();
-        let start = self.start_hang(&placed[..body_len], first_line, post);
+        let start = self.start_hang(&placed[..body_len], first_line, post, pending);
         // Widths in logical order: a tab's depends on its distance from the
         // line-start edge (spec ST3-1), the start mark's protrusion outside.
         let mut distance = post - LineHangs::protrusion(start);
         for p in &mut placed[..body_len] {
             distance += p.gap;
-            p.width = self.measure(&p.piece, distance, slot, None).0;
+            p.width = self.measure(&p.piece, distance, slot, Some(pending)).0;
             distance += p.width;
         }
         // A soft-wrapped line is justified; one that ends the paragraph or at
@@ -151,7 +151,16 @@ impl<'i, 'a> Layout<'i, 'a> {
             0.0
         };
         let fits_without = within(distance + pre - shrink, slot.width());
-        let end = self.end_hang(&placed[..body_len], first_line, pre, start, fits_without);
+        let end = self.end_hang(
+            &placed[..body_len],
+            first_line,
+            EndHang {
+                pre,
+                start,
+                fits_without,
+            },
+            pending,
+        );
         let hangs = LineHangs { start, end };
         // The visible width `W`, hanging halves outside (ST3-2).
         let visible_width = distance + pre - LineHangs::protrusion(end);
@@ -159,7 +168,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let is_justified = compressible
             && slot.width().is_finite()
             && (soft_wrap || slack < 0.0)
-            && self.justify(&mut placed[..body_len], slack);
+            && self.justify(&mut placed[..body_len], slack, pending);
         let mut x = left_pad - hangs.physical(rtl).0;
         for &k in &order {
             x += placed[k].gap;
@@ -178,7 +187,6 @@ impl<'i, 'a> Layout<'i, 'a> {
 
         self.build_line(
             PlacedLine {
-                index: cursor.index,
                 placed,
                 order,
                 byte_range: TextRange::new(cursor.byte_start, byte_end),
@@ -193,6 +201,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 block_top: cursor.block_top,
             },
             geometry,
+            pending,
         )
     }
 
@@ -302,6 +311,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         &mut self,
         mut line: PlacedLine<'a>,
         geometry: &LineGeometry,
+        pending: &Reshapes,
     ) -> Result<PositionedLine, LayoutInputError> {
         let slot = geometry.slots[0];
         let line_box =
@@ -310,7 +320,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             mut runs,
             extent,
             visible_end,
-        } = self.build_visual_runs(&line);
+        } = self.build_visual_runs(&line, pending);
         let line = self.align_line_content(line, &mut runs, extent, slot);
         let content = &line.content;
         let content_edges = content.edges();
@@ -328,7 +338,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             &mut span_fragments,
             &mut decorations,
         );
-        let caret_stops = self.caret_stops(&line, visible_end, &runs, &visual_boxes);
+        let caret_stops = self.caret_stops(&line, visible_end, &runs, &visual_boxes, pending);
 
         // The line fills its first slot; the others stay empty (ME-2).
         let slots: SmallVec<[PositionedSlot; 1]> = geometry
@@ -426,7 +436,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// The line's glyph runs in visual order (OUT-3), the inline extent of
     /// their glyphs, objects and tabs, and the end of the last visible
     /// source byte, in one pass over the body.
-    fn build_visual_runs(&self, line: &PlacedLine<'_>) -> VisualRuns {
+    fn build_visual_runs(&self, line: &PlacedLine<'_>, pending: &Reshapes) -> VisualRuns {
         let mut out = VisualRuns {
             runs: Vec::new(),
             extent: None,
@@ -436,7 +446,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             let p = line.placed[k];
             match p.piece.kind {
                 PieceKind::Cluster { run, cluster } => {
-                    self.push_cluster_glyphs(&mut out, &p, run, cluster)
+                    self.push_cluster_glyphs(&mut out, &p, (run, cluster), pending)
                 }
                 PieceKind::Object(_) | PieceKind::Tab => {
                     out.extend(p.x, p.x + p.width);
@@ -455,12 +465,12 @@ impl<'i, 'a> Layout<'i, 'a> {
         &self,
         out: &mut VisualRuns,
         p: &PlacedPiece<'_>,
-        run: usize,
-        cluster: usize,
+        (run, cluster): (usize, usize),
+        pending: &Reshapes,
     ) {
         let r = &self.ast.runs[run];
         let c = &self.ast.clusters[cluster];
-        let (glyphs, _) = self.cluster_glyphs(cluster);
+        let (glyphs, _) = self.cluster_glyphs(pending, cluster);
         if glyphs.is_empty() {
             return;
         }
