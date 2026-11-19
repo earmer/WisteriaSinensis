@@ -76,11 +76,11 @@ fn truncation_and_multiple_synthesized_ellipsis_glyphs() {
     let mut l = line();
     set_visual_width(&mut l, 120.0);
     l.is_ellipsized = true;
-    l.visual_runs = vec![run(glyph(0.0, 100.0, false))];
+    l.visual_runs = vec![run(glyph(0.0, 100.0))];
     for x in [100.0, 110.0] {
         l.visual_runs[0].glyphs.push(PositionedGlyph {
             byte_range: None,
-            ..glyph(x, 10.0, false)
+            ..glyph(x, 10.0)
         });
     }
     let mut p = paragraph(&ctx(), vec![l]);
@@ -277,7 +277,7 @@ fn ellipsis_only_empty_and_empty_paragraph_contracts() {
     l.visible_byte_end = 0;
     l.is_ellipsized = true;
     set_visual_width(&mut l, 120.0);
-    let mut r = run(glyph(0.0, 120.0, false));
+    let mut r = run(glyph(0.0, 120.0));
     r.byte_range = TextRange::empty_at(0);
     r.glyphs[0].byte_range = None;
     l.visual_runs = vec![r];

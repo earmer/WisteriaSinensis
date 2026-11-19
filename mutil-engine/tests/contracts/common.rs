@@ -410,7 +410,7 @@ pub fn paragraph(ctx: &LineContext, lines: Vec<PositionedLine>) -> PositionedPar
     }
 }
 
-pub fn glyph(x: f32, advance: f32, hanging: bool) -> PositionedGlyph {
+pub fn glyph(x: f32, advance: f32) -> PositionedGlyph {
     PositionedGlyph {
         glyph_id: 1,
         x,
@@ -418,7 +418,6 @@ pub fn glyph(x: f32, advance: f32, hanging: bool) -> PositionedGlyph {
         y_offset: 0.,
         advance,
         byte_range: Some(TextRange::new(0, 1)),
-        is_hanging: hanging,
     }
 }
 
@@ -488,9 +487,9 @@ pub fn two_slots() -> (PositionedLine, LineContext) {
     l.byte_range = TextRange::new(0, 2);
     l.visible_byte_end = 2;
     l.slots = smallvec![slot(0.0, 100.0, 100.0), slot(150.0, 100.0, 100.0)];
-    let mut right = glyph(150.0, 100.0, false);
+    let mut right = glyph(150.0, 100.0);
     right.byte_range = Some(TextRange::new(1, 2));
-    let mut r = run(glyph(0.0, 100.0, false));
+    let mut r = run(glyph(0.0, 100.0));
     r.byte_range = l.byte_range;
     r.glyphs.push(right);
     l.visual_runs = vec![r];
@@ -517,7 +516,7 @@ pub fn positioned_annotation() -> PositionedAnnotationRun {
         base_under: 2.0,
         glyphs: vec![PositionedGlyph {
             byte_range: None,
-            ..glyph(25.0, 50.0, false)
+            ..glyph(25.0, 50.0)
         }],
     }
 }

@@ -22,6 +22,12 @@ pub(super) fn approx_eq(a: f32, b: f32) -> bool {
     a == b || (a.is_finite() && b.is_finite() && (a - b).abs() <= tolerance(a, b))
 }
 
+/// `a` is smaller than `b` by more than [`tolerance`]. NaN is smaller than
+/// nothing.
+pub(super) fn approx_lt(a: f32, b: f32) -> bool {
+    a < b - tolerance(a, b)
+}
+
 /// [`approx_eq`] for sums accumulated in `f64`, with the same `f32`-scaled
 /// tolerance.
 pub(super) fn approx_eq_f64(a: f64, b: f64) -> bool {

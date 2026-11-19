@@ -2,10 +2,7 @@
 //! each edge of a line, by [`HANG_FRACTION`] of its advance.
 
 use super::{Layout, Piece, PieceKind, PlacedPiece, Reshapes};
-use crate::middleend::tolerance::tolerance;
-use crate::middleend::{
-    DecorationLine, HangEndMode, HangSide, PositionedSpanFragment, VisualGlyphRun,
-};
+use crate::middleend::{DecorationLine, HangEndMode, HangSide, PositionedSpanFragment};
 use crate::types::AtomFlags;
 
 /// The part of a hanging mark's advance that protrudes past the content
@@ -128,26 +125,6 @@ impl Layout<'_, '_> {
                 && start.is_none_or(|(s, _)| s != k)
                 && (self.options.hang_mode.end == HangEndMode::Force || !fits_without)
         })
-    }
-}
-
-/// Flags the glyphs of the hanging marks that overflow the content edges
-/// `(left, right)` beyond tolerance (OUT-4, HNG-1).
-pub(super) fn mark_hanging(
-    runs: &mut [VisualGlyphRun],
-    placed: &[PlacedPiece<'_>],
-    hangs: LineHangs,
-    (left, right): (f32, f32),
-) {
-    for (k, _) in [hangs.start, hangs.end].into_iter().flatten() {
-        let bytes = placed[k].piece.bytes;
-        for g in runs.iter_mut().flat_map(|r| r.glyphs.iter_mut()) {
-            let (lo, hi) = g.pen_interval();
-            let overflows = lo < left - tolerance(lo, left) || hi > right + tolerance(hi, right);
-            if g.byte_range == Some(bytes) && g.advance != 0.0 && overflows {
-                g.is_hanging = true;
-            }
-        }
     }
 }
 

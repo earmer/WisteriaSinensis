@@ -430,7 +430,7 @@ fn a_zero_width_tab_stop_geometry_is_not_constrained() {
         width: 0.,
     };
     let mut l = line();
-    l.visual_runs = vec![run(glyph(0., 100., false))];
+    l.visual_runs = vec![run(glyph(0., 100.))];
     l.tabs = vec![positioned];
     assert_eq!(l.validate(&ctx()), Ok(()));
 }

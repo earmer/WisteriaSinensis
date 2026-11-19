@@ -37,7 +37,7 @@ fn partial_hanging_counts_only_overflow() {
     let mut l = line();
     // The body glyph and the 4 units of the hanging mark inside the body span
     // the slot; the mark's last 6 units hang.
-    l.visual_runs = vec![run(glyph(0., 96., false)), run(glyph(96., 10., true))];
+    l.visual_runs = vec![run(glyph(0., 96.)), run(glyph(96., 10.))];
     let mut c = ctx();
     c.hang_mode.end = HangEndMode::Allow;
     assert_eq!(l.validate(&c), Ok(()));
@@ -51,9 +51,9 @@ fn nbsp_remains_visible_in_collapsible_output() {
     l.byte_range = TextRange::new(0, 3);
     l.visible_byte_end = 3;
     set_visual_width(&mut l, 14.);
-    let mut nbsp = glyph(10., 4., false);
+    let mut nbsp = glyph(10., 4.);
     nbsp.byte_range = Some(TextRange::new(1, 3));
-    l.visual_runs = vec![run(glyph(0., 10., false)), run(nbsp)];
+    l.visual_runs = vec![run(glyph(0., 10.)), run(nbsp)];
     assert_eq!(l.validate(&ctx()), Ok(()));
     assert_eq!(l.visual_runs[1].glyphs[0].advance, 4.);
 }
@@ -61,7 +61,7 @@ fn nbsp_remains_visible_in_collapsible_output() {
 #[test]
 fn malformed_atomic_fragments_are_rejected() {
     let mut l = line();
-    l.visual_runs = vec![run(glyph(0., 100., false))];
+    l.visual_runs = vec![run(glyph(0., 100.))];
     l.atomic_fragments = vec![AtomicFragment {
         atomic_id: 1,
         full_byte_range: TextRange::new(0, 1),
@@ -98,7 +98,7 @@ fn malformed_atomic_fragments_are_rejected() {
 #[test]
 fn invalid_visual_run_font_instance_is_rejected() {
     let mut l = line();
-    l.visual_runs = vec![run(glyph(0., 10., false))];
+    l.visual_runs = vec![run(glyph(0., 10.))];
     l.visual_runs[0].font_size = 0.;
     assert_eq!(
         l.validate(&ctx()),
@@ -121,21 +121,9 @@ fn non_positive_line_height_is_named() {
 }
 
 #[test]
-fn false_hanging_flag_inside_body_is_rejected() {
-    let mut l = line();
-    l.visual_runs = vec![run(glyph(90., 5., true))];
-    let mut c = ctx();
-    c.hang_mode.end = HangEndMode::Allow;
-    assert_eq!(
-        l.validate(&c),
-        Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 0 })
-    );
-}
-
-#[test]
 fn negative_advance_partial_hang_uses_normalized_envelope() {
     let mut l = line();
-    l.visual_runs = vec![run(glyph(0., 96., false)), run(glyph(106., -10., true))];
+    l.visual_runs = vec![run(glyph(0., 96.)), run(glyph(106., -10.))];
     let mut c = ctx();
     c.hang_mode.end = HangEndMode::Allow;
     assert_eq!(l.validate(&c), Ok(()));
@@ -144,7 +132,7 @@ fn negative_advance_partial_hang_uses_normalized_envelope() {
 #[test]
 fn left_partial_hanging_counts_only_overflow() {
     let mut l = line();
-    l.visual_runs = vec![run(glyph(-6., 10., true)), run(glyph(4., 96., false))];
+    l.visual_runs = vec![run(glyph(-6., 10.)), run(glyph(4., 96.))];
     let mut c = ctx();
     c.hang_mode.start = HangStartMode::AllLines;
     assert_eq!(l.validate(&c), Ok(()));
@@ -154,20 +142,13 @@ fn left_partial_hanging_counts_only_overflow() {
 fn hanging_requires_overflow_beyond_tolerance() {
     let mut c = ctx();
     c.hang_mode.end = HangEndMode::Allow;
-    // A non-zero-advance hanging glyph inside the block is still rejected.
-    let mut l = line();
-    l.visual_runs = vec![run(glyph(99., 1.00001, true))];
-    assert_eq!(
-        l.validate(&c),
-        Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 0 })
-    );
     // Zero-advance marks are exempt from containment and hanging.
     let mut l = line();
-    l.visual_runs = vec![run(glyph(0., 100., false)), run(glyph(50., 0., true))];
+    l.visual_runs = vec![run(glyph(0., 100.)), run(glyph(50., 0.))];
     assert_eq!(l.validate(&c), Ok(()));
     // Nor do they add a hanging extent.
     let mut l = line();
-    l.visual_runs = vec![run(glyph(0., 100., false)), run(glyph(99., 0., true))];
+    l.visual_runs = vec![run(glyph(0., 100.)), run(glyph(99., 0.))];
     assert_eq!(l.validate(&c), Ok(()));
     assert_eq!(l.hanging_right(), 0.0);
 }
@@ -234,7 +215,7 @@ fn empty_slot_hanging_and_trailing_whitespace() {
     l.slots[0].visual_width = 0.0;
     c.hang_mode.start = HangStartMode::AllLines;
     assert_eq!(l.validate(&c), Ok(()));
-    let mut hanging = glyph(145.0, 5.0, true);
+    let mut hanging = glyph(145.0, 5.0);
     hanging.byte_range = Some(TextRange::new(0, 1));
     l.visual_runs[0].glyphs.insert(0, hanging);
     assert_eq!(
@@ -244,7 +225,7 @@ fn empty_slot_hanging_and_trailing_whitespace() {
     l.visual_runs[0].glyphs.remove(0);
     let trailing = PositionedGlyph {
         byte_range: Some(TextRange::new(2, 3)),
-        ..glyph(250.0, 5.0, false)
+        ..glyph(250.0, 5.0)
     };
     l.byte_range = TextRange::new(l.byte_range.start(), 3);
     l.visual_runs[0].glyphs.push(trailing);
@@ -261,7 +242,7 @@ fn empty_slot_hanging_and_trailing_whitespace() {
 
 fn one_glyph_line() -> PositionedLine {
     let mut l = line();
-    l.visual_runs = vec![run(glyph(0., 100., false))];
+    l.visual_runs = vec![run(glyph(0., 100.))];
     l
 }
 
@@ -301,7 +282,7 @@ fn inline_box_alignment_and_bytes_are_checked_per_box() {
 #[test]
 fn non_synthesized_glyphs_own_bytes_inside_the_line() {
     let mut l = one_glyph_line();
-    l.visual_runs[0].glyphs.push(glyph(10., 10., false));
+    l.visual_runs[0].glyphs.push(glyph(10., 10.));
     assert_eq!(l.validate(&ctx()), Ok(()));
     let invalid = Err(LineInvariantError::InvalidGlyphSource { run: 0, glyph: 1 });
     l.visual_runs[0].glyphs[1].byte_range = Some(TextRange::empty_at(0));
@@ -316,12 +297,12 @@ fn non_synthesized_glyphs_own_bytes_inside_the_line() {
 #[test]
 fn visual_runs_hold_glyphs_and_stay_inside_the_line() {
     let mut l = one_glyph_line();
-    l.visual_runs.push(run(glyph(10., 10., false)));
+    l.visual_runs.push(run(glyph(10., 10.)));
     assert_eq!(l.validate(&ctx()), Ok(()));
     let invalid = Err(LineInvariantError::InvalidVisualRun { run: 1 });
     l.visual_runs[1].glyphs.clear();
     assert_eq!(l.validate(&ctx()), invalid);
-    l.visual_runs[1] = run(glyph(10., 10., false));
+    l.visual_runs[1] = run(glyph(10., 10.));
     l.visual_runs[1].byte_range = TextRange::new(0, 2);
     assert_eq!(l.validate(&ctx()), invalid);
 }
@@ -351,9 +332,9 @@ fn ellipsis_only_line_rejects_every_body_entity() {
     l.byte_range = TextRange::empty_at(0);
     l.visible_byte_end = 0;
     l.is_ellipsized = true;
-    let mut ellipsis = glyph(0., 10., false);
+    let mut ellipsis = glyph(0., 10.);
     ellipsis.byte_range = None;
-    let mut r = run(glyph(0., 10., false));
+    let mut r = run(glyph(0., 10.));
     r.byte_range = TextRange::empty_at(0);
     r.glyphs = vec![ellipsis];
     l.visual_runs = vec![r];
@@ -376,7 +357,7 @@ fn ellipsis_only_line_rejects_every_body_entity() {
         Err(LineInvariantError::InvalidCaretStop { index: 0 })
     );
     let mut body = l.clone();
-    body.visual_runs[0].glyphs.push(glyph(10., 10., false));
+    body.visual_runs[0].glyphs.push(glyph(10., 10.));
     assert_eq!(
         body.validate(&ctx()),
         Err(LineInvariantError::InvalidGlyphSource { run: 0, glyph: 1 })
@@ -419,10 +400,10 @@ fn occupancy_and_containment_share_one_tolerance() {
     // The mark sits 1e-4 before the slot: inside by tolerance, hence occupying.
     let mut l = line();
     set_visual_width(&mut l, 0.);
-    l.visual_runs = vec![run(glyph(-1e-4, 0., false))];
+    l.visual_runs = vec![run(glyph(-1e-4, 0.))];
     assert_eq!(l.validate(&ctx()), Ok(()));
     // Beyond the tolerance the slot stays empty although a glyph is present.
-    l.visual_runs = vec![run(glyph(-1e-2, 0., false))];
+    l.visual_runs = vec![run(glyph(-1e-2, 0.))];
     assert_eq!(
         l.validate(&ctx()),
         Err(LineInvariantError::InvalidSlots {
@@ -453,7 +434,7 @@ fn slot_line(
 ) -> (PositionedLine, LineContext) {
     let mut l = line();
     l.slots = smallvec::smallvec![slot(start, width, capacity)];
-    l.visual_runs = vec![run(glyph(start, width, false))];
+    l.visual_runs = vec![run(glyph(start, width))];
     let c = LineContext {
         wrap_width,
         ..ctx()
@@ -530,7 +511,7 @@ fn divisible_slot_line(
     l.byte_range = TextRange::new(0, 2);
     l.visible_byte_end = 2;
     let half = width / 2.;
-    let mut second = glyph(start + half, half, false);
+    let mut second = glyph(start + half, half);
     second.byte_range = Some(TextRange::new(1, 2));
     l.visual_runs[0].glyphs[0].advance = half;
     l.visual_runs[0].glyphs.push(second);
@@ -700,7 +681,7 @@ fn an_empty_line_keeps_the_fixed_strut_metrics() {
 #[test]
 fn the_visible_end_sits_on_a_cluster_boundary() {
     // One glyph (one cluster) over bytes 0..3.
-    let mut g = glyph(0., 100., false);
+    let mut g = glyph(0., 100.);
     g.byte_range = Some(TextRange::new(0, 3));
     let mut l = line();
     l.byte_range = TextRange::new(0, 3);
@@ -721,7 +702,7 @@ fn the_visible_end_sits_on_a_cluster_boundary() {
     // The edges of a box or a tab on the line are boundaries too.
     let mut l = line();
     l.byte_range = TextRange::new(0, 5);
-    let mut first = glyph(0., 20., false);
+    let mut first = glyph(0., 20.);
     first.byte_range = Some(TextRange::new(0, 2));
     l.visual_runs = vec![run(first)];
     l.visual_boxes = vec![PositionedInlineBox {
@@ -796,7 +777,7 @@ fn aligned_line(x: f32, content_start: f32, visual_width: f32) -> PositionedLine
     let mut l = line();
     l.slots[0].content_start = content_start;
     l.slots[0].visual_width = visual_width;
-    l.visual_runs = vec![run(glyph(x, 60., false))];
+    l.visual_runs = vec![run(glyph(x, 60.))];
     l
 }
 
@@ -825,7 +806,9 @@ fn the_content_block_separates_alignment_offset_from_leading_glue() {
     // An item outside the block is outside the slot's content.
     assert_eq!(
         aligned_line(10., 20., 60.).validate(&ctx()),
-        Err(LineInvariantError::BodyGlyphOutsideBlock { run: 0, glyph: 0 })
+        Err(LineInvariantError::HangingNotAllowed {
+            side: HangSide::Left
+        })
     );
     // The block starts inside its constraint ...
     let mut before = aligned_line(-5., -5., 60.);
@@ -854,9 +837,9 @@ fn two_glyph_line() -> PositionedLine {
     let mut l = line();
     l.byte_range = TextRange::new(0, 2);
     l.visible_byte_end = 2;
-    let mut second = glyph(50., 50., false);
+    let mut second = glyph(50., 50.);
     second.byte_range = Some(TextRange::new(1, 2));
-    let mut r = run(glyph(0., 50., false));
+    let mut r = run(glyph(0., 50.));
     r.byte_range = l.byte_range;
     r.glyphs.push(second);
     l.visual_runs = vec![r];
@@ -869,7 +852,7 @@ fn the_glyphs_of_a_run_are_in_screen_order() {
     assert_eq!(l.validate(&ctx()), Ok(()));
     // A mark shares its base's pen position; its ink offset is not compared.
     let mut marked = l.clone();
-    let mut mark = glyph(50., 0., false);
+    let mut mark = glyph(50., 0.);
     mark.byte_range = Some(TextRange::new(1, 2));
     mark.x_offset = -30.;
     marked.visual_runs[0].glyphs.push(mark);
@@ -981,7 +964,7 @@ fn end_hanging_line(body: f32) -> PositionedLine {
     l.visual_runs[0].glyphs[0].advance = body;
     l.visual_runs[0].glyphs[1] = PositionedGlyph {
         byte_range: Some(TextRange::new(1, 2)),
-        ..glyph(body, 5., true)
+        ..glyph(body, 5.)
     };
     l
 }

@@ -94,7 +94,7 @@ fn validated_layout_proves_the_output_gate() {
     let mut l = line();
     l.byte_range = TextRange::new(0, 1);
     l.visible_byte_end = 1;
-    let mut g = glyph(0.0, 10.0, false);
+    let mut g = glyph(0.0, 10.0);
     g.byte_range = Some(l.byte_range);
     l.visual_runs = vec![run(g)];
     set_visual_width(&mut l, 10.0);

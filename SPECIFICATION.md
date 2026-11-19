@@ -628,6 +628,7 @@ pub struct PositionedLine {
 }
 pub struct PositionedSlot { pub constraint: InlineSlotConstraint, pub content_start: f32, pub visual_width: f32 }
 pub enum HangSide { Left, Right }
+pub enum GlyphRole { Trailing, ZeroAdvance, Hanging, Body }
 pub struct VisualGlyphRun {
     pub orientation: GlyphOrientation,
     pub font_size: f32,
@@ -644,7 +645,6 @@ pub struct PositionedGlyph {
     pub y_offset: f32,
     pub advance: f32,
     pub byte_range: Option<TextRange>,
-    pub is_hanging: bool,
 }
 pub struct PositionedInlineBox {
     pub baseline_align: BaselineAlignment,
@@ -715,7 +715,7 @@ pub struct CaretStop { pub x: f32, pub offset: ByteIndex, pub affinity: CaretAff
 
 **Derived line geometry.**
 
-**[OUT-4]** A line's body width is the sum of its slots' content widths (`PositionedLine::visual_width`). Its hanging extents are the largest overflow of an `is_hanging` glyph's pen interval beyond the left edge of the first occupied slot's content (`PositionedLine::hanging_left`) and beyond the right edge of the last one's (`PositionedLine::hanging_right`). None of the three is stored (AX-2). A slot is occupied when it has a non-zero content width or holds a visible body glyph, an inline box or a visible tab.
+**[OUT-4]** A line's body width is the sum of its slots' content widths (`PositionedLine::visual_width`). A glyph has one role (`GlyphRole`, derived from its position and never stored, AX-2), the first that applies: *trailing* (its bytes start at or after `visible_byte_end`), *zero-advance* (`advance == 0`), *hanging* (no slot's content block holds its pen interval), or *body*. The hanging extents are the largest overflow of a hanging glyph's pen interval, beyond tolerance, beyond the left edge of the first occupied slot's content (`PositionedLine::hanging_left`) and beyond the right edge of the last one's (`PositionedLine::hanging_right`); `PositionedLine::hanging_glyphs` yields the hanging glyphs. None of these is stored. A slot is occupied when it has a non-zero content width or holds a visible glyph with source bytes, an inline box or a visible tab; the first and last occupied slots bound the body (`BodyExtent`).
 
 **Slots and the content block.**
 
@@ -749,13 +749,13 @@ pub struct CaretStop { pub x: f32, pub offset: ByteIndex, pub affinity: CaretAff
 
 **Hanging punctuation and trailing whitespace.**
 
-**[HNG-1]** An `is_hanging` glyph overflows the body beyond tolerance; it MAY straddle the body edge. It hangs from the outer slot on its side: the part of it that is not overflow lies in that slot's content. Unused slots and internal obstacles hold no hanging glyph.
+**[HNG-1]** A hanging glyph (OUT-4) overflows the body beyond tolerance; it MAY straddle the body edge. It hangs from the outer slot on its side: the part of it that is not overflow lies in that slot's content. Unused slots and internal obstacles hold no hanging glyph. A glyph outside every slot's content that does not hang this way is a `BodyGlyphOutsideBlock`; one that does is a hanging glyph, whatever laid it out, and is then subject to HNG-2 and HNG-4.
 
 **[HNG-2]** A side hangs only where `HangMode::allows(side, base_direction, line_index == 0)` permits (§5 Stage 1.3). Under `HangEndMode::Allow` a mark hangs at the line end only if it would otherwise wrap: the slot it hangs from is too narrow for its body plus the overflow (an unbounded slot never needs to hang). `HangEndMode::Force` hangs regardless.
 
 **[HNG-4] One mark per side.** At most one character (one source byte range) hangs on each physical side of a line, and it is the outermost glyph on that side: no other body glyph's pen interval reaches further towards that side. A hanging mark's level is the paragraph's base level, so it lies at the physical edge after L2 (ST1-3).
 
-**[HNG-3]** Trailing whitespace is never `is_hanging` and never counts towards the hanging extents. Trailing `WordSpace` glue has no glyph (WN-10): under `HangingWhitespaceMode::Preserved` it contributes only caret stops beyond the last visible entity, on the far edge of the base direction. The glyph and tab rules below bind any trailing whitespace that does have an entity, such as a tab, U+3000 or a whitespace glyph from a caller's own AST. Under `HangingWhitespaceMode::Collapsible` such glyphs and tabs have zero width. Under `HangingWhitespaceMode::Preserved` they are exempt from SLT-4 but lie on the far edge of the base direction (UAX #9 L1): right of the body in an LTR paragraph, left of it in an RTL one.
+**[HNG-3]** Trailing whitespace is never hanging (its role is *trailing*, OUT-4) and never counts towards the hanging extents. Trailing `WordSpace` glue has no glyph (WN-10): under `HangingWhitespaceMode::Preserved` it contributes only caret stops beyond the last visible entity, on the far edge of the base direction. The glyph and tab rules below bind any trailing whitespace that does have an entity, such as a tab, U+3000 or a whitespace glyph from a caller's own AST. Under `HangingWhitespaceMode::Collapsible` such glyphs and tabs have zero width. Under `HangingWhitespaceMode::Preserved` they are exempt from SLT-4 but lie on the far edge of the base direction (UAX #9 L1): right of the body in an LTR paragraph, left of it in an RTL one.
 
 **Decoration span fragments.**
 
@@ -833,7 +833,6 @@ pub enum LineInvariantError {
     InvalidAtomicFragment { index: usize },
     NonFiniteGlyph { run: usize, glyph: usize },
     TrailingWhitespaceNotCollapsed { run: usize, glyph: usize },
-    HangingGlyphInsideBlock { run: usize, glyph: usize },
     BodyGlyphOutsideBlock { run: usize, glyph: usize },
     InvalidInlineBox { index: usize },
     InlineBoxOutsideBlock { index: usize },
@@ -856,7 +855,6 @@ pub enum LineInvariantError {
     TrailingTabOnWrongSide { index: usize },
     InvalidCaretStop { index: usize },
     InvalidDecoration { index: usize },
-    TrailingWhitespaceMarkedHanging { run: usize, glyph: usize },
     HangingNotAllowed { side: HangSide },
     HangingWithoutOverflow { side: HangSide },
     VisualRunsOutOfOrder { run: usize },
@@ -901,8 +899,6 @@ pub enum ParagraphErrorReason {
 | `NonFiniteGlyph { run, glyph }` | a glyph coordinate is not finite | OUT-1 |
 | `TrailingWhitespaceNotCollapsed { run, glyph }`, `TrailingTabNotCollapsed { index }` | trailing whitespace has width under `Collapsible` | HNG-3 |
 | `TrailingWhitespaceOnWrongSide { run, glyph }`, `TrailingTabOnWrongSide { index }` | preserved trailing whitespace is not on the far edge of the base direction | HNG-3 |
-| `TrailingWhitespaceMarkedHanging { run, glyph }` | a trailing-whitespace glyph is `is_hanging` | HNG-3 |
-| `HangingGlyphInsideBlock { run, glyph }` | an `is_hanging` glyph does not overflow the body | HNG-1 |
 | `BodyGlyphOutsideBlock { run, glyph }` | a body glyph lies outside every content block, or a hanging glyph does not hang from an outer slot | SLT-4, HNG-1 |
 | `HangingNotAllowed { side }` | punctuation hangs where the hang mode forbids it | HNG-2 |
 | `HangingWithoutOverflow { side }` | under `Allow`, a mark hangs although it would have fitted | HNG-2 |

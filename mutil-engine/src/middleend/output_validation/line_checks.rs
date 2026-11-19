@@ -1,12 +1,12 @@
 //! Line-level finite, envelope, source, caret, and annotation record checks.
 
-use super::super::tolerance::{approx_eq, tolerance};
-use super::super::{
+use super::{RangeIndex, SourcedGlyphs};
+use crate::frontend::AnnotationSide;
+use crate::middleend::tolerance::{approx_eq, approx_lt};
+use crate::middleend::{
     AnnotationErrorReason, LineContext, LineHeight, LineInvariantError, PositionedGlyph,
     PositionedLine,
 };
-use super::{RangeIndex, SourcedGlyphs};
-use crate::frontend::AnnotationSide;
 use crate::types::{BidiLevel, GlyphOrientation, TextRange};
 use std::collections::HashSet;
 
@@ -130,7 +130,7 @@ impl PositionedLine {
                 self.check_fixed_metrics(ctx)
             }
             LineHeight::Normal => {
-                if self.line_height < expected - tolerance(self.line_height, expected) {
+                if approx_lt(self.line_height, expected) {
                     return Err(E::LineHeightBelowStrut {
                         minimum: expected,
                         actual: self.line_height,
@@ -267,11 +267,7 @@ impl PositionedLine {
             }
             // Screen order: a pen position never lies left of the previous one.
             // Marks share their base's position, so only `x` is compared.
-            if let Some(step) = r
-                .glyphs
-                .windows(2)
-                .position(|w| w[1].x < w[0].x - tolerance(w[0].x, w[1].x))
-            {
+            if let Some(step) = r.glyphs.windows(2).position(|w| approx_lt(w[1].x, w[0].x)) {
                 return Err(E::GlyphsOutOfVisualOrder {
                     run,
                     glyph: step + 1,
@@ -279,10 +275,11 @@ impl PositionedLine {
             }
         }
         // And across runs, from the last glyph of one to the first of the next.
-        if let Some(step) = self.visual_runs.windows(2).position(|w| {
-            let (end, start) = (w[0].glyphs[w[0].glyphs.len() - 1].x, w[1].glyphs[0].x);
-            start < end - tolerance(end, start)
-        }) {
+        if let Some(step) = self
+            .visual_runs
+            .windows(2)
+            .position(|w| approx_lt(w[1].glyphs[0].x, w[0].glyphs[w[0].glyphs.len() - 1].x))
+        {
             return Err(E::VisualRunsOutOfOrder { run: step + 1 });
         }
         for (index, b) in self.visual_boxes.iter().enumerate() {
@@ -357,10 +354,7 @@ impl PositionedLine {
                 .collect(),
         );
         for (index, stop) in self.caret_stops.iter().enumerate() {
-            let in_order = index == 0 || {
-                let previous = self.caret_stops[index - 1].x;
-                stop.x >= previous - tolerance(previous, stop.x)
-            };
+            let in_order = index == 0 || !approx_lt(stop.x, self.caret_stops[index - 1].x);
             let level_is_owned = || {
                 let mut owners = glyphs
                     .touching(stop.offset)

@@ -36,7 +36,7 @@ fn word(ast: &mut ParagraphAst, start: usize, end: usize) -> WordNode {
     push_text(ast, 0, atoms, clusters)
 }
 
-fn glyph(c: &ShapedCluster, x: f32, hanging: bool) -> PositionedGlyph {
+fn glyph(c: &ShapedCluster, x: f32) -> PositionedGlyph {
     PositionedGlyph {
         glyph_id: 1,
         x,
@@ -44,7 +44,6 @@ fn glyph(c: &ShapedCluster, x: f32, hanging: bool) -> PositionedGlyph {
         y_offset: 0.0,
         advance: c.natural_width,
         byte_range: Some(c.byte_range),
-        is_hanging: hanging,
     }
 }
 
@@ -220,7 +219,7 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
     let mut l0_glyphs: Vec<_> = oma
         .iter()
         .enumerate()
-        .map(|(i, c)| glyph(c, i as f32 * ADV, false))
+        .map(|(i, c)| glyph(c, i as f32 * ADV))
         .collect();
     l0_glyphs.push(PositionedGlyph {
         glyph_id: b'-' as u32,
@@ -229,7 +228,6 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
         y_offset: 0.0,
         advance: ADV,
         byte_range: None,
-        is_hanging: false,
     });
     let line0 = PositionedLine {
         byte_range: TextRange::new(0, 3),
@@ -246,18 +244,18 @@ fn assembled_paragraph(ast: &ParagraphAst, ctx: &LineContext) -> PositionedParag
     let mut pen = 0.0;
     let mut l1_glyphs = Vec::new();
     for c in atje.iter() {
-        l1_glyphs.push(glyph(c, pen, false));
+        l1_glyphs.push(glyph(c, pen));
         pen += c.natural_width;
     }
     pen += SPACE_W;
     let box_x = pen;
     pen += BOX_W + TAB_W;
     for c in word_b {
-        l1_glyphs.push(glyph(c, pen, false));
+        l1_glyphs.push(glyph(c, pen));
         pen += c.natural_width;
     }
     let body_width = pen;
-    l1_glyphs.push(glyph(comma, body_width, true));
+    l1_glyphs.push(glyph(comma, body_width));
     let line1 = PositionedLine {
         byte_range: TextRange::new(3, 18),
         visible_byte_end: 15,
@@ -562,19 +560,6 @@ fn assembled_output_owns_its_data() {
 }
 
 #[test]
-fn hanging_comma_counted_in_visual_width_is_rejected() {
-    let (_, ctx, para) = assembled();
-    let mut bad = para.lines[1].clone();
-    let widened = bad.visual_width() + ADV;
-    set_visual_width(&mut bad, widened);
-    // The comma is the last glyph of the run: "atje" (4), "go" (2), ",".
-    assert_eq!(
-        bad.validate(&ctx),
-        Err(LineInvariantError::HangingGlyphInsideBlock { run: 0, glyph: 6 })
-    );
-}
-
-#[test]
 fn extreme_assembly_every_cluster_belongs_to_one_node() {
     // Words of one atom each, glue between them, 200 nodes: the partition check
     // holds for every node and the cluster byte ranges tile the text without
@@ -663,7 +648,6 @@ fn small_line() -> PositionedLine {
         y_offset: 0.0,
         advance: 10.0,
         byte_range: Some(TextRange::new(bytes.0, bytes.1)),
-        is_hanging: false,
     };
     PositionedLine {
         slots: single_slot(40.0, f32::INFINITY),
@@ -815,7 +799,6 @@ fn hang_mode_struct_gates_each_physical_edge() {
         y_offset: 0.0,
         advance: 10.0,
         byte_range: Some(TextRange::new(4, 5)),
-        is_hanging: true,
     });
     l.byte_range = TextRange::new(0, 5);
     l.visible_byte_end = 5;
@@ -888,7 +871,6 @@ fn trailing_space_line(x: f32) -> PositionedLine {
             y_offset: 0.0,
             advance: 20.0,
             byte_range: Some(TextRange::new(0, 2)),
-            is_hanging: false,
         },
         PositionedGlyph {
             glyph_id: 3,
@@ -897,7 +879,6 @@ fn trailing_space_line(x: f32) -> PositionedLine {
             y_offset: 0.0,
             advance: 5.0,
             byte_range: Some(TextRange::new(2, 3)),
-            is_hanging: false,
         },
     ];
     // A run's glyphs are in screen order.
@@ -1058,7 +1039,6 @@ fn first_line_start_hanging_is_gated_by_line_index_and_direction() {
             y_offset: 0.0,
             advance: 10.0,
             byte_range: Some(TextRange::new(4, 5)),
-            is_hanging: true,
         },
     );
     let ctx = |start, dir, index| LineContext {

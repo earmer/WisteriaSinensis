@@ -11,6 +11,7 @@ mod error_messages;
 mod input_validation;
 mod interaction;
 mod layout;
+mod line_geometry;
 mod options;
 mod output;
 mod output_validation;
@@ -28,6 +29,7 @@ pub use interaction::{
     ParagraphEdge, Selection, SelectionRect, resolve_ligature_carets, utf8_to_utf16, utf16_to_utf8,
 };
 pub use layout::layout_paragraph;
+pub use line_geometry::GlyphRole;
 pub use options::{
     HangEndMode, HangMode, HangStartMode, HangingWhitespaceMode, InlineSlotConstraint,
     LayoutConstraints, LayoutOptions, LineBreakStrategy, LineClampPolicy, LineGeometry,
