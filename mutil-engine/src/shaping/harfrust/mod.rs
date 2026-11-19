@@ -76,6 +76,19 @@ struct ShapingTarget<'a, 'out, 'm, 'reg, 's> {
     last_font: Option<PreparedFont>,
 }
 
+/// One resolved font instance, its cache key, and its unit metrics.
+struct ResolvedInstance {
+    key: InstanceKey,
+    font: Font,
+    units: UnitMetrics,
+}
+
+/// End of a same-face slice inside a segment and the face starting after it.
+struct FontRunNext {
+    end: usize,
+    pending: Option<Option<FontId>>,
+}
+
 impl HarfRustShaper {
     /// A shaper over `registry`.
     #[must_use]
@@ -98,8 +111,8 @@ impl HarfRustShaper {
     /// is built once and cached.
     fn instance(&self, id: FontId, variations: &[FontVariation]) -> Option<(Font, UnitMetrics)> {
         let face = self.registry.face(id)?;
-        let (_, font, units) = self.instance_with_key(id, face, variations);
-        Some((font, units))
+        let resolved = self.instance_with_key(id, face, variations);
+        Some((resolved.font, resolved.units))
     }
 
     fn instance_with_key(
@@ -107,9 +120,13 @@ impl HarfRustShaper {
         id: FontId,
         face: &RegisteredFace,
         variations: &[FontVariation],
-    ) -> (InstanceKey, Font, UnitMetrics) {
+    ) -> ResolvedInstance {
         if variations.is_empty() || face.font.axes().is_empty() {
-            return ((id, SmallVec::new()), face.font.clone(), face.metrics);
+            return ResolvedInstance {
+                key: (id, SmallVec::new()),
+                font: face.font.clone(),
+                units: face.metrics,
+            };
         }
         // Distinct axes commute, so the key lists them by tag: `[wght, wdth]`
         // and `[wdth, wght]` share one instance. The sort is stable, so a
@@ -132,7 +149,7 @@ impl HarfRustShaper {
                 (font, metrics)
             })
             .clone();
-        (key, font, units)
+        ResolvedInstance { key, font, units }
     }
 
     fn prepare_font(
@@ -142,9 +159,9 @@ impl HarfRustShaper {
         id: FontId,
     ) -> Option<PreparedFont> {
         let face = self.registry.face(id)?;
-        let (instance, font, units) = self.instance_with_key(id, face, run.features.variations());
+        let resolved = self.instance_with_key(id, face, run.features.variations());
         let plan_key = PlanKey {
-            instance,
+            instance: resolved.key,
             direction: setup.direction,
             script: setup.script,
             language: setup.language.clone(),
@@ -154,7 +171,7 @@ impl HarfRustShaper {
             let mut cache = self.plans.lock().unwrap_or_else(PoisonError::into_inner);
             Arc::clone(cache.get_or_insert_with(plan_key, MAX_CACHED_PLANS, || {
                 Arc::new(ShapePlan::new(
-                    &font,
+                    &resolved.font,
                     setup.direction.to_harfrust(),
                     setup.script,
                     setup.language.as_ref(),
@@ -164,8 +181,8 @@ impl HarfRustShaper {
         };
         Some(PreparedFont {
             id,
-            font,
-            scale: run.font_size / units.units_per_em,
+            font: resolved.font,
+            scale: run.font_size / resolved.units.units_per_em,
             plan,
         })
     }
@@ -191,26 +208,35 @@ impl HarfRustShaper {
             }
         });
         while let Some(font) = pending {
-            let (end, next_font) = if group {
-                (range.end, None)
+            let next = if group {
+                FontRunNext {
+                    end: range.end,
+                    pending: None,
+                }
             } else {
                 (start + 1..range.end)
-                    .find_map(|i| {
-                        let f = target.matcher.face_for(target.text, &target.atoms[i]);
-                        (f != font).then_some((i, f))
+                    .find_map(|end| {
+                        let next_font = target.matcher.face_for(target.text, &target.atoms[end]);
+                        (next_font != font).then_some(FontRunNext {
+                            end,
+                            pending: Some(next_font),
+                        })
                     })
-                    .map_or((range.end, None), |(i, f)| (i, Some(f)))
+                    .unwrap_or(FontRunNext {
+                        end: range.end,
+                        pending: None,
+                    })
             };
-            pending = next_font;
+            pending = next.pending;
             let first_cluster = target.output.clusters.len();
-            self.shape_font_run(target, start..end, font);
+            self.shape_font_run(target, start..next.end, font);
             if cut_before
                 && start == range.start
                 && let Some(cluster) = target.output.clusters.get_mut(first_cluster)
             {
                 cluster.safe_to_concat_before = false;
             }
-            start = end;
+            start = next.end;
         }
     }
 
@@ -239,6 +265,7 @@ impl HarfRustShaper {
             push_empty_clusters(run, atoms, range, font_id, target.output);
             return;
         };
+        target.scratch.reset_buffer();
         let buffer = &mut target.scratch.buffer;
         fill_segment_buffer(buffer, target.text, target.context, bytes);
         if !shape_buffer(run.font_size, target.setup, prepared, buffer) {
@@ -271,8 +298,8 @@ impl HarfRustShaper {
             return SmallVec::new();
         };
         with_scratch(|scratch| {
+            scratch.reset_buffer();
             let buffer = &mut scratch.buffer;
-            buffer.reset();
             buffer.push_str(replacement);
             // The replacement takes the kept text's language, features and size.
             if !shape_buffer(run.font_size, setup, &prepared, buffer) {
@@ -293,10 +320,9 @@ impl HarfRustShaper {
     }
 }
 
-/// Resets `buffer` and loads `text[bytes]` with its surrounding context slice
-/// and edge flags.
+/// Loads `text[bytes]` with its surrounding context slice and edge flags into
+/// an already-reset `buffer`.
 fn fill_segment_buffer(buffer: &mut Buffer, text: &str, context: TextRange, bytes: TextRange) {
-    buffer.reset();
     for (offset, c) in text[bytes.as_range()].char_indices() {
         buffer.push(c as u32, u32::try_from(offset).unwrap_or(u32::MAX));
     }

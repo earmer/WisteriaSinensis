@@ -6,6 +6,7 @@ use crate::types::{
     AtomFlags, FontId, FontRef, GraphemeAtom, RawShapedGlyph, ShapedCluster, ShapingRun, TextRange,
     natural_width,
 };
+use smallvec::SmallVec;
 
 /// Appends one glyph-less cluster per atom in `atoms[range]`, or one merged
 /// cluster for `HorizontalInVertical` (spec SHP-5).
@@ -89,9 +90,23 @@ struct Group {
 }
 
 /// Reusable scratch buffer for [`push_clusters_with_scratch`].
+///
+/// Inline storage keeps short segments (and callers of [`push_clusters`] such
+/// as `LineOnlyShaper`) allocation-free while allowing long segments to reuse
+/// heap capacity across calls.
 #[derive(Default)]
 pub(crate) struct GroupScratch {
-    groups: Vec<Group>,
+    groups: SmallVec<[Group; 8]>,
+}
+
+impl GroupScratch {
+    /// Clears the buffer and releases oversized heap capacity past `max_cap`.
+    pub(crate) fn trim(&mut self, max_cap: usize) {
+        self.groups.clear();
+        if self.groups.spilled() && self.groups.capacity() > max_cap {
+            self.groups = SmallVec::new();
+        }
+    }
 }
 
 /// Groups `glyphs` into `groups` so `atom_range` partitions stay strictly
@@ -103,7 +118,7 @@ fn group_glyphs_into(
     run: &ShapingRun,
     range: &core::ops::Range<usize>,
     glyphs: &[TaggedGlyph],
-    groups: &mut Vec<Group>,
+    groups: &mut SmallVec<[Group; 8]>,
 ) {
     groups.clear();
     if run.orientation == crate::types::GlyphOrientation::HorizontalInVertical {

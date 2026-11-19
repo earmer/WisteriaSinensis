@@ -14,8 +14,12 @@ static NFD: DecomposingNormalizerBorrowed<'static> = DecomposingNormalizerBorrow
 ///
 /// Built once per run so per-atom face selection works directly on in-memory
 /// references with zero registry lookups and zero locale parsing in the loop.
+/// Only faces matching the run's explicit family stack are collected up front;
+/// remaining registry faces are streamed lazily as last-resort fallbacks so
+/// large registries never spill or allocate tracking tables per run.
 pub(super) struct RunFaceMatcher<'a> {
-    candidates: SmallVec<[ResolvedCandidate<'a>; 8]>,
+    registry: &'a FontRegistry,
+    stack_candidates: SmallVec<[ResolvedCandidate<'a>; 16]>,
     /// `Some(regions)` for a CJK script run (with the run's preferred region
     /// tiers, possibly empty); `None` for non-CJK runs.
     cjk_preferred: Option<&'static [CjkRegion]>,
@@ -24,13 +28,22 @@ pub(super) struct RunFaceMatcher<'a> {
 impl<'a> RunFaceMatcher<'a> {
     pub(super) fn new(registry: &'a FontRegistry, run: &ShapingRun) -> Self {
         Self {
-            candidates: registry.resolve_candidates(&run.families, run.style),
+            registry,
+            stack_candidates: registry.resolve_stack_candidates(&run.families, run.style),
             cjk_preferred: is_cjk_script(run.script).then(|| preferred_regions(run)),
         }
     }
 
+    fn candidates(&self) -> impl Iterator<Item = ResolvedCandidate<'a>> + '_ {
+        self.stack_candidates.iter().copied().chain(
+            self.registry
+                .all_candidates()
+                .filter(|cand| !self.stack_candidates.iter().any(|s| s.id == cand.id)),
+        )
+    }
+
     pub(super) fn first_id(&self) -> FontId {
-        self.candidates.first().map_or(FontId::default(), |c| c.id)
+        self.candidates().next().map_or(FontId::default(), |c| c.id)
     }
 
     /// The face that shapes `atom` of the run, keyed by script and locale
@@ -55,15 +68,13 @@ impl<'a> RunFaceMatcher<'a> {
             && let Some(c) = written.chars().next()
         {
             return self
-                .candidates
-                .iter()
+                .candidates()
                 .find(|cand| covers_char(cand, c))
-                .or_else(|| self.candidates.first())
+                .or_else(|| self.candidates().next())
                 .map(|cand| cand.id);
         }
         let mut atom_text = AtomText::new(written);
-        self.choose_index(&mut atom_text)
-            .map(|idx| self.candidates[idx].id)
+        self.choose_candidate(&mut atom_text).map(|cand| cand.id)
     }
 
     /// The one face that shapes a tate-chu-yoko group `atoms` (SHP-5): the
@@ -77,32 +88,25 @@ impl<'a> RunFaceMatcher<'a> {
             .iter()
             .map(|atom| AtomText::new(&text[atom.byte_range.as_range()]))
             .collect();
-        let first_idx = self.choose_index(group.first_mut()?)?;
-        if self.candidate_covers_all(first_idx, &mut group) {
-            return Some(self.candidates[first_idx].id);
+        let first = self.choose_candidate(group.first_mut()?)?;
+        if covers_all(first, &mut group) {
+            return Some(first.id);
         }
         for i in 1..group.len() {
-            if let Some(idx) = self.choose_index(&mut group[i])
-                && idx != first_idx
-                && self.candidate_covers_all(idx, &mut group)
+            if let Some(cand) = self.choose_candidate(&mut group[i])
+                && cand.id != first.id
+                && covers_all(cand, &mut group)
             {
-                return Some(self.candidates[idx].id);
+                return Some(cand.id);
             }
         }
-        for idx in 0..self.candidates.len() {
-            if self.candidate_covers_all(idx, &mut group) {
-                return Some(self.candidates[idx].id);
-            }
-        }
-        Some(self.candidates[first_idx].id)
+        self.candidates()
+            .find(|&cand| covers_all(cand, &mut group))
+            .map(|cand| cand.id)
+            .or(Some(first.id))
     }
 
-    fn candidate_covers_all(&self, idx: usize, group: &mut [AtomText<'_>]) -> bool {
-        let cand = &self.candidates[idx];
-        group.iter_mut().all(|atom| atom.is_covered_by(cand))
-    }
-
-    fn choose_index(&self, atom: &mut AtomText<'_>) -> Option<usize> {
+    fn choose_candidate(&self, atom: &mut AtomText<'_>) -> Option<ResolvedCandidate<'a>> {
         // ASCII keeps stack order even in a CJK run: FE-13 folds digits and
         // ASCII punctuation into a neighbouring Han run, and they belong to
         // the stack's leading Latin face.
@@ -113,43 +117,48 @@ impl<'a> RunFaceMatcher<'a> {
         }
     }
 
-    fn choose_stack_order(&self, atom: &mut AtomText<'_>) -> Option<usize> {
-        self.candidates
-            .iter()
-            .position(|c| atom.is_covered_by(c))
+    fn choose_stack_order(&self, atom: &mut AtomText<'_>) -> Option<ResolvedCandidate<'a>> {
+        self.candidates()
+            .find(|c| atom.is_covered_by(c))
             .or_else(|| {
                 let lead = atom.lead()?;
-                self.candidates.iter().position(|c| covers_char(c, lead))
+                self.candidates().find(|c| covers_char(c, lead))
             })
-            .or_else(|| (!self.candidates.is_empty()).then_some(0))
+            .or_else(|| self.candidates().next())
     }
 
-    fn choose_cjk(&self, atom: &mut AtomText<'_>, preferred: &[CjkRegion]) -> Option<usize> {
+    fn choose_cjk(
+        &self,
+        atom: &mut AtomText<'_>,
+        preferred: &[CjkRegion],
+    ) -> Option<ResolvedCandidate<'a>> {
         for (tier, &region) in preferred.iter().enumerate() {
-            if let Some(idx) = self.candidates.iter().position(|c| {
+            if let Some(found) = self.candidates().find(|c| {
                 let profile = c.profile();
                 profile.cjk
                     && (profile.region == Some(region)
                         || (tier == 0 && profile.region == Some(CjkRegion::Pan)))
                     && atom.is_covered_by(c)
             }) {
-                return Some(idx);
+                return Some(found);
             }
         }
-        self.candidates
-            .iter()
-            .position(|c| c.profile().cjk && atom.is_covered_by(c))
-            .or_else(|| self.candidates.iter().position(|c| atom.is_covered_by(c)))
+        self.candidates()
+            .find(|c| c.profile().cjk && atom.is_covered_by(c))
+            .or_else(|| self.candidates().find(|c| atom.is_covered_by(c)))
             .or_else(|| {
                 let lead = atom.lead()?;
-                self.candidates
-                    .iter()
-                    .position(|c| c.profile().cjk && covers_char(c, lead))
-                    .or_else(|| self.candidates.iter().position(|c| covers_char(c, lead)))
+                self.candidates()
+                    .find(|c| c.profile().cjk && covers_char(c, lead))
+                    .or_else(|| self.candidates().find(|c| covers_char(c, lead)))
             })
-            .or_else(|| self.candidates.iter().position(|c| c.profile().cjk))
-            .or_else(|| (!self.candidates.is_empty()).then_some(0))
+            .or_else(|| self.candidates().find(|c| c.profile().cjk))
+            .or_else(|| self.candidates().next())
     }
+}
+
+fn covers_all(cand: ResolvedCandidate<'_>, group: &mut [AtomText<'_>]) -> bool {
+    group.iter_mut().all(|atom| atom.is_covered_by(&cand))
 }
 
 /// Whether `cand` maps `c`, or `c` needs no glyph of its own.

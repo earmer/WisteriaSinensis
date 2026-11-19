@@ -20,6 +20,11 @@ pub(super) const MAX_CACHED_INSTANCES: usize = 128;
 /// The most compiled HarfRust shape plans the shaper keeps cached at once.
 pub(super) const MAX_CACHED_PLANS: usize = 256;
 
+/// Upper bound on element capacity retained in thread-local shaping scratch
+/// buffers after a call finishes, so unusually large requests do not leave
+/// peak allocations permanently resident on worker threads.
+const MAX_RETAINED_SCRATCH_CAP: usize = 4096;
+
 /// A variable instance, keyed by face and its sorted variation coordinates
 /// (spec FNT-1 makes [`FontVariation`] a sound hash/equality key).
 pub(super) type InstanceKey = (FontId, SmallVec<[FontVariation; 2]>);
@@ -148,13 +153,44 @@ impl Default for ShaperScratch {
     }
 }
 
+impl ShaperScratch {
+    /// Resets `buffer` for reuse, replacing it instead if the previous segment
+    /// exceeded [`MAX_RETAINED_SCRATCH_CAP`].
+    pub(super) fn reset_buffer(&mut self) {
+        if self.buffer.len() > MAX_RETAINED_SCRATCH_CAP {
+            self.buffer = Buffer::new();
+        } else {
+            self.buffer.reset();
+        }
+    }
+
+    /// Releases oversized capacities so an outlier segment does not stay
+    /// permanently resident in thread-local storage.
+    fn trim(&mut self) {
+        if self.buffer.len() > MAX_RETAINED_SCRATCH_CAP
+            || self.tagged.capacity() > MAX_RETAINED_SCRATCH_CAP
+        {
+            self.buffer = Buffer::new();
+        }
+        self.tagged.clear();
+        if self.tagged.capacity() > MAX_RETAINED_SCRATCH_CAP {
+            self.tagged.shrink_to(MAX_RETAINED_SCRATCH_CAP);
+        }
+        self.groups.trim(MAX_RETAINED_SCRATCH_CAP);
+    }
+}
+
 std::thread_local! {
     static SHAPER_SCRATCH: RefCell<ShaperScratch> = RefCell::new(ShaperScratch::default());
 }
 
 pub(super) fn with_scratch<R>(f: impl FnOnce(&mut ShaperScratch) -> R) -> R {
     SHAPER_SCRATCH.with(|cell| match cell.try_borrow_mut() {
-        Ok(mut scratch) => f(&mut scratch),
+        Ok(mut scratch) => {
+            let result = f(&mut scratch);
+            scratch.trim();
+            result
+        }
         Err(_) => f(&mut ShaperScratch::default()),
     })
 }

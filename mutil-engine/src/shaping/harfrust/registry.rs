@@ -207,42 +207,44 @@ impl FontRegistry {
         (!self.faces.is_empty()).then_some(FontId(0))
     }
 
-    /// The pre-resolved faces to try for `families` and `style`, best first:
-    /// the best style match of each family of the stack in order, then every
-    /// other face in registration order (the deterministic last resort, SHP-12).
-    pub(super) fn resolve_candidates(
+    /// The pre-resolved faces matching `families` in stack order, sorted by
+    /// style distance within each family and deduplicated. Unmatched fallback
+    /// faces are iterated lazily via [`Self::all_candidates`] so large
+    /// registries never spill or allocate tracking tables per run.
+    pub(super) fn resolve_stack_candidates(
         &self,
         families: &[FontFamily],
         style: FontStyle,
-    ) -> SmallVec<[ResolvedCandidate<'_>; 8]> {
-        let mut order: SmallVec<[ResolvedCandidate<'_>; 8]> = SmallVec::new();
-        let mut seen: SmallVec<[bool; 64]> = SmallVec::from_elem(false, self.faces.len());
+    ) -> SmallVec<[ResolvedCandidate<'_>; 16]> {
+        let mut order: SmallVec<[ResolvedCandidate<'_>; 16]> = SmallVec::new();
         for family in families {
             let Some(name) = self.resolve_family_name(family) else {
                 continue;
             };
             let start = order.len();
             for (index, face) in self.faces.iter().enumerate() {
-                if !seen[index] && face.family.eq_ignore_ascii_case(name) {
-                    seen[index] = true;
-                    order.push(ResolvedCandidate {
-                        id: id_of(index),
-                        face,
-                    });
+                if face.family.eq_ignore_ascii_case(name) {
+                    let id = id_of(index);
+                    if !order.iter().any(|existing| existing.id == id) {
+                        order.push(ResolvedCandidate { id, face });
+                    }
                 }
             }
             order[start..].sort_by_key(|cand| (style_distance(cand.face.style, style), cand.id.0));
         }
-        for (index, face) in self.faces.iter().enumerate() {
-            if !seen[index] {
-                seen[index] = true;
-                order.push(ResolvedCandidate {
-                    id: id_of(index),
-                    face,
-                });
-            }
-        }
         order
+    }
+
+    /// Every registered face in registration order (the deterministic last
+    /// resort of SHP-12), without allocating.
+    pub(super) fn all_candidates(&self) -> impl Iterator<Item = ResolvedCandidate<'_>> {
+        self.faces
+            .iter()
+            .enumerate()
+            .map(|(index, face)| ResolvedCandidate {
+                id: id_of(index),
+                face,
+            })
     }
 }
 
