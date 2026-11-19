@@ -236,6 +236,7 @@ dependencies = [
 name = "mutil-engine"
 version = "0.0.1"
 dependencies = [
+ "bitflags",
  "harfrust",
  "icu_normalizer",
  "icu_properties",

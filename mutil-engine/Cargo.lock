@@ -227,6 +227,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 name = "mutil-engine"
 version = "0.0.1"
 dependencies = [
+ "bitflags",
  "harfrust",
  "icu_normalizer",
  "icu_properties",
