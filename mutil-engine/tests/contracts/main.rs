@@ -5,6 +5,7 @@
 
 mod annotations;
 mod api;
+mod atom_flags;
 mod badness;
 mod bidi_gates;
 mod common;
@@ -14,6 +15,7 @@ mod error_causes;
 mod error_messages;
 mod gates;
 mod geometry;
+mod geometry_gate;
 mod hanging_gates;
 mod hanging_roles;
 mod hanging_slot_content;
@@ -27,6 +29,7 @@ mod paragraph_validation;
 mod pipeline_assembly;
 mod pipeline_types;
 mod rich_inline_spans;
+mod slot_overflow_roles;
 mod source_coverage;
 mod spans;
 mod storage;
