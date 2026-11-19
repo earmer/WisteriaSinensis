@@ -1,158 +1,224 @@
 //! Face selection (spec SHP-5, SHP-12, SHP-25, SHP-26): which registered
 //! face shapes an atom, or a tate-chu-yoko group, of a run.
 
-use super::HarfRustShaper;
-use super::registry::{CjkRegion, preferred_regions};
+use super::registry::{CjkRegion, FontRegistry, ResolvedCandidate, preferred_regions};
 use crate::types::{FontId, GraphemeAtom, ScriptTag, ShapingRun};
 use icu_normalizer::{ComposingNormalizerBorrowed, DecomposingNormalizerBorrowed};
 use smallvec::SmallVec;
-use std::borrow::Cow;
 
 /// The normalisations under which a face covers an atom (spec SHP-26).
 static NFC: ComposingNormalizerBorrowed<'static> = ComposingNormalizerBorrowed::new_nfc();
 static NFD: DecomposingNormalizerBorrowed<'static> = DecomposingNormalizerBorrowed::new_nfd();
 
-impl HarfRustShaper {
-    /// The face that shapes `atom` of `run`, keyed by the run's script and
-    /// locale (spec SHP-12, SHP-25).
+/// Pre-resolved candidate faces and CJK routing state for one shaping run.
+///
+/// Built once per run so per-atom face selection works directly on in-memory
+/// references with zero registry lookups and zero locale parsing in the loop.
+/// Only faces matching the run's explicit family stack are collected up front;
+/// remaining registry faces are streamed lazily as last-resort fallbacks so
+/// large registries never spill or allocate tracking tables per run.
+pub(super) struct RunFaceMatcher<'a> {
+    registry: &'a FontRegistry,
+    stack_candidates: SmallVec<[ResolvedCandidate<'a>; 16]>,
+    /// `Some(regions)` for a CJK script run (with the run's preferred region
+    /// tiers, possibly empty); `None` for non-CJK runs.
+    cjk_preferred: Option<&'static [CjkRegion]>,
+}
+
+impl<'a> RunFaceMatcher<'a> {
+    pub(super) fn new(registry: &'a FontRegistry, run: &ShapingRun) -> Self {
+        Self {
+            registry,
+            stack_candidates: registry.resolve_stack_candidates(&run.families, run.style),
+            cjk_preferred: is_cjk_script(run.script).then(|| preferred_regions(run)),
+        }
+    }
+
+    fn candidates(&self) -> impl Iterator<Item = ResolvedCandidate<'a>> + '_ {
+        self.stack_candidates.iter().copied().chain(
+            self.registry
+                .all_candidates()
+                .filter(|cand| !self.stack_candidates.iter().any(|s| s.id == cand.id)),
+        )
+    }
+
+    pub(super) fn first_id(&self) -> FontId {
+        self.candidates().next().map_or(FontId::default(), |c| c.id)
+    }
+
+    /// The face that shapes `atom` of the run, keyed by script and locale
+    /// (spec SHP-12, SHP-25).
     ///
     /// In a CJK run (`Hani`, `Hira`, `Kana`, `Hang`, `Bopo`) an atom whose
     /// first code point is ASCII keeps stack order; for any other atom the
-    /// CJK faces come first: the first candidate whose region the run prefers and
-    /// whose character map covers the whole atom, else the first CJK
+    /// CJK faces come first: the first candidate whose region the run prefers
+    /// and whose character map covers the whole atom, else the first CJK
     /// candidate that covers it; a face that is not CJK is reached only when
     /// no CJK face covers the atom. Every run then falls back to the first
     /// candidate that covers the whole atom, else the first that covers its
     /// first code point, else the first candidate, CJK faces first in a CJK
     /// run. A face covers an atom when it covers the atom as written or its
     /// NFC or NFD form (SHP-26).
-    pub(super) fn face_for(
-        &self,
-        text: &str,
-        run: &ShapingRun,
-        atom: &GraphemeAtom,
-        candidates: &[FontId],
-    ) -> Option<FontId> {
-        self.face_for_forms(run, &AtomText::new(text, atom), candidates)
-    }
-
-    /// [`Self::face_for`] for an atom whose normal forms are already known.
-    fn face_for_forms(
-        &self,
-        run: &ShapingRun,
-        atom: &AtomText<'_>,
-        candidates: &[FontId],
-    ) -> Option<FontId> {
-        let covers_atom = |id: FontId| self.covers_forms(id, &atom.forms);
-        let covers_lead = |id: FontId| atom.lead.is_some_and(|c| self.covers_char(id, c));
-        let profile = |id: FontId| self.registry.profile(id).unwrap_or_default();
-        let first = |pass: &dyn Fn(FontId) -> bool| candidates.iter().copied().find(|&id| pass(id));
-        // ASCII keeps stack order even in a CJK run: FE-13 folds digits and
-        // ASCII punctuation into a neighbouring Han run, and they belong to
-        // the stack's leading Latin face.
-        let ascii = atom.lead.is_some_and(|c| c.is_ascii());
-        if !is_cjk_script(run.script) || ascii {
-            return first(&covers_atom)
-                .or_else(|| first(&covers_lead))
-                .or_else(|| candidates.first().copied());
+    pub(super) fn face_for(&self, text: &str, atom: &GraphemeAtom) -> Option<FontId> {
+        let written = &text[atom.byte_range.as_range()];
+        // Fast path: a single ASCII byte is already NFC and NFD, always keeps
+        // stack order (even in a CJK run), and its whole-atom and lead-char
+        // coverage predicates are identical.
+        if written.len() == 1
+            && let Some(c) = written.chars().next()
+        {
+            return self
+                .candidates()
+                .find(|cand| covers_char(cand, c))
+                .or_else(|| self.candidates().next())
+                .map(|cand| cand.id);
         }
-        let cjk = |id: FontId| profile(id).cjk;
-        for (tier, &region) in preferred_regions(run).iter().enumerate() {
-            let found = first(&|id| {
-                let face = profile(id);
-                face.cjk
-                    && (face.region == Some(region)
-                        || (tier == 0 && face.region == Some(CjkRegion::Pan)))
-                    && covers_atom(id)
-            });
-            if found.is_some() {
-                return found;
-            }
-        }
-        first(&|id| cjk(id) && covers_atom(id))
-            .or_else(|| first(&covers_atom))
-            .or_else(|| first(&|id| cjk(id) && covers_lead(id)))
-            .or_else(|| first(&covers_lead))
-            .or_else(|| first(&cjk))
-            .or_else(|| candidates.first().copied())
-    }
-
-    /// Whether face `id` maps `c`, or `c` needs no glyph of its own.
-    fn covers_char(&self, id: FontId, c: char) -> bool {
-        is_coverage_exempt(c)
-            || self
-                .registry
-                .face(id)
-                .is_some_and(|face| face.font.charmap().map_unicode(c).is_some())
-    }
-
-    /// Whether face `id` covers one of an atom's `forms` (SHP-26).
-    fn covers_forms(&self, id: FontId, forms: &[Cow<'_, str>]) -> bool {
-        forms
-            .iter()
-            .any(|form| form.chars().all(|c| self.covers_char(id, c)))
+        let mut atom_text = AtomText::new(written);
+        self.choose_candidate(&mut atom_text).map(|cand| cand.id)
     }
 
     /// The one face that shapes a tate-chu-yoko group `atoms` (SHP-5): the
     /// face of its first atom when that covers every atom, else the first
     /// face, among those chosen for its atoms and then the candidates, that
     /// does, else the first atom's face.
-    pub(super) fn face_for_group(
+    pub(super) fn face_for_group(&self, text: &str, atoms: &[GraphemeAtom]) -> Option<FontId> {
+        // Each atom's NFC/NFD fallback forms are computed lazily at most once
+        // across both selection and group coverage.
+        let mut group: SmallVec<[AtomText<'_>; 4]> = atoms
+            .iter()
+            .map(|atom| AtomText::new(&text[atom.byte_range.as_range()]))
+            .collect();
+        let first = self.choose_candidate(group.first_mut()?)?;
+        if covers_all(first, &mut group) {
+            return Some(first.id);
+        }
+        for i in 1..group.len() {
+            if let Some(cand) = self.choose_candidate(&mut group[i])
+                && cand.id != first.id
+                && covers_all(cand, &mut group)
+            {
+                return Some(cand.id);
+            }
+        }
+        self.candidates()
+            .find(|&cand| covers_all(cand, &mut group))
+            .map(|cand| cand.id)
+            .or(Some(first.id))
+    }
+
+    fn choose_candidate(&self, atom: &mut AtomText<'_>) -> Option<ResolvedCandidate<'a>> {
+        // ASCII keeps stack order even in a CJK run: FE-13 folds digits and
+        // ASCII punctuation into a neighbouring Han run, and they belong to
+        // the stack's leading Latin face.
+        let ascii = atom.lead().is_some_and(|c| c.is_ascii());
+        match self.cjk_preferred {
+            Some(preferred) if !ascii => self.choose_cjk(atom, preferred),
+            _ => self.choose_stack_order(atom),
+        }
+    }
+
+    fn choose_stack_order(&self, atom: &mut AtomText<'_>) -> Option<ResolvedCandidate<'a>> {
+        self.candidates()
+            .find(|c| atom.is_covered_by(c))
+            .or_else(|| {
+                let lead = atom.lead()?;
+                self.candidates().find(|c| covers_char(c, lead))
+            })
+            .or_else(|| self.candidates().next())
+    }
+
+    fn choose_cjk(
         &self,
-        text: &str,
-        run: &ShapingRun,
-        atoms: &[GraphemeAtom],
-        candidates: &[FontId],
-    ) -> Option<FontId> {
-        // Each atom is decoded and normalised once, for the choice of its
-        // face and for the coverage of the whole group.
-        let group: SmallVec<[AtomText<'_>; 4]> =
-            atoms.iter().map(|atom| AtomText::new(text, atom)).collect();
-        let lead = self.face_for_forms(run, group.first()?, candidates)?;
-        let covers_all = |id: FontId| group.iter().all(|a| self.covers_forms(id, &a.forms));
-        core::iter::once(lead)
-            .chain(
-                group[1..]
-                    .iter()
-                    .filter_map(|atom| self.face_for_forms(run, atom, candidates)),
-            )
-            .chain(candidates.iter().copied())
-            .find(|&id| covers_all(id))
-            .or(Some(lead))
+        atom: &mut AtomText<'_>,
+        preferred: &[CjkRegion],
+    ) -> Option<ResolvedCandidate<'a>> {
+        for (tier, &region) in preferred.iter().enumerate() {
+            if let Some(found) = self.candidates().find(|c| {
+                let profile = c.profile();
+                profile.cjk
+                    && (profile.region == Some(region)
+                        || (tier == 0 && profile.region == Some(CjkRegion::Pan)))
+                    && atom.is_covered_by(c)
+            }) {
+                return Some(found);
+            }
+        }
+        self.candidates()
+            .find(|c| c.profile().cjk && atom.is_covered_by(c))
+            .or_else(|| self.candidates().find(|c| atom.is_covered_by(c)))
+            .or_else(|| {
+                let lead = atom.lead()?;
+                self.candidates()
+                    .find(|c| c.profile().cjk && covers_char(c, lead))
+                    .or_else(|| self.candidates().find(|c| covers_char(c, lead)))
+            })
+            .or_else(|| self.candidates().find(|c| c.profile().cjk))
+            .or_else(|| self.candidates().next())
     }
 }
 
-/// An atom's first code point and its forms as written, NFC and NFD
-/// (SHP-26), decoded once for face selection.
+fn covers_all(cand: ResolvedCandidate<'_>, group: &mut [AtomText<'_>]) -> bool {
+    group.iter_mut().all(|atom| atom.is_covered_by(&cand))
+}
+
+/// Whether `cand` maps `c`, or `c` needs no glyph of its own.
+fn covers_char(cand: &ResolvedCandidate<'_>, c: char) -> bool {
+    is_coverage_exempt(c) || cand.face.font.charmap().map_unicode(c).is_some()
+}
+
+/// Whether `cand` covers every scalar of `s`.
+fn covers_str(cand: &ResolvedCandidate<'_>, s: &str) -> bool {
+    s.chars().all(|c| covers_char(cand, c))
+}
+
+/// An atom's written slice and lazily computed NFC/NFD scalar forms (SHP-26).
 struct AtomText<'t> {
-    lead: Option<char>,
-    forms: SmallVec<[Cow<'t, str>; 3]>,
+    written: &'t str,
+    /// Populated only when a candidate fails to cover `written` directly.
+    /// Holds distinct NFC/NFD scalar sequences that differ from `written`.
+    extra: Option<SmallVec<[SmallVec<[char; 8]>; 2]>>,
 }
 
 impl<'t> AtomText<'t> {
-    fn new(text: &'t str, atom: &GraphemeAtom) -> Self {
-        let written = &text[atom.byte_range.as_range()];
+    fn new(written: &'t str) -> Self {
         Self {
-            lead: written.chars().next(),
-            forms: atom_forms(written),
+            written,
+            extra: None,
         }
     }
-}
 
-/// An atom's text as written, then its NFC and NFD forms where they differ
-/// (SHP-26).
-fn atom_forms(written: &str) -> SmallVec<[Cow<'_, str>; 3]> {
-    let mut forms: SmallVec<[Cow<'_, str>; 3]> = SmallVec::new();
-    for form in [
-        Cow::Borrowed(written),
-        NFC.normalize(written),
-        NFD.normalize(written),
-    ] {
-        if !forms.contains(&form) {
-            forms.push(form);
-        }
+    fn lead(&self) -> Option<char> {
+        self.written.chars().next()
     }
-    forms
+
+    /// Whether `cand` covers `self` as written, or in NFC or NFD (SHP-26).
+    fn is_covered_by(&mut self, cand: &ResolvedCandidate<'_>) -> bool {
+        if covers_str(cand, self.written) {
+            return true;
+        }
+        self.extra_forms()
+            .iter()
+            .any(|form| form.iter().all(|&c| covers_char(cand, c)))
+    }
+
+    fn extra_forms(&mut self) -> &[SmallVec<[char; 8]>] {
+        self.extra.get_or_insert_with(|| {
+            let mut forms: SmallVec<[SmallVec<[char; 8]>; 2]> = SmallVec::new();
+            if self.written.is_ascii() {
+                return forms;
+            }
+            if !NFC.is_normalized(self.written) {
+                forms.push(NFC.normalize_iter(self.written.chars()).collect());
+            }
+            if !NFD.is_normalized(self.written) {
+                let nfd: SmallVec<[char; 8]> = NFD.normalize_iter(self.written.chars()).collect();
+                if forms.first() != Some(&nfd) {
+                    forms.push(nfd);
+                }
+            }
+            forms
+        })
+    }
 }
 
 /// Code points shaped by whatever face shapes the rest of their atom:

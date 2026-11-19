@@ -89,24 +89,45 @@ struct Group {
     glyphs: core::ops::Range<usize>,
 }
 
-/// Groups `glyphs` so `atom_range` partitions stay strictly monotonic and
-/// non-overlapping (`prev.max_atom < next.min_atom`) with contiguous glyph
-/// slices (`prev.glyphs.end == next.glyphs.start`): a glyph that reaches back
-/// into an earlier group merges them. A `HorizontalInVertical` run is one
-/// group.
-fn group_glyphs(
+/// Reusable scratch buffer for [`push_clusters_with_scratch`].
+///
+/// Inline storage keeps short segments (and callers of [`push_clusters`] such
+/// as `LineOnlyShaper`) allocation-free while allowing long segments to reuse
+/// heap capacity across calls.
+#[derive(Default)]
+pub(crate) struct GroupScratch {
+    groups: SmallVec<[Group; 8]>,
+}
+
+impl GroupScratch {
+    /// Clears the buffer and releases oversized heap capacity past `max_cap`.
+    pub(crate) fn trim(&mut self, max_cap: usize) {
+        self.groups.clear();
+        if self.groups.spilled() && self.groups.capacity() > max_cap {
+            self.groups = SmallVec::new();
+        }
+    }
+}
+
+/// Groups `glyphs` into `groups` so `atom_range` partitions stay strictly
+/// monotonic and non-overlapping (`prev.max_atom < next.min_atom`) with
+/// contiguous glyph slices (`prev.glyphs.end == next.glyphs.start`): a glyph
+/// that reaches back into an earlier group merges them. A
+/// `HorizontalInVertical` run is one group.
+fn group_glyphs_into(
     run: &ShapingRun,
     range: &core::ops::Range<usize>,
     glyphs: &[TaggedGlyph],
-) -> SmallVec<[Group; 8]> {
-    let mut groups: SmallVec<[Group; 8]> = SmallVec::new();
+    groups: &mut SmallVec<[Group; 8]>,
+) {
+    groups.clear();
     if run.orientation == crate::types::GlyphOrientation::HorizontalInVertical {
         groups.push(Group {
             min_atom: range.start,
             max_atom: range.end - 1,
             glyphs: 0..glyphs.len(),
         });
-        return groups;
+        return;
     }
     for (index, tagged) in glyphs.iter().enumerate() {
         let atom = tagged.atom;
@@ -148,7 +169,6 @@ fn group_glyphs(
         });
     }
     groups[0].min_atom = range.start;
-    groups
 }
 
 /// Groups glyphs into clusters of whole atoms (spec SHP-13): a glyph that
@@ -168,10 +188,33 @@ pub(crate) fn push_clusters(
     fallback_font: FontId,
     output: &mut ShapeOutput,
 ) {
+    let mut scratch = GroupScratch::default();
+    push_clusters_with_scratch(
+        run,
+        atoms,
+        range,
+        glyphs,
+        fallback_font,
+        output,
+        &mut scratch,
+    );
+}
+
+/// As [`push_clusters`], reusing `scratch`'s group buffer across calls.
+pub(crate) fn push_clusters_with_scratch(
+    run: &ShapingRun,
+    atoms: &[GraphemeAtom],
+    range: core::ops::Range<usize>,
+    glyphs: &[TaggedGlyph],
+    fallback_font: FontId,
+    output: &mut ShapeOutput,
+    scratch: &mut GroupScratch,
+) {
     if range.is_empty() {
         return;
     }
-    let groups = group_glyphs(run, &range, glyphs);
+    group_glyphs_into(run, &range, glyphs, &mut scratch.groups);
+    let groups = &scratch.groups;
     for (k, group) in groups.iter().enumerate() {
         let start = group.min_atom;
         let end = groups.get(k + 1).map_or(range.end, |next| next.min_atom);
@@ -274,11 +317,11 @@ pub(crate) fn plan_window<'a>(
 pub(crate) fn attach_synthesized(
     clusters: &mut [ShapedCluster],
     glyphs: &mut Vec<RawShapedGlyph>,
-    leading: Vec<RawShapedGlyph>,
-    trailing: Vec<RawShapedGlyph>,
+    leading: &[RawShapedGlyph],
+    trailing: &[RawShapedGlyph],
 ) {
     if !trailing.is_empty() {
-        glyphs.extend(trailing);
+        glyphs.extend_from_slice(trailing);
         if let Some(last) = clusters.last_mut() {
             last.glyph_range.end = glyphs.len();
             last.natural_width = natural_width(&glyphs[last.glyph_range.clone()], 0.0);
@@ -287,7 +330,7 @@ pub(crate) fn attach_synthesized(
     if !leading.is_empty() && !clusters.is_empty() {
         let count = leading.len();
         let at = clusters[0].glyph_range.start;
-        glyphs.splice(at..at, leading);
+        glyphs.splice(at..at, leading.iter().copied());
         clusters[0].glyph_range.end += count;
         clusters[0].natural_width = natural_width(&glyphs[clusters[0].glyph_range.clone()], 0.0);
         for cluster in &mut clusters[1..] {
@@ -312,14 +355,17 @@ pub(crate) struct EdgeFonts {
 /// then take those faces BEFORE `synthesize` shapes the edit text in them,
 /// and the head is marked unsafe to concatenate (CLU-8) and, with a leading
 /// edit, unsafe to break before.
-pub(crate) fn finish_window<S>(
+pub(crate) fn finish_window<S, L, T>(
     run: &ShapingRun,
     atoms: &[GraphemeAtom],
     plan: &WindowPlan<'_>,
     output: &mut ShapeOutput,
     shape_kept: impl FnOnce(&mut ShapeOutput) -> (EdgeFonts, S),
-    synthesize: impl FnOnce(S, EdgeFonts) -> (Vec<RawShapedGlyph>, Vec<RawShapedGlyph>),
-) {
+    synthesize: impl FnOnce(S, EdgeFonts) -> (L, T),
+) where
+    L: AsRef<[RawShapedGlyph]>,
+    T: AsRef<[RawShapedGlyph]>,
+{
     let first_cluster = output.clusters.len();
     push_empty_clusters(
         run,
@@ -343,8 +389,8 @@ pub(crate) fn finish_window<S>(
     attach_synthesized(
         &mut output.clusters[first_cluster..],
         &mut output.glyphs,
-        leading,
-        trailing,
+        leading.as_ref(),
+        trailing.as_ref(),
     );
 }
 
@@ -524,7 +570,7 @@ mod tests {
         lead.is_synthesized = true;
         let mut trail = glyph(200, 1.5);
         trail.is_synthesized = true;
-        attach_synthesized(&mut clusters, &mut glyphs, vec![lead], vec![trail]);
+        attach_synthesized(&mut clusters, &mut glyphs, &[lead], &[trail]);
 
         assert_eq!(clusters[0].glyph_range, 0..1);
         assert_eq!(clusters[0].natural_width, 2.0);
