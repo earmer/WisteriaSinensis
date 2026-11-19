@@ -41,8 +41,8 @@ impl ValidatedLayout<'_> {
                         // back to the caret (an atomic span over several
                         // lines) is crossed too.
                         let lines = std::iter::successors(
-                            self.adjacent_line_with_stops(located.line.index, forward),
-                            |l| self.adjacent_line_with_stops(l.index, forward),
+                            self.adjacent_line_with_stops(located.line().index(), forward),
+                            |l| self.adjacent_line_with_stops(l.index(), forward),
                         );
                         let moved = lines
                             .map(|target| hit_on_line(target.as_line(), inline).position)
@@ -66,7 +66,7 @@ impl ValidatedLayout<'_> {
                 } else {
                     HangSide::Right
                 };
-                CursorMove::Moved(stop_position(located.line.stops.edge(side).1))
+                CursorMove::Moved(stop_position(located.line().stops().edge(side).1))
             }
             Command::Previous | Command::Next => {
                 self.move_logical(position.byte_offset, command == Command::Next, None)
@@ -91,24 +91,24 @@ impl ValidatedLayout<'_> {
     /// line past a line edge, or out of the paragraph past its first or
     /// last line.
     fn move_visual(&self, located: LocatedCaret<'_>, rightwards: bool) -> CursorMove {
-        let LocatedCaret { line, stop } = located;
-        if let Some(next) = line.stops.step_visual(stop, rightwards) {
+        let (line, stop) = (located.line(), located.stop());
+        if let Some(next) = line.stops().step_visual(stop, rightwards) {
             return CursorMove::Moved(stop_position(next));
         }
         // Past the edge: rightwards is forward in LTR, backward in RTL.
         let forward = rightwards != self.paragraph().base_direction.is_rtl();
-        let Some(target) = self.adjacent_line_with_stops(line.index, forward) else {
+        let Some(target) = self.adjacent_line_with_stops(line.index(), forward) else {
             return CursorMove::Exited {
                 edge: ParagraphEdge::ahead(forward),
                 inline_position: None,
             };
         };
-        let (at, entry) = target.stops.edge(entry_side(rightwards));
+        let (at, entry) = target.stops().edge(entry_side(rightwards));
         if entry.offset != located.caret().offset {
             return CursorMove::Moved(stop_position(entry));
         }
         // The same offset on both sides of a wrap: one more step.
-        let next = target.stops.step_visual(at, rightwards);
+        let next = target.stops().step_visual(at, rightwards);
         CursorMove::Moved(stop_position(next.unwrap_or(entry)))
     }
 

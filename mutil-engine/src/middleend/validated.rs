@@ -7,7 +7,10 @@
 //! of degrading to empty content.
 
 use super::input_validation::validate_layout_inputs;
-use super::proofs::{LineIdx, NonEmptySlice, SortedCaretStops, StopIdx};
+// The proof kernel is a child of this module: its proof constructors are
+// `pub(super)`, so only `ValidatedLayout` builds the views that carry G4 facts.
+#[path = "proofs.rs"]
+mod proofs;
 use super::tolerance::resolves_extent;
 use super::{
     AnnotationErrorReason, CaretStop, InlineSlotConstraint, LayoutConstraints, LayoutInputError,
@@ -19,6 +22,8 @@ use crate::types::{
     FontRef, FontVariation, GlyphOrientation, GraphemeAtom, Point, RawShapedGlyph, ShapedCluster,
     WritingMode,
 };
+pub(crate) use proofs::NonEmptyStr;
+use proofs::{LineIdx, NonEmptySlice, SortedCaretStops, StopIdx};
 use smallvec::SmallVec;
 
 /// Layout inputs that passed the input gate (spec AX-3, G1), with the policy
@@ -372,13 +377,26 @@ impl<'a> ValidatedLayout<'a> {
 /// A line of a [`ValidatedLayout`] with the facts G4 proved about it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ValidatedLine<'a> {
-    pub(crate) index: LineIdx,
-    pub(crate) line: &'a PositionedLine,
+    index: LineIdx,
+    line: &'a PositionedLine,
     /// `None` for a line without stops, as one inside an atomic span (CRT-1).
-    pub(crate) stops: Option<SortedCaretStops<'a>>,
+    stops: Option<SortedCaretStops<'a>>,
 }
 
 impl<'a> ValidatedLine<'a> {
+    pub(crate) fn index(&self) -> LineIdx {
+        self.index
+    }
+
+    pub(crate) fn line(&self) -> &'a PositionedLine {
+        self.line
+    }
+
+    /// The line's sorted stops; `None` for a line inside an atomic span.
+    pub(crate) fn stops(&self) -> Option<SortedCaretStops<'a>> {
+        self.stops
+    }
+
     /// The line, when it has caret stops.
     pub(crate) fn with_stops(self) -> Option<LineWithStops<'a>> {
         Some(LineWithStops {
@@ -389,7 +407,7 @@ impl<'a> ValidatedLine<'a> {
     }
 
     /// The line's first slot.
-    pub(crate) fn first_slot(self) -> &'a PositionedSlot {
+    pub(crate) fn first_slot(&self) -> &'a PositionedSlot {
         // PROOF(G4::NoSlots): `check_slots` rejects a line without slots.
         self.line.slots.first().expect("G4 proved slots")
     }
@@ -398,12 +416,29 @@ impl<'a> ValidatedLine<'a> {
 /// A line of a [`ValidatedLayout`] that has caret stops.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LineWithStops<'a> {
-    pub(crate) index: LineIdx,
-    pub(crate) line: &'a PositionedLine,
-    pub(crate) stops: SortedCaretStops<'a>,
+    index: LineIdx,
+    line: &'a PositionedLine,
+    stops: SortedCaretStops<'a>,
 }
 
 impl<'a> LineWithStops<'a> {
+    pub(crate) fn index(&self) -> LineIdx {
+        self.index
+    }
+
+    pub(crate) fn line(&self) -> &'a PositionedLine {
+        self.line
+    }
+
+    pub(crate) fn stops(&self) -> SortedCaretStops<'a> {
+        self.stops
+    }
+
+    /// The caret at `stop`, one of this line's stops.
+    pub(crate) fn at(self, stop: StopIdx) -> LocatedCaret<'a> {
+        LocatedCaret { line: self, stop }
+    }
+
     /// The same line as a [`ValidatedLine`].
     pub(crate) fn as_line(self) -> ValidatedLine<'a> {
         ValidatedLine {
@@ -417,13 +452,21 @@ impl<'a> LineWithStops<'a> {
 /// The caret stop that shows a cursor position, on its line.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LocatedCaret<'a> {
-    pub(crate) line: LineWithStops<'a>,
-    pub(crate) stop: StopIdx,
+    line: LineWithStops<'a>,
+    stop: StopIdx,
 }
 
 impl<'a> LocatedCaret<'a> {
+    pub(crate) fn line(&self) -> LineWithStops<'a> {
+        self.line
+    }
+
+    pub(crate) fn stop(&self) -> StopIdx {
+        self.stop
+    }
+
     /// The located stop.
-    pub(crate) fn caret(self) -> &'a CaretStop {
+    pub(crate) fn caret(&self) -> &'a CaretStop {
         self.line.stops.stop(self.stop)
     }
 }

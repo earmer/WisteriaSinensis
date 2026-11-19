@@ -15,7 +15,6 @@ mod line_geometry;
 mod options;
 mod output;
 mod output_validation;
-mod proofs;
 mod shaper_gate;
 mod tolerance;
 mod validated;

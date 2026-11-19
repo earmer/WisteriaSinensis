@@ -42,6 +42,14 @@ BUSINESS_PANIC = PANIC + r"|\.unwrap\(|\bassert!\("
 INDEXING = r"[\w)\]]\["
 
 
+# The opening of a raw (byte) string: `r"`, `r#"`, `br##"`, ...
+RAW_STRING = re.compile(r'b?r(#*)"')
+
+
+def is_ident(ch: str) -> bool:
+    return ch.isalnum() or ch == "_"
+
+
 def strip_code(code: str) -> str:
     """Blanks comments and the contents of string and char literals, keeping
     every newline so line numbers survive (after `check_spec.strip_comments`)."""
@@ -54,6 +62,14 @@ def strip_code(code: str) -> str:
             j = code.find("*/", i + 2)
             j = n if j < 0 else j + 2
             out.append("\n" * code.count("\n", i, j))
+            i = j
+        elif (raw := RAW_STRING.match(code, i)) and (i == 0 or not is_ident(code[i - 1])):
+            # A raw string ends only at `"` and its own hashes: no escapes,
+            # and quotes or `//` inside it are text.
+            close = '"' + raw.group(1)
+            j = code.find(close, raw.end())
+            j = n if j < 0 else j + len(close)
+            out.append('"' + "\n" * code.count("\n", i, j) + '"')
             i = j
         elif code[i] == '"':
             j = i + 1

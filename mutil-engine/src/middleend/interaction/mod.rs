@@ -350,15 +350,15 @@ impl<'a> ValidatedLayout<'a> {
             // No line has a stop: the caret stands at the first line's start.
             let first = self.line(0);
             return CaretVisual {
-                primary_rect: rect_on(first.line, first.first_slot().content_start),
+                primary_rect: rect_on(first.line(), first.first_slot().content_start),
                 secondary_rect: None,
             };
         };
-        let rect = |x: f32| rect_on(located.line.line, x);
+        let rect = |x: f32| rect_on(located.line().line(), x);
         let primary = located.caret();
         let secondary = located
-            .line
-            .stops
+            .line()
+            .stops()
             .iter()
             .find(|s| {
                 s.offset == primary.offset
@@ -391,8 +391,9 @@ impl<'a> ValidatedLayout<'a> {
     /// G4 proved that the lines tile the text in order (`SourceNotCovered`)
     /// and that every stop lies in its line's range, ends included
     /// (`InvalidCaretStop`). So the lines that can hold a stop at the offset
-    /// are one run, found by bisection: O(log L) plus the stops of those
-    /// lines, usually one or two.
+    /// are one run, found by bisection. The cost is O(log L) plus the stops
+    /// of that run: one line, or two at a wrap. Only a run of empty lines
+    /// at one offset is longer, and its first line usually matches.
     pub(crate) fn locate(&self, position: CursorPosition) -> Option<LocatedCaret<'a>> {
         let offset = position.byte_offset;
         let first = self
@@ -400,16 +401,16 @@ impl<'a> ValidatedLayout<'a> {
             .partition_point(|l| l.byte_range.end() < offset);
         let candidates = self
             .walk_lines(first, true)
-            .take_while(|l| l.line.byte_range.start() <= offset)
+            .take_while(|l| l.line().byte_range.start() <= offset)
             .filter_map(ValidatedLine::with_stops);
         let mut fallback = None;
         for line in candidates {
-            for (stop, s) in line.stops.indexed() {
+            for (stop, s) in line.stops().indexed() {
                 if s.offset == offset {
                     if s.affinity == position.affinity {
-                        return Some(LocatedCaret { line, stop });
+                        return Some(line.at(stop));
                     }
-                    fallback.get_or_insert(LocatedCaret { line, stop });
+                    fallback.get_or_insert(line.at(stop));
                 }
             }
         }
@@ -420,6 +421,10 @@ impl<'a> ValidatedLayout<'a> {
     /// holds the offset, else the nearest earlier line with stops, else the
     /// nearest later one, the stop at the nearest offset before it, else
     /// the first stop with the least offset.
+    ///
+    /// The holder is bisected; the walk to a line with stops crosses only
+    /// stopless lines, each wholly inside one atomic span (CRT-1). So it is
+    /// O(log L) plus the lines that span covers.
     fn locate_nearest(&self, offset: ByteIndex) -> Option<LocatedCaret<'a>> {
         // Line ends ascend (`SourceNotCovered`), so the holder is bisected.
         let holder = self
@@ -428,21 +433,21 @@ impl<'a> ValidatedLayout<'a> {
         let line = self
             .walk_lines(holder, false)
             .find_map(ValidatedLine::with_stops)
-            .or_else(|| self.adjacent_line_with_stops(self.line(holder).index, true))?;
+            .or_else(|| self.adjacent_line_with_stops(self.line(holder).index(), true))?;
         let (stop, _) = line
-            .stops
+            .stops()
             .indexed()
             .filter(|(_, s)| s.offset <= offset)
             .max_by_key(|(_, s)| s.offset)
-            .unwrap_or_else(|| line.stops.min_by_offset());
-        Some(LocatedCaret { line, stop })
+            .unwrap_or_else(|| line.stops().min_by_offset());
+        Some(line.at(stop))
     }
 }
 
 /// The caret position on `line` nearest the flow-space inline position `x`
 /// (spec INT-7 to INT-10).
 fn hit_on_line(line: ValidatedLine<'_>, x: f32) -> HitResult {
-    let ValidatedLine { line, stops, .. } = line;
+    let (line, stops) = (line.line(), line.stops());
     // Atomic spans snap to an end (INT-10).
     if let Some(fragment) = line
         .atomic_fragments

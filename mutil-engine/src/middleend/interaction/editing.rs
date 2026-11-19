@@ -2,7 +2,7 @@
 //! UTF-16 conversions (spec §6.5, INT-12, INT-18).
 
 use super::ValidatedInputs;
-use crate::middleend::proofs::NonEmptyStr;
+use crate::middleend::validated::NonEmptyStr;
 use crate::types::{AtomFlags, ByteIndex, TextRange};
 
 impl ValidatedInputs<'_> {
