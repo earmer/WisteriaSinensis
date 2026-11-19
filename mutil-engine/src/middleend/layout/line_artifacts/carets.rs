@@ -8,8 +8,9 @@ use crate::middleend::{
     CaretAffinity, CaretStop, HangingWhitespaceMode, PositionedInlineBox, VisualGlyphRun,
     resolve_ligature_carets,
 };
-use crate::types::{AtomFlags, BidiLevel, GlyphOrientation};
+use crate::types::{AtomFlags, BidiLevel, GlyphOrientation, TextRange};
 use smallvec::SmallVec;
+use std::cell::OnceCell;
 
 /// A candidate caret stop, with the affinity and level it takes at a
 /// direction boundary (CRT-3): upstream at its piece's end, downstream at its
@@ -82,10 +83,12 @@ impl Layout<'_, '_> {
         raw.retain(|s| belongs_here(s.offset));
         let mut stops = distinct_stops(raw);
         resolve_shared_offsets(&mut stops, line.soft_wrap());
-        // The level of an entity touching `offset`, else the paragraph's.
-        let entities = EntityLevels::new(runs, boxes);
+        // The level of an entity touching `offset`, else the paragraph's. The
+        // index is built when the first stop needs it.
+        let entities = OnceCell::new();
         let level_at = |offset: usize| {
             entities
+                .get_or_init(|| EntityLevels::new(runs, boxes))
                 .at(offset)
                 .unwrap_or_else(|| self.base.base_level())
         };
@@ -237,15 +240,24 @@ fn resolve_shared_offsets(stops: &mut Vec<RawStop>, soft_wrap: bool) {
     stops.sort_by(|a, b| a.x.total_cmp(&b.x));
 }
 
-/// The levels of the entities (glyph clusters and boxes) of a line, by byte
-/// range, so that "the first entity in visual order whose closed range holds
-/// `offset`" is a binary search, not a scan of every glyph.
+/// One glyph cluster or box of a line, as [`EntityLevels`] indexes it.
+struct Entity {
+    range: TextRange,
+    /// Position in visual order (glyphs of all runs, then boxes).
+    rank: usize,
+    level: BidiLevel,
+    /// The greatest end of this entity and all those sorted before it.
+    reach: usize,
+}
+
+/// The levels of the entities of a line, by byte range, so that "the first
+/// entity in visual order whose closed range holds `offset`" is a binary
+/// search, not a scan of every glyph. Consecutive glyphs of one cluster share
+/// a range and a level, so only the first is indexed: a multi-glyph cluster
+/// costs one entry, not one per glyph.
 struct EntityLevels {
-    /// `(start, end, rank, level)` sorted by `start`; `rank` is the position in
-    /// visual order (glyphs of all runs, then boxes).
-    sorted: Vec<(usize, usize, usize, BidiLevel)>,
-    /// `reach[i]` is the greatest `end` among `sorted[..=i]`.
-    reach: Vec<usize>,
+    /// Sorted by range start, then rank.
+    sorted: Vec<Entity>,
 }
 
 impl EntityLevels {
@@ -255,33 +267,35 @@ impl EntityLevels {
                 .iter()
                 .filter_map(|g| Some((g.byte_range?, r.bidi_level)))
         });
-        let mut sorted: Vec<(usize, usize, usize, BidiLevel)> = glyphs
+        let mut previous = None;
+        let mut sorted: Vec<Entity> = glyphs
             .chain(boxes.iter().map(|b| (b.byte_range, b.bidi_level)))
             .enumerate()
-            .map(|(rank, (r, level))| (r.start(), r.end(), rank, level))
+            .filter(|&(_, entity)| previous.replace(entity) != Some(entity))
+            .map(|(rank, (range, level))| Entity {
+                range,
+                rank,
+                level,
+                reach: 0,
+            })
             .collect();
-        sorted.sort_unstable_by_key(|&(start, _, rank, _)| (start, rank));
-        let mut reach = Vec::with_capacity(sorted.len());
-        let mut max_end = 0;
-        for &(_, end, _, _) in &sorted {
-            max_end = max_end.max(end);
-            reach.push(max_end);
+        sorted.sort_unstable_by_key(|e| (e.range.start(), e.rank));
+        let mut reach = 0;
+        for entity in &mut sorted {
+            reach = reach.max(entity.range.end());
+            entity.reach = reach;
         }
-        Self { sorted, reach }
+        Self { sorted }
     }
 
     fn at(&self, offset: usize) -> Option<BidiLevel> {
-        let upto = self.sorted.partition_point(|&(start, ..)| start <= offset);
-        let mut best: Option<(usize, BidiLevel)> = None;
-        for i in (0..upto).rev() {
-            if self.reach[i] < offset {
-                break;
-            }
-            let (_, end, rank, level) = self.sorted[i];
-            if end >= offset && best.is_none_or(|(r, _)| rank < r) {
-                best = Some((rank, level));
-            }
-        }
-        best.map(|(_, level)| level)
+        let upto = self.sorted.partition_point(|e| e.range.start() <= offset);
+        self.sorted[..upto]
+            .iter()
+            .rev()
+            .take_while(|e| e.reach >= offset)
+            .filter(|e| e.range.end() >= offset)
+            .min_by_key(|e| e.rank)
+            .map(|e| e.level)
     }
 }
