@@ -77,9 +77,10 @@ pub(super) fn check_storage(ast: &ParagraphAst) -> Result<TextBoxes<'_>, LayoutI
     for (item, node) in ast.items.iter().enumerate() {
         let WordNode::Box(BoxNode::Text {
             run_index,
+            byte_range,
             atom_range,
             cluster_range,
-            ..
+            natural_width,
         }) = node
         else {
             boxes.push(None);
@@ -100,9 +101,16 @@ pub(super) fn check_storage(ast: &ParagraphAst) -> Result<TextBoxes<'_>, LayoutI
             return Err(E::ItemNotSelfContained { item });
         }
         (*next_atom, *next_cluster) = (atom_range.end, cluster_range.end);
-        boxes.push(Some(
-            ast.text_box(item).ok_or(E::ItemNotSelfContained { item })?,
-        ));
+        // The ranges lie inside the run's, which the run checks above put
+        // inside the storage.
+        boxes.push(Some(TextBoxView {
+            run_index: *run_index,
+            byte_range: *byte_range,
+            atom_start: atom_range.start,
+            atoms: &ast.atoms[atom_range.clone()],
+            clusters: &ast.clusters[cluster_range.clone()],
+            natural_width: *natural_width,
+        }));
     }
     for (run, (r, (atom_end, cluster_end))) in ast.runs.iter().zip(next).enumerate() {
         if atom_end != r.atom_range.end || cluster_end != r.cluster_range.end {
