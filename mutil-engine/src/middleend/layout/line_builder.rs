@@ -103,6 +103,21 @@ impl<'a> Deref for AlignedLine<'a> {
     }
 }
 
+/// What a line's [`LineEnd`] names.
+struct LineEndFacts<'a> {
+    last_piece: usize,
+    end_break: Option<&'a DiscretionaryNode>,
+    byte_end: usize,
+    pre: f32,
+}
+
+/// The pads between a line's body and its left and right edges (physical).
+#[derive(Clone, Copy)]
+struct Pads {
+    left: f32,
+    right: f32,
+}
+
 impl<'i, 'a> Layout<'i, 'a> {
     /// Places the line `(cursor.token_start, end]` in the first slot of `geometry`.
     pub(super) fn place(
@@ -113,12 +128,12 @@ impl<'i, 'a> Layout<'i, 'a> {
         pending: &Reshapes,
     ) -> Result<PositionedLine, LayoutInputError> {
         let slot = geometry.slots[0];
-        let (last_piece, end_break, byte_end, pre) = match end {
-            LineEnd::At { token, brk } => {
-                (token, Some(brk), brk.byte_range.end(), brk.pre_break_width)
-            }
-            LineEnd::Before(token) => (token, None, self.tokens[token].bytes().start(), 0.0),
-        };
+        let LineEndFacts {
+            last_piece,
+            end_break,
+            byte_end,
+            pre,
+        } = self.end_facts(end);
         let soft_wrap = soft_wraps(end_break);
 
         let mut placed = self.collect_placed_pieces(cursor.token_start, last_piece);
@@ -136,12 +151,12 @@ impl<'i, 'a> Layout<'i, 'a> {
         let start = self.start_hang(&placed[..body_len], first_line, post, pending);
         // Widths in logical order: a tab's depends on its distance from the
         // line-start edge (spec ST3-1), the start mark's protrusion outside.
-        let mut distance = post - LineHangs::protrusion(start);
-        for p in &mut placed[..body_len] {
-            distance += p.gap;
-            p.width = self.measure(&p.piece, distance, slot, Some(pending)).0;
-            distance += p.width;
-        }
+        let distance = self.measure_widths(
+            &mut placed[..body_len],
+            post - LineHangs::protrusion(start),
+            slot,
+            pending,
+        );
         // A soft-wrapped line is justified; one that ends the paragraph or at
         // a hard break is only ever compressed, and only on request (ST3-3).
         let compressible = self.options.justify && (soft_wrap || self.options.compress_last_lines);
@@ -169,21 +184,16 @@ impl<'i, 'a> Layout<'i, 'a> {
             && slot.width().is_finite()
             && (soft_wrap || slack < 0.0)
             && self.justify(&mut placed[..body_len], slack, pending);
-        let mut x = left_pad - hangs.physical(rtl).0;
-        for &k in &order {
-            x += placed[k].gap;
-            placed[k].x = x;
-            x += placed[k].width;
-        }
-        let body_end = x + right_pad;
-        // In RTL the trailing whitespace lies left of everything on the line,
-        // a hanging mark's protrusion included (HNG-3).
-        let far_edge = if rtl {
-            -hangs.physical(rtl).0
-        } else {
-            body_end
-        };
-        self.place_trailing_whitespace(&mut placed[body_len..], far_edge, rtl);
+        let body_end = self.place_visual(
+            &mut placed,
+            &order,
+            body_len,
+            Pads {
+                left: left_pad,
+                right: right_pad,
+            },
+            hangs,
+        );
 
         self.build_line(
             PlacedLine {
@@ -203,6 +213,72 @@ impl<'i, 'a> Layout<'i, 'a> {
             geometry,
             pending,
         )
+    }
+
+    /// Sets each piece's width in logical order from the pen position
+    /// `distance` and returns the position after the last one.
+    fn measure_widths(
+        &self,
+        body: &mut [PlacedPiece<'a>],
+        mut distance: f32,
+        slot: InlineSlotConstraint,
+        pending: &Reshapes,
+    ) -> f32 {
+        for p in body {
+            distance += p.gap;
+            p.width = self.measure(&p.piece, distance, slot, Some(pending)).0;
+            distance += p.width;
+        }
+        distance
+    }
+
+    /// What the line's end names: its last piece, the break it ends at, the
+    /// byte it ends before and the break's pre-break width.
+    fn end_facts(&self, end: LineEnd<'a>) -> LineEndFacts<'a> {
+        match end {
+            LineEnd::At { token, brk } => LineEndFacts {
+                last_piece: token,
+                end_break: Some(brk),
+                byte_end: brk.byte_range.end(),
+                pre: brk.pre_break_width,
+            },
+            LineEnd::Before(token) => LineEndFacts {
+                last_piece: token,
+                end_break: None,
+                byte_end: self.tokens[token].bytes().start(),
+                pre: 0.0,
+            },
+        }
+    }
+
+    /// Assigns each body piece its `x` in visual `order` and places the
+    /// trailing whitespace; returns the body's far end including the right
+    /// pad.
+    fn place_visual(
+        &self,
+        placed: &mut [PlacedPiece<'a>],
+        order: &[usize],
+        body_len: usize,
+        pads: Pads,
+        hangs: LineHangs,
+    ) -> f32 {
+        let rtl = self.base.is_rtl();
+        let mut x = pads.left - hangs.physical(rtl).0;
+        for &k in order {
+            x += placed[k].gap;
+            placed[k].x = x;
+            x += placed[k].width;
+        }
+        let body_end = x + pads.right;
+        // In RTL the trailing whitespace lies left of everything on the line,
+        // a hanging mark's protrusion included (HNG-3).
+        let far_edge = if rtl {
+            -hangs.physical(rtl).0
+        } else {
+            body_end
+        };
+        self.place_trailing_whitespace(&mut placed[body_len..], far_edge, rtl);
+        body_end
     }
 
     /// UAX #9 L1 on the line (spec ST2-1): tabs, the whitespace before them

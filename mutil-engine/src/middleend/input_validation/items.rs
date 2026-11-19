@@ -107,6 +107,15 @@ fn hyphen_chains(ast: &ParagraphAst, boxes: &TextBoxes<'_>) -> Vec<(usize, usize
     chains
 }
 
+/// A discretionary's break widths net of its cloned spans' padding.
+#[derive(Clone, Copy)]
+struct NetWidths {
+    /// Net of `pre_break_width`.
+    pre: f64,
+    /// Net of `post_break_width`.
+    post: f64,
+}
+
 /// Everything the per-item checks share.
 struct ItemChecks<'a> {
     ast: &'a ParagraphAst,
@@ -291,8 +300,18 @@ impl<'a> ItemChecks<'a> {
         item: usize,
         d: &DiscretionaryNode,
     ) -> Result<(), LayoutInputError> {
-        use LayoutInputError as E;
-        let invalid = Err(E::InvalidDiscretionary { item });
+        let invalid = LayoutInputError::InvalidDiscretionary { item };
+        if !self.discretionary_is_well_formed(item, d) {
+            return Err(invalid);
+        }
+        let net = self.net_break_widths(item, d)?;
+        self.check_break_action(item, d, net)
+    }
+
+    /// The discretionary's own fields: finite widths, a penalty in range, a
+    /// mandatory break exactly when hard, the bytes it owns and unique
+    /// cloned spans.
+    fn discretionary_is_well_formed(&self, item: usize, d: &DiscretionaryNode) -> bool {
         let widths_are_finite = [d.pre_break_width, d.post_break_width, d.no_break_width]
             .into_iter()
             .all(is_measurement);
@@ -312,20 +331,27 @@ impl<'a> ItemChecks<'a> {
                 .iter()
                 .enumerate()
                 .all(|(i, id)| !d.cloned_spans[..i].contains(id));
-        if !(widths_are_finite
+        widths_are_finite
             && d.penalty >= DiscretionaryNode::MANDATORY_BREAK_PENALTY
             && d.penalty < DiscretionaryNode::FORBIDDEN_BREAK_PENALTY
             && is_hard == d.is_mandatory()
             && (!is_hard || d.no_break_width == 0.0)
             && owns_its_bytes
-            && clones_are_unique)
-        {
-            return invalid;
-        }
+            && clones_are_unique
+    }
 
-        // `cloned_spans` is exactly the set of `Clone` spans the break falls
-        // strictly inside: a chip split without its cloned padding is wrong,
-        // and so is cloning a span the break does not cut.
+    /// The break widths net of cloned padding. `cloned_spans` is exactly the
+    /// set of `Clone` spans the break falls strictly inside: a chip split
+    /// without its cloned padding is wrong, and so is cloning a span the
+    /// break does not cut. Line `k` gains each listed span's `end_padding`,
+    /// line `k + 1` its `start_padding`; what remains of the widths is the
+    /// action's own delta.
+    fn net_break_widths(
+        &self,
+        item: usize,
+        d: &DiscretionaryNode,
+    ) -> Result<NetWidths, LayoutInputError> {
+        use LayoutInputError as E;
         let offset = d.byte_offset();
         let is_cut = |span: &InlineDecorationSpan| {
             span.break_mode == BoxDecorationBreak::Clone
@@ -339,10 +365,8 @@ impl<'a> ItemChecks<'a> {
             .iter()
             .any(|&i| is_cut(&spans[i]) && !d.cloned_spans.contains(&spans[i].span_id))
         {
-            return invalid;
+            return Err(E::InvalidDiscretionary { item });
         }
-        // Cloned padding is part of the break widths: line `k` gains each
-        // listed span's `end_padding`, line `k + 1` its `start_padding`.
         let (mut clone_pre, mut clone_post) = (0.0_f64, 0.0_f64);
         for id in &d.cloned_spans {
             let Some(span) = self
@@ -356,9 +380,22 @@ impl<'a> ItemChecks<'a> {
             clone_pre += f64::from(span.end_padding);
             clone_post += f64::from(span.start_padding);
         }
-        // What remains of the widths is the action's own delta.
-        let net_pre = f64::from(d.pre_break_width) - clone_pre;
-        let net_post = f64::from(d.post_break_width) - clone_post;
+        Ok(NetWidths {
+            pre: f64::from(d.pre_break_width) - clone_pre,
+            post: f64::from(d.post_break_width) - clone_post,
+        })
+    }
+
+    /// The widths the break's action implies.
+    fn check_break_action(
+        &self,
+        item: usize,
+        d: &DiscretionaryNode,
+        net: NetWidths,
+    ) -> Result<(), LayoutInputError> {
+        use LayoutInputError as E;
+        let invalid = Err(E::InvalidDiscretionary { item });
+        let (net_pre, net_post) = (net.pre, net.post);
         let is_zero = |net: f64| approx_eq_f64(net, 0.0);
         match &d.action {
             // A hyphenation's net deltas are its reshaping deltas.
