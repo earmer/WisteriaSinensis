@@ -21,18 +21,17 @@ mod line_box;
 mod line_builder;
 
 use crate::frontend::{
-    AnnotationSide, BoxNode, DiscretionaryNode, GlueNode, InlineObjectBox,
-    MAX_DECORATION_NESTING_DEPTH, ParagraphAst, SpanEdge, WordNode,
+    AnnotationSide, BoxNode, DiscretionaryNode, GlueNode, InlineObjectBox, ParagraphAst, SpanEdge,
+    WordNode,
 };
 use crate::middleend::shaper_gate::checked_line_box;
 use crate::middleend::{
-    LayoutConstraints, LayoutInputError, LayoutOptions, LineGeometry, LineHeight, PositionedLine,
+    GeometryAnswer, LayoutConstraints, LayoutInputError, LayoutOptions, LineHeight, PositionedLine,
     PositionedParagraph, StrutMetrics, ValidatedInputs,
 };
 use crate::shaping::TextShaper;
 use crate::types::{BidiDirection, BidiLevel, FontMetrics, RawShapedGlyph, TextRange};
 use breaking::{LineFit, within};
-use smallvec::SmallVec;
 use std::collections::HashMap;
 
 /// How many obstructed block positions the clearance loop tries in a row
@@ -76,20 +75,15 @@ pub fn layout_paragraph(
     Layout::new(&inputs, shaper).run()
 }
 
-/// Advances `obstructed` past an empty provider answer, failing once more
-/// than [`MAX_CLEARANCE_PROBES`] obstructed attempts occur in a row
-/// (spec GEO-4).
-fn advance_clearance(
-    obstructed: &mut usize,
-    geometry: &LineGeometry,
-) -> Result<f32, LayoutInputError> {
+/// Advances `obstructed` past an obstructed provider answer that clears at
+/// `clear_at`, failing once more than [`MAX_CLEARANCE_PROBES`] obstructed
+/// attempts occur in a row (spec GEO-4).
+fn advance_clearance(obstructed: &mut usize, clear_at: f32) -> Result<f32, LayoutInputError> {
     *obstructed += 1;
     if *obstructed > MAX_CLEARANCE_PROBES {
-        return Err(LayoutInputError::InvalidLineGeometry);
+        return Err(LayoutInputError::ClearanceExhausted);
     }
-    Ok(geometry
-        .next_feature_block_offset
-        .expect("the provider gate proved an obstructed answer points ahead"))
+    Ok(clear_at)
 }
 
 /// Checks that a geometry provider offers the first line a place to start.
@@ -112,12 +106,17 @@ fn probe_first_line(
             // Contract check only: an expanded envelope must stay inside the
             // original one. Its contents do not decide whether the initial
             // position is legal.
-            inputs.line_geometry(0, block_start, block_start + tallest, Some(&probe))?;
+            inputs.line_geometry(
+                0,
+                block_start,
+                block_start + tallest,
+                Some(probe.geometry()),
+            )?;
         }
-        if !probe.slots.is_empty() {
+        let GeometryAnswer::Obstructed { clear_at, .. } = probe else {
             return Ok(());
-        }
-        block_start = advance_clearance(&mut obstructed, &probe)?;
+        };
+        block_start = advance_clearance(&mut obstructed, clear_at)?;
     }
 }
 
@@ -341,80 +340,12 @@ impl LineCursor {
 impl<'i, 'a> Layout<'i, 'a> {
     fn new(inputs: &'i ValidatedInputs<'a>, shaper: &'i dyn TextShaper) -> Self {
         let ast = inputs.ast();
-        let mut tokens = Vec::with_capacity(ast.items.len() + ast.clusters.len());
-        // Boundaries open in span order and close LIFO (AST-8), so the sweep
-        // names each one's span without a lookup.
-        let mut next_span = 0;
-        let mut open_spans: SmallVec<[usize; MAX_DECORATION_NESTING_DEPTH]> = SmallVec::new();
-        for (index, item) in ast.items.iter().enumerate() {
-            match item {
-                WordNode::Box(BoxNode::Text { cluster_range, .. }) => {
-                    let view = inputs
-                        .text_box(index)
-                        .expect("the input gate resolved every text box");
-                    for (cluster, info) in cluster_range.clone().zip(view.clusters) {
-                        tokens.push(Token::Piece(Piece {
-                            kind: PieceKind::Cluster {
-                                run: view.run_index,
-                                cluster,
-                            },
-                            bytes: info.byte_range,
-                            level: info.bidi_level,
-                            width: info.natural_width,
-                        }));
-                    }
-                }
-                WordNode::Box(BoxNode::InlineObject(object)) => tokens.push(Token::Piece(Piece {
-                    kind: PieceKind::Object(object),
-                    bytes: object.byte_range,
-                    level: object.bidi_level,
-                    width: object.width,
-                })),
-                WordNode::Box(BoxNode::SpanBoundary {
-                    byte_range,
-                    edge,
-                    width,
-                    bidi_level,
-                    ..
-                }) => {
-                    let span = match edge {
-                        SpanEdge::Leading => {
-                            open_spans.push(next_span);
-                            next_span += 1;
-                            next_span - 1
-                        }
-                        SpanEdge::Trailing => open_spans
-                            .pop()
-                            .expect("the input gate pairs every trailing boundary"),
-                    };
-                    tokens.push(Token::Piece(Piece {
-                        kind: PieceKind::SpanEdge { span, edge: *edge },
-                        bytes: *byte_range,
-                        level: *bidi_level,
-                        width: *width,
-                    }));
-                }
-                WordNode::Glue(glue) => tokens.push(Token::Piece(Piece {
-                    kind: PieceKind::Glue(glue),
-                    bytes: glue.byte_range,
-                    level: glue.bidi_level,
-                    width: glue.natural_width,
-                })),
-                WordNode::Tab { byte_range } => tokens.push(Token::Piece(Piece {
-                    kind: PieceKind::Tab,
-                    bytes: *byte_range,
-                    level: ast.base_direction.base_level(),
-                    width: 0.0,
-                })),
-                WordNode::Discretionary(d) => tokens.push(Token::Break(d)),
-            }
-        }
         Self {
             inputs,
             ast,
             shaper,
             options: inputs.options(),
-            tokens,
+            tokens: tokenize(inputs),
             strut: inputs.policy().strut,
             base: ast.base_direction,
             metrics: HashMap::new(),
@@ -423,23 +354,29 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     fn run(mut self) -> Result<PositionedParagraph, LayoutInputError> {
-        let mut lines: Vec<PositionedLine> = Vec::new();
+        let (lines, total_block_size) = self.place_lines()?;
+        Ok(PositionedParagraph {
+            policy: self.inputs.policy().clone(),
+            base_direction: self.base,
+            total_block_size,
+            lines,
+            truncated_range: None,
+        })
+    }
+
+    /// Places lines from the paragraph start until no token is left; returns
+    /// them with the block size they stack to.
+    fn place_lines(&mut self) -> Result<(Vec<PositionedLine>, f32), LayoutInputError> {
+        let mut lines = Vec::new();
         let mut cursor = LineCursor::paragraph_start();
         loop {
             let (line, end) = self.place_next_line(&mut cursor)?;
             cursor.advance(end, &self.tokens, line.line_height);
             lines.push(line);
             if cursor.is_paragraph_end(&self.tokens) {
-                break;
+                return Ok((lines, cursor.block_top));
             }
         }
-        Ok(PositionedParagraph {
-            policy: self.inputs.policy().clone(),
-            base_direction: self.base,
-            total_block_size: cursor.block_top,
-            lines,
-            truncated_range: None,
-        })
     }
 
     /// Probes geometry and refits until the line fits its envelope (spec GEO-3–6).
@@ -452,16 +389,19 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut obstructed = 0;
         'place: loop {
             let mut envelope = strut_height;
-            let mut geometry = self.inputs.line_geometry(
+            let answer = self.inputs.line_geometry(
                 cursor.index,
                 cursor.block_top,
                 cursor.block_top + envelope,
                 None,
             )?;
-            if geometry.slots.is_empty() {
-                cursor.block_top = advance_clearance(&mut obstructed, &geometry)?;
-                continue;
-            }
+            let mut geometry = match answer {
+                GeometryAnswer::Open(geometry) => geometry,
+                GeometryAnswer::Obstructed { clear_at, .. } => {
+                    cursor.block_top = advance_clearance(&mut obstructed, clear_at)?;
+                    continue;
+                }
+            };
             for _ in 0..MAX_ENVELOPE_REFITS {
                 let slot = geometry.slots[0];
                 let LineFit { end, reshapes } = self.fit(cursor, slot);
@@ -477,19 +417,93 @@ impl<'i, 'a> Layout<'i, 'a> {
                     cursor.block_top + envelope,
                     Some(&geometry),
                 )?;
-                if expanded == geometry {
-                    self.reshaped.extend(reshapes);
-                    return Ok((line, end));
+                match expanded {
+                    GeometryAnswer::Open(open) if open == geometry => {
+                        self.reshaped.extend(reshapes);
+                        return Ok((line, end));
+                    }
+                    GeometryAnswer::Open(open) => geometry = open,
+                    GeometryAnswer::Obstructed { clear_at, .. } => {
+                        cursor.block_top = advance_clearance(&mut obstructed, clear_at)?;
+                        continue 'place;
+                    }
                 }
-                if expanded.slots.is_empty() {
-                    cursor.block_top = advance_clearance(&mut obstructed, &expanded)?;
-                    continue 'place;
-                }
-                geometry = expanded;
             }
-            return Err(LayoutInputError::InvalidLineGeometry);
+            return Err(LayoutInputError::RefitExhausted);
         }
     }
+}
+
+/// The token sequence of the validated items, in logical order. Every node
+/// the gate resolved is borrowed; clusters stay indexes.
+fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> Vec<Token<'a>> {
+    let ast = inputs.ast();
+    let mut tokens = Vec::with_capacity(ast.items.len() + ast.clusters.len());
+    // The gate proved every boundary names a span of the paragraph (AST-8).
+    let span_of_id: HashMap<u64, usize> = ast
+        .decoration_spans
+        .iter()
+        .enumerate()
+        .map(|(index, span)| (span.span_id, index))
+        .collect();
+    for (index, item) in ast.items.iter().enumerate() {
+        match item {
+            WordNode::Box(BoxNode::Text { cluster_range, .. }) => {
+                let view = inputs.text_view(index);
+                tokens.extend(
+                    cluster_range
+                        .clone()
+                        .zip(view.clusters)
+                        .map(|(cluster, info)| {
+                            Token::Piece(Piece {
+                                kind: PieceKind::Cluster {
+                                    run: view.run_index,
+                                    cluster,
+                                },
+                                bytes: info.byte_range,
+                                level: info.bidi_level,
+                                width: info.natural_width,
+                            })
+                        }),
+                );
+            }
+            WordNode::Box(BoxNode::InlineObject(object)) => tokens.push(Token::Piece(Piece {
+                kind: PieceKind::Object(object),
+                bytes: object.byte_range,
+                level: object.bidi_level,
+                width: object.width,
+            })),
+            WordNode::Box(BoxNode::SpanBoundary {
+                byte_range,
+                span_id,
+                edge,
+                width,
+                bidi_level,
+            }) => tokens.push(Token::Piece(Piece {
+                kind: PieceKind::SpanEdge {
+                    span: span_of_id[span_id],
+                    edge: *edge,
+                },
+                bytes: *byte_range,
+                level: *bidi_level,
+                width: *width,
+            })),
+            WordNode::Glue(glue) => tokens.push(Token::Piece(Piece {
+                kind: PieceKind::Glue(glue),
+                bytes: glue.byte_range,
+                level: glue.bidi_level,
+                width: glue.natural_width,
+            })),
+            WordNode::Tab { byte_range } => tokens.push(Token::Piece(Piece {
+                kind: PieceKind::Tab,
+                bytes: *byte_range,
+                level: ast.base_direction.base_level(),
+                width: 0.0,
+            })),
+            WordNode::Discretionary(d) => tokens.push(Token::Break(d)),
+        }
+    }
+    tokens
 }
 
 #[cfg(test)]

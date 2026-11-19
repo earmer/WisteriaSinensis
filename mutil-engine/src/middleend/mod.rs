@@ -45,4 +45,6 @@ pub use output_validation::{
     AnnotationErrorReason, LineInvariantError, ParagraphErrorReason, SlotErrorReason,
 };
 pub use tolerance::{LINE_GEOMETRY_ABS_EPSILON, LINE_GEOMETRY_REL_EPSILON};
-pub use validated::{PlacedGlyph, PlacedRun, PlacedRunSource, ValidatedInputs, ValidatedLayout};
+pub use validated::{
+    GeometryAnswer, PlacedGlyph, PlacedRun, PlacedRunSource, ValidatedInputs, ValidatedLayout,
+};

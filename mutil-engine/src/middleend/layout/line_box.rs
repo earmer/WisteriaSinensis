@@ -48,8 +48,7 @@ impl Layout<'_, '_> {
         slot: InlineSlotConstraint,
     ) -> Result<LineBoxMetrics, LayoutInputError> {
         let normal = matches!(self.options.line_height, LineHeight::Normal);
-        let half = |m: StrutMetrics| (m.ascent + m.line_gap / 2.0, m.descent + m.line_gap / 2.0);
-        let (mut above, mut below) = half(self.strut);
+        let (mut above, mut below) = half_leaded(self.strut);
         let mut line_relative: Vec<LineRelativeItem> = Vec::new();
         for &k in order {
             let piece = placed[k].piece;
@@ -60,7 +59,7 @@ impl Layout<'_, '_> {
                 PieceKind::Cluster { run, cluster } => {
                     let align = self.ast.runs[run].baseline_align;
                     let extent = if normal || LineRelativeEdge::of(align).is_some() {
-                        Some(half(self.cluster_box(run, cluster)?))
+                        Some(half_leaded(self.cluster_box(run, cluster)?))
                     } else {
                         None
                     };
@@ -93,20 +92,22 @@ impl Layout<'_, '_> {
                 }
             }
         }
-        // A line-relative item taller than the line deepens it on its free
-        // side under `Normal` (spec BAS-1).
         if normal {
-            for item in &line_relative {
-                let room = above + below;
-                let item_height = item.above + item.below;
-                if item_height > room {
-                    match item.edge {
-                        LineRelativeEdge::Top => below += item_height - room,
-                        LineRelativeEdge::Bottom => above += item_height - room,
-                    }
-                }
-            }
+            deepen_for_line_relative(&line_relative, &mut above, &mut below);
         }
+        let metrics = self.resolve_line_box(above, below, byte_range);
+        for item in &line_relative {
+            placed[item.piece_index].y_shift = match item.edge {
+                LineRelativeEdge::Top => metrics.ascent - item.above,
+                LineRelativeEdge::Bottom => item.below - metrics.descent,
+            };
+        }
+        Ok(metrics)
+    }
+
+    /// The line box from the content's `above` and `below` the baseline: the
+    /// strut's under a fixed line height, or for an empty line (spec MET-3).
+    fn resolve_line_box(&self, above: f32, below: f32, byte_range: TextRange) -> LineBoxMetrics {
         let (ascent, descent, line_height) = match self.options.line_height {
             LineHeight::Fixed(_) => (
                 self.strut.ascent,
@@ -114,22 +115,36 @@ impl Layout<'_, '_> {
                 self.strut.line_height(),
             ),
             LineHeight::Normal if byte_range.is_empty() => {
-                let (a, d) = half(self.strut);
+                let (a, d) = half_leaded(self.strut);
                 (a, d, self.strut.line_height())
             }
             LineHeight::Normal => (above, below, above + below),
         };
-        for item in &line_relative {
-            placed[item.piece_index].y_shift = match item.edge {
-                LineRelativeEdge::Top => ascent - item.above,
-                LineRelativeEdge::Bottom => item.below - descent,
-            };
-        }
-        Ok(LineBoxMetrics {
+        LineBoxMetrics {
             ascent,
             descent,
             line_height,
-        })
+        }
+    }
+}
+
+/// A strut's or box's ascent and descent with half its line gap added to each.
+fn half_leaded(m: StrutMetrics) -> (f32, f32) {
+    (m.ascent + m.line_gap / 2.0, m.descent + m.line_gap / 2.0)
+}
+
+/// A line-relative item taller than the line deepens it on its free side
+/// under `Normal` (spec BAS-1).
+fn deepen_for_line_relative(items: &[LineRelativeItem], above: &mut f32, below: &mut f32) {
+    for item in items {
+        let room = *above + *below;
+        let item_height = item.above + item.below;
+        if item_height > room {
+            match item.edge {
+                LineRelativeEdge::Top => *below += item_height - room,
+                LineRelativeEdge::Bottom => *above += item_height - room,
+            }
+        }
     }
 }
 

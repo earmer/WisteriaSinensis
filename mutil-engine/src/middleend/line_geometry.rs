@@ -73,23 +73,28 @@ impl BodyExtent {
     /// source bytes, an inline box or a visible tab.
     pub(crate) fn of(line: &PositionedLine) -> Option<Self> {
         let eps = line.eps();
-        let is_occupied = |slot: &PositionedSlot| {
-            slot.visual_width > 0.0
-                || line.glyphs().any(|g| {
-                    let (lo, hi) = g.pen_interval();
-                    g.byte_range.is_some_and(|r| !line.is_trailing(r)) && slot.holds(lo, hi, eps)
-                })
-                || line
-                    .visual_boxes
-                    .iter()
-                    .any(|b| slot.holds(b.x, b.x + b.width, eps))
-                || line
-                    .tabs
-                    .iter()
-                    .any(|t| !line.is_trailing(t.byte_range) && slot.holds(t.x, t.x + t.width, eps))
+        let mut occupied: Vec<bool> = line.slots.iter().map(|s| s.visual_width > 0.0).collect();
+        let mut occupy = |lo: f32, hi: f32| {
+            for (index, _) in line.slots_holding(lo, hi, eps) {
+                occupied[index] = true;
+            }
         };
-        let first = line.slots.iter().position(is_occupied)?;
-        let last = line.slots.iter().rposition(is_occupied)?;
+        for g in line.glyphs() {
+            if g.byte_range.is_some_and(|r| !line.is_trailing(r)) {
+                let (lo, hi) = g.pen_interval();
+                occupy(lo, hi);
+            }
+        }
+        for b in &line.visual_boxes {
+            occupy(b.x, b.x + b.width);
+        }
+        for t in &line.tabs {
+            if !line.is_trailing(t.byte_range) {
+                occupy(t.x, t.x + t.width);
+            }
+        }
+        let first = occupied.iter().position(|&o| o)?;
+        let last = occupied.iter().rposition(|&o| o)?;
         Some(Self {
             first,
             last,
@@ -152,19 +157,27 @@ impl PositionedLine {
 
     /// The glyphs of the line that hang ([`GlyphRole::Hanging`]).
     pub fn hanging_glyphs(&self) -> impl Iterator<Item = &PositionedGlyph> {
+        let eps = self.eps();
         self.glyphs()
-            .filter(|glyph| self.role(glyph) == GlyphRole::Hanging)
+            .filter(move |glyph| self.role_at(glyph, eps) == GlyphRole::Hanging)
     }
 
     /// The role of `glyph` on this line (spec OUT-4).
     #[must_use]
     pub fn role(&self, glyph: &PositionedGlyph) -> GlyphRole {
+        self.role_at(glyph, self.eps())
+    }
+
+    /// [`PositionedLine::role`] with the line's [`PositionedLine::eps`]
+    /// computed once by the caller, so a pass over the glyphs sums the
+    /// slots once.
+    pub(crate) fn role_at(&self, glyph: &PositionedGlyph, eps: f32) -> GlyphRole {
         let (lo, hi) = glyph.pen_interval();
         if self.is_trailing_whitespace(glyph) {
             GlyphRole::Trailing
         } else if glyph.advance == 0.0 {
             GlyphRole::ZeroAdvance
-        } else if self.is_held(lo, hi) {
+        } else if self.is_held(lo, hi, eps) {
             GlyphRole::Body
         } else {
             GlyphRole::Hanging
@@ -200,10 +213,29 @@ impl PositionedLine {
         tolerance(self.visual_width(), 0.0)
     }
 
-    /// Whether some slot's content block holds `[lo, hi]`.
-    pub(crate) fn is_held(&self, lo: f32, hi: f32) -> bool {
-        let eps = self.eps();
-        self.slots.iter().any(|slot| slot.holds(lo, hi, eps))
+    /// Whether some slot's content block holds `[lo, hi]`, within `eps`
+    /// (the line's [`PositionedLine::eps`]).
+    pub(crate) fn is_held(&self, lo: f32, hi: f32, eps: f32) -> bool {
+        self.slots_holding(lo, hi, eps).next().is_some()
+    }
+
+    /// The slots whose content block holds `[lo, hi]` ([`PositionedSlot::holds`]),
+    /// with their indexes. The slots ascend and are disjoint (spec GEO-3), so a
+    /// binary search finds the first slot ending late enough and the scan stops
+    /// at the first one that starts too late.
+    pub(crate) fn slots_holding(
+        &self,
+        lo: f32,
+        hi: f32,
+        eps: f32,
+    ) -> impl Iterator<Item = (usize, &PositionedSlot)> {
+        let from = self.slots.partition_point(|s| s.content_end() + eps < hi);
+        self.slots
+            .iter()
+            .enumerate()
+            .skip(from)
+            .take_while(move |(_, s)| s.content_start - eps <= lo)
+            .filter(move |(_, s)| s.holds(lo, hi, eps))
     }
 
     /// `true` for source bytes at or after `visible_byte_end`.

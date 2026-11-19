@@ -249,6 +249,16 @@ impl<'a> TextBoxes<'a> {
         self.0.get(item)?.as_ref()
     }
 
+    /// The text box at `items[item]`, for an item the caller matched as a
+    /// [`BoxNode::Text`]: `check_storage` produced one for each.
+    ///
+    /// # Panics
+    /// When `items[item]` is not a text box.
+    pub(super) fn view(&self, item: usize) -> &TextBoxView<'a> {
+        self.get(item)
+            .unwrap_or_else(|| panic!("items[{item}] is not a text box"))
+    }
+
     /// Every text box, in item order.
     pub(super) fn iter(&self) -> impl Iterator<Item = &TextBoxView<'a>> {
         self.0.iter().flatten()

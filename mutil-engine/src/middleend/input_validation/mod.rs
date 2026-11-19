@@ -44,8 +44,15 @@ pub enum LayoutInputError {
     },
     /// Invalid clamp or other layout policy.
     InvalidLayoutOptions,
-    /// Malformed geometry or exhausted clearance progress.
+    /// A provider answer outside the wrap envelope or out of order, or an
+    /// obstructed answer without progress ahead.
     InvalidLineGeometry,
+    /// More than the allowed number of obstructed provider answers in a row
+    /// for one line (spec GEO-4).
+    ClearanceExhausted,
+    /// One line still outgrew its envelope after the allowed refits
+    /// (spec GEO-6).
+    RefitExhausted,
     /// Expanding a block envelope introduced available inline space.
     NonMonotonicGeometry,
     /// Invalid width or indentation; positive-infinite width is allowed. Without a geometry provider each indent must lie in
@@ -298,6 +305,14 @@ pub fn check_layout_inputs(
     super::ValidatedInputs::try_from_ast(ast, text, constraints, options).map(drop)
 }
 
+/// A paragraph AST covers one paragraph: the document text is split first.
+fn check_no_paragraph_separator(text: &str) -> Result<(), LayoutInputError> {
+    if text.chars().any(is_paragraph_separator) {
+        return Err(LayoutInputError::ParagraphSeparatorInText);
+    }
+    Ok(())
+}
+
 /// [`check_layout_inputs`], returning the policy it resolved on the way so
 /// that layout resolves the strut once.
 pub(super) fn validate_layout_inputs(
@@ -307,10 +322,7 @@ pub(super) fn validate_layout_inputs(
     options: &LayoutOptions,
 ) -> Result<LayoutPolicySnapshot, LayoutInputError> {
     let policy = LayoutPolicySnapshot::resolve(ast, constraints, options)?;
-    // A paragraph AST covers one paragraph: split the document text first.
-    if text.chars().any(is_paragraph_separator) {
-        return Err(LayoutInputError::ParagraphSeparatorInText);
-    }
+    check_no_paragraph_separator(text)?;
     // Phase order is error precedence. `check_storage` and `check_spans`
     // return the proofs that the later phases take as arguments.
     let boxes = storage::check_storage(ast)?;

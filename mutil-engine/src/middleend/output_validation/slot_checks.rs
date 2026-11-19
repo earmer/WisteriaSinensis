@@ -78,7 +78,7 @@ impl PositionedLine {
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
                 let (lo, hi) = g.pen_interval();
-                match self.role(g) {
+                match self.role_at(g, body.eps) {
                     GlyphRole::Trailing if g.advance != 0.0 => {
                         if collapsible {
                             return Err(E::TrailingWhitespaceNotCollapsed { run, glyph });
@@ -128,7 +128,7 @@ impl PositionedLine {
         use LineInvariantError as E;
         let collapsible = ctx.whitespace == HangingWhitespaceMode::Collapsible;
         for (index, b) in self.visual_boxes.iter().enumerate() {
-            if !self.is_held(b.x, b.x + b.width) {
+            if !self.is_held(b.x, b.x + b.width, body.eps) {
                 return Err(E::InlineBoxOutsideBlock { index });
             }
             if b.overflow_policy != BoxOverflowPolicy::AllowOverflow
@@ -145,17 +145,17 @@ impl PositionedLine {
                 if t.width != 0.0 && !body.is_on_far_edge(ctx.base_direction, t.x, t.x + t.width) {
                     return Err(E::TrailingTabOnWrongSide { index });
                 }
-            } else if !self.is_held(t.x, t.x + t.width) {
+            } else if !self.is_held(t.x, t.x + t.width, body.eps) {
                 return Err(E::TabOutsideBlock { index });
             }
         }
         for (index, f) in self.span_fragments.iter().enumerate() {
-            if !self.is_held(f.x, f.x + f.width) {
+            if !self.is_held(f.x, f.x + f.width, body.eps) {
                 return Err(E::SpanFragmentOutsideBlock { index });
             }
         }
         for (index, f) in self.atomic_fragments.iter().enumerate() {
-            if !self.is_held(f.x, f.x + f.width) {
+            if !self.is_held(f.x, f.x + f.width, body.eps) {
                 return Err(E::InvalidAtomicFragment { index });
             }
         }
@@ -308,7 +308,7 @@ impl PositionedLine {
         };
         for g in self.glyphs() {
             let (lo, hi) = g.pen_interval();
-            match self.role(g) {
+            match self.role_at(g, eps) {
                 GlyphRole::Trailing | GlyphRole::ZeroAdvance => {}
                 GlyphRole::Body => {
                     if let Some(slot) = owner(lo, hi) {
@@ -395,9 +395,11 @@ impl PositionedLine {
                 (b.byte_range, b.x, b.x + b.width, b.width)
             }
             [] => {
+                let eps = self.eps();
                 let glyphs = || {
                     self.glyphs().filter(|g| {
-                        self.role(g).is_inside_body() && (!g.is_synthesized() || self.is_ellipsized)
+                        self.role_at(g, eps).is_inside_body()
+                            && (!g.is_synthesized() || self.is_ellipsized)
                     })
                 };
                 let mut ranges = glyphs()
@@ -492,7 +494,7 @@ impl PositionedLine {
                 r.glyphs
                     .iter()
                     .enumerate()
-                    .map(move |(glyph, g)| (run, glyph, g, self.role(g)))
+                    .map(move |(glyph, g)| (run, glyph, g, self.role_at(g, body.eps)))
             })
         };
         for side in [HangSide::Left, HangSide::Right] {
@@ -553,12 +555,13 @@ impl PositionedLine {
             }
         }
         let visual_width = self.visual_width();
+        let eps = tolerance(visual_width, 0.0);
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
                 let Some(range) = g.byte_range else {
                     continue;
                 };
-                if !self.role(g).is_inside_body() {
+                if !self.role_at(g, eps).is_inside_body() {
                     continue;
                 }
                 let (lo, hi) = g.pen_interval();
