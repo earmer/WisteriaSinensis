@@ -9,6 +9,7 @@ mod bidi_queries;
 mod cjk_routing;
 mod common;
 mod decoration_spans;
+mod emergency_refit;
 mod fonts;
 mod frontend;
 mod hanging;
