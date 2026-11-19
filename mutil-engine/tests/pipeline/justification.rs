@@ -479,12 +479,13 @@ fn crt1_crt3_compressed_cjk_seam_has_no_false_split_caret() {
         let line = &p.lines[0];
         assert!(line.is_justified, "{shortfall}");
 
-        // CRT-1: stops are in non-decreasing visual order, within the line's bytes,
-        // and carry the line's index.
+        // CRT-1: stops are in non-decreasing visual order, within the line's bytes.
         assert!(line.caret_stops.windows(2).all(|w| w[0].x <= w[1].x));
-        assert!(line.caret_stops.iter().all(|s| s.line == 0
-            && s.offset >= line.byte_range.start()
-            && s.offset <= line.byte_range.end()));
+        assert!(
+            line.caret_stops
+                .iter()
+                .all(|s| s.offset >= line.byte_range.start() && s.offset <= line.byte_range.end())
+        );
 
         // CRT-3: no false split caret at the compressed seam (byte 6); there is
         // a single CaretStop at offset 6 strictly between offsets 3 and 9.

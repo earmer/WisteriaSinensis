@@ -524,12 +524,6 @@ fn fe31_cursive_scripts_are_flagged_for_no_letter_spacing() {
             "{:?}",
             &text[atom.byte_range.as_range()]
         );
-        assert_eq!(
-            flags.contains(AtomFlags::KASHIDA_CAPABLE),
-            arabic,
-            "{:?}",
-            &text[atom.byte_range.as_range()]
-        );
     }
     assert!(ast.atoms.iter().any(|a| a.script == ScriptTag::ARABIC));
 }

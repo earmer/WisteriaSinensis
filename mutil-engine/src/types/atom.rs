@@ -119,9 +119,9 @@ pub enum LineBreakClass {
 bitflags::bitflags! {
     /// Per-atom boolean properties, stored as a 16-bit mask (spec §2.2).
     ///
-    /// Thirteen of sixteen bits are assigned; the high three are reserved and
-    /// are masked off by `from_bits_truncate` and `!`. Layout: 2 bytes,
-    /// alignment 2.
+    /// Twelve of sixteen bits are assigned (bit 3 is unused); the high three
+    /// are reserved and are masked off by `from_bits_truncate` and `!`.
+    /// Layout: 2 bytes, alignment 2.
     #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
     #[repr(transparent)]
     pub struct AtomFlags: u16 {
@@ -134,8 +134,6 @@ bitflags::bitflags! {
         /// (Arabic, Hanifi Rohingya, Mandaic, Mongolian, N'Ko, Phags Pa, Syriac;
         /// CSS Text 4 Appendix D `[W2]`). Split from the draft's `IS_CURSIVE_CONNECTED`.
         const NO_LETTER_SPACING = 1 << 2;
-        /// Arabic-script atoms eligible for elongation (kashida). Open question 12.
-        const KASHIDA_CAPABLE = 1 << 3;
         /// A UTS #51 emoji sequence: core, ZWJ, keycap, flag, tag or modifier `[U5]`.
         const IS_EMOJI_SEQUENCE = 1 << 4;
         /// Opening punctuation.
@@ -240,7 +238,7 @@ mod tests {
         let mut f = AtomFlags::IS_CJK_IDEOGRAPH | AtomFlags::ALLOW_CJK_JUSTIFY_AFTER;
         assert!(f.contains(AtomFlags::IS_CJK_IDEOGRAPH));
         assert!(!f.contains(AtomFlags::NO_LETTER_SPACING));
-        assert!(f.intersects(AtomFlags::IS_CJK_IDEOGRAPH | AtomFlags::KASHIDA_CAPABLE));
+        assert!(f.intersects(AtomFlags::IS_CJK_IDEOGRAPH | AtomFlags::NO_LETTER_SPACING));
 
         f.insert(AtomFlags::IS_EMOJI_SEQUENCE);
         f.remove(AtomFlags::IS_CJK_IDEOGRAPH);
@@ -283,7 +281,7 @@ mod tests {
                 AtomFlags::IS_OPEN_PUNCT
                     | AtomFlags::IS_CLOSE_PUNCT
                     | AtomFlags::ALLOW_CJK_JUSTIFY_AFTER
-                    | AtomFlags::KASHIDA_CAPABLE,
+                    | AtomFlags::HAS_VARIATION_SELECTOR,
             ),
             atom_with(AtomFlags::IS_CLOSE_PUNCT | AtomFlags::IS_EMOJI_SEQUENCE),
         ];
@@ -297,7 +295,7 @@ mod tests {
         // IS_CLOSE_PUNCT: from the last atom only.
         assert!(f.contains(AtomFlags::IS_CLOSE_PUNCT));
         // Everything else is ORed.
-        assert!(f.contains(AtomFlags::KASHIDA_CAPABLE | AtomFlags::IS_EMOJI_SEQUENCE));
+        assert!(f.contains(AtomFlags::HAS_VARIATION_SELECTOR | AtomFlags::IS_EMOJI_SEQUENCE));
 
         // Reverse the roles: first has no open mark or continuation bind, middle
         // atoms do; last has the justification opportunity but no close mark.

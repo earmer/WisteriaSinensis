@@ -58,7 +58,6 @@ impl ContentBlock {
 /// visual order, and what the line's end and hanging marks leave. Its `x`
 /// coordinates are relative to the body's start.
 pub(super) struct PlacedLine<'a> {
-    pub(super) index: usize,
     pub(super) placed: Vec<PlacedPiece<'a>>,
     pub(super) order: Vec<usize>,
     pub(super) byte_range: TextRange,
@@ -188,7 +187,6 @@ impl<'i, 'a> Layout<'i, 'a> {
 
         self.build_line(
             PlacedLine {
-                index: cursor.index,
                 placed,
                 order,
                 byte_range: TextRange::new(cursor.byte_start, byte_end),

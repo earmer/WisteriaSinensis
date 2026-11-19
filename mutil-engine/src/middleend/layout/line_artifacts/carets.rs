@@ -107,7 +107,6 @@ impl Layout<'_, '_> {
             offset: s.offset,
             affinity: s.affinity,
             level: s.level.unwrap_or_else(|| level_at(s.offset)),
-            line: line.index,
         };
         stops.iter().map(to_stop).collect()
     }

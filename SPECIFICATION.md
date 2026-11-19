@@ -150,7 +150,6 @@ pub struct AtomFlags(..);
 | `AtomFlags::IS_CJK_IDEOGRAPH` | a Han ideograph or full-width kana |
 | `AtomFlags::ALLOW_CJK_JUSTIFY_AFTER` | the boundary after the atom is an inter-character justification opportunity |
 | `AtomFlags::NO_LETTER_SPACING` | a cursive script that admits no letter spacing (Arabic, Hanifi Rohingya, Mandaic, Mongolian, N'Ko, Phags Pa, Syriac) |
-| `AtomFlags::KASHIDA_CAPABLE` | an Arabic-script atom eligible for elongation |
 | `AtomFlags::IS_EMOJI_SEQUENCE` | a UTS #51 emoji sequence (core, ZWJ, keycap, flag, tag, modifier) |
 | `AtomFlags::IS_OPEN_PUNCT`, `AtomFlags::IS_CLOSE_PUNCT` | opening or closing punctuation |
 | `AtomFlags::HAS_VARIATION_SELECTOR` | the atom contains U+FE0E, U+FE0F or an IVS selector |
@@ -698,7 +697,7 @@ pub struct DecorationLine {
     pub thickness: f32,
 }
 pub enum CaretAffinity { Downstream, Upstream }
-pub struct CaretStop { pub x: f32, pub offset: ByteIndex, pub affinity: CaretAffinity, pub level: BidiLevel, pub line: usize }
+pub struct CaretStop { pub x: f32, pub offset: ByteIndex, pub affinity: CaretAffinity, pub level: BidiLevel }
 ```
 
 **Coordinates.**
@@ -1206,7 +1205,7 @@ pub enum FrontendFeature { VerticalWritingMode, RtlBaseDirection, DecorationSpan
 
 **[FE-31] Phase 2 spacing and flags.** After Step 4 the frontend sets, from each atom's first code point and resolved script:
 
-- `NO_LETTER_SPACING` on atoms whose script is Arab, Rohg, Mand, Mong, Nkoo, Phag or Syrc, and `KASHIDA_CAPABLE` on Arab atoms (kashida itself is not applied; ST3-5);
+- `NO_LETTER_SPACING` on atoms whose script is Arab, Rohg, Mand, Mong, Nkoo, Phag or Syrc; kashida is not applied (ST3-5);
 - `HANGABLE_START` and `HANGABLE_END` as ATM-3 lists them;
 - `ALLOW_CJK_JUSTIFY_AFTER` on a CJK-class atom (FE-20) unless it is the last atom before a hard break or the paragraph end, the next atom is closing or prohibited-start punctuation (`IS_CLOSE_PUNCT`, UAX #14 class CL, CP, EX, IS or SY, or U+3001, U+3002, U+FF0C or U+FF0E), or glue (of any kind, synthetic included), a tab or an inline object follows it, so that a boundary is never counted in two tiers.
 

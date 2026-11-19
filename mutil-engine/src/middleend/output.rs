@@ -198,8 +198,6 @@ pub struct CaretStop {
     /// touching `offset`; otherwise the paragraph level or that of the
     /// nearest entity, as on an empty line (CRT-2).
     pub level: BidiLevel,
-    /// Index into `PositionedParagraph::lines`.
-    pub line: usize,
 }
 
 /// Visual fragment of an atomic edit span, independent of decorations.
