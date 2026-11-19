@@ -158,12 +158,9 @@ fn shp20_wn10_shp24_a_bad_space_advance_is_an_invalid_glue_at_the_input_gate() {
     }
 }
 
-/// SHP-18 names a negative `space_advance` as an `InvalidGlue` at the gate,
-/// but FE-27 sizes the glue as `max(0, a + word_spacing)`, which would turn a
-/// negative `a` into a valid zero-width glue. The spec is silent on which
-/// wins, so this stays ignored until it says.
+/// SHP-18 names a negative `space_advance` as an `InvalidGlue` at the gate;
+/// FE-27 clamps only `a + word_spacing` for a valid `a`.
 #[test]
-#[ignore = "SHP-18 (negative space_advance fails as InvalidGlue) conflicts with FE-27's max(0, ..)"]
 fn shp18_a_negative_space_advance_is_an_invalid_glue_at_the_input_gate() {
     let text = "a b";
     for bad in [-3.0, -0.5] {
