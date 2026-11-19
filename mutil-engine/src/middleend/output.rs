@@ -308,12 +308,6 @@ pub struct PositionedLine {
 }
 
 impl PositionedLine {
-    /// Whether the line has caret stops: one wholly inside an atomic span has
-    /// none (spec CRT-1).
-    pub(crate) fn has_caret_stops(&self) -> bool {
-        !self.caret_stops.is_empty()
-    }
-
     /// The extreme caret stop towards `side` (spec §6.3 rule 3); equal-`x`
     /// ties go to the first stop for `Left` and the last for `Right`.
     #[must_use]

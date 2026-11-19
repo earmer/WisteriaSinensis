@@ -7,11 +7,12 @@
 //! of degrading to empty content.
 
 use super::input_validation::validate_layout_inputs;
+use super::proofs::{LineIdx, NonEmptySlice, SortedCaretStops, StopIdx};
 use super::tolerance::resolves_extent;
 use super::{
-    AnnotationErrorReason, CaretStop, HangSide, InlineSlotConstraint, LayoutConstraints,
-    LayoutInputError, LayoutOptions, LayoutPolicySnapshot, LineGeometry, LineInvariantError,
-    PositionedAnnotationRun, PositionedGlyph, PositionedLine, PositionedParagraph, VisualGlyphRun,
+    AnnotationErrorReason, CaretStop, InlineSlotConstraint, LayoutConstraints, LayoutInputError,
+    LayoutOptions, LayoutPolicySnapshot, LineGeometry, LineInvariantError, PositionedAnnotationRun,
+    PositionedGlyph, PositionedLine, PositionedParagraph, PositionedSlot, VisualGlyphRun,
 };
 use crate::frontend::{BoxNode, ParagraphAst, TextBox, TextBoxView, WordNode};
 use crate::types::{
@@ -92,6 +93,7 @@ impl<'a> ValidatedInputs<'a> {
     /// When `item` is not an index into `items`.
     #[must_use]
     pub fn text_box(&self, item: usize) -> Option<TextBoxView<'a>> {
+        // PROOF(caller): `item` indexes `items` (see # Panics).
         let WordNode::Box(BoxNode::Text(text)) = &self.ast.items[item] else {
             return None;
         };
@@ -111,6 +113,8 @@ impl<'a> ValidatedInputs<'a> {
     /// When `run` is not an index into `runs`.
     #[must_use]
     pub fn run_atoms(&self, run: usize) -> &'a [GraphemeAtom] {
+        // PROOF(G1::AST-4): a run's atom range lies in `atoms`; `run` is the
+        // caller's index (see # Panics).
         &self.ast.atoms[self.ast.runs[run].atom_range.clone()]
     }
 
@@ -120,6 +124,8 @@ impl<'a> ValidatedInputs<'a> {
     /// When `run` is not an index into `runs`.
     #[must_use]
     pub fn run_clusters(&self, run: usize) -> &'a [ShapedCluster] {
+        // PROOF(G1::AST-4): a run's cluster range lies in `clusters`; `run`
+        // is the caller's index (see # Panics).
         &self.ast.clusters[self.ast.runs[run].cluster_range.clone()]
     }
 
@@ -129,6 +135,7 @@ impl<'a> ValidatedInputs<'a> {
     /// When `cluster` is not a cluster of this paragraph.
     #[must_use]
     pub fn cluster_glyphs(&self, cluster: &ShapedCluster) -> &'a [RawShapedGlyph] {
+        // PROOF(G1::AST-4): a cluster's glyph range lies in `glyphs`.
         &self.ast.glyphs[cluster.glyph_range.clone()]
     }
 
@@ -195,6 +202,7 @@ impl OpenGeometry {
     /// The first slot, which Phase 1 layout fills (spec ME-2).
     #[must_use]
     pub fn first_slot(&self) -> InlineSlotConstraint {
+        // PROOF(G3::classify): an open answer holds at least one slot.
         self.0.slots[0]
     }
 }
@@ -244,6 +252,7 @@ impl GeometryAnswer {
 #[derive(Clone, Copy, Debug)]
 pub struct ValidatedLayout<'a> {
     paragraph: &'a PositionedParagraph,
+    lines: NonEmptySlice<'a, PositionedLine>,
     text: &'a str,
 }
 
@@ -257,7 +266,13 @@ impl<'a> ValidatedLayout<'a> {
         text: &'a str,
     ) -> Result<Self, (usize, LineInvariantError)> {
         paragraph.validate(text)?;
-        Ok(Self { paragraph, text })
+        // PROOF(G4::NoLines): `validate` rejects a paragraph without lines.
+        let lines = NonEmptySlice::try_from_slice(&paragraph.lines).expect("G4 proved lines");
+        Ok(Self {
+            paragraph,
+            lines,
+            text,
+        })
     }
 
     /// The validated paragraph.
@@ -272,15 +287,56 @@ impl<'a> ValidatedLayout<'a> {
         self.text
     }
 
-    /// The extreme caret stop of line `line` towards `side` (spec §6.3 rule
-    /// 3), or `None` for a line inside an atomic span, which has none
-    /// (CRT-1).
-    ///
-    /// # Panics
-    /// When `line` is not an index into the paragraph's lines.
-    #[must_use]
-    pub(crate) fn edge_caret_stop(&self, line: usize, side: HangSide) -> Option<&'a CaretStop> {
-        self.paragraph.lines[line].extreme_caret_stop(side)
+    /// The paragraph's lines, which G4 proved non-empty (`NoLines`).
+    pub(crate) fn lines(&self) -> NonEmptySlice<'a, PositionedLine> {
+        self.lines
+    }
+
+    /// Line `index`, or the last line past the end.
+    pub(crate) fn line(&self, index: usize) -> ValidatedLine<'a> {
+        let index = index.min(self.lines.last_index());
+        self.view(index, self.lines.get_clamped(index))
+    }
+
+    /// The lines from `from` onwards (`forward`) or backwards, `from`
+    /// included; none when `from` is past the last line.
+    pub(crate) fn walk_lines(
+        &self,
+        from: usize,
+        forward: bool,
+    ) -> impl Iterator<Item = ValidatedLine<'a>> + '_ {
+        let step = move |&i: &usize| {
+            if forward {
+                i.checked_add(1)
+            } else {
+                i.checked_sub(1)
+            }
+        };
+        std::iter::successors(Some(from), step)
+            .map_while(|i| self.lines.get(i).map(|line| self.view(i, line)))
+    }
+
+    /// The nearest line after (`forward`) or before `line` that has caret
+    /// stops: a line inside an atomic span has none and is crossed whole
+    /// (CRT-1, INT-13).
+    pub(crate) fn adjacent_line_with_stops(
+        &self,
+        line: LineIdx,
+        forward: bool,
+    ) -> Option<LineWithStops<'a>> {
+        self.walk_lines(line.get(), forward)
+            .skip(1)
+            .find_map(ValidatedLine::with_stops)
+    }
+
+    /// Line `index`, which `line` is: its stops are those of a line G4
+    /// accepted.
+    fn view(&self, index: usize, line: &'a PositionedLine) -> ValidatedLine<'a> {
+        ValidatedLine {
+            index: LineIdx(index),
+            line,
+            stops: SortedCaretStops::try_from_validated(&line.caret_stops),
+        }
     }
 
     /// Every glyph run of the paragraph with its glyphs' drawing origins in
@@ -310,6 +366,65 @@ impl<'a> ValidatedLayout<'a> {
                     total_block_size,
                 })
             })
+    }
+}
+
+/// A line of a [`ValidatedLayout`] with the facts G4 proved about it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ValidatedLine<'a> {
+    pub(crate) index: LineIdx,
+    pub(crate) line: &'a PositionedLine,
+    /// `None` for a line without stops, as one inside an atomic span (CRT-1).
+    pub(crate) stops: Option<SortedCaretStops<'a>>,
+}
+
+impl<'a> ValidatedLine<'a> {
+    /// The line, when it has caret stops.
+    pub(crate) fn with_stops(self) -> Option<LineWithStops<'a>> {
+        Some(LineWithStops {
+            index: self.index,
+            line: self.line,
+            stops: self.stops?,
+        })
+    }
+
+    /// The line's first slot.
+    pub(crate) fn first_slot(self) -> &'a PositionedSlot {
+        // PROOF(G4::NoSlots): `check_slots` rejects a line without slots.
+        self.line.slots.first().expect("G4 proved slots")
+    }
+}
+
+/// A line of a [`ValidatedLayout`] that has caret stops.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LineWithStops<'a> {
+    pub(crate) index: LineIdx,
+    pub(crate) line: &'a PositionedLine,
+    pub(crate) stops: SortedCaretStops<'a>,
+}
+
+impl<'a> LineWithStops<'a> {
+    /// The same line as a [`ValidatedLine`].
+    pub(crate) fn as_line(self) -> ValidatedLine<'a> {
+        ValidatedLine {
+            index: self.index,
+            line: self.line,
+            stops: Some(self.stops),
+        }
+    }
+}
+
+/// The caret stop that shows a cursor position, on its line.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LocatedCaret<'a> {
+    pub(crate) line: LineWithStops<'a>,
+    pub(crate) stop: StopIdx,
+}
+
+impl<'a> LocatedCaret<'a> {
+    /// The located stop.
+    pub(crate) fn caret(self) -> &'a CaretStop {
+        self.line.stops.stop(self.stop)
     }
 }
 

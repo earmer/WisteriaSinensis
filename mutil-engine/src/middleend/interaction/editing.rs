@@ -2,6 +2,7 @@
 //! UTF-16 conversions (spec §6.5, INT-12, INT-18).
 
 use super::ValidatedInputs;
+use crate::middleend::proofs::NonEmptyStr;
 use crate::types::{AtomFlags, ByteIndex, TextRange};
 
 impl ValidatedInputs<'_> {
@@ -16,9 +17,10 @@ impl ValidatedInputs<'_> {
         let text = self.text();
         let ast = self.ast();
         let offset = floor_boundary(text, offset);
-        if offset == 0 {
+        let (before, _) = text.split_at(offset);
+        let Some(before) = NonEmptyStr::try_new(before) else {
             return TextRange::empty_at(0);
-        }
+        };
         if let Some(unit) = anchored_unit_range(ast, offset - 1) {
             return unit;
         }
@@ -30,8 +32,7 @@ impl ValidatedInputs<'_> {
         {
             return atom.byte_range;
         }
-        let last = text[..offset].chars().next_back().map_or(1, char::len_utf8);
-        TextRange::new(offset - last, offset)
+        TextRange::new(offset - before.last_char().len_utf8(), offset)
     }
 
     /// The range Delete removes after `offset` (spec INT-12): a whole atomic
@@ -43,9 +44,10 @@ impl ValidatedInputs<'_> {
         let text = self.text();
         let ast = self.ast();
         let offset = floor_boundary(text, offset);
-        if offset >= text.len() {
+        let (_, after) = text.split_at(offset);
+        let Some(after) = NonEmptyStr::try_new(after) else {
             return TextRange::empty_at(text.len());
-        }
+        };
         if let Some(unit) = anchored_unit_range(ast, offset) {
             return unit;
         }
@@ -53,8 +55,7 @@ impl ValidatedInputs<'_> {
         if let Some(atom) = ast.atoms.get(k).filter(|a| a.byte_range.start() == offset) {
             return atom.byte_range;
         }
-        let next = text[offset..].chars().next().map_or(1, char::len_utf8);
-        TextRange::new(offset, offset + next)
+        TextRange::new(offset, offset + after.first_char().len_utf8())
     }
 
     /// The text a copy of `range` puts on the clipboard (spec INT-17): the
@@ -66,7 +67,7 @@ impl ValidatedInputs<'_> {
         let text = self.text();
         let start = floor_boundary(text, range.start());
         let end = floor_boundary(text, range.end()).max(start);
-        let source = &text[start..end];
+        let (_, source) = text.split_at(end).0.split_at(start);
         match self.options().soft_hyphen {
             crate::middleend::SoftHyphenPolicy::Keep => source.to_owned(),
             crate::middleend::SoftHyphenPolicy::Strip => source.replace('\u{AD}', ""),
@@ -95,7 +96,8 @@ fn object_holding(ast: &crate::frontend::ParagraphAst, byte: ByteIndex) -> Optio
     }
 }
 
-/// `offset` clamped to `text` and moved back to a character boundary.
+/// `offset` clamped to `text` and moved back to a character boundary, where
+/// `str::split_at` cannot panic.
 fn floor_boundary(text: &str, offset: ByteIndex) -> ByteIndex {
     let mut at = offset.min(text.len());
     while !text.is_char_boundary(at) {

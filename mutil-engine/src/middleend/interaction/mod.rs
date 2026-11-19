@@ -9,6 +9,7 @@ use super::output::{
     AtomicFragment, CaretAffinity, CaretStop, PositionedLine, PositionedParagraph,
 };
 use super::tolerance::approx_eq;
+use super::validated::{LocatedCaret, ValidatedLine};
 use super::{ValidatedInputs, ValidatedLayout};
 use crate::types::{BidiLevel, ByteIndex, Point, Rect, WritingMode};
 
@@ -203,7 +204,7 @@ fn carets_are_usable(width: f32, atom_count: usize, carets: &[f32]) -> bool {
     let within_width = carets
         .iter()
         .all(|position| position.is_finite() && *position > 0.0 && *position < width);
-    let strictly_increasing = carets.windows(2).all(|pair| pair[0] < pair[1]);
+    let strictly_increasing = carets.is_sorted_by(|a, b| a < b);
     within_width && strictly_increasing
 }
 
@@ -300,7 +301,7 @@ impl Motion {
 /// The queries of §6 for laid-out, validated output (spec INT-1 to INT-15,
 /// INT-18 `rect_for_offset`). Points and rectangles are paragraph-local and
 /// physical (HST-8); inline positions are in flow space.
-impl ValidatedLayout<'_> {
+impl<'a> ValidatedLayout<'a> {
     /// The caret position nearest `point` (spec INT-7, INT-8): the point is
     /// clamped to the first or last line, then placed on that line.
     /// `inside` is `false` when the point was clamped to a line or to a line
@@ -312,16 +313,14 @@ impl ValidatedLayout<'_> {
             .policy
             .writing_mode
             .physical_to_flow_point(point, p.total_block_size);
-        let lines = &p.lines;
-        let (top, _) = line_block(p, 0);
-        let (_, bottom) = line_block(p, lines.len() - 1);
+        let lines = self.lines();
+        let (top, _) = line_box(p, lines.first());
+        let (_, bottom) = line_box(p, lines.last());
         // The output gate stacks line boxes without overlap (LineBoxesOverlap),
         // so their bottoms ascend and the first one below the point is found
         // by bisection.
-        let line = lines
-            .partition_point(|l| line_box(p, l).1 <= flow.y)
-            .min(lines.len() - 1);
-        let hit = self.hit_test_on_line(line, flow.x);
+        let line = lines.partition_point_clamped(|l| line_box(p, l).1 <= flow.y);
+        let hit = hit_on_line(self.line(line), flow.x);
         HitResult {
             position: hit.position,
             inside: hit.inside && flow.y >= top && flow.y < bottom,
@@ -333,63 +332,7 @@ impl ValidatedLayout<'_> {
     /// index past the last line is clamped to it.
     #[must_use]
     pub fn hit_test_on_line(&self, line: usize, inline_position: f32) -> HitResult {
-        let lines = &self.paragraph().lines;
-        let line = &lines[line.min(lines.len() - 1)];
-        let x = inline_position;
-        // Atomic spans snap to an end (INT-10).
-        if let Some(fragment) = line
-            .atomic_fragments
-            .iter()
-            .find(|f| f.x <= x && x <= f.x + f.width)
-        {
-            return HitResult {
-                position: fragment.hit_test(x),
-                inside: true,
-            };
-        }
-        let stops = &line.caret_stops;
-        let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
-            // A line may have no stops, as one wholly inside an atomic span
-            // (CRT-1): it snaps to the span's ends.
-            let position = line.atomic_fragments.first().map_or(
-                CursorPosition {
-                    byte_offset: line.byte_range.start(),
-                    affinity: CaretAffinity::Downstream,
-                },
-                |fragment| fragment.hit_test(x),
-            );
-            return HitResult {
-                position,
-                inside: false,
-            };
-        };
-        // At or beyond an edge: the extreme stop on that side (INT-8). The
-        // output gate proves the stops finite and in non-decreasing `x`, so
-        // `first` and `last` are the extreme stops with their ties resolved
-        // by visual order. A position that is not a number lies beyond the
-        // left edge, never inside.
-        if x.is_nan() || x <= first.x {
-            return HitResult {
-                position: stop_position(first),
-                inside: x == first.x,
-            };
-        }
-        if x >= last.x {
-            return HitResult {
-                position: stop_position(last),
-                inside: x == last.x,
-            };
-        }
-        // Strictly inside: `stops[right - 1].x <= x < stops[right].x`, so the
-        // right stop is the first of its coincident group and the left stop
-        // the last of its own. The midpoint belongs to the right half.
-        let right = stops.partition_point(|s| s.x <= x);
-        let (l, r) = (&stops[right - 1], &stops[right]);
-        let stop = if r.x - x <= x - l.x { r } else { l };
-        HitResult {
-            position: stop_position(stop),
-            inside: true,
-        }
+        hit_on_line(self.line(line), inline_position)
     }
 
     /// The caret rectangles of `position` (spec INT-11): zero-width
@@ -397,24 +340,25 @@ impl ValidatedLayout<'_> {
     #[must_use]
     pub fn caret_geometry(&self, position: CursorPosition) -> CaretVisual {
         let p = self.paragraph();
-        let rect_on = |line: usize, x: f32| {
-            let (top, bottom) = line_block(p, line);
+        let rect_on = |line: &PositionedLine, x: f32| {
+            let (top, bottom) = line_box(p, line);
             p.policy
                 .writing_mode
                 .flow_to_physical_rect(Rect::new(x, top, 0.0, bottom - top), p.total_block_size)
         };
-        let Some((line, index)) = self.locate(position) else {
+        let Some(located) = self.locate(position) else {
             // No line has a stop: the caret stands at the first line's start.
-            let x = p.lines[0].slots.first().map_or(0.0, |s| s.content_start);
+            let first = self.line(0);
             return CaretVisual {
-                primary_rect: rect_on(0, x),
+                primary_rect: rect_on(first.line, first.first_slot().content_start),
                 secondary_rect: None,
             };
         };
-        let rect = |x: f32| rect_on(line, x);
-        let stops = &p.lines[line].caret_stops;
-        let primary = stops[index];
-        let secondary = stops
+        let rect = |x: f32| rect_on(located.line.line, x);
+        let primary = located.caret();
+        let secondary = located
+            .line
+            .stops
             .iter()
             .find(|s| {
                 s.offset == primary.offset
@@ -443,40 +387,109 @@ impl ValidatedLayout<'_> {
     /// before it on the line that holds it. A line may have no stops (CRT-1),
     /// as one inside an atomic span: the nearest earlier line with stops
     /// shows it, else the nearest later one. `None` when no line has stops.
-    fn locate(&self, position: CursorPosition) -> Option<(usize, usize)> {
-        let lines = &self.paragraph().lines;
+    ///
+    /// G4 proved that the lines tile the text in order (`SourceNotCovered`)
+    /// and that every stop lies in its line's range, ends included
+    /// (`InvalidCaretStop`). So the lines that can hold a stop at the offset
+    /// are one run, found by bisection: O(log L) plus the stops of those
+    /// lines, usually one or two.
+    pub(crate) fn locate(&self, position: CursorPosition) -> Option<LocatedCaret<'a>> {
         let offset = position.byte_offset;
+        let first = self
+            .lines()
+            .partition_point(|l| l.byte_range.end() < offset);
+        let candidates = self
+            .walk_lines(first, true)
+            .take_while(|l| l.line.byte_range.start() <= offset)
+            .filter_map(ValidatedLine::with_stops);
         let mut fallback = None;
-        for (i, line) in lines.iter().enumerate() {
-            for (k, stop) in line.caret_stops.iter().enumerate() {
-                if stop.offset == offset {
-                    if stop.affinity == position.affinity {
-                        return Some((i, k));
+        for line in candidates {
+            for (stop, s) in line.stops.indexed() {
+                if s.offset == offset {
+                    if s.affinity == position.affinity {
+                        return Some(LocatedCaret { line, stop });
                     }
-                    fallback.get_or_insert((i, k));
+                    fallback.get_or_insert(LocatedCaret { line, stop });
                 }
             }
         }
-        if fallback.is_some() {
-            return fallback;
-        }
-        let holder = lines
-            .iter()
-            .position(|l| offset < l.byte_range.end())
-            .unwrap_or(lines.len() - 1);
-        let line = lines[..=holder]
-            .iter()
-            .rposition(PositionedLine::has_caret_stops)
-            .or_else(|| lines.iter().position(PositionedLine::has_caret_stops))?;
-        let stops = &lines[line].caret_stops;
-        let k = stops
-            .iter()
-            .enumerate()
+        fallback.or_else(|| self.locate_nearest(offset))
+    }
+
+    /// The stop nearest `offset` when no stop has it: on the line that
+    /// holds the offset, else the nearest earlier line with stops, else the
+    /// nearest later one, the stop at the nearest offset before it, else
+    /// the first stop with the least offset.
+    fn locate_nearest(&self, offset: ByteIndex) -> Option<LocatedCaret<'a>> {
+        // Line ends ascend (`SourceNotCovered`), so the holder is bisected.
+        let holder = self
+            .lines()
+            .partition_point_clamped(|l| l.byte_range.end() <= offset);
+        let line = self
+            .walk_lines(holder, false)
+            .find_map(ValidatedLine::with_stops)
+            .or_else(|| self.adjacent_line_with_stops(self.line(holder).index, true))?;
+        let (stop, _) = line
+            .stops
+            .indexed()
             .filter(|(_, s)| s.offset <= offset)
             .max_by_key(|(_, s)| s.offset)
-            .or_else(|| stops.iter().enumerate().min_by_key(|(_, s)| s.offset))
-            .map_or(0, |(k, _)| k);
-        Some((line, k))
+            .unwrap_or_else(|| line.stops.min_by_offset());
+        Some(LocatedCaret { line, stop })
+    }
+}
+
+/// The caret position on `line` nearest the flow-space inline position `x`
+/// (spec INT-7 to INT-10).
+fn hit_on_line(line: ValidatedLine<'_>, x: f32) -> HitResult {
+    let ValidatedLine { line, stops, .. } = line;
+    // Atomic spans snap to an end (INT-10).
+    if let Some(fragment) = line
+        .atomic_fragments
+        .iter()
+        .find(|f| f.x <= x && x <= f.x + f.width)
+    {
+        return HitResult {
+            position: fragment.hit_test(x),
+            inside: true,
+        };
+    }
+    let Some(stops) = stops else {
+        // A line may have no stops, as one wholly inside an atomic span
+        // (CRT-1): it snaps to the span's ends.
+        let position = line.atomic_fragments.first().map_or(
+            CursorPosition {
+                byte_offset: line.byte_range.start(),
+                affinity: CaretAffinity::Downstream,
+            },
+            |fragment| fragment.hit_test(x),
+        );
+        return HitResult {
+            position,
+            inside: false,
+        };
+    };
+    let (first, last) = (stops.first(), stops.last());
+    // At or beyond an edge: the extreme stop on that side (INT-8). The
+    // output gate proves the stops finite and in non-decreasing `x`, so
+    // `first` and `last` are the extreme stops with their ties resolved
+    // by visual order. A position that is not a number lies beyond the
+    // left edge, never inside.
+    if x.is_nan() || x <= first.x {
+        return HitResult {
+            position: stop_position(first),
+            inside: x == first.x,
+        };
+    }
+    if x >= last.x {
+        return HitResult {
+            position: stop_position(last),
+            inside: x == last.x,
+        };
+    }
+    HitResult {
+        position: stop_position(stops.nearest_in_bounds(x)),
+        inside: true,
     }
 }
 
@@ -486,11 +499,6 @@ fn stop_position(stop: &CaretStop) -> CursorPosition {
         byte_offset: stop.offset,
         affinity: stop.affinity,
     }
-}
-
-/// The flow-space block interval of line `line`: its line box.
-fn line_block(paragraph: &PositionedParagraph, line: usize) -> (f32, f32) {
-    line_box(paragraph, &paragraph.lines[line])
 }
 
 /// The flow-space block interval of `line`, a line of `paragraph`.
