@@ -163,20 +163,8 @@ impl<'a> ValidatedInputs<'a> {
         block_end: f32,
         previous: Option<&LineGeometry>,
     ) -> Result<GeometryAnswer, LayoutInputError> {
-        let geometry = self.constraints.query_checked_geometry(
-            line_index,
-            block_start,
-            block_end,
-            previous,
-        )?;
-        match (
-            geometry.slots.is_empty(),
-            geometry.next_feature_block_offset,
-        ) {
-            (false, _) => Ok(GeometryAnswer::Open(geometry)),
-            (true, Some(clear_at)) => Ok(GeometryAnswer::Obstructed { clear_at }),
-            (true, None) => Err(LayoutInputError::InvalidLineGeometry),
-        }
+        self.constraints
+            .query_checked_geometry(line_index, block_start, block_end, previous)
     }
 }
 
@@ -195,6 +183,16 @@ pub enum GeometryAnswer {
 }
 
 impl GeometryAnswer {
+    /// Classifies an answer the provider gate (or G1, without a provider)
+    /// accepted: an empty answer carries a next offset, because `stalls`
+    /// rejects one without it and the standard slot is non-empty (spec GEO-4).
+    pub(crate) fn from_checked(geometry: LineGeometry) -> Self {
+        match geometry.next_feature_block_offset {
+            Some(clear_at) if geometry.slots.is_empty() => Self::Obstructed { clear_at },
+            _ => Self::Open(geometry),
+        }
+    }
+
     /// The answer as the provider gave it: its slots and next feature offset.
     #[must_use]
     pub fn geometry(&self) -> LineGeometry {
@@ -251,7 +249,7 @@ impl<'a> ValidatedLayout<'a> {
     pub(crate) fn edge_caret_stop(&self, line: usize, side: HangSide) -> &'a CaretStop {
         self.paragraph.lines[line]
             .extreme_caret_stop(side)
-            .expect("the output gate proved every line has caret stops")
+            .unwrap_or_else(|| panic!("line {line} has no caret stops (proved by the output gate)"))
     }
 
     /// Every glyph run of the paragraph with its glyphs' drawing origins in
