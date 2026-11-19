@@ -327,8 +327,9 @@ impl PositionedLine {
         }
     }
 
-    /// Caret stops are in visual order, lie on this line, and carry the bidi
-    /// level of the content they belong to.
+    /// Caret stops are in visual order, lie on this line, carry the bidi
+    /// level of the content they belong to, and no two share an offset at
+    /// one position.
     ///
     /// A stop's owners are the glyphs, inline boxes and tabs whose bytes
     /// contain or touch its `offset`; at a boundary either neighbour qualifies,
@@ -353,6 +354,7 @@ impl PositionedLine {
                 )
                 .collect(),
         );
+        let repeats = self.repeated_caret_stops();
         for (index, stop) in self.caret_stops.iter().enumerate() {
             let in_order = index == 0 || stop.x >= self.caret_stops[index - 1].x;
             let level_is_owned = || {
@@ -395,8 +397,29 @@ impl PositionedLine {
             {
                 return Err(LineInvariantError::InvalidCaretStop { index });
             }
+            if repeats[index] {
+                return Err(LineInvariantError::DuplicateCaretStop { index });
+            }
         }
         Ok(())
+    }
+
+    /// For each caret stop, whether it repeats the offset of an earlier stop
+    /// at the same position, within the tolerance the layout merges at
+    /// (INT-20). Sorting by offset keeps each offset's stops in `x` order, so
+    /// a stop repeats one when it repeats its predecessor there: O(n log n),
+    /// however many stops share a position (PAR-3).
+    fn repeated_caret_stops(&self) -> Vec<bool> {
+        let stops = &self.caret_stops;
+        let mut by_offset: Vec<usize> = (0..stops.len()).collect();
+        // Stable: within an offset, the stops keep their visual order.
+        by_offset.sort_by_key(|&i| stops[i].offset);
+        let mut repeats = vec![false; stops.len()];
+        for pair in by_offset.windows(2) {
+            let (earlier, later) = (&stops[pair[0]], &stops[pair[1]]);
+            repeats[pair[1]] = earlier.offset == later.offset && approx_eq(earlier.x, later.x);
+        }
+        repeats
     }
 
     /// The annotations' own records: metrics, base range, glyphs, unique ids

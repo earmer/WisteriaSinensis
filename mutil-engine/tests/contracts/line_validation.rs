@@ -878,8 +878,20 @@ fn a_caret_stop_carries_the_level_of_a_run_owning_its_offset() {
         l.validate(&ctx())
     };
     let invalid = |index| Err(LineInvariantError::InvalidCaretStop { index });
-    // Offset 1 is the run boundary: either run's level, and both stops sit
-    // at one x.
+    // Offset 1 is the run boundary: either run's level qualifies.
+    for boundary in [BidiLevel::LTR, BidiLevel::RTL] {
+        assert_eq!(
+            with(vec![
+                caret(0., 0, BidiLevel::LTR),
+                caret(50., 1, boundary),
+                caret(50., 2, BidiLevel::RTL)
+            ]),
+            Ok(()),
+            "{boundary:?}"
+        );
+    }
+    // But one offset has one stop per position (CRT-1, INT-20): a second
+    // stop for offset 1 at the same x is a duplicate, whatever its level.
     assert_eq!(
         with(vec![
             caret(0., 0, BidiLevel::LTR),
@@ -887,7 +899,7 @@ fn a_caret_stop_carries_the_level_of_a_run_owning_its_offset() {
             caret(50., 1, BidiLevel::RTL),
             caret(50., 2, BidiLevel::RTL)
         ]),
-        Ok(())
+        Err(LineInvariantError::DuplicateCaretStop { index: 2 })
     );
     // Offset 0 belongs to the level-0 run only, offset 2 to the level-1 run.
     assert_eq!(with(vec![caret(0., 0, BidiLevel::RTL)]), invalid(0));

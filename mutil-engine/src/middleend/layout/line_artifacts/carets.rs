@@ -9,6 +9,7 @@ use crate::middleend::{
     resolve_ligature_carets,
 };
 use crate::types::{AtomFlags, BidiLevel, GlyphOrientation};
+use smallvec::SmallVec;
 
 /// A candidate caret stop, with the affinity and level it takes at a
 /// direction boundary (CRT-3): upstream at its piece's end, downstream at its
@@ -78,17 +79,8 @@ impl Layout<'_, '_> {
                     .is_some_and(|span| span.is_interior(offset))
                 && !(hides_trailing && offset > visible_end && offset != bytes.start())
         };
-        // One stop per distinct `(x, offset)`.
-        let mut stops: Vec<RawStop> = Vec::new();
-        for stop in raw.into_iter().filter(|s| belongs_here(s.offset)) {
-            let recent = &stops[stops.len().saturating_sub(4)..];
-            if !recent
-                .iter()
-                .any(|s| s.offset == stop.offset && approx_eq(s.x, stop.x))
-            {
-                stops.push(stop);
-            }
-        }
+        raw.retain(|s| belongs_here(s.offset));
+        let mut stops = distinct_stops(raw);
         resolve_shared_offsets(&mut stops, line.soft_wrap());
         // The level of an entity touching `offset`, else the paragraph's.
         let level_at = |offset: usize| {
@@ -160,11 +152,13 @@ impl Layout<'_, '_> {
         {
             let direction = p.level.direction();
             let (glyphs, width) = self.cluster_glyphs(pending, cluster);
-            let first_glyph = glyphs.first().map_or(0, |g| g.glyph_id);
-            let instance = self.ast.runs[run].font_instance(c.font);
-            let carets = self
-                .shaper
-                .ligature_carets(instance, first_glyph, direction);
+            // A cluster with no glyph has no ligature to ask GDEF about; it
+            // takes the equal slots (INT-5).
+            let carets = glyphs.first().map_or_else(SmallVec::new, |glyph| {
+                let instance = self.ast.runs[run].font_instance(c.font);
+                self.shaper
+                    .ligature_carets(instance, glyph.glyph_id, direction)
+            });
             let atoms = &self.inputs.run_atoms(run)[c.atom_range.clone()];
             let mut offsets: Vec<usize> = atoms[1..].iter().map(|a| a.byte_range.start()).collect();
             let rtl = direction.is_rtl();
@@ -182,6 +176,29 @@ impl Layout<'_, '_> {
         }
         raw.push(edge(placed.x + placed.width, right));
     }
+}
+
+/// One stop per distinct `(x, offset)` (INT-20), the first emitted of each,
+/// in emission order. Two pieces that meet at an offset need not be emitted
+/// next to each other: an RTL line's trailing white space is emitted after
+/// its whole body but sits at its visual left, beside the body's last
+/// logical edge. So every stop is compared with all earlier stops of its
+/// offset, not with its recent neighbours.
+fn distinct_stops(mut raw: Vec<RawStop>) -> Vec<RawStop> {
+    let mut by_offset: Vec<usize> = (0..raw.len()).collect();
+    // Stable: emission order within an offset.
+    by_offset.sort_by_key(|&i| raw[i].offset);
+    let mut duplicate = vec![false; raw.len()];
+    for same in by_offset.chunk_by(|&a, &b| raw[a].offset == raw[b].offset) {
+        for (n, &i) in same.iter().enumerate() {
+            duplicate[i] = same[..n]
+                .iter()
+                .any(|&j| !duplicate[j] && approx_eq(raw[j].x, raw[i].x));
+        }
+    }
+    let mut duplicate = duplicate.into_iter();
+    raw.retain(|_| duplicate.next() == Some(false));
+    raw
 }
 
 /// Resolves the stops, in visual order, that share an offset (CRT-3). Those

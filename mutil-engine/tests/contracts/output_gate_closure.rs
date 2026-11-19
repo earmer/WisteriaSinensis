@@ -1,8 +1,9 @@
 //! What the output gate G4 proves for the queries behind it (ADR-0004):
 //! line boxes keep their height (`LineBoxCollapsed`) and their bottoms
 //! ascend exactly (`LineBoxesOverlap`), caret stops are in exact visual
-//! order and on character boundaries (CRT-1), and the recorded policy is
-//! one `resolve` could produce (PAR-1). Also INT-13 in a clamped paragraph.
+//! order and on character boundaries with no offset repeated at one
+//! position (CRT-1, INT-20), and the recorded policy is one `resolve`
+//! could produce (PAR-1). Also INT-13 in a clamped paragraph.
 
 use crate::common::*;
 use mutil_engine::*;
@@ -165,6 +166,175 @@ fn crt1_a_caret_stop_off_a_character_boundary_is_invalid() {
         Err((0, LineInvariantError::InvalidCaretStop { index: 1 }))
     );
     assert!(ValidatedLayout::try_from_paragraph(&p, text).is_err());
+}
+
+/// G4 on one line of `TEXT` (one LTR glyph over all six bytes) with the
+/// given caret stops: the line check, the paragraph check and the
+/// `ValidatedLayout` gate agree.
+fn check_stops(stops: Vec<CaretStop>, expected: Result<(), LineInvariantError>) {
+    let mut l = text_line(0, 0, 6);
+    l.caret_stops = stops;
+    let mut p = paragraph(&ctx(), vec![l]);
+    p.total_block_size = 10.;
+    let stops = &p.lines[0].caret_stops;
+    assert_eq!(p.lines[0].validate(&ctx()), expected, "{stops:?}");
+    let at_line = expected.map_err(|e| (0, e));
+    assert_eq!(p.validate(TEXT), at_line, "{stops:?}");
+    assert_eq!(
+        ValidatedLayout::try_from_paragraph(&p, TEXT).map(drop),
+        at_line,
+        "{stops:?}"
+    );
+}
+
+fn duplicate(index: usize) -> Result<(), LineInvariantError> {
+    Err(LineInvariantError::DuplicateCaretStop { index })
+}
+
+#[test]
+fn crt1_two_stops_with_one_offset_and_affinity_at_one_x_are_a_duplicate() {
+    use CaretAffinity::*;
+    check_stops(
+        vec![stop(0., 0, Downstream), stop(0., 0, Downstream)],
+        duplicate(1),
+    );
+    check_stops(
+        vec![
+            stop(0., 0, Downstream),
+            stop(50., 3, Downstream),
+            stop(50., 3, Downstream),
+            stop(100., 6, Upstream),
+        ],
+        duplicate(2),
+    );
+}
+
+#[test]
+fn crt1_a_repeated_offset_at_one_x_is_a_duplicate_whatever_its_affinity() {
+    use CaretAffinity::*;
+    check_stops(
+        vec![
+            stop(0., 0, Downstream),
+            stop(50., 3, Upstream),
+            stop(50., 3, Downstream),
+            stop(100., 6, Upstream),
+        ],
+        duplicate(2),
+    );
+    check_stops(
+        vec![
+            stop(0., 0, Downstream),
+            stop(50., 3, Downstream),
+            stop(50., 3, Upstream),
+            stop(100., 6, Upstream),
+        ],
+        duplicate(2),
+    );
+}
+
+#[test]
+fn crt1_a_repeat_after_another_offset_at_the_same_x_is_a_duplicate() {
+    use CaretAffinity::*;
+    check_stops(
+        vec![
+            stop(50., 2, Downstream),
+            stop(50., 3, Downstream),
+            stop(50., 2, Downstream),
+        ],
+        duplicate(2),
+    );
+    check_stops(
+        vec![
+            stop(0., 0, Downstream),
+            stop(50., 2, Downstream),
+            stop(50., 3, Downstream),
+            stop(50., 4, Downstream),
+            stop(50., 2, Upstream),
+            stop(100., 6, Upstream),
+        ],
+        duplicate(4),
+    );
+}
+
+#[test]
+fn crt1_a_repeat_within_the_geometry_tolerance_is_at_the_same_position() {
+    use CaretAffinity::*;
+    // At 50 the tolerance is the absolute 1e-3 (OUT-2).
+    for (second, expected) in [
+        (50.0005_f32, duplicate(2)),
+        (50.000_9, duplicate(2)),
+        (50.01, Ok(())),
+        (51.0, Ok(())),
+    ] {
+        check_stops(
+            vec![
+                stop(0., 0, Downstream),
+                stop(50., 3, Upstream),
+                stop(second, 3, Downstream),
+                stop(100., 6, Upstream),
+            ],
+            expected,
+        );
+    }
+}
+
+#[test]
+fn crt1_an_invalid_stop_reports_invalid_caret_stop_before_duplicate() {
+    use CaretAffinity::*;
+    // Within the tolerance of the stop before it, but a step back: out of
+    // exact visual order first.
+    check_stops(
+        vec![
+            stop(0., 0, Downstream),
+            stop(50., 3, Upstream),
+            stop(50.0_f32.next_down(), 3, Downstream),
+            stop(100., 6, Upstream),
+        ],
+        Err(LineInvariantError::InvalidCaretStop { index: 2 }),
+    );
+    // A repeat at the same x whose level no entity at offset 3 has (CRT-2).
+    let rtl = CaretStop {
+        level: BidiLevel::RTL,
+        ..stop(50., 3, Downstream)
+    };
+    check_stops(
+        vec![
+            stop(0., 0, Downstream),
+            stop(50., 3, Upstream),
+            rtl,
+            stop(100., 6, Upstream),
+        ],
+        Err(LineInvariantError::InvalidCaretStop { index: 2 }),
+    );
+}
+
+#[test]
+fn crt3_one_offset_at_two_positions_is_a_split_caret_not_a_duplicate() {
+    use CaretAffinity::*;
+    check_stops(
+        vec![
+            stop(0., 0, Downstream),
+            stop(40., 3, Upstream),
+            stop(60., 3, Downstream),
+            stop(100., 6, Upstream),
+        ],
+        Ok(()),
+    );
+}
+
+#[test]
+fn crt1_distinct_offsets_at_one_x_are_coincident_stops_not_duplicates() {
+    use CaretAffinity::*;
+    check_stops(
+        vec![
+            stop(0., 0, Downstream),
+            stop(50., 2, Downstream),
+            stop(50., 3, Downstream),
+            stop(50., 4, Upstream),
+            stop(100., 6, Upstream),
+        ],
+        Ok(()),
+    );
 }
 
 #[test]

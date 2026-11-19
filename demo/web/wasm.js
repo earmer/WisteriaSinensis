@@ -62,9 +62,11 @@ export class Engine {
     const word = BigInt.asUintN(64, BigInt(packed));
     const length = Number(word & 0xffffffffn);
     const ptr = Number(word >> 32n);
-    const text = decoder.decode(new Uint8Array(this.#exports.memory.buffer, ptr, length));
-    this.#exports.demo_free(ptr);
-    return text;
+    try {
+      return decoder.decode(new Uint8Array(this.#exports.memory.buffer, ptr, length));
+    } finally {
+      this.#exports.demo_free(ptr);
+    }
   }
 
   #text(name, ...args) {

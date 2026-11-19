@@ -652,3 +652,41 @@ impl TextShaper for MetricsShaper {
         NoopShaper.space_advance(instance, orientation)
     }
 }
+
+/// `n` one-byte decoration spans, each with an atomic span over the same
+/// byte, and their leading and trailing boundaries.
+pub fn spanned(n: usize) -> (String, ParagraphAst) {
+    let t = "a".repeat(n);
+    let mut a = ast(&t);
+    rebuild_items(&mut a, |_| vec![]);
+    for i in 0..n {
+        let r = TextRange::new(i, i + 1);
+        a.decoration_spans.push(InlineDecorationSpan {
+            span_id: i as u64,
+            byte_range: r,
+            start_padding: 0.,
+            end_padding: 0.,
+            break_mode: BoxDecorationBreak::Slice,
+        });
+        a.atomic_spans.push(AtomicEditSpan {
+            span_id: (n + i) as u64,
+            byte_range: r,
+        });
+        for edge in [SpanEdge::Leading, SpanEdge::Trailing] {
+            let off = if edge == SpanEdge::Leading { i } else { i + 1 };
+            a.items.push(WordNode::Box(BoxNode::SpanBoundary {
+                byte_range: TextRange::empty_at(off),
+                span_id: i as u64,
+                edge,
+                width: 0.,
+                bidi_level: BidiLevel::LTR,
+            }));
+            if edge == SpanEdge::Leading {
+                let text = boxed(&mut a, i, i + 1);
+                a.items.push(text);
+            }
+        }
+    }
+    a.items.push(end(n));
+    (t, a)
+}

@@ -41,6 +41,20 @@ def count(directory: Path, pattern: str) -> int:
     return sum(1 for _, line in source_lines(directory) if regex.search(line))
 
 
+def count_everywhere(pattern: str) -> int:
+    """Counts matching lines in every `.rs` file of the engine and the demo,
+    tests and benches included, build output excluded."""
+    regex = re.compile(pattern)
+    return sum(
+        1
+        for crate in (ROOT / "mutil-engine", ROOT / "demo")
+        for path in sorted(crate.rglob("*.rs"))
+        if "target" not in path.relative_to(crate).parts
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if regex.search(line)
+    )
+
+
 def under(*parts: str) -> Path:
     return ENGINE.joinpath(*parts)
 
@@ -70,6 +84,9 @@ def metrics() -> dict[str, int]:
         # Panics that rely on a gate behind them (ADR-0004 rule 5): each is
         # an assumption a gate must prove; a query handles the rest totally.
         "panics_behind_gates": count(under("middleend"), r"panic!\(|\.expect\("),
+        # Ignored tests: a test either runs in `cargo test` or is a bench in
+        # `benches/`, so no test is silently skipped.
+        "ignored_tests": count_everywhere(r"#\[ignore\b"),
     }
 
 
@@ -83,6 +100,7 @@ TARGETS = {
     "is_hanging_field_uses": 0,
     "unsafe_in_demo": 0,
     "panics_behind_gates": 0,
+    "ignored_tests": 0,
 }
 
 

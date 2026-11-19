@@ -6,7 +6,7 @@
 //! deletion ranges and the copied text; and the UTF-16 conversions.
 
 use super::output::{
-    AtomicFragment, CaretAffinity, CaretStop, HangSide, PositionedLine, PositionedParagraph,
+    AtomicFragment, CaretAffinity, CaretStop, PositionedLine, PositionedParagraph,
 };
 use super::tolerance::approx_eq;
 use super::{ValidatedInputs, ValidatedLayout};
@@ -142,11 +142,8 @@ pub struct Selection {
 /// `[C1]` (spec §6.6).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum BoxHeightStyle {
-    /// Union of selected font-instance ascent/descent, excluding gap and leading.
-    ///
-    /// **Forward contract.** Selection geometry is not computed yet; when it
-    /// is, it must query `TextShaper::font_metrics` for every
-    /// selected instance and union their ascent/descent.
+    /// Union of selected font-instance ascent/descent, excluding gap and
+    /// leading (`TextShaper::font_metrics` of every selected instance).
     #[default]
     Tight,
     /// Includes line gap and maximum inline-box height.
@@ -366,36 +363,29 @@ impl ValidatedLayout<'_> {
                 inside: false,
             };
         };
-        // Beyond an edge: the extreme stop on that side (INT-8). A position
-        // that is not a number lies beyond the left edge, never inside.
-        if x.is_nan() || x < first.x {
-            let stop = line.extreme_caret_stop(HangSide::Left).unwrap_or(first);
+        // At or beyond an edge: the extreme stop on that side (INT-8). The
+        // output gate proves the stops finite and in non-decreasing `x`, so
+        // `first` and `last` are the extreme stops with their ties resolved
+        // by visual order. A position that is not a number lies beyond the
+        // left edge, never inside.
+        if x.is_nan() || x <= first.x {
             return HitResult {
-                position: stop_position(stop),
-                inside: false,
+                position: stop_position(first),
+                inside: x == first.x,
             };
         }
-        if x > last.x {
-            let stop = line.extreme_caret_stop(HangSide::Right).unwrap_or(last);
+        if x >= last.x {
             return HitResult {
-                position: stop_position(stop),
-                inside: false,
+                position: stop_position(last),
+                inside: x == last.x,
             };
         }
-        // The nearest stop; the midpoint belongs to the right half, and of
-        // two stops at one x the one on the side of the point wins.
-        let right = stops.partition_point(|s| s.x <= x).min(stops.len() - 1);
-        let left = right.saturating_sub(1);
-        let (l, r) = (&stops[left], &stops[right]);
-        let stop = if r.x - x <= x - l.x || r.x <= x {
-            // Approaching from the left: the first stop at that x.
-            let at = stops.partition_point(|s| s.x < r.x);
-            &stops[at.min(right)]
-        } else {
-            // From the right: the last stop at the left one's x.
-            let at = stops.partition_point(|s| s.x <= l.x);
-            &stops[at.saturating_sub(1)]
-        };
+        // Strictly inside: `stops[right - 1].x <= x < stops[right].x`, so the
+        // right stop is the first of its coincident group and the left stop
+        // the last of its own. The midpoint belongs to the right half.
+        let right = stops.partition_point(|s| s.x <= x);
+        let (l, r) = (&stops[right - 1], &stops[right]);
+        let stop = if r.x - x <= x - l.x { r } else { l };
         HitResult {
             position: stop_position(stop),
             inside: true,

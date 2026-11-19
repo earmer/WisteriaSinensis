@@ -19,6 +19,7 @@ mod glue_width;
 mod hanging;
 mod hanging_regressions;
 mod hanging_roles;
+mod hit_test_coincident;
 mod justification;
 mod layout;
 mod line_only;

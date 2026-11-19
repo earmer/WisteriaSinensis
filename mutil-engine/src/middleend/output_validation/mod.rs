@@ -264,6 +264,13 @@ pub enum LineInvariantError {
         /// Index into `caret_stops`.
         index: usize,
     },
+    /// A caret stop repeats the offset of an earlier stop at the same
+    /// position, within the layout tolerance (spec INT-20: one stop per
+    /// distinct offset and position).
+    DuplicateCaretStop {
+        /// Index into `caret_stops` of the later stop.
+        index: usize,
+    },
     /// A decoration has a non-finite coordinate, a negative width or
     /// thickness, or bytes outside the line.
     InvalidDecoration {

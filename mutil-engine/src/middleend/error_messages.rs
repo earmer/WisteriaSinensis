@@ -124,6 +124,7 @@ error_messages! {
         TrailingWhitespaceOnWrongSide { run, glyph } => "trailing whitespace glyph {glyph} of run {run} is not on the far edge of the base direction",
         TrailingTabOnWrongSide { index } => "trailing tab {index} is not on the far edge of the base direction",
         InvalidCaretStop { index } => "caret stop {index} is non-finite, out of visual order, outside the line or off a character boundary, or at a bidi level that nothing owning its offset has",
+        DuplicateCaretStop { index } => "caret stop {index} repeats the offset of an earlier stop at the same position",
         InvalidDecoration { index } => "decoration {index} has a non-finite or negative extent or bytes outside the line",
         HangingNotAllowed { side } => "{side} hanging punctuation is not allowed by the hang mode",
         HangingWithoutOverflow { side } => "{side} hanging punctuation would have fitted the line, which the allow-end mode does not hang",

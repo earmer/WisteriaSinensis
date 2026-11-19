@@ -30,7 +30,7 @@ __pycache__/
 # Composed specification (scripts/build_full_spec.py)
 dist/
 
-# Temporary git worktrees of Claude Code sub-agents
-.claude/worktrees/
+# Claude Code's local launch settings and sub-agent worktrees
+.claude/
 .DS_Store
 SCAN_TEMP.md
