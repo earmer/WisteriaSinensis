@@ -17,6 +17,7 @@ use crate::types::{
     FontRef, FontVariation, GlyphOrientation, GraphemeAtom, Point, RawShapedGlyph, ShapedCluster,
     WritingMode,
 };
+use smallvec::SmallVec;
 
 /// Layout inputs that passed the input gate (spec AX-3, G1), with the policy
 /// the gate resolved.
@@ -116,7 +117,7 @@ impl<'a> ValidatedInputs<'a> {
     /// # Panics
     /// When `items[item]` is not a text box.
     #[must_use]
-    pub fn text_view(&self, item: usize) -> TextBoxView<'a> {
+    pub(crate) fn text_view(&self, item: usize) -> TextBoxView<'a> {
         self.text_box(item)
             .unwrap_or_else(|| panic!("items[{item}] is not a text box"))
     }
@@ -173,7 +174,7 @@ impl<'a> ValidatedInputs<'a> {
             geometry.next_feature_block_offset,
         ) {
             (false, _) => Ok(GeometryAnswer::Open(geometry)),
-            (true, Some(clear_at)) => Ok(GeometryAnswer::Obstructed { geometry, clear_at }),
+            (true, Some(clear_at)) => Ok(GeometryAnswer::Obstructed { clear_at }),
             (true, None) => Err(LayoutInputError::InvalidLineGeometry),
         }
     }
@@ -185,10 +186,8 @@ pub enum GeometryAnswer {
     /// At least one slot is available.
     Open(LineGeometry),
     /// No slot is available; the gate proved the answer points ahead
-    /// (spec GEO-4).
+    /// (spec GEO-4). The answer itself is empty, so only its offset is kept.
     Obstructed {
-        /// The empty answer.
-        geometry: LineGeometry,
         /// The next block start at which geometry may change, beyond the
         /// queried start by a measurement.
         clear_at: f32,
@@ -196,11 +195,15 @@ pub enum GeometryAnswer {
 }
 
 impl GeometryAnswer {
-    /// The answer's slots and next feature offset.
+    /// The answer as the provider gave it: its slots and next feature offset.
     #[must_use]
-    pub fn geometry(&self) -> &LineGeometry {
+    pub fn geometry(&self) -> LineGeometry {
         match self {
-            Self::Open(geometry) | Self::Obstructed { geometry, .. } => geometry,
+            Self::Open(geometry) => geometry.clone(),
+            Self::Obstructed { clear_at } => LineGeometry {
+                slots: SmallVec::new(),
+                next_feature_block_offset: Some(*clear_at),
+            },
         }
     }
 }
@@ -245,7 +248,7 @@ impl<'a> ValidatedLayout<'a> {
     /// # Panics
     /// When `line` is not an index into the paragraph's lines.
     #[must_use]
-    pub fn edge_caret_stop(&self, line: usize, side: HangSide) -> &'a CaretStop {
+    pub(crate) fn edge_caret_stop(&self, line: usize, side: HangSide) -> &'a CaretStop {
         self.paragraph.lines[line]
             .extreme_caret_stop(side)
             .expect("the output gate proved every line has caret stops")

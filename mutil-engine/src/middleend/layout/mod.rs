@@ -110,10 +110,10 @@ fn probe_first_line(
                 0,
                 block_start,
                 block_start + tallest,
-                Some(probe.geometry()),
+                Some(&probe.geometry()),
             )?;
         }
-        let GeometryAnswer::Obstructed { clear_at, .. } = probe else {
+        let GeometryAnswer::Obstructed { clear_at } = probe else {
             return Ok(());
         };
         block_start = advance_clearance(&mut obstructed, clear_at)?;
@@ -397,7 +397,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             )?;
             let mut geometry = match answer {
                 GeometryAnswer::Open(geometry) => geometry,
-                GeometryAnswer::Obstructed { clear_at, .. } => {
+                GeometryAnswer::Obstructed { clear_at } => {
                     cursor.block_top = advance_clearance(&mut obstructed, clear_at)?;
                     continue;
                 }
@@ -423,7 +423,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                         return Ok((line, end));
                     }
                     GeometryAnswer::Open(open) => geometry = open,
-                    GeometryAnswer::Obstructed { clear_at, .. } => {
+                    GeometryAnswer::Obstructed { clear_at } => {
                         cursor.block_top = advance_clearance(&mut obstructed, clear_at)?;
                         continue 'place;
                     }
@@ -440,6 +440,9 @@ fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> Vec<Token<'a>> {
     let ast = inputs.ast();
     let mut tokens = Vec::with_capacity(ast.items.len() + ast.clusters.len());
     // The gate proved every boundary names a span of the paragraph (AST-8).
+    // A map, not a stack of open spans: popping a stack would `expect` the
+    // pairing the gate proved (pipeline rule 4). It is built only for
+    // paragraphs with decoration spans, which are few.
     let span_of_id: HashMap<u64, usize> = ast
         .decoration_spans
         .iter()

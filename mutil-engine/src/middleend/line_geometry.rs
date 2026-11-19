@@ -220,21 +220,19 @@ impl PositionedLine {
     }
 
     /// The slots whose content block holds `[lo, hi]` ([`PositionedSlot::holds`]),
-    /// with their indexes. The slots ascend and are disjoint (spec GEO-3), so a
-    /// binary search finds the first slot ending late enough and the scan stops
-    /// at the first one that starts too late.
+    /// with their indexes. A linear scan: until G4 has checked each slot's
+    /// content against its constraint, content blocks need not ascend (a slot
+    /// may overflow past the next), and `role` and the hanging queries are
+    /// public on unvalidated lines too, so no search may assume an order.
     pub(crate) fn slots_holding(
         &self,
         lo: f32,
         hi: f32,
         eps: f32,
     ) -> impl Iterator<Item = (usize, &PositionedSlot)> {
-        let from = self.slots.partition_point(|s| s.content_end() + eps < hi);
         self.slots
             .iter()
             .enumerate()
-            .skip(from)
-            .take_while(move |(_, s)| s.content_start - eps <= lo)
             .filter(move |(_, s)| s.holds(lo, hi, eps))
     }
 
