@@ -1,7 +1,7 @@
 //! Cluster reconstruction and window-reshaping helpers shared by the shaping
 //! backends (spec SHP-6, SHP-13).
 
-use super::{LeadingEdit, TrailingEdit};
+use super::{LeadingEdit, ShapeOutput, TrailingEdit};
 use crate::types::{
     AtomFlags, FontId, FontRef, GraphemeAtom, RawShapedGlyph, ShapedCluster, ShapingRun, TextRange,
 };
@@ -14,15 +14,14 @@ pub(crate) fn push_empty_clusters(
     atoms: &[GraphemeAtom],
     range: core::ops::Range<usize>,
     font: FontId,
-    output_clusters: &mut Vec<ShapedCluster>,
-    output_glyphs: &[RawShapedGlyph],
+    output: &mut ShapeOutput,
 ) {
     if range.is_empty() {
         return;
     }
-    let at = output_glyphs.len();
+    let at = output.glyphs.len();
     if run.orientation == crate::types::GlyphOrientation::HorizontalInVertical {
-        output_clusters.push(ShapedCluster {
+        output.clusters.push(ShapedCluster {
             orientation: run.orientation,
             byte_range: TextRange::new(
                 atoms[range.start].byte_range.start(),
@@ -41,7 +40,7 @@ pub(crate) fn push_empty_clusters(
     }
     for (offset, atom) in atoms[range.clone()].iter().enumerate() {
         let index = range.start + offset;
-        output_clusters.push(ShapedCluster {
+        output.clusters.push(ShapedCluster {
             orientation: run.orientation,
             byte_range: atom.byte_range,
             atom_range: index..index + 1,
@@ -95,12 +94,15 @@ pub(crate) fn push_clusters(
     range: core::ops::Range<usize>,
     glyphs: &[TaggedGlyph],
     fallback_font: FontId,
-    output_clusters: &mut Vec<ShapedCluster>,
-    output_glyphs: &mut Vec<RawShapedGlyph>,
+    output: &mut ShapeOutput,
 ) {
     if range.is_empty() {
         return;
     }
+    let ShapeOutput {
+        clusters: output_clusters,
+        glyphs: output_glyphs,
+    } = output;
     struct Group {
         min_atom: usize,
         max_atom: usize,
@@ -311,42 +313,33 @@ pub(crate) fn finish_window<S>(
     run: &ShapingRun,
     atoms: &[GraphemeAtom],
     plan: &WindowPlan<'_>,
-    output_clusters: &mut Vec<ShapedCluster>,
-    output_glyphs: &mut Vec<RawShapedGlyph>,
-    shape_kept: impl FnOnce(&mut Vec<ShapedCluster>, &mut Vec<RawShapedGlyph>) -> (EdgeFonts, S),
+    output: &mut ShapeOutput,
+    shape_kept: impl FnOnce(&mut ShapeOutput) -> (EdgeFonts, S),
     synthesize: impl FnOnce(S, EdgeFonts) -> (Vec<RawShapedGlyph>, Vec<RawShapedGlyph>),
 ) {
-    let first_cluster = output_clusters.len();
+    let first_cluster = output.clusters.len();
     push_empty_clusters(
         run,
         atoms,
         plan.first..plan.kept_start,
         FontId::default(),
-        output_clusters,
-        output_glyphs,
+        output,
     );
-    let kept_first = output_clusters.len();
-    let (edges, shaped) = shape_kept(output_clusters, output_glyphs);
-    for cluster in &mut output_clusters[first_cluster..kept_first] {
+    let kept_first = output.clusters.len();
+    let (edges, shaped) = shape_kept(output);
+    for cluster in &mut output.clusters[first_cluster..kept_first] {
         cluster.font = FontRef::unscaled(edges.first);
     }
-    push_empty_clusters(
-        run,
-        atoms,
-        plan.kept_end..plan.end,
-        edges.last,
-        output_clusters,
-        output_glyphs,
-    );
-    let Some(head) = output_clusters.get_mut(first_cluster) else {
+    push_empty_clusters(run, atoms, plan.kept_end..plan.end, edges.last, output);
+    let Some(head) = output.clusters.get_mut(first_cluster) else {
         return;
     };
     head.safe_to_concat_before = false;
     head.safe_to_break_before &= plan.leading_text.is_empty();
     let (leading, trailing) = synthesize(shaped, edges);
     attach_synthesized(
-        &mut output_clusters[first_cluster..],
-        output_glyphs,
+        &mut output.clusters[first_cluster..],
+        &mut output.glyphs,
         leading,
         trailing,
     );
@@ -429,17 +422,9 @@ mod tests {
             tag(3, glyph(30, 6.0), false, true),
             tag(1, glyph(40, 2.0), false, false),
         ];
-        let mut clusters = Vec::new();
-        let mut glyphs = Vec::new();
-        push_clusters(
-            &run,
-            &atoms,
-            0..4,
-            &tagged,
-            FontId(1),
-            &mut clusters,
-            &mut glyphs,
-        );
+        let mut output = ShapeOutput::default();
+        push_clusters(&run, &atoms, 0..4, &tagged, FontId(1), &mut output);
+        let ShapeOutput { clusters, glyphs } = output;
         assert_eq!(clusters.len(), 2);
         assert_eq!(clusters[0].atom_range, 0..1);
         assert_eq!(clusters[0].glyph_range, 0..1);
@@ -466,20 +451,11 @@ mod tests {
             tag(3, glyph(30, 3.0), false, false),
             tag(1, glyph(40, 4.0), false, false),
         ];
-        let mut clusters = Vec::new();
-        let mut glyphs = Vec::new();
-        push_clusters(
-            &run,
-            &atoms,
-            0..4,
-            &tagged,
-            FontId(1),
-            &mut clusters,
-            &mut glyphs,
-        );
-        assert_eq!(clusters.len(), 1);
-        assert_eq!(clusters[0].atom_range, 0..4);
-        assert_eq!(clusters[0].glyph_range, 0..4);
+        let mut output = ShapeOutput::default();
+        push_clusters(&run, &atoms, 0..4, &tagged, FontId(1), &mut output);
+        assert_eq!(output.clusters.len(), 1);
+        assert_eq!(output.clusters[0].atom_range, 0..4);
+        assert_eq!(output.clusters[0].glyph_range, 0..4);
 
         // `[0, 3, 1, 2]`: `1` merges with `3` (`1..=3`), then `2` stays in
         // `1..=3` without splitting `0..1` or creating an overlapping range.
@@ -489,17 +465,9 @@ mod tests {
             tag(1, glyph(30, 3.0), false, false),
             tag(2, glyph(40, 4.0), false, false),
         ];
-        clusters.clear();
-        glyphs.clear();
-        push_clusters(
-            &run,
-            &atoms,
-            0..4,
-            &tagged,
-            FontId(1),
-            &mut clusters,
-            &mut glyphs,
-        );
+        output = ShapeOutput::default();
+        push_clusters(&run, &atoms, 0..4, &tagged, FontId(1), &mut output);
+        let clusters = output.clusters;
         assert_eq!(clusters.len(), 2);
         assert_eq!(clusters[0].atom_range, 0..1);
         assert_eq!(clusters[0].glyph_range, 0..1);
@@ -533,19 +501,21 @@ mod tests {
     fn attach_synthesized_updates_edges_and_interior_ranges() {
         let run = sample_run();
         let atoms = sample_atoms(3);
-        let mut clusters = Vec::new();
-        let mut glyphs = Vec::new();
-        push_empty_clusters(&run, &atoms, 0..1, FontId(1), &mut clusters, &glyphs);
+        let mut output = ShapeOutput::default();
+        push_empty_clusters(&run, &atoms, 0..1, FontId(1), &mut output);
         push_clusters(
             &run,
             &atoms,
             1..2,
             &[tag(1, glyph(5, 3.0), false, false)],
             FontId(1),
-            &mut clusters,
-            &mut glyphs,
+            &mut output,
         );
-        push_empty_clusters(&run, &atoms, 2..3, FontId(1), &mut clusters, &glyphs);
+        push_empty_clusters(&run, &atoms, 2..3, FontId(1), &mut output);
+        let ShapeOutput {
+            mut clusters,
+            mut glyphs,
+        } = output;
 
         let mut lead = glyph(100, 2.0);
         lead.is_synthesized = true;
