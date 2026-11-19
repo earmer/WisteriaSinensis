@@ -298,6 +298,14 @@ pub fn check_layout_inputs(
     super::ValidatedInputs::try_from_ast(ast, text, constraints, options).map(drop)
 }
 
+/// A paragraph AST covers one paragraph: the document text is split first.
+fn check_no_paragraph_separator(text: &str) -> Result<(), LayoutInputError> {
+    if text.chars().any(is_paragraph_separator) {
+        return Err(LayoutInputError::ParagraphSeparatorInText);
+    }
+    Ok(())
+}
+
 /// [`check_layout_inputs`], returning the policy it resolved on the way so
 /// that layout resolves the strut once.
 pub(super) fn validate_layout_inputs(
@@ -307,10 +315,7 @@ pub(super) fn validate_layout_inputs(
     options: &LayoutOptions,
 ) -> Result<LayoutPolicySnapshot, LayoutInputError> {
     let policy = LayoutPolicySnapshot::resolve(ast, constraints, options)?;
-    // A paragraph AST covers one paragraph: split the document text first.
-    if text.chars().any(is_paragraph_separator) {
-        return Err(LayoutInputError::ParagraphSeparatorInText);
-    }
+    check_no_paragraph_separator(text)?;
     // Phase order is error precedence. `check_storage` and `check_spans`
     // return the proofs that the later phases take as arguments.
     let boxes = storage::check_storage(ast)?;

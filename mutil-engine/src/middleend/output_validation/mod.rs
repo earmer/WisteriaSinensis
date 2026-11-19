@@ -253,7 +253,7 @@ pub enum LineInvariantError {
         index: usize,
     },
     /// A caret stop has a non-finite `x`, is out of visual order, lies outside
-    /// the line's bytes or belongs to another line, or has a bidi level that
+    /// the line's bytes, or has a bidi level that
     /// no glyph, box or tab owning its offset has. At an offset no entity
     /// touches (glyph-less glue, an empty line) the level is the paragraph
     /// level or that of the nearest entity on either side (spec CRT-2).
@@ -519,13 +519,23 @@ impl PositionedLine {
         let glyphs = self.sourced_glyphs();
         self.check_caret_stops(ctx, &glyphs)?;
         self.check_annotation_records(ctx)?;
+        self.check_slots_and_content(ctx, &glyphs)
+    }
+
+    /// Steps 6 to 9 of [`PositionedLine::validate`]: the slots, and, for a
+    /// line with a body, everything placed in them.
+    fn check_slots_and_content(
+        &self,
+        ctx: &LineContext,
+        glyphs: &SourcedGlyphs<'_>,
+    ) -> Result<(), LineInvariantError> {
         let Some(body) = self.check_slots(ctx)? else {
             return self.check_nothing_outside_slots();
         };
         self.check_glyph_placement(ctx, &body)?;
         self.check_hanging(ctx, &body)?;
         self.check_object_placement(ctx, &body)?;
-        self.check_annotation_placement(ctx, &body, &glyphs)?;
+        self.check_annotation_placement(ctx, &body, glyphs)?;
         self.check_span_fragments()?;
         self.check_slot_overflow(ctx, &body)?;
         self.check_slot_spans(ctx.base_direction)
