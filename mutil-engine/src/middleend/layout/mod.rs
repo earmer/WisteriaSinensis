@@ -19,6 +19,7 @@ mod justify;
 mod line_artifacts;
 mod line_box;
 mod line_builder;
+mod visual_runs;
 
 use crate::frontend::{
     AnnotationSide, BoxNode, DiscretionaryNode, GlueNode, InlineObjectBox, ParagraphAst, SpanEdge,

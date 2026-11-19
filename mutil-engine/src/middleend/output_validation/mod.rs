@@ -4,6 +4,7 @@
 use crate::middleend::{HangSide, LineContext, PositionedGlyph, PositionedLine};
 use crate::types::{BidiLevel, TextRange};
 
+mod body_checks;
 mod line_checks;
 mod paragraph;
 mod slot_checks;

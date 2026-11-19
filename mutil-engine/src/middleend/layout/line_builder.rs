@@ -3,15 +3,15 @@
 
 use super::breaking::within;
 use super::hanging::{EndHang, LineHangs, clip_to_content};
+use super::visual_runs::VisualRuns;
 use super::{Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Reshapes, Token};
 use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_order};
 use crate::frontend::{DiscretionaryNode, SpanEdge};
 use crate::middleend::{
     DecorationKind, DecorationLine, HangingWhitespaceMode, InlineSlotConstraint, LayoutInputError,
-    LineGeometry, PositionedGlyph, PositionedInlineBox, PositionedLine, PositionedSlot,
-    PositionedTab, VisualGlyphRun,
+    LineGeometry, PositionedLine, PositionedSlot, VisualGlyphRun,
 };
-use crate::types::{AtomFlags, BidiLevel, RawShapedGlyph, TextRange, WritingMode};
+use crate::types::{AtomFlags, BidiLevel, TextRange, WritingMode};
 use smallvec::SmallVec;
 use std::ops::Deref;
 
@@ -21,25 +21,6 @@ use std::ops::Deref;
 pub(super) struct LineBounds {
     pub(super) body_lo: f32,
     pub(super) body_hi: f32,
-}
-
-/// A line's glyph runs before alignment, the inline extent of its visible
-/// entities (`None` when it has none), and the end of its last visible
-/// source byte.
-struct VisualRuns {
-    runs: Vec<VisualGlyphRun>,
-    extent: Option<(f32, f32)>,
-    visible_end: usize,
-}
-
-impl VisualRuns {
-    fn extend(&mut self, a: f32, b: f32) {
-        let (lo, hi) = (a.min(b), a.max(b));
-        self.extent = Some(
-            self.extent
-                .map_or((lo, hi), |(l, h)| (l.min(lo), h.max(hi))),
-        );
-    }
 }
 
 /// Where a line's content block lies in its slot (SLT-3), after alignment.
@@ -118,6 +99,23 @@ struct Pads {
     right: f32,
 }
 
+impl Pads {
+    /// The line-end pad `pre` and line-start pad `post` on their physical sides.
+    fn new(rtl: bool, pre: f32, post: f32) -> Self {
+        if rtl {
+            Self {
+                left: pre,
+                right: post,
+            }
+        } else {
+            Self {
+                left: post,
+                right: pre,
+            }
+        }
+    }
+}
+
 impl<'i, 'a> Layout<'i, 'a> {
     /// Places the line `(cursor.token_start, end]` in the first slot of `geometry`.
     pub(super) fn place(
@@ -146,7 +144,7 @@ impl<'i, 'a> Layout<'i, 'a> {
 
         let rtl = self.base.is_rtl();
         let post = cursor.post_break_width;
-        let (left_pad, right_pad) = if rtl { (pre, post) } else { (post, pre) };
+        let pads = Pads::new(rtl, pre, post);
         let first_line = cursor.first_line();
         let start = self.start_hang(&placed[..body_len], first_line, post, pending);
         // Widths in logical order: a tab's depends on its distance from the
@@ -181,19 +179,8 @@ impl<'i, 'a> Layout<'i, 'a> {
         let visible_width = distance + pre - LineHangs::protrusion(end);
         let slack = slot.width() - visible_width;
         let is_justified = compressible
-            && slot.width().is_finite()
-            && (soft_wrap || slack < 0.0)
-            && self.justify(&mut placed[..body_len], slack, pending);
-        let body_end = self.place_visual(
-            &mut placed,
-            &order,
-            body_len,
-            Pads {
-                left: left_pad,
-                right: right_pad,
-            },
-            hangs,
-        );
+            && self.justify_slack(&mut placed[..body_len], slot, slack, soft_wrap, pending);
+        let body_end = self.place_visual(&mut placed, &order, body_len, pads, hangs);
 
         self.build_line(
             PlacedLine {
@@ -201,7 +188,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 order,
                 byte_range: TextRange::new(cursor.byte_start, byte_end),
                 bounds: LineBounds {
-                    body_lo: left_pad,
+                    body_lo: pads.left,
                     body_hi: body_end,
                 },
                 end_break,
@@ -213,6 +200,19 @@ impl<'i, 'a> Layout<'i, 'a> {
             geometry,
             pending,
         )
+    }
+
+    /// Justifies a compressible line whose slot is finite when it is
+    /// soft-wrapped or overfull; whether it did (ST3-3).
+    fn justify_slack(
+        &self,
+        body: &mut [PlacedPiece<'a>],
+        slot: InlineSlotConstraint,
+        slack: f32,
+        soft_wrap: bool,
+        pending: &Reshapes,
+    ) -> bool {
+        slot.width().is_finite() && (soft_wrap || slack < 0.0) && self.justify(body, slack, pending)
     }
 
     /// Sets each piece's width in logical order from the pen position
@@ -507,138 +507,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             line,
             content: ContentBlock { start, width },
         }
-    }
-
-    /// The line's glyph runs in visual order (OUT-3), the inline extent of
-    /// their glyphs, objects and tabs, and the end of the last visible
-    /// source byte, in one pass over the body.
-    fn build_visual_runs(&self, line: &PlacedLine<'_>, pending: &Reshapes) -> VisualRuns {
-        let mut out = VisualRuns {
-            runs: Vec::new(),
-            extent: None,
-            visible_end: line.byte_range.start(),
-        };
-        for &k in &line.order {
-            let p = line.placed[k];
-            match p.piece.kind {
-                PieceKind::Cluster { run, cluster } => {
-                    self.push_cluster_glyphs(&mut out, &p, (run, cluster), pending)
-                }
-                PieceKind::Object(_) | PieceKind::Tab => {
-                    out.extend(p.x, p.x + p.width);
-                    out.visible_end = out.visible_end.max(p.piece.bytes.end());
-                }
-                PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => {}
-            }
-        }
-        out
-    }
-
-    /// Appends the glyphs of placed cluster `p` to the line's runs, merging
-    /// into the last run when font, level, size, orientation and variations
-    /// agree.
-    fn push_cluster_glyphs(
-        &self,
-        out: &mut VisualRuns,
-        p: &PlacedPiece<'_>,
-        (run, cluster): (usize, usize),
-        pending: &Reshapes,
-    ) {
-        let r = &self.ast.runs[run];
-        let c = &self.ast.clusters[cluster];
-        let (glyphs, _) = self.cluster_glyphs(pending, cluster);
-        if glyphs.is_empty() {
-            return;
-        }
-        // Justification after an RTL cluster lies before its first glyph
-        // in visual order, after an LTR one on its last glyph (ST3-2).
-        let level = p.piece.level;
-        let rtl_cluster = level.direction().is_rtl();
-        let mut pen = p.x + if rtl_cluster { p.expansion } else { 0.0 };
-        let mut make_glyph = |g: &RawShapedGlyph| {
-            // The extent counts the shaped advance, not the expansion.
-            if g.x_advance != 0.0 {
-                out.extend(pen, pen + g.x_advance);
-            }
-            let glyph = PositionedGlyph {
-                glyph_id: g.glyph_id,
-                x: pen,
-                x_offset: g.x_offset,
-                y_offset: g.y_offset + p.y_shift,
-                advance: g.x_advance,
-                byte_range: (!g.is_synthesized).then_some(c.byte_range),
-            };
-            pen += g.x_advance;
-            glyph
-        };
-        let mut positioned: Vec<PositionedGlyph> = if rtl_cluster {
-            glyphs.iter().rev().map(&mut make_glyph).collect()
-        } else {
-            glyphs.iter().map(&mut make_glyph).collect()
-        };
-        if !glyphs.iter().all(|g| g.is_synthesized) {
-            out.visible_end = out.visible_end.max(p.piece.bytes.end());
-        }
-        if !rtl_cluster && let Some(last) = positioned.last_mut() {
-            last.advance += p.expansion;
-        }
-        let same_run = out.runs.last_mut().filter(|v| {
-            v.font == c.font
-                && v.bidi_level == level
-                && v.font_size == r.font_size
-                && v.orientation == c.orientation
-                && v.variations.as_slice() == r.features.variations()
-        });
-        if let Some(v) = same_run {
-            v.byte_range = v.byte_range.cover(c.byte_range);
-            v.glyphs.extend(positioned);
-        } else {
-            out.runs.push(VisualGlyphRun {
-                orientation: c.orientation,
-                font_size: r.font_size,
-                variations: r.features.variations().iter().copied().collect(),
-                font: c.font,
-                bidi_level: level,
-                byte_range: c.byte_range,
-                glyphs: positioned,
-            });
-        }
-    }
-
-    /// Boxes and tabs are built in logical order directly.
-    fn build_boxes_and_tabs(
-        &self,
-        placed: &[PlacedPiece<'_>],
-        slot: InlineSlotConstraint,
-    ) -> (Vec<PositionedInlineBox>, Vec<PositionedTab>) {
-        let mut visual_boxes: Vec<PositionedInlineBox> = Vec::new();
-        let mut tabs: Vec<PositionedTab> = Vec::new();
-        for p in placed {
-            match p.piece.kind {
-                PieceKind::Object(object) => {
-                    let (w, a, d) = Self::fitted_object(object, slot);
-                    visual_boxes.push(PositionedInlineBox {
-                        baseline_align: object.baseline_align,
-                        box_id: object.box_id,
-                        byte_range: object.byte_range,
-                        x: p.x,
-                        y: -p.y_shift,
-                        width: w,
-                        ascent: a,
-                        descent: d,
-                        overflow_policy: object.overflow_policy,
-                        bidi_level: object.bidi_level,
-                    });
-                }
-                PieceKind::Tab => tabs.push(PositionedTab {
-                    byte_range: p.piece.bytes,
-                    x: p.x,
-                    width: p.width,
-                }),
-                PieceKind::Cluster { .. } | PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => {}
-            }
-        }
-        (visual_boxes, tabs)
     }
 }
 
