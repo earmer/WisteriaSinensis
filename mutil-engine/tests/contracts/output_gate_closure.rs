@@ -476,12 +476,17 @@ fn boxed_line(y: f32, ascent: f32, descent: f32) -> PositionedParagraph {
     p
 }
 
-/// G4 on `boxed_line(y, ascent, descent)`: the line check, the paragraph
-/// check and the `ValidatedLayout` gate agree.
+/// G4 on `boxed_line(y, ascent, descent)`.
 fn check_box(y: f32, ascent: f32, descent: f32, expected: Result<(), LineInvariantError>) {
-    let p = boxed_line(y, ascent, descent);
-    let fields = (y, ascent, descent);
-    assert_eq!(p.lines[0].validate(&ctx()), expected, "{fields:?}");
+    check_boxed(boxed_line(y, ascent, descent), expected);
+}
+
+/// G4 on a one-line paragraph carrying a box: the line check, the
+/// paragraph check and the `ValidatedLayout` gate agree.
+fn check_boxed(p: PositionedParagraph, expected: Result<(), LineInvariantError>) {
+    let l = &p.lines[0];
+    let fields = (l.baseline_y, &l.visual_boxes[0]);
+    assert_eq!(l.validate(&ctx()), expected, "{fields:?}");
     let at_line = expected.map_err(|e| (0, e));
     assert_eq!(p.validate(TEXT), at_line, "{fields:?}");
     assert_eq!(
@@ -526,4 +531,58 @@ fn int16_a_box_with_large_but_finite_extents_about_the_baseline_is_valid() {
     // `ascent - y` is 2e38 and `descent + y` is 1e38 + 1: both finite.
     check_box(-1e38, 1e38, 1., Ok(()));
     check_box(1e38, 5., 1e38, Ok(()));
+}
+
+/// `boxed_line(y, ascent, descent)` with its baseline moved to `FAR` and a
+/// line box `FAR - 1e38 .. FAR` tall enough that f32 steps there do not
+/// collapse it (PAR-2), ending the block. `FAR ± 1e38` is finite, so the
+/// line's own metrics are (BOX-1).
+fn far_boxed_line(y: f32, ascent: f32, descent: f32) -> PositionedParagraph {
+    let mut p = boxed_line(y, ascent, descent);
+    let l = &mut p.lines[0];
+    l.baseline_y = FAR;
+    l.ascent = 1e38;
+    l.descent = 0.;
+    l.line_height = 1e38;
+    p.total_block_size = FAR;
+    p
+}
+
+const FAR: f32 = 2e38;
+
+#[test]
+fn int16_a_box_whose_bottom_edge_from_a_far_baseline_overflows_is_invalid() {
+    // `descent + y` is 2e38 and `ascent - y` is -1e38: both finite. But the
+    // edge `baseline_y + (descent + y)` is 4e38: infinite in f32.
+    assert!((1e38_f32 + 1e38_f32).is_finite());
+    assert!((FAR + 2e38).is_infinite());
+    check_boxed(
+        far_boxed_line(1e38, 5., 1e38),
+        Err(LineInvariantError::InvalidInlineBox { index: 0 }),
+    );
+}
+
+#[test]
+fn int16_a_box_whose_top_extent_reaches_past_f32_from_a_far_baseline_is_invalid() {
+    // The mirror case: `ascent - y` is 2e38 and `descent + y` is -1e38, both
+    // finite. Vertical-lr puts that extent on the far side of the baseline,
+    // so `baseline_y + (ascent - y)` must be finite too, and it is 4e38.
+    assert!((1e38_f32 - -1e38_f32).is_finite());
+    assert!((FAR + 2e38).is_infinite());
+    check_boxed(
+        far_boxed_line(-1e38, 1e38, 1.),
+        Err(LineInvariantError::InvalidInlineBox { index: 0 }),
+    );
+}
+
+#[test]
+fn int16_a_box_whose_edges_from_a_far_baseline_stay_finite_is_valid() {
+    // The far line on its own, then extents of 2e37 either way: every edge
+    // `2e38 ± 2e37` is finite.
+    let mut p = far_boxed_line(0., 5., 1.);
+    p.lines[0].visual_boxes.clear();
+    assert_eq!(p.validate(TEXT), Ok(()));
+    assert!((FAR + 2e37).is_finite());
+    check_boxed(far_boxed_line(1e37, 5., 1e37), Ok(()));
+    check_boxed(far_boxed_line(-1e37, 1e37, 1.), Ok(()));
 }
