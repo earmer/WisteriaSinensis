@@ -33,6 +33,8 @@ pub(super) struct LayoutScratch<'a> {
     pub(super) logical: Vec<LogicalPiece<'a>>,
     /// The body's levels, for UAX #9 L1 and L2.
     pub(super) levels: Vec<BidiLevel>,
+    /// The body's visual order (UAX #9 L2).
+    pub(super) order: Vec<usize>,
     /// Each piece's advance, by logical index.
     pub(super) widths: Vec<f32>,
     /// Each piece's justification inside its advance (ST3-2).

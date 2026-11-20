@@ -8,7 +8,7 @@ use super::line_box::LineBoxMetrics;
 use super::scratch::{LayoutScratch, LogicalPiece, build_placed};
 use super::visual_runs::VisualRuns;
 use super::{Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Reshapes, Token};
-use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_order};
+use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order_into as bidi_order_into};
 use crate::frontend::{DiscretionaryNode, SpanEdge};
 use crate::middleend::{
     DecorationKind, DecorationLine, HangingWhitespaceMode, InlineSlotConstraint, LayoutInputError,
@@ -44,7 +44,7 @@ impl ContentBlock {
 /// relative to the body's start.
 pub(super) struct PlacedLine<'l, 'a> {
     pub(super) placed: &'l mut [PlacedPiece<'a>],
-    pub(super) order: Vec<usize>,
+    pub(super) order: &'l [usize],
     pub(super) visual: &'l VisualIndex,
     pub(super) byte_range: TextRange,
     pub(super) bounds: LineBounds,
@@ -160,6 +160,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let LayoutScratch {
             logical,
             levels,
+            order,
             widths,
             expansions,
             xs,
@@ -174,7 +175,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             .rposition(|p| p.piece.is_content())
             .map_or(0, |k| k + 1);
         self.apply_l1(logical, levels);
-        let order = visual_order(&logical[..body_len], levels);
+        visual_order_into(&logical[..body_len], levels, order);
         let request = BodyRequest {
             cursor,
             pre,
@@ -186,11 +187,11 @@ impl<'i, 'a> Layout<'i, 'a> {
             is_justified,
         } = self.measure_line(logical, body_len, widths, expansions, &request, pending);
         let pads = Pads::new(self.base.is_rtl(), pre, cursor.post_break_width());
-        let body_end = self.place_visual(logical, &order, widths, xs, pads, hangs);
+        let body_end = self.place_visual(logical, order, widths, xs, pads, hangs);
         let byte_range = TextRange::new(cursor.byte_start, byte_end);
-        let line_box = self.compute_line_box(logical, &order, y_shifts, byte_range, slot)?;
+        let line_box = self.compute_line_box(logical, order, y_shifts, byte_range, slot)?;
         build_placed(placed, logical, [xs, widths, expansions, y_shifts]);
-        visual.rebuild(placed, &order);
+        visual.rebuild(placed, order);
         let line = PlacedLine {
             placed,
             order,
@@ -472,8 +473,11 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut span_fragments = self.span_fragments(&line);
 
         let mut decorations: Vec<DecorationLine> = Vec::new();
-        for kind in [DecorationKind::Underline, DecorationKind::Strikethrough] {
-            self.decorations(kind, &line, &mut decorations)?;
+        if self.has_underline {
+            self.decorations(DecorationKind::Underline, &line, &mut decorations)?;
+        }
+        if self.has_strikethrough {
+            self.decorations(DecorationKind::Strikethrough, &line, &mut decorations)?;
         }
         let atomic_fragments = self.atomic_fragments(&line);
         clip_to_content(
@@ -581,9 +585,21 @@ impl<'i, 'a> Layout<'i, 'a> {
 }
 
 /// Visual indices of a line's pieces from their levels (UAX #9 L2, spec
-/// ST2-2), through the frontend's shared rule; `levels` is a working buffer.
-pub(super) fn visual_order(body: &[LogicalPiece<'_>], levels: &mut Vec<BidiLevel>) -> Vec<usize> {
+/// ST2-2), through the frontend's shared rule; `levels` and `order` are working
+/// buffers.
+pub(super) fn visual_order_into(
+    body: &[LogicalPiece<'_>],
+    levels: &mut Vec<BidiLevel>,
+    order: &mut Vec<usize>,
+) {
     levels.clear();
     levels.extend(body.iter().map(|p| p.piece.level));
-    bidi_order(levels)
+    bidi_order_into(levels, order);
+}
+
+#[cfg(test)]
+pub(super) fn visual_order(body: &[LogicalPiece<'_>], levels: &mut Vec<BidiLevel>) -> Vec<usize> {
+    let mut order = Vec::new();
+    visual_order_into(body, levels, &mut order);
+    order
 }

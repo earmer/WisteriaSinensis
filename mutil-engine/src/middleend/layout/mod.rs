@@ -276,6 +276,8 @@ pub(super) struct Layout<'i, 'a> {
     pub(super) base: BidiDirection,
     pub(super) metrics: HashMap<(u32, u32, usize), FontMetrics>,
     pub(super) reshaped: Reshapes,
+    pub(super) has_underline: bool,
+    pub(super) has_strikethrough: bool,
 }
 
 /// One piece of the current line, its level resolved by UAX #9 L1 in
@@ -368,6 +370,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             base: ast.base_direction,
             metrics: HashMap::new(),
             reshaped: HashMap::new(),
+            has_underline: ast.runs.iter().any(|r| r.decoration.underline),
+            has_strikethrough: ast.runs.iter().any(|r| r.decoration.strikethrough),
         }
     }
 

@@ -10,6 +10,7 @@ use crate::frontend::{
 };
 use crate::middleend::tolerance::{approx_eq, approx_eq_f64, tolerance};
 use crate::types::{BidiClass, BidiLevel, TextRange, is_extent, is_measurement};
+use std::cell::OnceCell;
 
 /// Every item fits inside `text`. Run before indexing spans against items, so
 /// the index is built on ordered ranges and cannot scan or clone unboundedly
@@ -127,10 +128,12 @@ struct ItemChecks<'a> {
     boxes: &'a TextBoxes<'a>,
     ids: &'a DecorationIds,
     spans: &'a SpanIndex,
-    /// Hyphen-chain bounds per item ([`hyphen_chains`]).
-    chains: Vec<(usize, usize)>,
-    /// Per run, whether its atoms are in byte order ([`in_byte_order`]).
-    runs_in_byte_order: Vec<bool>,
+    /// Hyphen-chain bounds per item ([`hyphen_chains`]), built lazily on the
+    /// first hyphenation discretionary.
+    chains: OnceCell<Vec<(usize, usize)>>,
+    /// Per run, whether its atoms are in byte order ([`in_byte_order`]), built
+    /// lazily on the first hyphenation discretionary.
+    runs_in_byte_order: OnceCell<Vec<bool>>,
     /// Index of the last discretionary, where the sentinel belongs.
     last_break: Option<usize>,
     /// The font size of the run of the last text box checked (WN-13).
@@ -151,10 +154,8 @@ impl<'a> ItemChecks<'a> {
             boxes,
             ids,
             spans,
-            chains: hyphen_chains(ast, boxes),
-            runs_in_byte_order: (0..ast.runs.len())
-                .map(|run| in_byte_order(ast.run_atoms(run).iter().map(|a| a.byte_range)))
-                .collect(),
+            chains: OnceCell::new(),
+            runs_in_byte_order: OnceCell::new(),
             last_break: ast.items.iter().rposition(WordNode::is_break_opportunity),
             last_text_font_size: None,
         }
@@ -478,11 +479,19 @@ impl<'a> ItemChecks<'a> {
         ) else {
             return false;
         };
+        let chains = self
+            .chains
+            .get_or_init(|| hyphen_chains(self.ast, self.boxes));
+        let runs_in_byte_order = self.runs_in_byte_order.get_or_init(|| {
+            (0..self.ast.runs.len())
+                .map(|run| in_byte_order(self.ast.run_atoms(run).iter().map(|a| a.byte_range)))
+                .collect()
+        });
         let atoms = self.ast.run_atoms(before.run_index);
-        prefix_start >= self.chains[item - 1].0
-            && suffix_end <= self.chains[item + 1].1
+        prefix_start >= chains[item - 1].0
+            && suffix_end <= chains[item + 1].1
             // See `in_byte_order`: unordered atoms are reported by the box.
-            && (!self.runs_in_byte_order[before.run_index]
+            && (!runs_in_byte_order[before.run_index]
                 || (is_range_edge(atoms, |a| a.byte_range, prefix_start)
                     && is_range_edge(atoms, |a| a.byte_range, suffix_end)))
     }

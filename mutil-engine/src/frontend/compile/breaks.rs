@@ -26,8 +26,8 @@ impl Compiler<'_> {
             return None;
         };
         (b == a + 1
-            && self.same_run(units, locales, a, b)
-            && script::binds_to_next(self.text, &units.atoms, a))
+            && script::binds_to_next(self.text, &units.atoms, a)
+            && self.same_run(units, locales, a, b))
         .then_some(b)
     }
 
@@ -48,7 +48,19 @@ impl Compiler<'_> {
         ) else {
             return false;
         };
-        let word_start = units.units[..i - 1]
+        let list = url::no_line_end_words(primary_language(&locales[a]));
+        if list.is_empty() {
+            return false;
+        }
+        let letter = &self.text[units.atoms[a].byte_range.as_range()];
+        let mut chars = letter.chars();
+        let Some(c) = chars.next().filter(|_| chars.next().is_none()) else {
+            return false;
+        };
+        if !list.contains(c) {
+            return false;
+        }
+        units.units[..i - 1]
             .iter()
             .rev()
             .find(|u| {
@@ -57,13 +69,7 @@ impl Compiler<'_> {
                     Unit::Atom(p) if units.atoms[*p].flags.contains(AtomFlags::IS_OPEN_PUNCT)
                 )
             })
-            .is_none_or(|u| !matches!(u, Unit::Atom(_)));
-        let letter = &self.text[units.atoms[a].byte_range.as_range()];
-        let language = primary_language(&locales[a]);
-        let mut chars = letter.chars();
-        word_start
-            && matches!((chars.next(), chars.next()), (Some(c), None)
-                if url::no_line_end_words(language).contains(c))
+            .is_none_or(|u| !matches!(u, Unit::Atom(_)))
     }
 
     /// The penalty of the discretionary after each unit, if any (FE-19,
@@ -88,6 +94,8 @@ impl Compiler<'_> {
             .flat_map(|&u| url::url_opportunities(text, u, graphemes))
             .collect();
         let mut breaks_after = Vec::with_capacity(units.units.len());
+        let mut opp_at = 0;
+        let has_urls = !urls.is_empty();
         for i in 0..units.units.len() {
             let unit = units.units[i];
             let end = unit.range(&units.atoms, self.input.inline_objects).end();
@@ -96,18 +104,13 @@ impl Compiler<'_> {
                 continue;
             }
             // Only directly adjacent `Atom` units within the same `ShapingRun`
-            // may bind under FE-15 (never across `Glue`, `Tab`, `HardBreak`,
-            // or `Object`).
-            if self.atom_bound_by(units, locales, i).is_some() {
-                breaks_after.push(None);
-                continue;
-            }
-            // A CJK middle dot is fused to the atom before it (FE-15, WN-3).
+            // may bind under FE-15 (marked earlier by `mark_bound_atoms`).
             if let (Unit::Atom(a), Some(Unit::Atom(b))) = (unit, units.units.get(i + 1).copied())
                 && b == a + 1
-                && units.atoms[a].byte_range.end() == units.atoms[b].byte_range.start()
-                && script::is_cjk_middle_dot(self.text, &units.atoms, b)
-                && self.options.line_break_strictness != LineBreakStrictness::Anywhere
+                && (units.atoms[b].flags.contains(AtomFlags::BINDS_TO_PREVIOUS)
+                    || (units.atoms[a].byte_range.end() == units.atoms[b].byte_range.start()
+                        && script::is_cjk_middle_dot(self.text, &units.atoms, b)
+                        && self.options.line_break_strictness != LineBreakStrictness::Anywhere))
             {
                 breaks_after.push(None);
                 continue;
@@ -116,19 +119,26 @@ impl Compiler<'_> {
                 breaks_after.push(None);
                 continue;
             }
-            let natural = opportunities.binary_search(&end).is_ok();
-            let tailored = added
-                .get(added.partition_point(|&(at, _)| at < end))
-                .filter(|&&(at, _)| at == end)
-                .map(|&(_, p)| p);
-            let inside_url = urls
-                .get(urls.partition_point(|u| u.end() <= end))
-                .is_some_and(|u| u.start() < end && end < u.end());
-            let penalty = match (natural, tailored) {
-                (_, Some(p)) => Some(p),
-                (true, None) if inside_url => Some(DiscretionaryNode::URL_PENALTY_MIN),
-                (true, None) => Some(DiscretionaryNode::NATURAL_PENALTY),
-                (false, None) => None,
+            while opp_at < opportunities.len() && opportunities[opp_at] < end {
+                opp_at += 1;
+            }
+            let natural = opportunities.get(opp_at) == Some(&end);
+            let penalty = if !has_urls {
+                natural.then_some(DiscretionaryNode::NATURAL_PENALTY)
+            } else {
+                let tailored = added
+                    .get(added.partition_point(|&(at, _)| at < end))
+                    .filter(|&&(at, _)| at == end)
+                    .map(|&(_, p)| p);
+                let inside_url = urls
+                    .get(urls.partition_point(|u| u.end() <= end))
+                    .is_some_and(|u| u.start() < end && end < u.end());
+                match (natural, tailored) {
+                    (_, Some(p)) => Some(p),
+                    (true, None) if inside_url => Some(DiscretionaryNode::URL_PENALTY_MIN),
+                    (true, None) => Some(DiscretionaryNode::NATURAL_PENALTY),
+                    (false, None) => None,
+                }
             };
             breaks_after.push(penalty);
         }

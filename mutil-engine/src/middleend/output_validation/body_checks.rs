@@ -17,10 +17,11 @@ impl PositionedLine {
         &self,
         ctx: &LineContext,
         body: &BodyExtent,
-    ) -> Result<(), LineInvariantError> {
+    ) -> Result<bool, LineInvariantError> {
         use LineInvariantError as E;
         let (first, last) = (&self.slots[body.first], &self.slots[body.last]);
         let collapsible = ctx.whitespace == HangingWhitespaceMode::Collapsible;
+        let mut has_hanging = false;
         for (run, r) in self.visual_runs.iter().enumerate() {
             for (glyph, g) in r.glyphs.iter().enumerate() {
                 let (lo, hi) = g.pen_interval();
@@ -35,6 +36,7 @@ impl PositionedLine {
                     }
                     GlyphRole::Trailing | GlyphRole::ZeroAdvance | GlyphRole::Body => {}
                     GlyphRole::Hanging => {
+                        has_hanging = true;
                         // A mark hangs from the outer slot on its side:
                         // whatever of it is not overflow lies in that slot's
                         // content.
@@ -51,7 +53,7 @@ impl PositionedLine {
                 }
             }
         }
-        Ok(())
+        Ok(has_hanging)
     }
 
     /// Placement of inline boxes, tabs and fragments (SLT-4, SLT-5, HNG-3).
@@ -109,9 +111,12 @@ impl PositionedLine {
         &self,
         ctx: &LineContext,
         body: &BodyExtent,
-        glyphs: &SourcedGlyphs<'_>,
+        glyphs: Option<&SourcedGlyphs<'_>>,
     ) -> Result<(), LineInvariantError> {
         use AnnotationErrorReason as R;
+        let Some(glyphs) = glyphs else {
+            return Ok(());
+        };
         let eps = body.eps;
         for (index, ann) in self.annotations.iter().enumerate() {
             let (mut base_lo, mut base_hi) = (f32::INFINITY, f32::NEG_INFINITY);

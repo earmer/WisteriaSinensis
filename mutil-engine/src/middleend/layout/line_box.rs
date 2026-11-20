@@ -3,6 +3,7 @@
 
 use super::scratch::LogicalPiece;
 use super::{Layout, PieceKind};
+use crate::middleend::shaper_gate::resolved_line_box;
 use crate::middleend::{InlineSlotConstraint, LayoutInputError, LineHeight, StrutMetrics};
 use crate::types::{BaselineAlignment, FontMetrics, TextRange};
 
@@ -44,6 +45,16 @@ enum BaselinePlacement {
     },
 }
 
+/// Single-entry metrics cache inside [`Layout::compute_line_box`].
+#[derive(Clone, Copy)]
+struct CachedClusterMetrics {
+    font_id: u32,
+    scale_bits: u32,
+    run: usize,
+    own: FontMetrics,
+    line_box: Option<StrutMetrics>,
+}
+
 pub(super) struct LineBoxMetrics {
     pub(super) ascent: f32,
     pub(super) descent: f32,
@@ -66,6 +77,7 @@ impl Layout<'_, '_> {
         let normal = matches!(self.options.line_height, LineHeight::Normal);
         let (mut above, mut below) = half_leaded(self.strut);
         let mut line_relative: Vec<LineRelativeItem> = Vec::new();
+        let mut cached: Option<CachedClusterMetrics> = None;
         for &k in order {
             let item = |edge, (above, below)| {
                 BaselinePlacement::LineEdge(LineRelativeItem {
@@ -78,20 +90,47 @@ impl Layout<'_, '_> {
             let placement = match placed[k].piece.kind {
                 PieceKind::Cluster { run, cluster } => {
                     let align = self.ast.runs[run].baseline_align;
-                    match LineRelativeEdge::of(align) {
-                        Some(edge) => item(edge, half_leaded(self.cluster_box(run, cluster)?)),
-                        None => {
-                            let extent = if normal {
-                                Some(half_leaded(self.cluster_box(run, cluster)?))
+                    let edge = LineRelativeEdge::of(align);
+                    let needs_box = edge.is_some() || normal;
+                    let font = self.ast.clusters[cluster].font;
+                    let scale_bits = font.scale.to_bits();
+                    let (own, resolved_box) = match cached {
+                        Some(entry)
+                            if entry.font_id == font.font_id.0
+                                && entry.scale_bits == scale_bits
+                                && entry.run == run
+                                && (!needs_box || entry.line_box.is_some()) =>
+                        {
+                            (entry.own, entry.line_box)
+                        }
+                        _ => {
+                            let own = self.cluster_metrics(run, cluster)?;
+                            let line_box = if needs_box {
+                                Some(resolved_line_box(
+                                    &own,
+                                    self.ast.runs[run].font_size,
+                                    self.options.line_height,
+                                    self.ast.writing_mode,
+                                )?)
                             } else {
                                 None
                             };
-                            let own = self.cluster_metrics(run, cluster)?;
-                            BaselinePlacement::StrutRelative {
-                                shift: baseline_shift(align, &self.ast.strut_metrics, Some(&own)),
-                                extent,
-                            }
+                            cached = Some(CachedClusterMetrics {
+                                font_id: font.font_id.0,
+                                scale_bits,
+                                run,
+                                own,
+                                line_box,
+                            });
+                            (own, line_box)
                         }
+                    };
+                    match edge {
+                        Some(edge) => item(edge, half_leaded(resolved_box.unwrap_or(self.strut))),
+                        None => BaselinePlacement::StrutRelative {
+                            shift: baseline_shift(align, &self.ast.strut_metrics, Some(&own)),
+                            extent: resolved_box.map(half_leaded),
+                        },
                     }
                 }
                 PieceKind::Object(object) => {
