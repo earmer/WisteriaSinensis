@@ -15,12 +15,13 @@ use super::tolerance::resolves_extent;
 use super::{
     AnnotationErrorReason, CaretStop, InlineSlotConstraint, LayoutConstraints, LayoutInputError,
     LayoutOptions, LayoutPolicySnapshot, LineGeometry, LineInvariantError, PositionedAnnotationRun,
-    PositionedGlyph, PositionedLine, PositionedParagraph, PositionedSlot, VisualGlyphRun,
+    PositionedGlyph, PositionedLine, PositionedParagraph, PositionedSlot, StrutMetrics,
+    VisualGlyphRun,
 };
 use crate::frontend::{BoxNode, ParagraphAst, TextBox, TextBoxView, WordNode};
 use crate::types::{
-    FontRef, FontVariation, GlyphOrientation, GraphemeAtom, Point, RawShapedGlyph, ShapedCluster,
-    WritingMode,
+    FontRef, FontVariation, GlyphOrientation, GraphemeAtom, MAX_MEASUREMENT, Point, RawShapedGlyph,
+    ShapedCluster, WritingMode,
 };
 pub(crate) use proofs::NonEmptyStr;
 use proofs::{LineIdx, NonEmptySlice, SortedCaretStops, StopIdx};
@@ -594,11 +595,13 @@ pub(super) fn drawing_origin(
     mode.flow_to_physical_point(flow, total_block_size)
 }
 
-/// Every placed glyph's origin is finite: the check behind
-/// [`PlacedRun::glyphs`], run by the output gate (spec AX-3, HST-4).
+/// Every placed glyph's origin and `VerticalRl` selection block mapping is
+/// finite: the check behind [`PlacedRun::glyphs`] and selection geometry, run
+/// by the output gate (spec AX-3, HST-4, INT-16).
 pub(super) fn check_drawing_origins(
     line: &PositionedLine,
     mode: WritingMode,
+    strut: StrutMetrics,
     total_block_size: f32,
 ) -> Result<(), LineInvariantError> {
     let finite = |source: PlacedRunSource<'_>, glyph: &PositionedGlyph| {
@@ -628,6 +631,33 @@ pub(super) fn check_drawing_origins(
                 index,
                 reason: AnnotationErrorReason::InvalidGlyph,
             });
+        }
+    }
+    if mode == WritingMode::VerticalRl {
+        let phys_bounds_finite = |above: f32, below: f32| {
+            let (top, bottom) = mode.line_bounds(line.baseline_y, above, below);
+            let (phys_top, phys_bottom) = (total_block_size - top, total_block_size - bottom);
+            phys_top.is_finite() && phys_bottom.is_finite() && (phys_top - phys_bottom).is_finite()
+        };
+        if !(phys_bounds_finite(0.0, 0.0)
+            && phys_bounds_finite(strut.ascent, strut.descent)
+            && (line.visual_runs.is_empty()
+                || phys_bounds_finite(MAX_MEASUREMENT, MAX_MEASUREMENT)))
+        {
+            return Err(LineInvariantError::NonFiniteLineMetrics);
+        }
+        let (mut union_above, mut union_below) = if line.visual_runs.is_empty() {
+            (f32::NEG_INFINITY, f32::NEG_INFINITY)
+        } else {
+            (MAX_MEASUREMENT, MAX_MEASUREMENT)
+        };
+        for (index, b) in line.visual_boxes.iter().enumerate() {
+            let (above, below) = (b.ascent - b.y, b.descent + b.y);
+            union_above = union_above.max(above);
+            union_below = union_below.max(below);
+            if !(phys_bounds_finite(above, below) && phys_bounds_finite(union_above, union_below)) {
+                return Err(LineInvariantError::InvalidInlineBox { index });
+            }
         }
     }
     Ok(())

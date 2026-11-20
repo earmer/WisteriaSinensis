@@ -1,7 +1,8 @@
 //! Stage 3 justification (spec ST3-2 to ST3-5): the priority ladder that
 //! spends a line's slack on its glue and inter-cluster gaps.
 
-use super::{Layout, PieceKind, PlacedPiece, Reshapes};
+use super::scratch::LogicalPiece;
+use super::{Layout, PieceKind, Reshapes};
 use crate::frontend::GlueTier;
 use crate::middleend::FIT_EPSILON;
 use crate::types::{AtomFlags, ScriptTag};
@@ -34,30 +35,19 @@ impl Layout<'_, '_> {
     /// The capacities of the pieces after the line's last tab (ST3-1): glue
     /// by its tier, and the gap after each cluster that another cluster
     /// follows, with no inline object between them (ST1-7, ST3-2).
-    fn capacities(&self, body: &[PlacedPiece<'_>], pending: &Reshapes) -> Vec<Capacity> {
-        // Whether the next cluster or object after each piece is a cluster.
-        let mut cluster_follows = vec![false; body.len()];
+    fn capacities(&self, body: &[LogicalPiece<'_>], pending: &Reshapes) -> Vec<Capacity> {
+        let mut capacities = vec![Capacity::default(); body.len()];
         let mut next_is_cluster = false;
-        for (k, p) in body.iter().enumerate().rev() {
-            cluster_follows[k] = next_is_cluster;
-            match p.piece.kind {
-                PieceKind::Cluster { .. } => next_is_cluster = true,
-                PieceKind::Object { .. } => next_is_cluster = false,
-                _ => {}
-            }
-        }
-        body.iter()
-            .zip(cluster_follows)
-            .map(|(p, cluster_follows)| match p.piece.kind {
+        for (p, cap) in body.iter().zip(capacities.iter_mut()).rev() {
+            *cap = match p.piece.kind {
                 PieceKind::Glue(glue) => Capacity {
                     level: usize::from(glue.kind.tier() != GlueTier::Tier0),
                     stretch: glue.max_stretch,
                     shrink: glue.max_shrink,
                 },
-                PieceKind::Cluster { run, cluster } if cluster_follows => {
-                    if self.cluster_glyphs(pending, cluster).0.is_empty() {
-                        return Capacity::default();
-                    }
+                PieceKind::Cluster { run, cluster }
+                    if next_is_cluster && !self.cluster_glyphs(pending, cluster).0.is_empty() =>
+                {
                     let run = &self.ast.runs[run];
                     let flags = self.ast.clusters[cluster].flags;
                     if flags.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER) {
@@ -79,20 +69,26 @@ impl Layout<'_, '_> {
                     }
                 }
                 _ => Capacity::default(),
-            })
-            .collect()
+            };
+            match p.piece.kind {
+                PieceKind::Cluster { .. } => next_is_cluster = true,
+                PieceKind::Object(_) => next_is_cluster = false,
+                _ => {}
+            }
+        }
+        capacities
     }
 
     /// The index of the first piece of `body` after its last tab; only
     /// those take part in justification (ST3-1).
-    fn after_last_tab(body: &[PlacedPiece<'_>]) -> usize {
+    fn after_last_tab(body: &[LogicalPiece<'_>]) -> usize {
         body.iter()
             .rposition(|p| matches!(p.piece.kind, PieceKind::Tab))
             .map_or(0, |tab| tab + 1)
     }
 
     /// `Z`: how much the glue after the line's last tab can shrink (ST1-7).
-    pub(super) fn shrink_capacity(body: &[PlacedPiece<'_>]) -> f32 {
+    pub(super) fn shrink_capacity(body: &[LogicalPiece<'_>]) -> f32 {
         body[Self::after_last_tab(body)..]
             .iter()
             .map(|p| match p.piece.kind {
@@ -104,17 +100,24 @@ impl Layout<'_, '_> {
 
     /// Spends `slack` on the body pieces after the line's last tab, level by
     /// level, each level shared in proportion to its capacities (ST3-2,
-    /// ST3-3). Expansion after a cluster widens it; the cluster's glyphs
-    /// place it by direction. Returns whether the line came out flush
+    /// ST3-3), adding to their `widths` and, for a cluster, its
+    /// `expansions`. Expansion after a cluster widens it; the cluster's
+    /// glyphs place it by direction. Returns whether the line came out flush
     /// (ST3-4).
     pub(super) fn justify(
         &self,
-        body: &mut [PlacedPiece<'_>],
+        body: &[LogicalPiece<'_>],
+        widths: &mut [f32],
+        expansions: &mut [f32],
         slack: f32,
         pending: &Reshapes,
     ) -> bool {
         let first = Self::after_last_tab(body);
-        let body = &mut body[first..];
+        let (body, widths, expansions) = (
+            &body[first..],
+            &mut widths[first..],
+            &mut expansions[first..],
+        );
         let capacities = self.capacities(body, pending);
         let mut remaining = slack.abs();
         let level_count = if slack < 0.0 { 2 } else { LEVELS };
@@ -129,12 +132,13 @@ impl Layout<'_, '_> {
                 continue;
             }
             let spent = remaining.min(total);
-            for (p, c) in body.iter_mut().zip(&capacities) {
+            let columns = widths.iter_mut().zip(expansions.iter_mut());
+            for ((p, c), (width, expansion)) in body.iter().zip(&capacities).zip(columns) {
                 let share = spent * offered(c) / total;
                 let delta = if slack < 0.0 { -share } else { share };
-                p.width += delta;
+                *width += delta;
                 if matches!(p.piece.kind, PieceKind::Cluster { .. }) {
-                    p.expansion += delta;
+                    *expansion += delta;
                 }
             }
             remaining -= spent;

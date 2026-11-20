@@ -3,6 +3,9 @@
 
 use super::breaking::within;
 use super::hanging::{EndHang, LineHangs, clip_to_content};
+use super::line_artifacts::{CaretScratch, VisualIndex};
+use super::line_box::LineBoxMetrics;
+use super::scratch::{LayoutScratch, LogicalPiece, build_placed};
 use super::visual_runs::VisualRuns;
 use super::{Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Reshapes, Token};
 use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order as bidi_order};
@@ -35,12 +38,14 @@ impl ContentBlock {
     }
 }
 
-/// A line placed in logical order, before alignment: the pieces and their
-/// visual order, and what the line's end and hanging marks leave. Its `x`
-/// coordinates are relative to the body's start.
-pub(super) struct PlacedLine<'a> {
-    pub(super) placed: Vec<PlacedPiece<'a>>,
+/// A line placed in logical order, before alignment: the pieces, borrowed
+/// from the paragraph's [`LayoutScratch`], their visual order and its index,
+/// and what the line's end and hanging marks leave. Its `x` coordinates are
+/// relative to the body's start.
+pub(super) struct PlacedLine<'l, 'a> {
+    pub(super) placed: &'l mut [PlacedPiece<'a>],
     pub(super) order: Vec<usize>,
+    pub(super) visual: &'l VisualIndex,
     pub(super) byte_range: TextRange,
     pub(super) bounds: LineBounds,
     pub(super) start_break: Option<&'a DiscretionaryNode>,
@@ -50,7 +55,7 @@ pub(super) struct PlacedLine<'a> {
     block_top: f32,
 }
 
-impl PlacedLine<'_> {
+impl PlacedLine<'_, '_> {
     /// The pieces before the trailing whitespace: `order` ranks exactly
     /// those.
     pub(super) fn body_len(&self) -> usize {
@@ -71,13 +76,13 @@ fn soft_wraps(end_break: Option<&DiscretionaryNode>) -> bool {
 
 /// A [`PlacedLine`] after alignment: every coordinate is final, and the
 /// content block it lies in is known.
-pub(super) struct AlignedLine<'a> {
-    line: PlacedLine<'a>,
+pub(super) struct AlignedLine<'l, 'a> {
+    line: PlacedLine<'l, 'a>,
     pub(super) content: ContentBlock,
 }
 
-impl<'a> Deref for AlignedLine<'a> {
-    type Target = PlacedLine<'a>;
+impl<'l, 'a> Deref for AlignedLine<'l, 'a> {
+    type Target = PlacedLine<'l, 'a>;
 
     fn deref(&self) -> &Self::Target {
         &self.line
@@ -90,6 +95,22 @@ struct LineEndFacts<'a> {
     end_break: Option<&'a DiscretionaryNode>,
     byte_end: usize,
     pre: f32,
+}
+
+/// How the body of a line is measured: where it starts, the line-end pad
+/// `pre`, whether it soft-wraps, and the slot it fills.
+struct BodyRequest<'c, 'a> {
+    cursor: &'c LineCursor<'a>,
+    pre: f32,
+    soft_wrap: bool,
+    slot: InlineSlotConstraint,
+}
+
+/// What measuring the body settled: the marks that hang and whether the
+/// line was justified flush.
+struct BodyFit {
+    hangs: LineHangs,
+    is_justified: bool,
 }
 
 /// The pads between a line's body and its left and right edges (physical).
@@ -117,13 +138,17 @@ impl Pads {
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
-    /// Places the line `(cursor.token_start, end]` in the first slot of `geometry`.
+    /// Places the line `(cursor.token_start, end]` in the first slot of
+    /// `geometry`, working in `scratch`: the pieces are collected, their L1
+    /// levels and visual order resolved, the body measured, justified and
+    /// placed, the line box found, and only then are the placed pieces built.
     pub(super) fn place(
         &mut self,
         cursor: &LineCursor<'a>,
         end: LineEnd<'a>,
         geometry: &OpenGeometry,
         pending: &Reshapes,
+        scratch: &mut LayoutScratch<'a>,
     ) -> Result<PositionedLine, LayoutInputError> {
         let slot = geometry.first_slot();
         let LineEndFacts {
@@ -132,25 +157,89 @@ impl<'i, 'a> Layout<'i, 'a> {
             byte_end,
             pre,
         } = self.end_facts(end);
-        let soft_wrap = soft_wraps(end_break);
-
-        let mut placed = self.collect_placed_pieces(cursor.token_start, last_piece);
-        let body_len = placed
+        let LayoutScratch {
+            logical,
+            levels,
+            widths,
+            expansions,
+            xs,
+            y_shifts,
+            placed,
+            visual,
+            carets,
+        } = scratch;
+        self.collect_logical(logical, cursor.token_start, last_piece);
+        let body_len = logical
             .iter()
             .rposition(|p| p.piece.is_content())
             .map_or(0, |k| k + 1);
-        self.apply_l1(&mut placed);
-        let order = visual_order(&placed[..body_len]);
+        self.apply_l1(logical, levels);
+        let order = visual_order(&logical[..body_len], levels);
+        let request = BodyRequest {
+            cursor,
+            pre,
+            soft_wrap: soft_wraps(end_break),
+            slot,
+        };
+        let BodyFit {
+            hangs,
+            is_justified,
+        } = self.measure_line(logical, body_len, widths, expansions, &request, pending);
+        let pads = Pads::new(self.base.is_rtl(), pre, cursor.post_break_width());
+        let body_end = self.place_visual(logical, &order, widths, xs, pads, hangs);
+        let byte_range = TextRange::new(cursor.byte_start, byte_end);
+        let line_box = self.compute_line_box(logical, &order, y_shifts, byte_range, slot)?;
+        build_placed(placed, logical, [xs, widths, expansions, y_shifts]);
+        visual.rebuild(placed, &order);
+        let line = PlacedLine {
+            placed,
+            order,
+            visual,
+            byte_range,
+            bounds: LineBounds {
+                body_lo: pads.left,
+                body_hi: body_end,
+            },
+            start_break: cursor.start_break,
+            end_break,
+            hangs,
+            is_justified,
+            block_top: cursor.block_top,
+        };
+        self.build_line(line, &line_box, carets, geometry, pending)
+    }
 
-        let rtl = self.base.is_rtl();
+    /// Measures the line in logical order, finds the marks that hang,
+    /// justifies a compressible body (ST1-3, ST3-1 to ST3-4), and appends the
+    /// trailing whitespace's collapsed/preserved widths (WN-10, ST1-12):
+    /// fills both `widths` and `expansions` for every piece of `logical`.
+    fn measure_line(
+        &self,
+        logical: &[LogicalPiece<'a>],
+        body_len: usize,
+        widths: &mut Vec<f32>,
+        expansions: &mut Vec<f32>,
+        request: &BodyRequest<'_, 'a>,
+        pending: &Reshapes,
+    ) -> BodyFit {
+        let body = &logical[..body_len];
+        // Only the body is justified; the trailing whitespace has none.
+        expansions.clear();
+        expansions.resize(logical.len(), 0.0);
+        let BodyRequest {
+            cursor,
+            pre,
+            soft_wrap,
+            slot,
+        } = *request;
         let post = cursor.post_break_width();
-        let pads = Pads::new(rtl, pre, post);
         let first_line = cursor.first_line();
-        let start = self.start_hang(&placed[..body_len], first_line, post, pending);
+        let start = self.start_hang(body, first_line, post, pending);
         // Widths in logical order: a tab's depends on its distance from the
         // line-start edge (spec ST3-1), the start mark's protrusion outside.
         let distance = self.measure_widths(
-            &mut placed[..body_len],
+            body,
+            widths,
             post - LineHangs::protrusion(start),
             slot,
             pending,
@@ -159,13 +248,13 @@ impl<'i, 'a> Layout<'i, 'a> {
         // a hard break is only ever compressed, and only on request (ST3-3).
         let compressible = self.options.justify && (soft_wrap || self.options.compress_last_lines);
         let shrink = if compressible {
-            Self::shrink_capacity(&placed[..body_len])
+            Self::shrink_capacity(body)
         } else {
             0.0
         };
         let fits_without = within(distance + pre - shrink, slot.width());
         let end = self.end_hang(
-            &placed[..body_len],
+            body,
             first_line,
             EndHang {
                 pre,
@@ -179,55 +268,48 @@ impl<'i, 'a> Layout<'i, 'a> {
         let visible_width = distance + pre - LineHangs::protrusion(end);
         let slack = slot.width() - visible_width;
         let is_justified = compressible
-            && self.justify_slack(&mut placed[..body_len], slot, slack, soft_wrap, pending);
-        let body_end = self.place_visual(&mut placed, &order, body_len, pads, hangs);
-
-        self.build_line(
-            PlacedLine {
-                placed,
-                order,
-                byte_range: TextRange::new(cursor.byte_start, byte_end),
-                bounds: LineBounds {
-                    body_lo: pads.left,
-                    body_hi: body_end,
-                },
-                start_break: cursor.start_break,
-                end_break,
-                hangs,
-                is_justified,
-                block_top: cursor.block_top,
-            },
-            geometry,
-            pending,
-        )
+            && slot.width().is_finite()
+            && (soft_wrap || slack < 0.0)
+            && self.justify(body, widths, &mut expansions[..body_len], slack, pending);
+        self.append_trailing_widths(&logical[body_len..], widths);
+        BodyFit {
+            hangs,
+            is_justified,
+        }
     }
 
-    /// Justifies a compressible line whose slot is finite when it is
-    /// soft-wrapped or overfull; whether it did (ST3-3).
-    fn justify_slack(
-        &self,
-        body: &mut [PlacedPiece<'a>],
-        slot: InlineSlotConstraint,
-        slack: f32,
-        soft_wrap: bool,
-        pending: &Reshapes,
-    ) -> bool {
-        slot.width().is_finite() && (soft_wrap || slack < 0.0) && self.justify(body, slack, pending)
+    /// Appends each trailing whitespace piece's width to `widths`: synthetic
+    /// glue collapses under both modes, collapsible glue under `Collapsible`
+    /// (WN-10, ST1-12).
+    fn append_trailing_widths(&self, trailing: &[LogicalPiece<'_>], widths: &mut Vec<f32>) {
+        let collapsible = self.options.whitespace == HangingWhitespaceMode::Collapsible;
+        widths.extend(trailing.iter().map(|p| match p.piece.kind {
+            PieceKind::Glue(glue)
+                if glue.kind.is_synthetic() || (collapsible && glue.is_collapsible) =>
+            {
+                0.0
+            }
+            _ => p.piece.width,
+        }));
     }
 
-    /// Sets each piece's width in logical order from the pen position
-    /// `distance` and returns the position after the last one.
+    /// Fills `widths` with each body piece's width in logical order from
+    /// the pen position `distance` and returns the position after the last
+    /// one.
     fn measure_widths(
         &self,
-        body: &mut [PlacedPiece<'a>],
+        body: &[LogicalPiece<'a>],
+        widths: &mut Vec<f32>,
         mut distance: f32,
         slot: InlineSlotConstraint,
         pending: &Reshapes,
     ) -> f32 {
+        widths.clear();
         for p in body {
             distance += p.gap;
-            p.width = self.measure(&p.piece, distance, slot, Some(pending)).0;
-            distance += p.width;
+            let width = self.measure(&p.piece, distance, slot, Some(pending)).0;
+            widths.push(width);
+            distance += width;
         }
         distance
     }
@@ -251,23 +333,27 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// Assigns each body piece its `x` in visual `order` and places the
-    /// trailing whitespace; returns the body's far end including the right
-    /// pad.
+    /// Fills `xs` with each body piece's `x` in visual `order`, which ranks
+    /// exactly the body, and places the trailing whitespace beyond the far
+    /// edge; returns the body's far end including the right pad.
     fn place_visual(
         &self,
-        placed: &mut [PlacedPiece<'a>],
+        logical: &[LogicalPiece<'a>],
         order: &[usize],
-        body_len: usize,
+        widths: &[f32],
+        xs: &mut Vec<f32>,
         pads: Pads,
         hangs: LineHangs,
     ) -> f32 {
         let rtl = self.base.is_rtl();
+        let body_len = order.len();
+        xs.clear();
+        xs.resize(logical.len(), 0.0);
         let mut x = pads.left - hangs.physical(rtl).0;
         for &k in order {
-            x += placed[k].gap;
-            placed[k].x = x;
-            x += placed[k].width;
+            x += logical[k].gap;
+            xs[k] = x;
+            x += widths[k];
         }
         let body_end = x + pads.right;
         // In RTL the trailing whitespace lies left of everything on the line,
@@ -277,7 +363,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         } else {
             body_end
         };
-        self.place_trailing_whitespace(&mut placed[body_len..], far_edge, rtl);
+        self.place_trailing_whitespace(&widths[body_len..], &mut xs[body_len..], far_edge);
         body_end
     }
 
@@ -286,8 +372,8 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// from glue classes, cluster flags and tabs, never from the text. A span
     /// boundary is transparent and then takes the level of its span's next
     /// (leading) or previous (trailing) item on the line.
-    fn apply_l1(&self, placed: &mut [PlacedPiece<'_>]) {
-        let class = |p: &PlacedPiece<'_>| match p.piece.kind {
+    fn apply_l1(&self, placed: &mut [LogicalPiece<'_>], levels: &mut Vec<BidiLevel>) {
+        let class = |p: &LogicalPiece<'_>| match p.piece.kind {
             PieceKind::Tab => LineClass::Separator,
             PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => LineClass::Whitespace,
             PieceKind::Cluster { cluster, .. }
@@ -299,13 +385,10 @@ impl<'i, 'a> Layout<'i, 'a> {
             }
             PieceKind::Cluster { .. } | PieceKind::Object(_) => LineClass::Other,
         };
-        let mut levels: SmallVec<[BidiLevel; 64]> = placed.iter().map(|p| p.piece.level).collect();
-        reset_line_levels(
-            placed.iter().map(class),
-            &mut levels,
-            self.base.base_level(),
-        );
-        for (p, level) in placed.iter_mut().zip(levels) {
+        levels.clear();
+        levels.extend(placed.iter().map(|p| p.piece.level));
+        reset_line_levels(placed.iter().map(class), levels, self.base.base_level());
+        for (p, &level) in placed.iter_mut().zip(levels.iter()) {
             if !matches!(p.piece.kind, PieceKind::SpanEdge { .. }) {
                 p.piece.level = level;
             }
@@ -315,7 +398,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 continue;
             };
             let span = &self.ast.decoration_spans[span];
-            let is_item = |p: &&PlacedPiece<'_>| {
+            let is_item = |p: &&LogicalPiece<'_>| {
                 !matches!(p.piece.kind, PieceKind::SpanEdge { .. }) && !p.piece.bytes.is_empty()
             };
             let neighbour = match edge {
@@ -328,70 +411,55 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    fn collect_placed_pieces(&self, start: usize, last_piece: usize) -> Vec<PlacedPiece<'a>> {
-        let mut placed = Vec::new();
+    /// Refills `logical` with the line's pieces `[start, last_piece)`, each
+    /// with the no-break width of the breaks before it.
+    fn collect_logical(
+        &self,
+        logical: &mut Vec<LogicalPiece<'a>>,
+        start: usize,
+        last_piece: usize,
+    ) {
+        logical.clear();
         let mut gap = 0.0;
         for token in &self.tokens[start..last_piece] {
             match token {
                 Token::Piece(p) => {
-                    placed.push(PlacedPiece {
-                        piece: *p,
-                        gap,
-                        x: 0.0,
-                        width: 0.0,
-                        expansion: 0.0,
-                        y_shift: 0.0,
-                    });
+                    logical.push(LogicalPiece { piece: *p, gap });
                     gap = 0.0;
                 }
                 Token::Break(b) => gap += b.no_break_width,
             }
         }
-        placed
     }
 
-    /// Trailing whitespace beyond the far edge `far_edge` (UAX #9 L1, HNG-3); synthetic
-    /// glue collapses there under both modes (WN-10, ST1-12).
-    fn place_trailing_whitespace(
-        &self,
-        trailing: &mut [PlacedPiece<'_>],
-        far_edge: f32,
-        rtl: bool,
-    ) {
-        let collapsible = self.options.whitespace == HangingWhitespaceMode::Collapsible;
-        let trailing_width = |p: &PlacedPiece<'_>| match p.piece.kind {
-            PieceKind::Glue(glue) => {
-                if glue.kind.is_synthetic() || (collapsible && glue.is_collapsible) {
-                    0.0
-                } else {
-                    p.piece.width
-                }
-            }
-            _ => p.piece.width,
-        };
+    /// Trailing whitespace beyond the far edge `far_edge` (UAX #9 L1, HNG-3),
+    /// its positions written to `xs`.
+    fn place_trailing_whitespace(&self, widths: &[f32], xs: &mut [f32], far_edge: f32) {
+        let rtl = self.base.is_rtl();
         // Away from the body: leftwards in RTL, rightwards in LTR.
         let mut tx = far_edge;
-        for p in trailing {
-            p.width = trailing_width(p);
+        for (&width, x) in widths.iter().zip(xs) {
             if rtl {
-                tx -= p.width;
-                p.x = tx;
+                tx -= width;
+                *x = tx;
             } else {
-                p.x = tx;
-                tx += p.width;
+                *x = tx;
+                tx += width;
             }
         }
     }
 
+    /// The positioned line from a placed one and its line box: its glyph
+    /// runs, alignment, boxes, fragments, decorations and caret stops.
     fn build_line(
         &mut self,
-        mut line: PlacedLine<'a>,
+        line: PlacedLine<'_, 'a>,
+        line_box: &LineBoxMetrics,
+        carets: &mut CaretScratch,
         geometry: &OpenGeometry,
         pending: &Reshapes,
     ) -> Result<PositionedLine, LayoutInputError> {
         let slot = geometry.first_slot();
-        let line_box =
-            self.compute_line_box(&mut line.placed, &line.order, line.byte_range, slot)?;
         let VisualRuns {
             mut runs,
             extent,
@@ -400,7 +468,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let line = self.align_line_content(line, &mut runs, extent, slot);
         let content = &line.content;
         let content_edges = content.edges();
-        let (visual_boxes, tabs) = self.build_boxes_and_tabs(&line.placed, slot);
+        let (visual_boxes, tabs) = self.build_boxes_and_tabs(line.placed, slot);
         let mut span_fragments = self.span_fragments(&line);
 
         let mut decorations: Vec<DecorationLine> = Vec::new();
@@ -414,7 +482,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             &mut span_fragments,
             &mut decorations,
         );
-        let caret_stops = self.caret_stops(&line, visible_end, &runs, &visual_boxes, pending);
+        let caret_stops =
+            self.caret_stops(&line, visible_end, &runs, &visual_boxes, pending, carets);
 
         // The line fills its first slot; the others stay empty (ME-2).
         let slots: SmallVec<[PositionedSlot; 1]> = geometry
@@ -466,13 +535,13 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// glyph and box `extent` and the span fragments, then shifts every
     /// placed piece, glyph and the body bounds by the same amount, so every
     /// later stage reads final coordinates.
-    fn align_line_content(
+    fn align_line_content<'l>(
         &self,
-        mut line: PlacedLine<'a>,
+        mut line: PlacedLine<'l, 'a>,
         runs: &mut [VisualGlyphRun],
         extent: Option<(f32, f32)>,
         slot: InlineSlotConstraint,
-    ) -> AlignedLine<'a> {
+    ) -> AlignedLine<'l, 'a> {
         let (mut lo, mut hi) = extent.unwrap_or((f32::INFINITY, f32::NEG_INFINITY));
         self.for_each_span_group(&line, |_, g| {
             lo = lo.min(g.lo.min(g.hi));
@@ -496,7 +565,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             slot.start()
         };
         let shift = start - content_lo;
-        for p in &mut line.placed {
+        for p in line.placed.iter_mut() {
             p.x += shift;
         }
         for g in runs.iter_mut().flat_map(|r| r.glyphs.iter_mut()) {
@@ -512,8 +581,9 @@ impl<'i, 'a> Layout<'i, 'a> {
 }
 
 /// Visual indices of a line's pieces from their levels (UAX #9 L2, spec
-/// ST2-2), through the frontend's shared rule.
-pub(super) fn visual_order(placed: &[PlacedPiece<'_>]) -> Vec<usize> {
-    let levels: SmallVec<[BidiLevel; 64]> = placed.iter().map(|p| p.piece.level).collect();
-    bidi_order(&levels)
+/// ST2-2), through the frontend's shared rule; `levels` is a working buffer.
+pub(super) fn visual_order(body: &[LogicalPiece<'_>], levels: &mut Vec<BidiLevel>) -> Vec<usize> {
+    levels.clear();
+    levels.extend(body.iter().map(|p| p.piece.level));
+    bidi_order(levels)
 }

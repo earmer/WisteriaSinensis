@@ -167,18 +167,17 @@ impl ValidatedLayout<'_> {
                 include(b.ascent - b.y, b.descent + b.y);
             }
         }
-        // Deliberate deviation from pipeline rule 7: G4 proves a box's `y`,
-        // `ascent` and `descent` finite (`check_finite`) but not bounded, so
-        // `ascent - y` may overflow. Until G4 checks them as measurements, a
-        // non-finite union falls back to the strut, as for no selected entity.
-        let (above, below) = extent
-            .filter(|(above, below)| above.is_finite() && below.is_finite())
-            .unwrap_or((p.policy.strut.ascent, p.policy.strut.descent));
-        // The height `above + below` is not negative: the shaper gate proves
-        // font ascents and descents non-negative (FontMetrics::is_valid), G4
-        // an inline box's (`check_finite`), and every box adds to both sides,
-        // its `y` cancelling; G4 proves the strut's box non-negative
-        // (`LayoutPolicySnapshot::is_valid`).
+        let (above, below) = extent.unwrap_or((p.policy.strut.ascent, p.policy.strut.descent));
+        // Both are finite, and so are the writing-mode edges and block span
+        // they reach from the baseline (including in `VerticalRl` physical
+        // space): the shaper gate proves font metrics measurements, and G4
+        // proves an inline box's `ascent - y`, `descent + y`, and their
+        // writing-mode bounds and union span (`check_finite`,
+        // `check_drawing_origins`).
+        // Their sum is not negative: font ascents and descents are
+        // (FontMetrics::is_valid), an inline box's are (`check_finite`) and
+        // every box adds to both sides, its `y` cancelling; G4 proves the
+        // strut's box non-negative (`LayoutPolicySnapshot::is_valid`).
         p.policy
             .writing_mode
             .line_bounds(l.baseline_y, above, below)
