@@ -36,6 +36,7 @@ use crate::types::{BidiDirection, BidiLevel, FontMetrics, RawShapedGlyph, TextRa
 use breaking::{LineFit, within};
 use scratch::LayoutScratch;
 use std::collections::HashMap;
+use std::ops::Range;
 
 /// How many obstructed block positions the clearance loop tries in a row
 /// before giving up on a geometry provider (spec GEO-4).
@@ -268,6 +269,9 @@ pub(super) struct Layout<'i, 'a> {
     pub(super) shaper: &'i dyn TextShaper,
     pub(super) options: &'a LayoutOptions,
     pub(super) tokens: Vec<Token<'a>>,
+    /// Prefix max of `decoration_spans[i].byte_range.end()`, so each line
+    /// bisects only the spans whose ranges can touch it.
+    span_reach: Vec<usize>,
     pub(super) strut: StrutMetrics,
     pub(super) base: BidiDirection,
     pub(super) metrics: HashMap<(u32, u32, usize), FontMetrics>,
@@ -347,17 +351,36 @@ impl<'a> LineCursor<'a> {
 impl<'i, 'a> Layout<'i, 'a> {
     fn new(inputs: &'i ValidatedInputs<'a>, shaper: &'i dyn TextShaper) -> Self {
         let ast = inputs.ast();
+        let mut span_reach = Vec::with_capacity(ast.decoration_spans.len());
+        let mut reach = 0;
+        for s in &ast.decoration_spans {
+            reach = reach.max(s.byte_range.end());
+            span_reach.push(reach);
+        }
         Self {
             inputs,
             ast,
             shaper,
             options: inputs.options(),
             tokens: tokenize(inputs),
+            span_reach,
             strut: inputs.policy().strut,
             base: ast.base_direction,
             metrics: HashMap::new(),
             reshaped: HashMap::new(),
         }
+    }
+
+    /// Indices into `ast.decoration_spans` of the spans whose byte ranges can
+    /// touch `range` (inclusive of both edges): G1 proves `decoration_spans`
+    /// sorted by `start` ascending (AST-8).
+    pub(super) fn spans_touching(&self, range: TextRange) -> Range<usize> {
+        let lo = self.span_reach.partition_point(|&end| end < range.start());
+        let hi = self
+            .ast
+            .decoration_spans
+            .partition_point(|s| s.byte_range.start() <= range.end());
+        lo..hi.max(lo)
     }
 
     fn run(mut self) -> Result<PositionedParagraph, LayoutInputError> {

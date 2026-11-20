@@ -36,29 +36,18 @@ impl Layout<'_, '_> {
     /// by its tier, and the gap after each cluster that another cluster
     /// follows, with no inline object between them (ST1-7, ST3-2).
     fn capacities(&self, body: &[LogicalPiece<'_>], pending: &Reshapes) -> Vec<Capacity> {
-        // Whether the next cluster or object after each piece is a cluster.
-        let mut cluster_follows = vec![false; body.len()];
+        let mut capacities = vec![Capacity::default(); body.len()];
         let mut next_is_cluster = false;
-        for (k, p) in body.iter().enumerate().rev() {
-            cluster_follows[k] = next_is_cluster;
-            match p.piece.kind {
-                PieceKind::Cluster { .. } => next_is_cluster = true,
-                PieceKind::Object { .. } => next_is_cluster = false,
-                _ => {}
-            }
-        }
-        body.iter()
-            .zip(cluster_follows)
-            .map(|(p, cluster_follows)| match p.piece.kind {
+        for (p, cap) in body.iter().zip(capacities.iter_mut()).rev() {
+            *cap = match p.piece.kind {
                 PieceKind::Glue(glue) => Capacity {
                     level: usize::from(glue.kind.tier() != GlueTier::Tier0),
                     stretch: glue.max_stretch,
                     shrink: glue.max_shrink,
                 },
-                PieceKind::Cluster { run, cluster } if cluster_follows => {
-                    if self.cluster_glyphs(pending, cluster).0.is_empty() {
-                        return Capacity::default();
-                    }
+                PieceKind::Cluster { run, cluster }
+                    if next_is_cluster && !self.cluster_glyphs(pending, cluster).0.is_empty() =>
+                {
                     let run = &self.ast.runs[run];
                     let flags = self.ast.clusters[cluster].flags;
                     if flags.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER) {
@@ -80,8 +69,14 @@ impl Layout<'_, '_> {
                     }
                 }
                 _ => Capacity::default(),
-            })
-            .collect()
+            };
+            match p.piece.kind {
+                PieceKind::Cluster { .. } => next_is_cluster = true,
+                PieceKind::Object(_) => next_is_cluster = false,
+                _ => {}
+            }
+        }
+        capacities
     }
 
     /// The index of the first piece of `body` after its last tab; only

@@ -246,6 +246,7 @@ fn resolve_shared_offsets(
     let last_offset = by_offset.last().map(|&(offset, _)| offset);
     merged.clear();
     merged.resize(stops.len(), false);
+    let mut any_merged = false;
     for same in by_offset.chunk_by(|a, b| a.0 == b.0) {
         let (first, last) = (same[0].1, same[same.len() - 1].1);
         let (x, level) = (stops[first].x, stops[first].level);
@@ -255,6 +256,7 @@ fn resolve_shared_offsets(
         if merges {
             stops[first].x = (x + stops[last].x) / 2.0;
             same[1..].iter().for_each(|&(_, i)| merged[i] = true);
+            any_merged = true;
         } else if same.iter().any(|&(_, i)| !approx_eq(stops[i].x, x)) {
             continue;
         }
@@ -266,9 +268,11 @@ fn resolve_shared_offsets(
             stops[if merges { first } else { last }].affinity = CaretAffinity::Upstream;
         }
     }
-    let mut merged = merged.iter();
-    stops.retain(|_| merged.next() == Some(&false));
-    stops.sort_by(|a, b| a.x.total_cmp(&b.x));
+    if any_merged {
+        let mut merged = merged.iter();
+        stops.retain(|_| merged.next() == Some(&false));
+        stops.sort_by(|a, b| a.x.total_cmp(&b.x));
+    }
 }
 
 /// One glyph cluster or box of a line, as [`EntityLevels`] indexes it.

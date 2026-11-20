@@ -187,7 +187,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let level = p.piece.level;
         let rtl_cluster = level.direction().is_rtl();
         let pen = p.x + if rtl_cluster { p.expansion } else { 0.0 };
-        if !glyphs.iter().all(|g| g.is_synthesized) {
+        if glyphs.iter().any(|g| !g.is_synthesized) {
             out.visible_end = out.visible_end.max(p.piece.bytes.end());
         }
         let cluster_glyphs = ClusterGlyphs {

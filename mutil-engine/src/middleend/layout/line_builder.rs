@@ -181,24 +181,13 @@ impl<'i, 'a> Layout<'i, 'a> {
             soft_wrap: soft_wraps(end_break),
             slot,
         };
-        // Only the body is justified; the trailing whitespace has none.
-        expansions.clear();
-        expansions.resize(logical.len(), 0.0);
         let BodyFit {
             hangs,
             is_justified,
-        } = self.measure_body(
-            &logical[..body_len],
-            widths,
-            &mut expansions[..body_len],
-            &request,
-            pending,
-        );
+        } = self.measure_line(logical, body_len, widths, expansions, &request, pending);
         let pads = Pads::new(self.base.is_rtl(), pre, cursor.post_break_width());
         let body_end = self.place_visual(logical, &order, widths, xs, pads, hangs);
         let byte_range = TextRange::new(cursor.byte_start, byte_end);
-        y_shifts.clear();
-        y_shifts.resize(logical.len(), 0.0);
         let line_box = self.compute_line_box(logical, &order, y_shifts, byte_range, slot)?;
         build_placed(placed, logical, [xs, widths, expansions, y_shifts]);
         visual.rebuild(placed, &order);
@@ -220,17 +209,23 @@ impl<'i, 'a> Layout<'i, 'a> {
         self.build_line(line, &line_box, carets, geometry, pending)
     }
 
-    /// Measures the body in logical order, finds the marks that hang and
-    /// justifies a compressible line (ST1-3, ST3-1 to ST3-4): fills the
-    /// body's `widths` and adds its justification to `expansions`.
-    fn measure_body(
+    /// Measures the line in logical order, finds the marks that hang,
+    /// justifies a compressible body (ST1-3, ST3-1 to ST3-4), and appends the
+    /// trailing whitespace's collapsed/preserved widths (WN-10, ST1-12):
+    /// fills both `widths` and `expansions` for every piece of `logical`.
+    fn measure_line(
         &self,
-        body: &[LogicalPiece<'a>],
+        logical: &[LogicalPiece<'a>],
+        body_len: usize,
         widths: &mut Vec<f32>,
-        expansions: &mut [f32],
+        expansions: &mut Vec<f32>,
         request: &BodyRequest<'_, 'a>,
         pending: &Reshapes,
     ) -> BodyFit {
+        let body = &logical[..body_len];
+        // Only the body is justified; the trailing whitespace has none.
+        expansions.clear();
+        expansions.resize(logical.len(), 0.0);
         let BodyRequest {
             cursor,
             pre,
@@ -275,11 +270,27 @@ impl<'i, 'a> Layout<'i, 'a> {
         let is_justified = compressible
             && slot.width().is_finite()
             && (soft_wrap || slack < 0.0)
-            && self.justify(body, widths, expansions, slack, pending);
+            && self.justify(body, widths, &mut expansions[..body_len], slack, pending);
+        self.append_trailing_widths(&logical[body_len..], widths);
         BodyFit {
             hangs,
             is_justified,
         }
+    }
+
+    /// Appends each trailing whitespace piece's width to `widths`: synthetic
+    /// glue collapses under both modes, collapsible glue under `Collapsible`
+    /// (WN-10, ST1-12).
+    fn append_trailing_widths(&self, trailing: &[LogicalPiece<'_>], widths: &mut Vec<f32>) {
+        let collapsible = self.options.whitespace == HangingWhitespaceMode::Collapsible;
+        widths.extend(trailing.iter().map(|p| match p.piece.kind {
+            PieceKind::Glue(glue)
+                if glue.kind.is_synthetic() || (collapsible && glue.is_collapsible) =>
+            {
+                0.0
+            }
+            _ => p.piece.width,
+        }));
     }
 
     /// Fills `widths` with each body piece's width in logical order from
@@ -323,13 +334,13 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     /// Fills `xs` with each body piece's `x` in visual `order`, which ranks
-    /// exactly the body, and places the trailing whitespace, whose widths it
-    /// adds to `widths`; returns the body's far end including the right pad.
+    /// exactly the body, and places the trailing whitespace beyond the far
+    /// edge; returns the body's far end including the right pad.
     fn place_visual(
         &self,
         logical: &[LogicalPiece<'a>],
         order: &[usize],
-        widths: &mut Vec<f32>,
+        widths: &[f32],
         xs: &mut Vec<f32>,
         pads: Pads,
         hangs: LineHangs,
@@ -352,8 +363,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         } else {
             body_end
         };
-        let (_, trailing_xs) = xs.split_at_mut(body_len);
-        self.place_trailing_whitespace(&logical[body_len..], widths, trailing_xs, far_edge);
+        self.place_trailing_whitespace(&widths[body_len..], &mut xs[body_len..], far_edge);
         body_end
     }
 
@@ -422,34 +432,13 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// Trailing whitespace beyond the far edge `far_edge` (UAX #9 L1,
-    /// HNG-3), its widths appended to `widths` and its positions written to
-    /// `xs`; synthetic glue collapses there under both modes (WN-10,
-    /// ST1-12).
-    fn place_trailing_whitespace(
-        &self,
-        trailing: &[LogicalPiece<'_>],
-        widths: &mut Vec<f32>,
-        xs: &mut [f32],
-        far_edge: f32,
-    ) {
+    /// Trailing whitespace beyond the far edge `far_edge` (UAX #9 L1, HNG-3),
+    /// its positions written to `xs`.
+    fn place_trailing_whitespace(&self, widths: &[f32], xs: &mut [f32], far_edge: f32) {
         let rtl = self.base.is_rtl();
-        let collapsible = self.options.whitespace == HangingWhitespaceMode::Collapsible;
-        let trailing_width = |p: &LogicalPiece<'_>| match p.piece.kind {
-            PieceKind::Glue(glue) => {
-                if glue.kind.is_synthetic() || (collapsible && glue.is_collapsible) {
-                    0.0
-                } else {
-                    p.piece.width
-                }
-            }
-            _ => p.piece.width,
-        };
         // Away from the body: leftwards in RTL, rightwards in LTR.
         let mut tx = far_edge;
-        for (p, x) in trailing.iter().zip(xs) {
-            let width = trailing_width(p);
-            widths.push(width);
+        for (&width, x) in widths.iter().zip(xs) {
             if rtl {
                 tx -= width;
                 *x = tx;

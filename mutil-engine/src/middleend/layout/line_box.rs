@@ -51,17 +51,18 @@ pub(super) struct LineBoxMetrics {
 }
 
 impl Layout<'_, '_> {
-    /// Computes line-box ascent/descent and writes each body piece's
-    /// baseline shift to `y_shifts`, which holds 0 for the others (spec §5
-    /// Stage 4, BAS-1).
+    /// Computes line-box ascent/descent and fills `y_shifts` with each body
+    /// piece's baseline shift, 0 for the others (spec §5 Stage 4, BAS-1).
     pub(super) fn compute_line_box(
         &mut self,
         placed: &[LogicalPiece<'_>],
         order: &[usize],
-        y_shifts: &mut [f32],
+        y_shifts: &mut Vec<f32>,
         byte_range: TextRange,
         slot: InlineSlotConstraint,
     ) -> Result<LineBoxMetrics, LayoutInputError> {
+        y_shifts.clear();
+        y_shifts.resize(placed.len(), 0.0);
         let normal = matches!(self.options.line_height, LineHeight::Normal);
         let (mut above, mut below) = half_leaded(self.strut);
         let mut line_relative: Vec<LineRelativeItem> = Vec::new();
