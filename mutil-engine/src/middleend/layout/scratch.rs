@@ -6,6 +6,13 @@
 //! phases fill the columns in order (`logical`, then the level, width,
 //! expansion, position and shift columns), and the line's [`PlacedPiece`]s
 //! are built once, in one literal, when every column is final.
+//!
+//! Deliberate deviation from ADR-0003 rule 2: the measuring and placement
+//! phases fill these columns through `&mut` instead of returning a value,
+//! since returning one would allocate per line, which this scratch exists to
+//! avoid. Only the orchestrator, `place`, holds the scratch. It lends each
+//! phase only the columns that phase reads or fills, in the order above, so
+//! a column is final before any later phase reads it.
 
 use super::line_artifacts::{CaretScratch, VisualIndex};
 use super::{Piece, PlacedPiece};
