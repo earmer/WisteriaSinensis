@@ -915,7 +915,7 @@ pub enum ParagraphErrorReason {
 | `HangingWithoutOverflow { side }` | under `Allow`, a mark hangs although it would have fitted | HNG-2 |
 | `TooManyHangingGlyphs { side }` | more than one character hangs on one side | HNG-4 |
 | `HangingGlyphNotOutermost { run, glyph }` | a body glyph reaches further towards the side a glyph hangs on | HNG-4 |
-| `InvalidInlineBox { index }` | a box has a non-finite coordinate or extent about the baseline (`ascent - y`, `descent + y`), a negative size, an invalid alignment, or bytes empty or outside the line | SRC-2, WN-7 |
+| `InvalidInlineBox { index }` | a box has a non-finite coordinate, extent about the baseline (`ascent - y`, `descent + y`) or edge that extent reaches from the line's baseline, a negative size, an invalid alignment, or bytes empty or outside the line | SRC-2, WN-7 |
 | `InlineBoxOutsideBlock { index }` | a box lies outside every content block | SLT-4 |
 | `InlineBoxWiderThanWrapWidth { index }` | a `Clip` or `ScaleToFit` box ends beyond `wrap_width` | SLT-5 |
 | `LineWiderThanWrapWidth { visual_width, wrap_width }` | the body is wider than `wrap_width` outside the single-entity state | SLT-5 |

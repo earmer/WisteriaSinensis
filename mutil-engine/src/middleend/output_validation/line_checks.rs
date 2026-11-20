@@ -47,8 +47,10 @@ impl PositionedLine {
             }
         }
         for (index, b) in self.visual_boxes.iter().enumerate() {
-            // The extents about the line's baseline too: selection geometry
-            // takes `ascent - y` and `descent + y` (INT-16).
+            // The extents about the line's baseline too, and the edges they
+            // reach from it on either side (vertical-lr swaps the sides):
+            // selection geometry takes both (INT-16).
+            let (above, below) = (b.ascent - b.y, b.descent + b.y);
             let finite = [
                 b.x,
                 b.y,
@@ -56,8 +58,12 @@ impl PositionedLine {
                 b.ascent,
                 b.descent,
                 b.x + b.width,
-                b.ascent - b.y,
-                b.descent + b.y,
+                above,
+                below,
+                self.baseline_y - above,
+                self.baseline_y + above,
+                self.baseline_y - below,
+                self.baseline_y + below,
             ]
             .into_iter()
             .all(f32::is_finite);
