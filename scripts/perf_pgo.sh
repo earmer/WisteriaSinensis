@@ -13,7 +13,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ENGINE_DIR="$ROOT_DIR/mutil-engine"
-OUT_JSON="${1:-$ENGINE_DIR/target/perf_data.json}"
+RAW_OUT="${1:-$ENGINE_DIR/target/perf_data.json}"
+mkdir -p "$(dirname "$RAW_OUT")"
+OUT_JSON="$(cd "$(dirname "$RAW_OUT")" && pwd)/$(basename "$RAW_OUT")"
 
 SYSROOT="$(rustc --print sysroot)"
 HOST="$(rustc -vV | awk '/^host:/ { print $2 }')"
@@ -33,7 +35,7 @@ MERGED_PROFDATA="$PGO_DATA/merged.profdata"
 BASE_FLAGS="-Ctarget-cpu=native -Cpanic=abort"
 
 rm -rf "$PGO_DATA"
-mkdir -p "$PGO_DATA" "$(dirname "$OUT_JSON")"
+mkdir -p "$PGO_DATA"
 
 echo "[1/4] Building PGO-instrumented perf_survey..." >&2
 (
@@ -57,9 +59,12 @@ echo "[3/4] Building PGO-optimized perf_survey..." >&2
 )
 
 echo "[4/4] Running PGO-optimized perf_survey -> $OUT_JSON" >&2
+TMP_JSON="$(mktemp "${OUT_JSON}.tmp.XXXXXX")"
+trap 'rm -f "$TMP_JSON"' EXIT
 (
     cd "$ENGINE_DIR"
-    "$PGO_USE_DIR/release/examples/perf_survey" > "$OUT_JSON"
+    "$PGO_USE_DIR/release/examples/perf_survey" > "$TMP_JSON"
 )
+mv "$TMP_JSON" "$OUT_JSON"
 
 echo "Done: $OUT_JSON" >&2
