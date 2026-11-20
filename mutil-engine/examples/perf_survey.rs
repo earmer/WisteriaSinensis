@@ -8,15 +8,15 @@
 //! python3 ../scripts/plot_perf.py target/perf_data.json
 //! ```
 
+use mimalloc::MiMalloc;
 use mutil_engine::*;
-use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
-use std::alloc::System;
+use stats_alloc::{Region, StatsAlloc};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
 #[global_allocator]
-static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+static GLOBAL: StatsAlloc<MiMalloc> = StatsAlloc::new(MiMalloc);
 
 struct FastLineShaper;
 
@@ -171,7 +171,7 @@ struct Meas {
 
 fn measure<T>(iters: usize, mut f: impl FnMut() -> T) -> Meas {
     black_box(f());
-    let reg = Region::new(GLOBAL);
+    let reg = Region::new(&GLOBAL);
     black_box(f());
     let stats = reg.change();
 

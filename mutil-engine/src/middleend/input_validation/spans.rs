@@ -12,7 +12,6 @@ use crate::frontend::{
     WordNode, is_line_or_paragraph_separator,
 };
 use crate::types::{BidiLevel, GlyphOrientation, TextRange, WritingMode, is_extent};
-use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 
 /// The offsets at which the content of a paragraph starts and ends, for the
@@ -312,6 +311,13 @@ impl SpanIndex {
     /// Indexes the spans over items [`ItemsInOrder`] proved in byte order,
     /// which the sweep over both relies on.
     pub(super) fn new(ast: &ParagraphAst, boxes: &TextBoxes<'_>, _: &ItemsInOrder) -> Self {
+        if ast.decoration_spans.is_empty() {
+            return Self {
+                touching_flat: Vec::new(),
+                touching_start: Vec::new(),
+                levels: Vec::new(),
+            };
+        }
         let mut touching_flat = Vec::new();
         let mut touching_start = Vec::with_capacity(ast.items.len() + 1);
         let mut levels = vec![(None, None); ast.decoration_spans.len()];
@@ -327,29 +333,34 @@ impl SpanIndex {
                 }
                 next += 1;
             }
-            // The first and last inline entity inside each span: text
-            // atoms and inline objects (WN-8).
-            let entities: SmallVec<[(TextRange, BidiLevel); 1]> = match (node, boxes.get(item)) {
-                (_, Some(view)) => view
-                    .atoms
-                    .iter()
-                    .map(|a| (a.byte_range, a.bidi_level))
-                    .collect(),
-                (
-                    WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
-                        byte_range,
-                        bidi_level,
-                        ..
-                    })),
-                    None,
-                ) => smallvec::smallvec![(*byte_range, *bidi_level)],
-                _ => SmallVec::new(),
-            };
-            for &i in &active {
-                let span = ast.decoration_spans[i].byte_range;
-                for &(_, level) in entities.iter().filter(|(r, _)| span.contains_range(*r)) {
-                    levels[i].0.get_or_insert(level);
-                    levels[i].1 = Some(level);
+            if !active.is_empty() {
+                // The first and last inline entity inside each span: text
+                // atoms and inline objects (WN-8).
+                if let Some(view) = boxes.get(item) {
+                    for &i in &active {
+                        let span = ast.decoration_spans[i].byte_range;
+                        for atom in view.atoms {
+                            if span.contains_range(atom.byte_range) {
+                                levels[i].0.get_or_insert(atom.bidi_level);
+                                levels[i].1 = Some(atom.bidi_level);
+                            }
+                        }
+                    }
+                } else if let WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
+                    byte_range,
+                    bidi_level,
+                    ..
+                })) = node
+                {
+                    for &i in &active {
+                        if ast.decoration_spans[i]
+                            .byte_range
+                            .contains_range(*byte_range)
+                        {
+                            levels[i].0.get_or_insert(*bidi_level);
+                            levels[i].1 = Some(*bidi_level);
+                        }
+                    }
                 }
             }
             touching_start.push(touching_flat.len());
@@ -365,6 +376,9 @@ impl SpanIndex {
 
     /// Indices into `decoration_spans` of the spans touching `items[item]`.
     pub(super) fn touching(&self, item: usize) -> &[usize] {
+        if self.touching_flat.is_empty() {
+            return &[];
+        }
         &self.touching_flat[self.touching_start[item]..self.touching_start[item + 1]]
     }
 }
@@ -386,6 +400,9 @@ pub(super) fn check_span_enclosure(
     index: &SpanIndex,
     SpanBoundaries(boundary_positions): &SpanBoundaries,
 ) -> Result<(), LayoutInputError> {
+    if ast.decoration_spans.is_empty() {
+        return Ok(());
+    }
     for (item, node) in ast.items.iter().enumerate() {
         let item_range = node.byte_span();
         for &span_index in index.touching(item) {

@@ -124,20 +124,25 @@ pub(crate) fn resolve(
 /// A paragraph's levels by source position (spec FE-30).
 pub(crate) struct TextLevels {
     pub(crate) direction: Direction,
-    /// Each resolved position's starting byte offset, ascending, and level.
-    positions: Vec<(usize, BidiLevel)>,
+    /// When `None`, every position has `direction.base_level()` (uniform LTR
+    /// fast path with zero allocations or lookups). Otherwise, each resolved
+    /// position's starting byte offset, ascending, and level.
+    positions: Option<Vec<(usize, BidiLevel)>>,
 }
 
 impl TextLevels {
     /// The level of the code point or inline object starting at `byte`.
     pub(crate) fn at(&self, byte: usize) -> BidiLevel {
-        let at = self.positions.partition_point(|&(s, _)| s < byte);
+        let Some(positions) = &self.positions else {
+            return self.direction.base_level();
+        };
+        let at = positions.partition_point(|&(s, _)| s < byte);
         debug_assert_eq!(
-            self.positions.get(at).map(|p| p.0),
+            positions.get(at).map(|p| p.0),
             Some(byte),
             "a unit starts at {byte}"
         );
-        self.positions
+        positions
             .get(at)
             .map_or(self.direction.base_level(), |p| p.1)
     }
@@ -194,6 +199,28 @@ impl Builder<'_> {
     }
 }
 
+/// Whether `c` cannot trigger any non-zero bidi level under an LTR paragraph
+/// base with no explicit bidi spans: no RTL/Arabic/Arabic-number class and no
+/// explicit embedding, override, or isolate control.
+fn is_ltr_only_char(c: char) -> bool {
+    c.is_ascii()
+        || !matches!(
+            char_class(c),
+            BidiClass::R
+                | BidiClass::Al
+                | BidiClass::An
+                | BidiClass::Lre
+                | BidiClass::Lro
+                | BidiClass::Rle
+                | BidiClass::Rlo
+                | BidiClass::Pdf
+                | BidiClass::Lri
+                | BidiClass::Rli
+                | BidiClass::Fsi
+                | BidiClass::Pdi
+        )
+}
+
 /// Resolves a paragraph's text (spec FE-30). `objects` are the ranges of its
 /// inline objects, ascending; `spans` its validated explicit bidi spans.
 pub(crate) fn resolve_text(
@@ -202,6 +229,19 @@ pub(crate) fn resolve_text(
     spans: &[ExplicitBidiSpan],
     base: Option<Direction>,
 ) -> TextLevels {
+    // Under UAX #9 with an LTR (or auto) base and no explicit spans, if no
+    // character has an R, AL, AN, or explicit control class then W1-W7 resolve
+    // all EN to L (sos = L), N0-N2 resolve all neutrals to L, and I1 keeps
+    // every level at 0.
+    if spans.is_empty()
+        && base != Some(Direction::Rtl)
+        && (text.is_ascii() || text.chars().all(is_ltr_only_char))
+    {
+        return TextLevels {
+            direction: Direction::Ltr,
+            positions: None,
+        };
+    }
     let mut builder = Builder {
         spans,
         next_span: 0,
@@ -237,7 +277,7 @@ pub(crate) fn resolve_text(
         .collect();
     TextLevels {
         direction: resolution.direction,
-        positions,
+        positions: Some(positions),
     }
 }
 
@@ -292,13 +332,14 @@ pub(crate) fn reset_line_levels(
     }
 }
 
-/// L2: the logical indices of a line in visual order, left to right. From
-/// the highest level to the lowest odd one, every maximal sequence at that
-/// level or above is reversed (spec ST2-2).
-pub(crate) fn visual_order(levels: &[BidiLevel]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..levels.len()).collect();
+/// L2: writes the logical indices of a line in visual order, left to right,
+/// into `order`. From the highest level to the lowest odd one, every maximal
+/// sequence at that level or above is reversed (spec ST2-2).
+pub(crate) fn visual_order_into(levels: &[BidiLevel], order: &mut Vec<usize>) {
+    order.clear();
+    order.extend(0..levels.len());
     let Some(highest) = levels.iter().map(|l| l.get()).max() else {
-        return order;
+        return;
     };
     let lowest_odd = levels
         .iter()
@@ -315,5 +356,14 @@ pub(crate) fn visual_order(levels: &[BidiLevel]) -> Vec<usize> {
             }
         }
     }
+}
+
+/// L2: the logical indices of a line in visual order, left to right. From
+/// the highest level to the lowest odd one, every maximal sequence at that
+/// level or above is reversed (spec ST2-2).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn visual_order(levels: &[BidiLevel]) -> Vec<usize> {
+    let mut order = Vec::with_capacity(levels.len());
+    visual_order_into(levels, &mut order);
     order
 }

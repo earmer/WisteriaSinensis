@@ -112,7 +112,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             visible_end: line.byte_range.start(),
         };
         let mut sizes = sizes.into_iter();
-        for &k in &line.order {
+        for &k in line.order {
             let p = line.placed[k];
             match p.piece.kind {
                 PieceKind::Cluster { run, cluster } => {
@@ -145,7 +145,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn run_sizes(&self, line: &PlacedLine<'_, '_>, pending: &Reshapes) -> SmallVec<[usize; 8]> {
         let mut sizes = SmallVec::new();
         let mut last = None;
-        for &k in &line.order {
+        for &k in line.order {
             let p = &line.placed[k];
             let PieceKind::Cluster { run, cluster } = p.piece.kind else {
                 continue;

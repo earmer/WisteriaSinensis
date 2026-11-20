@@ -374,57 +374,64 @@ impl PositionedLine {
     pub(super) fn check_caret_stops(
         &self,
         ctx: &LineContext,
-        glyphs: &SourcedGlyphs<'_>,
+        glyphs: Option<&SourcedGlyphs<'_>>,
     ) -> Result<(), LineInvariantError> {
-        let objects = RangeIndex::new(
-            self.visual_boxes
-                .iter()
-                .map(|b| (b.byte_range, b.bidi_level))
-                .chain(
-                    self.tabs
-                        .iter()
-                        .map(|t| (t.byte_range, ctx.base_direction.base_level())),
-                )
-                .collect(),
-        );
-        let repeats = self.repeated_caret_stops();
-        for (index, stop) in self.caret_stops.iter().enumerate() {
-            let in_order = index == 0
-                || (stop.x >= self.caret_stops[index - 1].x
-                    && (stop.x - self.caret_stops[0].x).is_finite());
-            let level_is_owned = || {
-                let mut owners = glyphs
-                    .touching(stop.offset)
-                    .map(|(_, (level, _))| *level)
-                    .chain(objects.touching(stop.offset).map(|(_, level)| *level))
-                    .peekable();
-                if owners.peek().is_some() {
-                    return owners.any(|level| level == stop.level);
+        let base_level = ctx.base_direction.base_level();
+        let objects = glyphs.map(|_| {
+            RangeIndex::new(
+                self.visual_boxes
+                    .iter()
+                    .map(|b| (b.byte_range, b.bidi_level))
+                    .chain(self.tabs.iter().map(|t| (t.byte_range, base_level)))
+                    .collect(),
+            )
+        });
+        let stops = &self.caret_stops;
+        // When offsets are monotone (pure LTR or pure RTL), equal offsets are
+        // contiguous in visual order so duplicate checks need no sort or Vec.
+        let monotone_offsets = stops.windows(2).all(|w| w[0].offset <= w[1].offset)
+            || stops.windows(2).all(|w| w[0].offset >= w[1].offset);
+        let repeats = (!monotone_offsets).then(|| self.repeated_caret_stops());
+        for (index, stop) in stops.iter().enumerate() {
+            let in_order =
+                index == 0 || (stop.x >= stops[index - 1].x && (stop.x - stops[0].x).is_finite());
+            let level_is_owned = || match (glyphs, objects.as_ref()) {
+                (None, _) => stop.level == base_level,
+                (Some(glyphs), Some(objects)) => {
+                    let mut owners = glyphs
+                        .touching(stop.offset)
+                        .map(|(_, (level, _))| *level)
+                        .chain(objects.touching(stop.offset).map(|(_, level)| *level))
+                        .peekable();
+                    if owners.peek().is_some() {
+                        return owners.any(|level| level == stop.level);
+                    }
+                    // Inside bytes no entity renders (glyph-less `WordSpace`
+                    // glue, spec CRT-2): the base level, or the level of the
+                    // nearest entity on either side.
+                    if stop.level == base_level {
+                        return true;
+                    }
+                    let [glyph_before, glyph_after] = glyphs.neighbours(stop.offset);
+                    let [object_before, object_after] = objects.neighbours(stop.offset);
+                    let glyph_before = glyph_before.map(|(r, (level, _))| (r.end(), *level));
+                    let glyph_after = glyph_after.map(|(r, (level, _))| (r.start(), *level));
+                    let object_before = object_before.map(|(r, level)| (r.end(), *level));
+                    let object_after = object_after.map(|(r, level)| (r.start(), *level));
+                    let before = glyph_before
+                        .into_iter()
+                        .chain(object_before)
+                        .max_by_key(|(end, _)| *end);
+                    let after = glyph_after
+                        .into_iter()
+                        .chain(object_after)
+                        .min_by_key(|(start, _)| *start);
+                    before
+                        .into_iter()
+                        .chain(after)
+                        .any(|(_, level)| level == stop.level)
                 }
-                // Inside bytes no entity renders (glyph-less `WordSpace` glue,
-                // spec CRT-2): the base level, or the level of the nearest
-                // entity on either side.
-                if stop.level == ctx.base_direction.base_level() {
-                    return true;
-                }
-                let [glyph_before, glyph_after] = glyphs.neighbours(stop.offset);
-                let [object_before, object_after] = objects.neighbours(stop.offset);
-                let glyph_before = glyph_before.map(|(r, (level, _))| (r.end(), *level));
-                let glyph_after = glyph_after.map(|(r, (level, _))| (r.start(), *level));
-                let object_before = object_before.map(|(r, level)| (r.end(), *level));
-                let object_after = object_after.map(|(r, level)| (r.start(), *level));
-                let before = glyph_before
-                    .into_iter()
-                    .chain(object_before)
-                    .max_by_key(|(end, _)| *end);
-                let after = glyph_after
-                    .into_iter()
-                    .chain(object_after)
-                    .min_by_key(|(start, _)| *start);
-                before
-                    .into_iter()
-                    .chain(after)
-                    .any(|(_, level)| level == stop.level)
+                (Some(_), None) => false,
             };
             if !in_order
                 || !(self.byte_range.start()..=self.byte_range.end()).contains(&stop.offset)
@@ -432,7 +439,15 @@ impl PositionedLine {
             {
                 return Err(LineInvariantError::InvalidCaretStop { index });
             }
-            if repeats[index] {
+            let is_repeat = match &repeats {
+                Some(flags) => flags[index],
+                None => {
+                    index > 0
+                        && stops[index - 1].offset == stop.offset
+                        && approx_eq(stops[index - 1].x, stop.x)
+                }
+            };
+            if is_repeat {
                 return Err(LineInvariantError::DuplicateCaretStop { index });
             }
         }

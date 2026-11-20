@@ -73,24 +73,27 @@ impl BodyExtent {
     /// source bytes, an inline box or a visible tab.
     pub(crate) fn of(line: &PositionedLine) -> Option<Self> {
         let eps = line.eps();
-        let mut occupied: Vec<bool> = line.slots.iter().map(|s| s.visual_width > 0.0).collect();
-        let mut occupy = |lo: f32, hi: f32| {
-            for (index, _) in line.slots_holding(lo, hi, eps) {
-                occupied[index] = true;
+        let mut occupied: smallvec::SmallVec<[bool; 2]> =
+            line.slots.iter().map(|s| s.visual_width > 0.0).collect();
+        if !occupied.iter().all(|&o| o) {
+            let mut occupy = |lo: f32, hi: f32| {
+                for (index, _) in line.slots_holding(lo, hi, eps) {
+                    occupied[index] = true;
+                }
+            };
+            for g in line.glyphs() {
+                if g.byte_range.is_some_and(|r| !line.is_trailing(r)) {
+                    let (lo, hi) = g.pen_interval();
+                    occupy(lo, hi);
+                }
             }
-        };
-        for g in line.glyphs() {
-            if g.byte_range.is_some_and(|r| !line.is_trailing(r)) {
-                let (lo, hi) = g.pen_interval();
-                occupy(lo, hi);
+            for b in &line.visual_boxes {
+                occupy(b.x, b.x + b.width);
             }
-        }
-        for b in &line.visual_boxes {
-            occupy(b.x, b.x + b.width);
-        }
-        for t in &line.tabs {
-            if !line.is_trailing(t.byte_range) {
-                occupy(t.x, t.x + t.width);
+            for t in &line.tabs {
+                if !line.is_trailing(t.byte_range) {
+                    occupy(t.x, t.x + t.width);
+                }
             }
         }
         let first = occupied.iter().position(|&o| o)?;

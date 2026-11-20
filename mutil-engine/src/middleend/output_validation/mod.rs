@@ -531,10 +531,10 @@ impl PositionedLine {
         self.check_finite(ctx)?;
         self.check_envelope(ctx)?;
         self.check_sources(ctx)?;
-        let glyphs = self.sourced_glyphs();
-        self.check_caret_stops(ctx, &glyphs)?;
+        let glyphs = self.sourced_glyphs_if_needed(ctx);
+        self.check_caret_stops(ctx, glyphs.as_ref())?;
         self.check_annotation_records(ctx)?;
-        self.check_slots_and_content(ctx, &glyphs)
+        self.check_slots_and_content(ctx, glyphs.as_ref())
     }
 
     /// Steps 6 to 9 of [`PositionedLine::validate`]: the slots, and, for a
@@ -542,13 +542,13 @@ impl PositionedLine {
     fn check_slots_and_content(
         &self,
         ctx: &LineContext,
-        glyphs: &SourcedGlyphs<'_>,
+        glyphs: Option<&SourcedGlyphs<'_>>,
     ) -> Result<(), LineInvariantError> {
         let Some(body) = self.check_slots(ctx)? else {
             return self.check_nothing_outside_slots();
         };
-        self.check_glyph_placement(ctx, &body)?;
-        self.check_hanging(ctx, &body)?;
+        let has_hanging = self.check_glyph_placement(ctx, &body)?;
+        self.check_hanging(ctx, &body, has_hanging)?;
         self.check_object_placement(ctx, &body)?;
         self.check_annotation_placement(ctx, &body, glyphs)?;
         self.check_span_fragments()?;
@@ -567,13 +567,31 @@ impl PositionedLine {
         self.byte_range.contains_range(range)
     }
 
+    /// Builds [`SourcedGlyphs`] only when caret-stop level ownership or
+    /// annotation placement needs it: on a line with no annotations where every
+    /// run and inline box shares `ctx`'s base level, every stop's valid level
+    /// is uniquely that base level.
+    fn sourced_glyphs_if_needed(&self, ctx: &LineContext) -> Option<SourcedGlyphs<'_>> {
+        let base = ctx.base_direction.base_level();
+        if self.annotations.is_empty()
+            && self.visual_runs.iter().all(|r| r.bidi_level == base)
+            && self.visual_boxes.iter().all(|b| b.bidi_level == base)
+        {
+            return None;
+        }
+        Some(self.sourced_glyphs())
+    }
+
     fn sourced_glyphs(&self) -> SourcedGlyphs<'_> {
-        RangeIndex::new(
-            self.visual_runs
-                .iter()
-                .flat_map(|run| run.glyphs.iter().map(move |glyph| (run.bidi_level, glyph)))
-                .filter_map(|(level, glyph)| Some((glyph.byte_range?, (level, glyph))))
-                .collect(),
-        )
+        let cap = self.visual_runs.iter().map(|r| r.glyphs.len()).sum();
+        let mut entries = Vec::with_capacity(cap);
+        for run in &self.visual_runs {
+            for glyph in &run.glyphs {
+                if let Some(range) = glyph.byte_range {
+                    entries.push((range, (run.bidi_level, glyph)));
+                }
+            }
+        }
+        RangeIndex::new(entries)
     }
 }

@@ -415,7 +415,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             let first_v = first.visual_span.map(|(v, _)| v);
             if line
                 .visual
-                .has_other_left(line.placed, &line.order, first_v, first.lo, is_member)
+                .has_other_left(line.placed, line.order, first_v, first.lo, is_member)
             {
                 groups.insert(0, group(span_lo, span_lo + left.inside, left.bytes));
             } else {
@@ -428,7 +428,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             let last_v = last.visual_span.map(|(_, v)| v);
             if line
                 .visual
-                .has_other_right(line.placed, &line.order, last_v, last.hi, is_member)
+                .has_other_right(line.placed, line.order, last_v, last.hi, is_member)
             {
                 groups.push(group(span_hi - right.inside, span_hi, right.bytes));
             } else {
@@ -525,7 +525,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut open: Option<DecorationLine> = None;
         // Glue after the open segment joins only if a decorated cluster follows.
         let mut pending_glue: Option<TextRange> = None;
-        for &k in &line.order {
+        for &k in line.order {
             let p = line.placed[k];
             let bytes = p.piece.bytes;
             match p.piece.kind {

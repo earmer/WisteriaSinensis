@@ -22,10 +22,11 @@ pub(crate) enum AutospaceClass {
 
 /// East Asian Width W or F.
 fn is_wide_or_full(c: char) -> bool {
-    matches!(
-        WIDTH.get(c),
-        EastAsianWidth::Wide | EastAsianWidth::Fullwidth
-    )
+    !c.is_ascii()
+        && matches!(
+            WIDTH.get(c),
+            EastAsianWidth::Wide | EastAsianWidth::Fullwidth
+        )
 }
 
 /// General Category P*.
@@ -35,6 +36,9 @@ pub(crate) fn is_punctuation(c: char) -> bool {
 
 /// The autospace class of `c`, if any (FE-20). Punctuation is of neither.
 pub(crate) fn autospace_class(c: char) -> Option<AutospaceClass> {
+    if c.is_ascii() {
+        return c.is_ascii_alphanumeric().then_some(AutospaceClass::Western);
+    }
     let category = CATEGORY.get(c);
     if is_wide_or_full(c) {
         let cjk = HAN_LIST.contains(&char_script(c))
@@ -62,6 +66,9 @@ pub(crate) fn autospace_class(c: char) -> Option<AutospaceClass> {
 /// U+3001, U+3002, U+FF0C, U+FF0E, U+FF1A, U+FF1B, closing quotes ’ / ”,
 /// or a wide or full-width mark of UAX #14 class CL or CP.
 pub(crate) fn is_compressible_close(c: char) -> bool {
+    if c.is_ascii() {
+        return false;
+    }
     matches!(
         c,
         '\u{3001}'
@@ -81,15 +88,17 @@ pub(crate) fn is_compressible_close(c: char) -> bool {
 
 /// A wide or full-width punctuation mark or curly quote (FE-31).
 pub(crate) fn is_wide_punctuation(c: char) -> bool {
-    (is_wide_or_full(c) || matches!(c, '\u{2018}' | '\u{2019}' | '\u{201C}' | '\u{201D}'))
+    !c.is_ascii()
+        && (is_wide_or_full(c) || matches!(c, '\u{2018}' | '\u{2019}' | '\u{201C}' | '\u{201D}'))
         && is_punctuation(c)
 }
 
 /// A wide or full-width opening bracket (UAX #14 class OP) or opening curly
 /// quote (FE-31).
 pub(crate) fn is_wide_opening(c: char) -> bool {
-    (is_wide_or_full(c) && LINE_BREAK.get(c) == LineBreak::OpenPunctuation)
-        || matches!(c, '\u{2018}' | '\u{201C}')
+    !c.is_ascii()
+        && ((is_wide_or_full(c) && LINE_BREAK.get(c) == LineBreak::OpenPunctuation)
+            || matches!(c, '\u{2018}' | '\u{201C}'))
 }
 
 /// A CJK middle dot (FE-31): U+00B7, U+30FB, or U+2027.
@@ -115,6 +124,9 @@ pub(crate) fn is_prohibited_start(c: char) -> bool {
 /// An opening mark that may hang at a line start (ATM-3): UAX #14 class OP,
 /// or General Category Ps or Pi.
 pub(crate) fn is_hangable_start(c: char) -> bool {
+    if c.is_ascii() {
+        return matches!(c, '(' | '[' | '{');
+    }
     LINE_BREAK.get(c) == LineBreak::OpenPunctuation
         || matches!(
             CATEGORY.get(c),

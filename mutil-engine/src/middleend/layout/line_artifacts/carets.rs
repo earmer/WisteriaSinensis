@@ -104,17 +104,28 @@ impl Layout<'_, '_> {
         raw.retain(|s| belongs_here(s.offset));
         distinct_stops(raw, by_offset, marks);
         resolve_shared_offsets(raw, pairs, marks, line.soft_wrap());
-        // The level of an entity touching `offset`, else the paragraph's. The
-        // index is built when the first stop needs it.
+        // The level of an entity touching `offset`, else the paragraph's.
+        // When every run and box shares the base level, every stop takes it
+        // directly without indexing entities.
+        let base_level = self.base.base_level();
+        if runs.iter().all(|r| r.bidi_level == base_level)
+            && boxes.iter().all(|b| b.bidi_level == base_level)
+        {
+            return raw
+                .iter()
+                .map(|s| CaretStop {
+                    x: s.x,
+                    offset: s.offset,
+                    affinity: s.affinity,
+                    level: s.level.unwrap_or(base_level),
+                })
+                .collect();
+        }
         let mut levels = EntityLevels {
             sorted: entities,
             built: false,
         };
-        let mut level_at = |offset: usize| {
-            levels
-                .at(runs, boxes, offset)
-                .unwrap_or_else(|| self.base.base_level())
-        };
+        let mut level_at = |offset: usize| levels.at(runs, boxes, offset).unwrap_or(base_level);
         raw.iter()
             .map(|s| CaretStop {
                 x: s.x,
@@ -209,6 +220,30 @@ impl Layout<'_, '_> {
 ///
 /// `by_offset` and `duplicate` are working buffers.
 fn distinct_stops(raw: &mut Vec<RawStop>, by_offset: &mut Vec<usize>, duplicate: &mut Vec<bool>) {
+    // Fast path: when offsets are already monotone (pure LTR or pure RTL),
+    // equal offsets are contiguous and in emission order, so deduplication is
+    // one linear in-place pass with no sort.
+    let monotone = raw.windows(2).all(|w| w[0].offset <= w[1].offset)
+        || raw.windows(2).all(|w| w[0].offset >= w[1].offset);
+    if monotone {
+        let mut write = 0;
+        let mut group_start = 0;
+        for read in 0..raw.len() {
+            let stop = raw[read];
+            if write > group_start && raw[group_start].offset != stop.offset {
+                group_start = write;
+            }
+            if !raw[group_start..write]
+                .iter()
+                .any(|kept| approx_eq(kept.x, stop.x))
+            {
+                raw[write] = stop;
+                write += 1;
+            }
+        }
+        raw.truncate(write);
+        return;
+    }
     by_offset.clear();
     by_offset.extend(0..raw.len());
     // Stable: emission order within an offset.
@@ -226,6 +261,60 @@ fn distinct_stops(raw: &mut Vec<RawStop>, by_offset: &mut Vec<usize>, duplicate:
     raw.retain(|_| duplicate.next() == Some(&false));
 }
 
+/// Fast path for [`resolve_shared_offsets`] when stops are already ordered by
+/// both `x` and `offset`: equal offsets are contiguous so no sort is needed.
+fn resolve_ordered_shared_offsets(stops: &mut Vec<RawStop>, soft_wrap: bool) {
+    let last_offset = stops.last().map(|s| s.offset);
+    let mut any_merged = false;
+    let mut write = 0;
+    let mut start = 0;
+    while start < stops.len() {
+        let offset = stops[start].offset;
+        let mut end = start + 1;
+        while end < stops.len() && stops[end].offset == offset {
+            end += 1;
+        }
+        let x = stops[start].x;
+        let level = stops[start].level;
+        let last_x = stops[end - 1].x;
+        let merges = level.is_some()
+            && stops[start..end].iter().all(|s| s.level == level)
+            && !approx_eq(x, last_x);
+        if merges {
+            let mut kept = stops[start];
+            kept.x = (x + last_x) / 2.0;
+            kept.affinity = if soft_wrap && Some(offset) == last_offset {
+                CaretAffinity::Upstream
+            } else {
+                CaretAffinity::Downstream
+            };
+            kept.level = None;
+            stops[write] = kept;
+            write += 1;
+            any_merged = true;
+        } else {
+            let distinct_x = stops[start..end].iter().any(|s| !approx_eq(s.x, x));
+            for i in start..end {
+                let mut stop = stops[i];
+                if !distinct_x {
+                    stop.affinity = CaretAffinity::Downstream;
+                    stop.level = None;
+                    if soft_wrap && Some(offset) == last_offset && i + 1 == end {
+                        stop.affinity = CaretAffinity::Upstream;
+                    }
+                }
+                stops[write] = stop;
+                write += 1;
+            }
+        }
+        start = end;
+    }
+    if any_merged {
+        stops.truncate(write);
+        stops.sort_by(|a, b| a.x.total_cmp(&b.x));
+    }
+}
+
 /// Resolves the stops, in visual order, that share an offset (CRT-3). Those
 /// all of one level, e.g. where a negative-width `CjkPunctCompression`
 /// overlaps two clusters, merge into one at their midpoint. Only stops at two
@@ -239,6 +328,13 @@ fn resolve_shared_offsets(
     merged: &mut Vec<bool>,
     soft_wrap: bool,
 ) {
+    if stops
+        .windows(2)
+        .all(|w| w[0].x.total_cmp(&w[1].x).is_le() && w[0].offset <= w[1].offset)
+    {
+        resolve_ordered_shared_offsets(stops, soft_wrap);
+        return;
+    }
     stops.sort_by(|a, b| a.x.total_cmp(&b.x));
     by_offset.clear();
     by_offset.extend(stops.iter().enumerate().map(|(i, s)| (s.offset, i)));

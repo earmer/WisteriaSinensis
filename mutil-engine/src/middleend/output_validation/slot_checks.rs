@@ -64,12 +64,17 @@ impl PositionedLine {
     }
 
     /// Hanging marks: one per side, outermost, on a side the mode allows
-    /// (HNG-2, HNG-4).
+    /// (HNG-2, HNG-4). Skipped when `check_glyph_placement` proved no glyph
+    /// hangs.
     pub(super) fn check_hanging(
         &self,
         ctx: &LineContext,
         body: &BodyExtent,
+        has_hanging: bool,
     ) -> Result<(), LineInvariantError> {
+        if !has_hanging {
+            return Ok(());
+        }
         self.check_hanging_marks(body)?;
         self.check_hanging_sides(ctx, body)
     }
@@ -141,7 +146,8 @@ impl PositionedLine {
     ) -> Result<(), LineInvariantError> {
         let slots = &self.slots;
         let eps = self.eps();
-        let mut spans: Vec<Option<(f32, f32)>> = vec![None; slots.len()];
+        let mut spans: smallvec::SmallVec<[Option<(f32, f32)>; 2]> = smallvec::SmallVec::new();
+        spans.resize(slots.len(), None);
         let owner = |lo: f32, hi: f32| slots.iter().position(|s| s.holds(lo, hi, eps));
         let mut extend = |slot: usize, lo: f32, hi: f32| {
             let (a, b) = spans[slot].get_or_insert((lo, hi));

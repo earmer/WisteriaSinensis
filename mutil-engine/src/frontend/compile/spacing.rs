@@ -149,18 +149,24 @@ impl Compiler<'_> {
         atoms: &mut [GraphemeAtom],
         candidates: &[Seam],
     ) {
-        let allowed: Vec<usize> = touching_pairs(units)
-            .filter(|&a| {
-                let next = first_char(self.text, atoms, a + 1);
-                candidates.binary_search_by_key(&a, |s| s.after).is_err()
-                    && spacing::autospace_class(first_char(self.text, atoms, a))
-                        == Some(spacing::AutospaceClass::Cjk)
-                    && !atoms[a + 1].flags.contains(AtomFlags::IS_CLOSE_PUNCT)
-                    && !spacing::is_prohibited_start(next)
-            })
-            .collect();
-        for a in allowed {
-            atoms[a].flags.insert(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER);
+        let mut cand_at = 0;
+        for a in touching_pairs(units) {
+            let current = first_char(self.text, atoms, a);
+            if current.is_ascii() {
+                continue;
+            }
+            while cand_at < candidates.len() && candidates[cand_at].after < a {
+                cand_at += 1;
+            }
+            if candidates.get(cand_at).is_some_and(|s| s.after == a) {
+                continue;
+            }
+            if spacing::autospace_class(current) == Some(spacing::AutospaceClass::Cjk)
+                && !atoms[a + 1].flags.contains(AtomFlags::IS_CLOSE_PUNCT)
+                && !spacing::is_prohibited_start(first_char(self.text, atoms, a + 1))
+            {
+                atoms[a].flags.insert(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER);
+            }
         }
     }
 

@@ -3,11 +3,9 @@
 use super::hanging::LineEdge;
 use super::{Layout, LineCursor, LineEnd, Piece, PieceKind, Reshaped, Reshapes, Token};
 use crate::frontend::{BoxOverflowPolicy, DiscretionaryNode, InlineObjectBox};
-use crate::middleend::shaper_gate::{
-    checked_font_metrics, checked_reshape_window, resolved_line_box,
-};
+use crate::middleend::shaper_gate::{checked_font_metrics, checked_reshape_window};
 use crate::middleend::tolerance::tolerance;
-use crate::middleend::{InlineSlotConstraint, LayoutInputError, StrutMetrics};
+use crate::middleend::{InlineSlotConstraint, LayoutInputError};
 use crate::shaping::ReshapeRequest;
 use crate::types::{AtomFlags, FontMetrics, RawShapedGlyph, TextRange};
 use smallvec::SmallVec;
@@ -561,22 +559,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             }
         }
         walk
-    }
-
-    /// The line box of a cluster's font instance (spec MET-1, MET-2), through
-    /// the shaper gate.
-    pub(super) fn cluster_box(
-        &mut self,
-        run: usize,
-        cluster: usize,
-    ) -> Result<StrutMetrics, LayoutInputError> {
-        let metrics = self.cluster_metrics(run, cluster)?;
-        resolved_line_box(
-            &metrics,
-            self.ast.runs[run].font_size,
-            self.options.line_height,
-            self.ast.writing_mode,
-        )
     }
 
     /// A cluster's font metrics, through the shaper gate (spec G2).

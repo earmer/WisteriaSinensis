@@ -67,6 +67,15 @@ fn atom_properties(text: &str, range: TextRange, first: char) -> (LineBreakClass
         AtomFlags::IS_CLOSE_PUNCT,
         matches!(class, LineBreakClass::Cl | LineBreakClass::Cp),
     );
+    if grapheme.len() == 1 {
+        // Single ASCII byte: never has a variation selector, emoji sequence, or
+        // CJK ideograph; L1-resettable iff control/space; apostrophe iff `'`.
+        flags.set(AtomFlags::L1_RESETTABLE, first <= ' ' || first == '\x7F');
+        if first == '\'' {
+            flags.set(AtomFlags::IS_APOSTROPHE, script::is_apostrophe(text, range));
+        }
+        return (class, flags);
+    }
     flags.set(
         AtomFlags::HAS_VARIATION_SELECTOR,
         grapheme
@@ -105,10 +114,11 @@ impl<'a> Compiler<'a> {
         let text = self.text;
         let objects = self.input.inline_objects;
         check_objects(objects, graphemes)?;
+        let cap = graphemes.len().saturating_sub(1);
         let mut built = Units {
-            units: Vec::new(),
-            atoms: Vec::new(),
-            atom_styles: Vec::new(),
+            units: Vec::with_capacity(cap),
+            atoms: Vec::with_capacity(cap),
+            atom_styles: Vec::with_capacity(cap),
         };
         let mut next_object = 0;
         for pair in graphemes.windows(2) {

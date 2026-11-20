@@ -81,14 +81,37 @@ fn is_dash_run_char(c: char) -> bool {
 
 /// The script of `c`, `Zyyy` or `Zinh` included.
 pub(crate) fn char_script(c: char) -> ScriptTag {
+    if c.is_ascii() {
+        return if c.is_ascii_alphabetic() {
+            ScriptTag::LATIN
+        } else {
+            ScriptTag::COMMON
+        };
+    }
     tag_of(SCRIPT.get(c))
 }
 
 fn tag_of(script: Script) -> ScriptTag {
-    SCRIPT_NAMES
-        .get(script)
-        .and_then(|name| ScriptTag::try_from_str(name).ok())
-        .unwrap_or(ScriptTag::UNKNOWN)
+    match script {
+        Script::Common => ScriptTag::COMMON,
+        Script::Inherited => ScriptTag::INHERITED,
+        Script::Latin => ScriptTag::LATIN,
+        Script::Han => ScriptTag::HAN,
+        Script::Hiragana => ScriptTag::HIRAGANA,
+        Script::Katakana => ScriptTag::KATAKANA,
+        Script::Hangul => ScriptTag::HANGUL,
+        Script::Bopomofo => ScriptTag::BOPOMOFO,
+        Script::Arabic => ScriptTag::ARABIC,
+        Script::Devanagari => ScriptTag::DEVANAGARI,
+        Script::Cyrillic => ScriptTag::CYRILLIC,
+        Script::Greek => ScriptTag::GREEK,
+        Script::Hebrew => ScriptTag::HEBREW,
+        Script::Thai => ScriptTag::THAI,
+        _ => SCRIPT_NAMES
+            .get(script)
+            .and_then(|name| ScriptTag::try_from_str(name).ok())
+            .unwrap_or(ScriptTag::UNKNOWN),
+    }
 }
 
 /// The first specific script of `atom`'s characters, if any.
@@ -100,6 +123,9 @@ pub(crate) fn atom_script(atom: &str) -> Option<ScriptTag> {
 
 /// East Asian Width W, F or H.
 pub(crate) fn is_wide(c: char) -> bool {
+    if c.is_ascii() {
+        return false;
+    }
     matches!(
         WIDTH.get(c),
         EastAsianWidth::Wide | EastAsianWidth::Fullwidth | EastAsianWidth::Halfwidth
@@ -343,6 +369,11 @@ fn cjk_quotes(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag], pairs: &[(us
 /// FE-15: a maximal run of one of U+2014, U+2026 and U+00B7 takes one
 /// script from its nearest non-punctuation neighbours.
 fn dash_runs(atoms: &[ScriptAtom<'_>], resolved: &mut [ScriptTag]) {
+    if !atoms.iter().any(|atom| {
+        atom.explicit.is_none() && atom.text.chars().next().is_some_and(is_dash_run_char)
+    }) {
+        return;
+    }
     let anchor = |i: usize| {
         let text = atoms[i].text;
         !text
@@ -418,10 +449,12 @@ pub(crate) fn binds_to_next(text: &str, atoms: &[GraphemeAtom], index: usize) ->
     let Some([a, b]) = atoms.get(index..).and_then(<[_]>::first_chunk) else {
         return false;
     };
+    let Some(first) = first_char(text, a).filter(|&c| is_dash_run_char(c)) else {
+        return false;
+    };
     a.byte_range.end() == b.byte_range.start()
         && a.script == b.script
-        && first_char(text, a) == first_char(text, b)
-        && first_char(text, a).is_some_and(is_dash_run_char)
+        && first_char(text, b) == Some(first)
 }
 
 #[cfg(test)]

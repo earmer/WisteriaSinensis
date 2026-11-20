@@ -15,6 +15,14 @@ use crate::types::{
 use crate::{ShapedCluster, ShapingRun};
 use smallvec::SmallVec;
 
+/// Monotonic `(run, cluster)` cursor advancing through `runs` and `clusters`
+/// as text boxes close in atom order.
+#[derive(Default)]
+struct BoxCursor {
+    run: usize,
+    cluster: usize,
+}
+
 /// The storage a text box is closed over.
 struct TextBoxes<'a> {
     runs: &'a [ShapingRun],
@@ -24,20 +32,37 @@ struct TextBoxes<'a> {
 
 impl TextBoxes<'_> {
     /// Closes the box that opened at atom `open`, if any, before `end_atom`.
-    fn close(&self, open: Option<usize>, end_atom: usize, items: &mut Vec<WordNode>) {
+    fn close(
+        &self,
+        cursor: &mut BoxCursor,
+        open: Option<usize>,
+        end_atom: usize,
+        items: &mut Vec<WordNode>,
+    ) {
         let Some(first) = open else {
             return;
         };
         let (runs, clusters) = (self.runs, self.clusters);
-        // Box edges are cluster edges once CLU-8 has been applied.
-        let run_index = runs.partition_point(|r| r.atom_range.end <= first);
+        // Box edges are cluster edges once CLU-8 has been applied, and boxes
+        // close in strictly increasing atom order.
+        while cursor.run < runs.len() && runs[cursor.run].atom_range.end <= first {
+            cursor.run += 1;
+        }
+        let run_index = cursor.run;
         let run = &runs[run_index];
-        let c0 = run.cluster_range.start
-            + clusters[run.cluster_range.clone()]
-                .partition_point(|c| run.atom_range.start + c.atom_range.end <= first);
-        let cluster = c0
-            + clusters[c0..run.cluster_range.end]
-                .partition_point(|c| run.atom_range.start + c.atom_range.start < end_atom);
+        let mut c0 = cursor.cluster.max(run.cluster_range.start);
+        while c0 < run.cluster_range.end
+            && run.atom_range.start + clusters[c0].atom_range.end <= first
+        {
+            c0 += 1;
+        }
+        let mut cluster = c0;
+        while cluster < run.cluster_range.end
+            && run.atom_range.start + clusters[cluster].atom_range.start < end_atom
+        {
+            cluster += 1;
+        }
+        cursor.cluster = cluster;
         let natural_width = ShapedCluster::total_width(&clusters[c0..cluster]);
         items.push(WordNode::Box(BoxNode::Text(TextBox {
             run_index,
@@ -64,12 +89,15 @@ impl Compiler<'_> {
         shaped: &Shaped,
     ) -> Vec<WordNode> {
         let mut space_cache: Vec<Option<f32>> = vec![None; self.styles.len()];
-        let mut items: Vec<WordNode> = Vec::new();
+        let mut items: Vec<WordNode> = Vec::with_capacity(
+            units.units.len() / 2 + self.input.decoration_spans.len() * 2 + seams.len() + 1,
+        );
         let boxes = TextBoxes {
             runs: &shaped.runs,
             clusters: &shaped.clusters,
             atoms: &units.atoms,
         };
+        let mut box_cursor = BoxCursor::default();
         // The first atom of the open text box.
         let mut open: Option<usize> = None;
         let mut atom_end = 0;
@@ -83,7 +111,7 @@ impl Compiler<'_> {
             let node = match unit {
                 Unit::Atom(a) => {
                     if box_starts[a] {
-                        boxes.close(open.take(), a, &mut items);
+                        boxes.close(&mut box_cursor, open.take(), a, &mut items);
                         open = Some(a);
                     }
                     atom_end = a + 1;
@@ -101,7 +129,7 @@ impl Compiler<'_> {
                 Unit::Object(index) => Some(self.object_node(index, levels)),
             };
             if let Some(node) = node {
-                boxes.close(open.take(), atom_end, &mut items);
+                boxes.close(&mut box_cursor, open.take(), atom_end, &mut items);
                 items.push(node);
             }
             let end = unit.range(&units.atoms, self.input.inline_objects).end();
@@ -109,7 +137,7 @@ impl Compiler<'_> {
             let has_leading = end < self.text.len() && boundaries.has_leading_at(end);
             let seam = seams.next_if(|seam| matches!(unit, Unit::Atom(a) if a == seam.after));
             if breaks_after[i].is_some() || has_trailing || has_leading || seam.is_some() {
-                boxes.close(open.take(), atom_end, &mut items);
+                boxes.close(&mut box_cursor, open.take(), atom_end, &mut items);
             }
             if has_trailing {
                 boundaries.emit_trailing(end, &mut items);
@@ -129,7 +157,7 @@ impl Compiler<'_> {
                 boundaries.emit_leading(end, &mut items);
             }
         }
-        boxes.close(open.take(), atom_end, &mut items);
+        boxes.close(&mut box_cursor, open.take(), atom_end, &mut items);
         items.push(WordNode::Discretionary(DiscretionaryNode::paragraph_end(
             self.text.len(),
         )));
@@ -317,11 +345,11 @@ impl<'s> SpanBoundaries<'s> {
     }
 
     fn has_leading_at(&self, offset: usize) -> bool {
-        !self.leading_at(offset).is_empty()
+        !self.spans.is_empty() && !self.leading_at(offset).is_empty()
     }
 
     fn has_trailing_at(&self, offset: usize) -> bool {
-        !self.trailing_at(offset).is_empty()
+        !self.spans.is_empty() && !self.trailing_at(offset).is_empty()
     }
 
     /// Emits the spans starting at `offset`, outer first.
