@@ -148,8 +148,10 @@ pub enum LineInvariantError {
         /// Index into that run's `glyphs`.
         glyph: usize,
     },
-    /// An inline box has a non-finite coordinate, a negative size, an invalid
-    /// baseline alignment, or bytes outside the line.
+    /// An inline box has a non-finite coordinate, extent about the baseline, or
+    /// writing-mode edge or block span from the line's baseline (alone, in the
+    /// line's box union, or mapped to physical coordinates in `VerticalRl`), a
+    /// negative size, an invalid baseline alignment, or bytes outside the line.
     InvalidInlineBox {
         /// Index into `visual_boxes`.
         index: usize,
@@ -526,7 +528,7 @@ impl PositionedLine {
     /// # Errors
     /// The first violated invariant.
     pub fn validate(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
-        self.check_finite()?;
+        self.check_finite(ctx)?;
         self.check_envelope(ctx)?;
         self.check_sources(ctx)?;
         let glyphs = self.sourced_glyphs();

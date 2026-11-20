@@ -893,7 +893,7 @@ pub enum ParagraphErrorReason {
 | `InvalidGlyphSource { run, glyph }` | a glyph's range is empty or outside the line, or an ellipsis-only line holds a source glyph | SRC-1, BOX-3 |
 | `InvalidAnnotation { index, reason }` | see the annotation reasons below | ANO-1 to ANO-4 |
 | `InvalidParagraph { reason }` | see the paragraph reasons below | PAR-2, PAR-3 |
-| `NonFiniteLineMetrics` | a line metric is not finite | BOX-1 |
+| `NonFiniteLineMetrics` | a line metric, its strut/font-metric baseline bounds, or their `VerticalRl` physical mapping is not finite | BOX-1 |
 | `NonPositiveLineHeight { expected, actual }` | a line height or the strut height is not positive | BOX-1 |
 | `VisibleEndOutsideRange` | `visible_byte_end` lies outside `byte_range` | SRC-3 |
 | `VisibleEndNotOnBoundary` | `visible_byte_end` is not a content boundary | SRC-3 |
@@ -915,7 +915,7 @@ pub enum ParagraphErrorReason {
 | `HangingWithoutOverflow { side }` | under `Allow`, a mark hangs although it would have fitted | HNG-2 |
 | `TooManyHangingGlyphs { side }` | more than one character hangs on one side | HNG-4 |
 | `HangingGlyphNotOutermost { run, glyph }` | a body glyph reaches further towards the side a glyph hangs on | HNG-4 |
-| `InvalidInlineBox { index }` | a box has a non-finite coordinate, extent about the baseline (`ascent - y`, `descent + y`) or edge that extent reaches from the line's baseline, a negative size, an invalid alignment, or bytes empty or outside the line | SRC-2, WN-7 |
+| `InvalidInlineBox { index }` | a box has a non-finite coordinate, extent about the baseline (`ascent - y`, `descent + y`), writing-mode edge or block span from the line's baseline (alone, in the line's box/font union, or mapped to physical coordinates in `VerticalRl`), a negative size, an invalid alignment, or bytes empty or outside the line | SRC-2, WN-7 |
 | `InlineBoxOutsideBlock { index }` | a box lies outside every content block | SLT-4 |
 | `InlineBoxWiderThanWrapWidth { index }` | a `Clip` or `ScaleToFit` box ends beyond `wrap_width` | SLT-5 |
 | `LineWiderThanWrapWidth { visual_width, wrap_width }` | the body is wider than `wrap_width` outside the single-entity state | SLT-5 |
@@ -927,7 +927,7 @@ pub enum ParagraphErrorReason {
 | `SpanFragmentOutsideLine { index }` | a fragment's bytes lie outside the line | SRC-2 |
 | `SpanFragmentOutsideSpan { index }` | a fragment's bytes lie outside its `span_range` | FRG-1 |
 | `GlyphOutsideSpanFragment { span_id, run, glyph }`, `InlineBoxOutsideSpanFragment { span_id, index }` | a glyph or box of a span lies outside every fragment of it | FRG-2 |
-| `InvalidCaretStop { index }` | a stop breaks CRT-1 (out of exact visual order, outside the line, off a character boundary) or CRT-2 | CRT-1, CRT-2 |
+| `InvalidCaretStop { index }` | a stop breaks CRT-1 (non-finite `x`, non-finite span from the line's first stop, out of exact visual order, outside the line, off a character boundary) or CRT-2 | CRT-1, CRT-2 |
 | `DuplicateCaretStop { index }` | a stop repeats an earlier stop's offset at the same position, within the layout tolerance | CRT-1, INT-20 |
 | `InvalidDecoration { index }` | a decoration breaks DEC-1 | DEC-1 |
 

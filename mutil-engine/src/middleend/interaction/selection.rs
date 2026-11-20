@@ -168,10 +168,12 @@ impl ValidatedLayout<'_> {
             }
         }
         let (above, below) = extent.unwrap_or((p.policy.strut.ascent, p.policy.strut.descent));
-        // Both are finite, and so are the edges they reach from the baseline:
-        // the shaper gate proves font metrics measurements, and G4 an inline
-        // box's `ascent - y` and `descent + y` and the baseline plus or minus
-        // either (`check_finite`).
+        // Both are finite, and so are the writing-mode edges and block span
+        // they reach from the baseline (including in `VerticalRl` physical
+        // space): the shaper gate proves font metrics measurements, and G4
+        // proves an inline box's `ascent - y`, `descent + y`, and their
+        // writing-mode bounds and union span (`check_finite`,
+        // `check_drawing_origins`).
         // Their sum is not negative: font ascents and descents are
         // (FontMetrics::is_valid), an inline box's are (`check_finite`) and
         // every box adds to both sides, its `y` cancelling; G4 proves the

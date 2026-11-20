@@ -7,12 +7,12 @@ use crate::middleend::{
     AnnotationErrorReason, LineContext, LineHeight, LineInvariantError, PositionedGlyph,
     PositionedLine,
 };
-use crate::types::{BidiLevel, GlyphOrientation, TextRange};
+use crate::types::{BidiLevel, GlyphOrientation, MAX_MEASUREMENT, TextRange};
 use std::collections::HashSet;
 
 impl PositionedLine {
     /// Pass 1: all numbers finite, no negative extent or size.
-    pub(super) fn check_finite(&self) -> Result<(), LineInvariantError> {
+    pub(super) fn check_finite(&self, ctx: &LineContext) -> Result<(), LineInvariantError> {
         use LineInvariantError as E;
         let metrics = [
             self.baseline_y,
@@ -25,7 +25,14 @@ impl PositionedLine {
             self.baseline_y + self.descent,
             self.ascent + self.descent,
         ];
-        if !metrics.into_iter().all(f32::is_finite) {
+        let bounds_finite = |above: f32, below: f32| {
+            let (top, bottom) = ctx.writing_mode.line_bounds(self.baseline_y, above, below);
+            top.is_finite() && bottom.is_finite() && (bottom - top).is_finite()
+        };
+        if !metrics.into_iter().all(f32::is_finite)
+            || (ctx.strut.is_valid() && !bounds_finite(ctx.strut.ascent, ctx.strut.descent))
+            || (!self.visual_runs.is_empty() && !bounds_finite(MAX_MEASUREMENT, MAX_MEASUREMENT))
+        {
             return Err(E::NonFiniteLineMetrics);
         }
         for (run, r) in self.visual_runs.iter().enumerate() {
@@ -46,10 +53,17 @@ impl PositionedLine {
                 }
             }
         }
+        let (mut union_above, mut union_below) = if self.visual_runs.is_empty() {
+            (f32::NEG_INFINITY, f32::NEG_INFINITY)
+        } else {
+            (MAX_MEASUREMENT, MAX_MEASUREMENT)
+        };
         for (index, b) in self.visual_boxes.iter().enumerate() {
-            // The extents about the line's baseline too, and the edges they
-            // reach from it on either side (vertical-lr swaps the sides):
-            // selection geometry takes both (INT-16).
+            // The extents about the line's baseline, the edges they reach from
+            // it in this writing mode, and their block span — alone and
+            // unioned across the line (including any font run up to
+            // `MAX_MEASUREMENT`): `Tight` selection takes the union of any
+            // selected subset of boxes and runs (INT-16).
             let (above, below) = (b.ascent - b.y, b.descent + b.y);
             let finite = [
                 b.x,
@@ -60,14 +74,16 @@ impl PositionedLine {
                 b.x + b.width,
                 above,
                 below,
-                self.baseline_y - above,
-                self.baseline_y + above,
-                self.baseline_y - below,
-                self.baseline_y + below,
             ]
             .into_iter()
-            .all(f32::is_finite);
+            .all(f32::is_finite)
+                && bounds_finite(above, below);
             if !(finite && b.width >= 0.0 && b.ascent >= 0.0 && b.descent >= 0.0) {
+                return Err(E::InvalidInlineBox { index });
+            }
+            union_above = union_above.max(above);
+            union_below = union_below.max(below);
+            if !bounds_finite(union_above, union_below) {
                 return Err(E::InvalidInlineBox { index });
             }
         }
@@ -373,7 +389,9 @@ impl PositionedLine {
         );
         let repeats = self.repeated_caret_stops();
         for (index, stop) in self.caret_stops.iter().enumerate() {
-            let in_order = index == 0 || stop.x >= self.caret_stops[index - 1].x;
+            let in_order = index == 0
+                || (stop.x >= self.caret_stops[index - 1].x
+                    && (stop.x - self.caret_stops[0].x).is_finite());
             let level_is_owned = || {
                 let mut owners = glyphs
                     .touching(stop.offset)
