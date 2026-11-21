@@ -31,9 +31,9 @@ pub use interaction::{
 pub use layout::layout_paragraph;
 pub use line_geometry::GlyphRole;
 pub use options::{
-    HangEndMode, HangMode, HangStartMode, HangingWhitespaceMode, InlineSlotConstraint,
-    LayoutConstraints, LayoutOptions, LineBreakStrategy, LineClampPolicy, LineGeometry,
-    LineGeometryProvider, LineHeight, SoftHyphenPolicy, StrutMetrics, TabStops,
+    CjkPunctuationTrim, HangEndMode, HangMode, HangStartMode, HangingWhitespaceMode,
+    InlineSlotConstraint, LayoutConstraints, LayoutOptions, LineBreakStrategy, LineClampPolicy,
+    LineGeometry, LineGeometryProvider, LineHeight, SoftHyphenPolicy, StrutMetrics, TabStops,
 };
 pub use output::{
     AtomicFragment, CaretAffinity, CaretStop, DecorationKind, DecorationLine, HangSide,

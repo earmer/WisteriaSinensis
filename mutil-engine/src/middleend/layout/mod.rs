@@ -20,6 +20,7 @@ mod line_artifacts;
 mod line_box;
 mod line_builder;
 mod scratch;
+mod trim;
 mod visual_runs;
 
 use crate::frontend::{
@@ -285,6 +286,10 @@ pub(super) struct PlacedPiece<'a> {
     /// Justification space after a cluster, inside `width` (ST3-2).
     pub(super) expansion: f32,
     pub(super) y_shift: f32,
+    /// Leading blank trimmed from a CJK punctuation cluster.
+    pub(super) lead_trim: f32,
+    /// Trailing blank trimmed from a CJK punctuation cluster.
+    pub(super) trail_trim: f32,
 }
 
 /// Where the next line starts: its first token, the break it starts after
@@ -311,6 +316,12 @@ impl<'a> LineCursor<'a> {
 
     pub(super) fn first_line(&self) -> bool {
         self.index == 0
+    }
+
+    /// Whether this line starts after a soft wrap (not line 0 and not after a
+    /// mandatory hard break).
+    pub(super) fn is_soft_wrapped_start(&self) -> bool {
+        self.index > 0 && self.start_break.is_none_or(|b| !b.is_mandatory())
     }
 
     /// The padding cloned before the line's first piece (spec ST2-3).
@@ -686,9 +697,9 @@ mod tests {
 
     #[test]
     fn layout_piece_and_token_sizes_stay_compact() {
-        // 8-byte typed IDs shrink `PieceKind` to 16B, `Piece`/`Token` to 40B,
-        // and `PlacedPiece` to 56B (within a single 64B cache line).
+        // 8-byte typed IDs keep `PieceKind` at 16B, `Piece`/`Token` at 40B,
+        // and `PlacedPiece` at 64B (a single 64B cache line).
         assert_eq!(core::mem::size_of::<Token<'_>>(), 40);
-        assert_eq!(core::mem::size_of::<PlacedPiece<'_>>(), 56);
+        assert_eq!(core::mem::size_of::<PlacedPiece<'_>>(), 64);
     }
 }

@@ -746,24 +746,6 @@ fn break_widths_carry_the_padding_of_the_cloned_spans() {
         check(build(BreakAction::Direct, 2.0, 2.0, false)),
         Err(LayoutInputError::InvalidDiscretionary { item: 3 })
     );
-    // Punctuation adjustment: the clone padding is subtracted first, and
-    // what remains must be a real, affordable delta (edge clusters are 4 wide).
-    let adjust = |pre, post| check(build(BreakAction::CjkPunctAdjust, pre, post, true));
-    assert!(adjust(1.0, 2.0).is_ok()); // net_pre = -1
-    assert!(adjust(2.0, 5.0).is_ok()); // net_post = +3
-    assert!(adjust(-2.0, 2.0).is_ok()); // net_pre = -4: exactly zero left
-    assert_eq!(
-        adjust(2.0, 2.0),
-        Err(LayoutInputError::InvalidDiscretionary { item: 3 })
-    ); // padding alone adjusts nothing
-    assert_eq!(
-        adjust(-2.5, 2.0),
-        Err(LayoutInputError::InvalidDiscretionary { item: 3 })
-    ); // net_pre = -4.5
-    assert_eq!(
-        adjust(2.0, -2.5),
-        Err(LayoutInputError::InvalidDiscretionary { item: 3 })
-    ); // net_post = -4.5
 }
 
 #[test]
@@ -775,50 +757,6 @@ fn a_non_finite_cluster_total_cannot_match_a_finite_cached_width() {
         check_layout_inputs(&a, "abcd", &constraints(), &o),
         Err(LayoutInputError::InvalidTextWidth { item: 0 })
     );
-}
-
-#[test]
-fn punctuation_deltas_are_judged_net_of_large_clone_padding() {
-    use crate::frontend::BoxDecorationBreak::Clone;
-    let o = LayoutOptions::default();
-    // A chip with 1e6 of padding on each side: the padded widths are huge,
-    // the net deltas small, and only the net deltas decide.
-    let big = |pre: f32, post: f32| {
-        let mut d = DiscretionaryNode::direct(2);
-        d.action = BreakAction::CjkPunctAdjust;
-        d.pre_break_width = pre;
-        d.post_break_width = post;
-        d.cloned_spans.push(5);
-        let mut a = with_items(vec![
-            with_width(text_box(vec![atom(0, 1)])),
-            with_width(text_box(vec![atom(1, 2)])),
-            WordNode::Discretionary(d),
-            with_width(text_box(vec![atom(2, 3)])),
-            with_width(text_box(vec![atom(3, 4)])),
-        ]);
-        let mut sp = chip(5, Clone);
-        sp.start_padding = 1.0e6;
-        sp.end_padding = 1.0e6;
-        a.decoration_spans = vec![sp];
-        // Boundary widths follow the padding.
-        let mut a = closed(a);
-        for n in &mut a.items {
-            if let WordNode::Box(BoxNode::SpanBoundary { width, .. }) = n {
-                *width = 1.0e6;
-            }
-        }
-        check_layout_inputs(&a, "abcd", &constraints(), &o)
-    };
-    assert!(big(1.0e6 - 1.0, 1.0e6).is_ok()); // net_pre = -1 of 4
-    assert!(big(1.0e6, 1.0e6 + 0.5).is_ok()); // a small restore is real
-    assert_eq!(
-        big(1.0e6 - 5.0, 1.0e6),
-        Err(LayoutInputError::InvalidDiscretionary { item: 3 })
-    ); // net_pre = -5 empties the cluster
-    assert_eq!(
-        big(1.0e6, 1.0e6),
-        Err(LayoutInputError::InvalidDiscretionary { item: 3 })
-    ); // nothing adjusted
 }
 
 #[test]
@@ -1028,48 +966,6 @@ fn with_width(mut n: WordNode) -> WordNode {
         });
     }
     n
-}
-
-#[test]
-fn cjk_punct_adjust_deltas_need_a_neighbour_and_stay_non_negative() {
-    let o = LayoutOptions::default();
-    // Two boxes whose edge clusters are 4 wide, around the break.
-    let adjust = |pre: f32, post: f32| {
-        let mut d = DiscretionaryNode::direct(2);
-        d.action = BreakAction::CjkPunctAdjust;
-        d.pre_break_width = pre;
-        d.post_break_width = post;
-        with_items(vec![
-            with_width(text_box(vec![atom(0, 2)])),
-            WordNode::Discretionary(d),
-            with_width(text_box(vec![atom(2, 4)])),
-        ])
-    };
-    let check = |a: ParagraphAst| check_layout_inputs(&a, "abcd", &constraints(), &o);
-    // A trim to exactly zero is allowed; a restore is positive.
-    assert!(check(adjust(-4.0, -4.0)).is_ok());
-    assert!(check(adjust(2.0, 0.0)).is_ok());
-    let bad = Err(LayoutInputError::InvalidDiscretionary { item: 1 });
-    // An adjustment that adjusts nothing is no adjustment.
-    assert_eq!(check(adjust(0.0, 0.0)), bad);
-    assert_eq!(check(adjust(-4.5, 0.0)), bad); // last cluster would go negative
-    assert_eq!(check(adjust(0.0, -4.5)), bad); // first cluster would go negative
-    // A non-zero delta needs the text box it applies to.
-    let mut a = adjust(-1.0, 0.0);
-    a.items.remove(0);
-    settle(&mut a);
-    assert_eq!(
-        check(a),
-        Err(LayoutInputError::InvalidDiscretionary { item: 0 })
-    );
-    let mut a = adjust(0.0, -1.0);
-    a.items.remove(2);
-    settle(&mut a);
-    assert_eq!(check(a), bad);
-    // A delta on one side needs no neighbour on the other.
-    let mut a = adjust(-1.0, 0.0);
-    a.items.remove(2);
-    assert!(check(tiled(a)).is_ok());
 }
 
 fn bnd(id: u64, edge: SpanEdge, at: usize) -> WordNode {

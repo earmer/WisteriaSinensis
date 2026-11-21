@@ -991,6 +991,7 @@ fn context_follows_the_layout_options() {
             start: HangStartMode::FirstLine,
             end: HangEndMode::Force,
         },
+        cjk_punctuation_trim: CjkPunctuationTrim::default(),
         line_height: LineHeight::Fixed(1.5),
         whitespace: HangingWhitespaceMode::Preserved,
         soft_hyphen: SoftHyphenPolicy::Strip,

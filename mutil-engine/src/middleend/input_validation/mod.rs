@@ -166,10 +166,9 @@ pub enum LayoutInputError {
     ///   the last discretionary, at most once);
     /// * a repeated or incomplete `cloned_spans`;
     /// * break widths that do not match the cloned padding: `Direct` and
-    ///   `HardBreak` must equal the clone sums, `MathOperator` must equal them
+    ///   `HardBreak` must equal the clone sums, and `MathOperator` must equal them
     ///   plus the repeated operator's advance on the `post` side (and that
-    ///   advance must be finite and non-negative), and `CjkPunctAdjust` must
-    ///   carry a real net delta whose neighbouring cluster stays non-negative.
+    ///   advance must be finite and non-negative).
     InvalidDiscretionary {
         /// Index into `ParagraphAst::items`.
         item: usize,

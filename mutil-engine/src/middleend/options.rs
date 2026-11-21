@@ -42,6 +42,25 @@ pub enum SoftHyphenPolicy {
     Strip,
 }
 
+/// Layout-time side-slot trimming of full-width CJK punctuation (spec §5;
+/// CSS Text 4 `text-spacing-trim`, JLReq / CLReq).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CjkPunctuationTrim {
+    /// Locale-driven default: resolves to [`SpaceAll`](Self::SpaceAll) for
+    /// Traditional Chinese (`zh-Hant`, `zh-TW`), and [`SpaceFirst`](Self::SpaceFirst)
+    /// otherwise (`zh-Hans`, `ja`, and default).
+    #[default]
+    Auto,
+    /// Never trim full-width punctuation side slots.
+    SpaceAll,
+    /// Trim adjacent punctuation pairs and line-start opening marks on soft-wrapped
+    /// lines, leaving paragraph-start and post-hard-break opening marks full-width.
+    SpaceFirst,
+    /// Trim adjacent punctuation pairs and line-start opening marks on every line,
+    /// including paragraph start and after hard breaks.
+    TrimStart,
+}
+
 /// Layout policy (spec §5, §6.6); the geometry is [`LayoutConstraints`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LayoutOptions {
@@ -56,6 +75,8 @@ pub struct LayoutOptions {
     pub strategy: LineBreakStrategy,
     /// Hanging punctuation at both edges.
     pub hang_mode: HangMode,
+    /// Layout-time side-slot trimming of full-width CJK punctuation.
+    pub cjk_punctuation_trim: CjkPunctuationTrim,
     /// Line-height policy; must satisfy [`LineHeight::is_valid`].
     pub line_height: LineHeight,
     /// Trailing-whitespace handling at a soft wrap.

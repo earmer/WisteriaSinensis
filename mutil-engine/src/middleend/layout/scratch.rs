@@ -44,6 +44,10 @@ pub(super) struct LayoutScratch<'a> {
     pub(super) xs: Vec<f32>,
     /// Each piece's baseline shift (BAS-1).
     pub(super) y_shifts: Vec<f32>,
+    /// Each piece's CJK punctuation leading trim.
+    pub(super) lead_trims: Vec<f32>,
+    /// Each piece's CJK punctuation trailing trim.
+    pub(super) trail_trims: Vec<f32>,
     /// The finished pieces, built from the columns above.
     pub(super) placed: Vec<PlacedPiece<'a>>,
     /// The visual order indexed for span grouping (ST2-3).
@@ -53,11 +57,12 @@ pub(super) struct LayoutScratch<'a> {
 }
 
 /// Rebuilds `placed` from the line's final columns, one literal per piece:
-/// each piece of `logical` with its `x`, width, expansion and baseline shift.
+/// each piece of `logical` with its `x`, width, expansion, baseline shift,
+/// and CJK punctuation trims.
 pub(super) fn build_placed<'a>(
     placed: &mut Vec<PlacedPiece<'a>>,
     logical: &[LogicalPiece<'a>],
-    [xs, widths, expansions, y_shifts]: [&[f32]; 4],
+    [xs, widths, expansions, y_shifts, lead_trims, trail_trims]: [&[f32]; 6],
 ) {
     placed.clear();
     placed.extend(
@@ -67,12 +72,20 @@ pub(super) fn build_placed<'a>(
             .zip(widths)
             .zip(expansions)
             .zip(y_shifts)
-            .map(|((((p, &x), &width), &expansion), &y_shift)| PlacedPiece {
-                piece: p.piece,
-                x,
-                width,
-                expansion,
-                y_shift,
-            }),
+            .zip(lead_trims)
+            .zip(trail_trims)
+            .map(
+                |((((((p, &x), &width), &expansion), &y_shift), &lead_trim), &trail_trim)| {
+                    PlacedPiece {
+                        piece: p.piece,
+                        x,
+                        width,
+                        expansion,
+                        y_shift,
+                        lead_trim,
+                        trail_trim,
+                    }
+                },
+            ),
     );
 }
