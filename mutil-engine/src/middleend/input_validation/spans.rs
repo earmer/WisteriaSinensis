@@ -186,19 +186,39 @@ fn annotation_payload_is_valid(ann: &AnnotationSpan, mode: WritingMode) -> bool 
         && (run.orientation != GlyphOrientation::HorizontalInVertical || ann.clusters.len() == 1)
 }
 
-/// The byte ranges of concrete content: every text atom and inline object.
-fn concrete_content(ast: &ParagraphAst, boxes: &TextBoxes<'_>) -> Vec<TextRange> {
-    let mut out = Vec::new();
-    for (item, node) in ast.items.iter().enumerate() {
-        if let Some(view) = boxes.get(item) {
-            out.extend(view.atoms.iter().map(|a| a.byte_range));
+/// Zero-allocation iterator over the byte ranges of concrete content: every
+/// text atom and inline object, in item order.
+fn concrete_content_ranges<'a>(
+    ast: &'a ParagraphAst,
+    boxes: &'a TextBoxes<'a>,
+) -> impl Iterator<Item = TextRange> + 'a {
+    ast.items.iter().enumerate().flat_map(|(item, node)| {
+        let (atoms, object) = if let Some(view) = boxes.get(item) {
+            (view.atoms, None)
         } else if let WordNode::Box(BoxNode::InlineObject(InlineObjectBox { byte_range, .. })) =
             node
         {
-            out.push(*byte_range);
+            (&[][..], Some(*byte_range))
+        } else {
+            (&[][..], None)
+        };
+        atoms.iter().map(|a| a.byte_range).chain(object)
+    })
+}
+
+/// Concrete content ranges (atoms and inline objects) proved in non-overlapping
+/// byte order, so binary search over edges is sound.
+struct SortedContent(Vec<TextRange>);
+
+impl SortedContent {
+    /// Probes concrete content order with zero allocations; collects the ranges
+    /// only when they are in byte order.
+    fn try_from_ast(ast: &ParagraphAst, boxes: &TextBoxes<'_>) -> Option<Self> {
+        if !in_byte_order(concrete_content_ranges(ast, boxes)) {
+            return None;
         }
+        Some(Self(concrete_content_ranges(ast, boxes).collect()))
     }
-    out
 }
 
 /// Validates the decoration spans: ranges fit the text, ids are unique,
@@ -210,6 +230,11 @@ pub(super) fn check_decoration_spans(
     text: &str,
 ) -> Result<DecorationIds, LayoutInputError> {
     use LayoutInputError as E;
+    if u32::try_from(ast.decoration_spans.len()).is_err() {
+        return Err(E::InvalidDecorationSpan {
+            span: u32::MAX as usize,
+        });
+    }
     let mut ids = HashMap::with_capacity(ast.decoration_spans.len());
     let mut stack: Vec<TextRange> = Vec::new();
     for (span, s) in ast.decoration_spans.iter().enumerate() {
@@ -242,28 +267,88 @@ pub(super) fn check_decoration_spans(
 /// least one atom or object (a span of whitespace alone is not atomic
 /// content).
 ///
-/// Deliberately runs before the item checks, whose errors it takes
-/// precedence over (AST-11), so it cannot take their proof that the content
-/// is in byte order: content out of order, which the edge search would
-/// bisect wrongly, is left to `check_item_order` and `check_each_item`, which
-/// reject it.
+/// Runs before the item checks to honor AST-11 error precedence. When
+/// concrete content is in byte order, validates with a linear cursor and
+/// binary search on [`SortedContent`]; when concrete content is unsorted,
+/// validates edges and containment in a single pass without relying on item
+/// order, so every AST-9 fault still reports before `ItemOutsideText` /
+/// `ItemsOutOfOrder`.
 pub(super) fn check_atomic_spans(
     ast: &ParagraphAst,
     text: &str,
     boxes: &TextBoxes<'_>,
 ) -> Result<(), LayoutInputError> {
-    use LayoutInputError as E;
     if ast.atomic_spans.is_empty() {
         return Ok(());
     }
-    let content = concrete_content(ast, boxes);
-    if !in_byte_order(content.iter().copied()) {
-        return Ok(());
+    if let Some(sorted) = SortedContent::try_from_ast(ast, boxes) {
+        return validate_atomic_spans_sorted(ast, text, &sorted);
     }
+    validate_atomic_spans_unsorted(ast, text, boxes)
+}
+
+/// Full atomic-span validation when concrete content is not in byte order:
+/// indexes concrete content edge offsets in a hash set and records containment
+/// against the maximal ascending-disjoint prefix of `atomic_spans`, reporting
+/// the first failing span in index order without sorting the input.
+fn validate_atomic_spans_unsorted(
+    ast: &ParagraphAst,
+    text: &str,
+    boxes: &TextBoxes<'_>,
+) -> Result<(), LayoutInputError> {
+    use LayoutInputError as E;
+    let spans = &ast.atomic_spans;
+    let mut ordered_prefix = 0;
+    let mut prev_end = 0;
+    for s in spans {
+        if s.byte_range.is_empty() || (ordered_prefix > 0 && prev_end > s.byte_range.start()) {
+            break;
+        }
+        prev_end = s.byte_range.end();
+        ordered_prefix += 1;
+    }
+    let prefix = &spans[..ordered_prefix];
+    let mut edges = HashSet::new();
+    let mut has_content = vec![false; ordered_prefix];
+    for r in concrete_content_ranges(ast, boxes) {
+        edges.insert(r.start());
+        edges.insert(r.end());
+        if !r.is_empty() {
+            let after = prefix.partition_point(|s| s.byte_range.start() <= r.start());
+            if let Some(idx) = after.checked_sub(1)
+                && prefix[idx].byte_range.contains_range(r)
+            {
+                has_content[idx] = true;
+            }
+        }
+    }
+    let mut atomic_ids = HashSet::with_capacity(spans.len());
+    for (span, s) in spans.iter().enumerate() {
+        if !atomic_ids.insert(s.span_id)
+            || s.byte_range.is_empty()
+            || !fits(text, s.byte_range)
+            || (span > 0 && spans[span - 1].byte_range.end() > s.byte_range.start())
+            || !edges.contains(&s.byte_range.start())
+            || !edges.contains(&s.byte_range.end())
+            || !has_content.get(span).copied().unwrap_or(false)
+        {
+            return Err(E::InvalidAtomicSpan { span });
+        }
+    }
+    Ok(())
+}
+
+/// Full atomic-span validation against concrete content proved in byte order.
+fn validate_atomic_spans_sorted(
+    ast: &ParagraphAst,
+    text: &str,
+    SortedContent(content): &SortedContent,
+) -> Result<(), LayoutInputError> {
+    use LayoutInputError as E;
     // The offsets an atomic span may start or end at: the start or end of a
     // text atom or of an inline object. Glue, tabs and line terminators
     // contribute none, so an edge inside whitespace is rejected.
-    let is_edge = |offset: usize| is_range_edge(&content, |r| *r, offset);
+    let is_edge = |offset: usize| is_range_edge(content, |r| *r, offset);
     let mut content_at = 0;
     let mut atomic_ids = HashSet::with_capacity(ast.atomic_spans.len());
     for (span, s) in ast.atomic_spans.iter().enumerate() {
@@ -288,11 +373,12 @@ pub(super) fn check_atomic_spans(
 
 /// The index into `decoration_spans` of each span id, proved unique by
 /// `check_decoration_spans`.
-pub(super) struct DecorationIds(HashMap<u64, usize>);
+#[derive(Clone, Debug)]
+pub(in crate::middleend) struct DecorationIds(HashMap<u64, usize>);
 
 impl DecorationIds {
     /// The index of the decoration span with `span_id`, if there is one.
-    pub(super) fn index_of(&self, span_id: u64) -> Option<usize> {
+    pub(in crate::middleend) fn index_of(&self, span_id: u64) -> Option<usize> {
         self.0.get(&span_id).copied()
     }
 }

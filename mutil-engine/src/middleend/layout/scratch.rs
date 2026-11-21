@@ -16,6 +16,7 @@
 
 use super::line_artifacts::{CaretScratch, VisualIndex};
 use super::{Piece, PlacedPiece};
+use crate::middleend::validated::VisualOrder;
 use crate::types::BidiLevel;
 
 /// A piece of the current line in logical order, with the no-break gap
@@ -34,7 +35,7 @@ pub(super) struct LayoutScratch<'a> {
     /// The body's levels, for UAX #9 L1 and L2.
     pub(super) levels: Vec<BidiLevel>,
     /// The body's visual order (UAX #9 L2).
-    pub(super) order: Vec<usize>,
+    pub(super) order: VisualOrder,
     /// Each piece's advance, by logical index.
     pub(super) widths: Vec<f32>,
     /// Each piece's justification inside its advance (ST3-2).
@@ -59,11 +60,19 @@ pub(super) fn build_placed<'a>(
     [xs, widths, expansions, y_shifts]: [&[f32]; 4],
 ) {
     placed.clear();
-    placed.extend(logical.iter().enumerate().map(|(k, p)| PlacedPiece {
-        piece: p.piece,
-        x: xs[k],
-        width: widths[k],
-        expansion: expansions[k],
-        y_shift: y_shifts[k],
-    }));
+    placed.extend(
+        logical
+            .iter()
+            .zip(xs)
+            .zip(widths)
+            .zip(expansions)
+            .zip(y_shifts)
+            .map(|((((p, &x), &width), &expansion), &y_shift)| PlacedPiece {
+                piece: p.piece,
+                x,
+                width,
+                expansion,
+                y_shift,
+            }),
+    );
 }

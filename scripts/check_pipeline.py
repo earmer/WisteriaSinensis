@@ -185,6 +185,10 @@ def metrics() -> dict[str, int]:
         # Interaction queries read lines and stops through the proof views
         # (`ValidatedLine`, `SortedCaretStops`), never by index.
         "bare_indexing_in_interaction": count(under("middleend", "interaction"), INDEXING),
+        # Layout reads AST storage, tokens and scratch columns through the proof
+        # kernel (`ValidatedInputs`, `SentinelTokens`, `VisualOrder`), never by
+        # bare slice indexing.
+        "bare_indexing_in_layout": count(under("middleend", "layout"), INDEXING),
         # Ignored tests: a test either runs in `cargo test` or is a bench in
         # `benches/`, so no test is silently skipped.
         "ignored_tests": count_everywhere(r"#\[ignore\b"),
@@ -203,6 +207,7 @@ TARGETS = {
     "panics_behind_gates": 0,
     "unproved_kernel_sites": 0,
     "bare_indexing_in_interaction": 0,
+    "bare_indexing_in_layout": 0,
     "ignored_tests": 0,
 }
 

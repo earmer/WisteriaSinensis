@@ -5,6 +5,7 @@ use super::{Layout, LineCursor, LineEnd, Piece, PieceKind, Reshaped, Reshapes, T
 use crate::frontend::{BoxOverflowPolicy, DiscretionaryNode, InlineObjectBox};
 use crate::middleend::shaper_gate::{checked_font_metrics, checked_reshape_window};
 use crate::middleend::tolerance::tolerance;
+use crate::middleend::validated::{ClusterId, RunId, TokenIdx};
 use crate::middleend::{InlineSlotConstraint, LayoutInputError};
 use crate::shaping::ReshapeRequest;
 use crate::types::{AtomFlags, FontMetrics, RawShapedGlyph, TextRange};
@@ -17,10 +18,9 @@ pub(super) fn ladder_tier(d: &DiscretionaryNode) -> usize {
     if d.is_mandatory() {
         return 0;
     }
-    let clones = i32::try_from(d.cloned_spans.len()).unwrap_or(i32::MAX);
-    let net = d
-        .penalty
-        .saturating_sub(clones.saturating_mul(DiscretionaryNode::CLONED_SPAN_PENALTY));
+    // G1 proves `cloned_spans.len() <= MAX_DECORATION_NESTING_DEPTH` (8) and
+    // `penalty` in `[-10_000, 10_000)`, so this subtraction cannot overflow.
+    let net = d.penalty - (d.cloned_spans.len() as i32) * DiscretionaryNode::CLONED_SPAN_PENALTY;
     match net {
         DiscretionaryNode::URL_PENALTY_MAX => 2,
         n if (DiscretionaryNode::URL_PENALTY_MIN..DiscretionaryNode::URL_PENALTY_MAX)
@@ -90,18 +90,28 @@ pub(super) struct LineFit<'a> {
 }
 
 /// The last fitting break of each ladder tier (spec ST1-1), with its token.
-struct Fits<'a>([Option<(usize, &'a DiscretionaryNode)>; 3]);
+#[derive(Default)]
+struct Fits<'a> {
+    tier0: Option<(TokenIdx, &'a DiscretionaryNode)>,
+    tier1: Option<(TokenIdx, &'a DiscretionaryNode)>,
+    tier2: Option<(TokenIdx, &'a DiscretionaryNode)>,
+}
 
 impl<'a> Fits<'a> {
-    fn record(&mut self, token: usize, brk: &'a DiscretionaryNode) {
-        self.0[ladder_tier(brk)] = Some((token, brk));
+    fn record(&mut self, token: TokenIdx, brk: &'a DiscretionaryNode) {
+        let entry = Some((token, brk));
+        match ladder_tier(brk) {
+            0 => self.tier0 = entry,
+            1 => self.tier1 = entry,
+            _ => self.tier2 = entry,
+        }
     }
 
     /// The break of the lowest tier that fits.
     fn best(&self) -> Option<LineEnd<'a>> {
-        self.0
-            .iter()
-            .find_map(|&fit| fit)
+        self.tier0
+            .or(self.tier1)
+            .or(self.tier2)
             .map(|(token, brk)| LineEnd::At { token, brk })
     }
 }
@@ -185,7 +195,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     pub(super) fn cluster_glyphs<'s>(
         &'s self,
         pending: &'s Reshapes,
-        cluster: usize,
+        cluster: ClusterId,
     ) -> (&'s [RawShapedGlyph], f32) {
         self.cluster_glyphs_over(Some(pending), cluster)
     }
@@ -195,7 +205,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     pub(super) fn cluster_glyphs_over<'s>(
         &'s self,
         pending: Option<&'s Reshapes>,
-        cluster: usize,
+        cluster: ClusterId,
     ) -> (&'s [RawShapedGlyph], f32) {
         let reshaped = pending
             .and_then(|pending| pending.get(&cluster))
@@ -203,8 +213,8 @@ impl<'i, 'a> Layout<'i, 'a> {
         if let Some(r) = reshaped {
             return (&r.glyphs, r.width);
         }
-        let c = &self.ast.clusters[cluster];
-        (self.inputs.cluster_glyphs(c), c.natural_width)
+        let c = self.inputs.cluster(cluster);
+        (self.inputs.cluster_glyphs_id(cluster), c.natural_width)
     }
 
     /// Greedy fitting (spec ST1-1, ST1-5, ST1-7, WN-1): the last break of
@@ -216,10 +226,10 @@ impl<'i, 'a> Layout<'i, 'a> {
     pub(super) fn fit(&self, line: &LineCursor<'_>, slot: InlineSlotConstraint) -> LineFit<'a> {
         let slot_width = slot.width();
         let mut walk = LineWalk::new(line.post_break_width());
-        let mut fits = Fits([None; 3]);
+        let mut fits = Fits::default();
         let mut t = line.token_start;
         let end = loop {
-            match self.tokens[t] {
+            match *self.tokens.at_or_sentinel(t) {
                 Token::Break(b) => {
                     if b.is_mandatory() {
                         // A line ending here is compressed only under
@@ -243,11 +253,14 @@ impl<'i, 'a> Layout<'i, 'a> {
                 {
                     // No reachable stop (spec ST3-1, AX-6): break before the
                     // tab at an earlier opportunity, else consume it with no
-                    // advance and end the line right after it.
+                    // advance and end the line right after it. Since `t` is a
+                    // piece and `tokens` ends with the sentinel break, `t.next()`
+                    // is in bounds.
                     let earlier = fits.best().filter(|_| walk.has_content);
-                    break earlier.unwrap_or(match self.tokens.get(t + 1) {
-                        Some(&Token::Break(brk)) => LineEnd::At { token: t + 1, brk },
-                        _ => LineEnd::Before(t + 1),
+                    let next = t.next();
+                    break earlier.unwrap_or(match *self.tokens.at_or_sentinel(next) {
+                        Token::Break(brk) => LineEnd::At { token: next, brk },
+                        Token::Piece(_) => LineEnd::Before(next),
                     });
                 }
                 Token::Piece(piece) => {
@@ -260,7 +273,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     }
                 }
             }
-            t += 1;
+            t = t.next();
         };
         LineFit {
             end,
@@ -282,7 +295,10 @@ impl<'i, 'a> Layout<'i, 'a> {
         let LineEnd::At { token, brk } = end else {
             return reshapes;
         };
-        if self.repair_seam(line, token + 1, &mut reshapes).is_empty() {
+        if self
+            .repair_seam(line, token.next(), &mut reshapes)
+            .is_empty()
+        {
             return reshapes;
         }
         // Measured as `fit` measured the break: with shrink, except at a
@@ -340,18 +356,15 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     /// The break token right after `t` and its trailing glue, if any.
-    fn next_break_after(&self, t: usize) -> Option<LineEnd<'a>> {
-        let mut e = t + 1;
-        while let Some(Token::Piece(p)) = self.tokens.get(e) {
-            if !matches!(p.kind, PieceKind::Glue(_)) {
-                return None;
+    fn next_break_after(&self, t: TokenIdx) -> Option<LineEnd<'a>> {
+        for (e, token) in self.tokens.iter_from(t.next()) {
+            match *token {
+                Token::Piece(p) if matches!(p.kind, PieceKind::Glue(_)) => {}
+                Token::Break(brk) => return Some(LineEnd::At { token: e, brk }),
+                Token::Piece(_) => return None,
             }
-            e += 1;
         }
-        match self.tokens.get(e) {
-            Some(&Token::Break(brk)) => Some(LineEnd::At { token: e, brk }),
-            _ => None,
-        }
+        None
     }
 
     /// The emergency break (spec ST1-5) of a line from `line` whose piece
@@ -362,18 +375,21 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn emergency(
         &self,
         line: &LineCursor<'_>,
-        t: usize,
+        t: TokenIdx,
         slot: InlineSlotConstraint,
     ) -> LineFit<'a> {
         let start = line.token_start;
         let mut reshapes = Reshapes::new();
-        let first_content =
-            (start..t).find(|&k| matches!(&self.tokens[k], Token::Piece(p) if p.is_content()));
+        let first_content = self
+            .tokens
+            .iter_range(start, t)
+            .find_map(|(k, tok)| matches!(tok, Token::Piece(p) if p.is_content()).then_some(k));
         if let Some(first) = first_content {
             // Re-shaping an unsafe seam can widen its sides (kerning across
             // it is lost); while the line then overflows, the seam moves one
             // piece back and the abandoned re-shape is dropped.
             let available = slot.width();
+            let floor = first.next();
             let mut t = t;
             loop {
                 // A dash, ellipsis or middle-dot run (FE-15) moves whole to
@@ -386,7 +402,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     t = run_start;
                 }
                 let added = self.repair_seam(line, t, &mut reshapes);
-                if t <= first + 1 || within(self.used_before(line, t, slot, &reshapes), available) {
+                if t <= floor || within(self.used_before(line, t, slot, &reshapes), available) {
                     return LineFit {
                         end: LineEnd::Before(t),
                         reshapes,
@@ -395,30 +411,38 @@ impl<'i, 'a> Layout<'i, 'a> {
                 for c in added {
                     reshapes.remove(&c);
                 }
-                t -= 1;
-                while t > first + 1 && matches!(self.tokens[t], Token::Break(_)) {
-                    t -= 1;
+                while let Some(prev) = t.prev() {
+                    t = prev;
+                    if t <= floor || !matches!(self.tokens.get(t), Some(Token::Break(_))) {
+                        break;
+                    }
                 }
             }
         }
         if let Some(end) = self.next_break_after(t) {
             return LineFit { end, reshapes };
         }
-        self.repair_seam(line, t + 1, &mut reshapes);
+        let next = t.next();
+        self.repair_seam(line, next, &mut reshapes);
         LineFit {
-            end: LineEnd::Before(t + 1),
+            end: LineEnd::Before(next),
             reshapes,
         }
     }
 
     /// Whether the seam before token `t` lies inside a binding punctuation run
     /// such as consecutive U+2014, U+2026 or U+00B7 (spec FE-15).
-    fn inside_dash_run(&self, mut t: usize) -> bool {
-        while let Some(Token::Piece(p)) = self.tokens.get(t) {
+    fn inside_dash_run(&self, t: TokenIdx) -> bool {
+        for token in self.tokens.slice_from(t) {
+            let Token::Piece(p) = token else {
+                return false;
+            };
             match p.kind {
-                PieceKind::SpanEdge { .. } => t += 1,
+                PieceKind::SpanEdge { .. } => {}
                 PieceKind::Cluster { cluster, .. } => {
-                    return self.ast.clusters[cluster]
+                    return self
+                        .inputs
+                        .cluster(cluster)
                         .flags
                         .contains(AtomFlags::BINDS_TO_PREVIOUS);
                 }
@@ -429,9 +453,12 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     /// The first token of the run whose seam `t` lies inside, or `t`.
-    fn dash_run_start(&self, mut t: usize) -> usize {
-        while t > 0 && self.inside_dash_run(t) {
-            t -= 1;
+    fn dash_run_start(&self, mut t: TokenIdx) -> TokenIdx {
+        while let Some(prev) = t.prev() {
+            if !self.inside_dash_run(t) {
+                break;
+            }
+            t = prev;
         }
         t
     }
@@ -449,28 +476,31 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn repair_seam(
         &self,
         line: &LineCursor<'_>,
-        t: usize,
+        t: TokenIdx,
         reshapes: &mut Reshapes,
-    ) -> SmallVec<[usize; 4]> {
+    ) -> SmallVec<[ClusterId; 4]> {
         let mut added = SmallVec::new();
         let Some((run, after)) = self.cluster_from(t) else {
             return added;
         };
-        if self.ast.clusters[after].safe_to_break_before {
+        let after_cluster = self.inputs.cluster(after);
+        if after_cluster.safe_to_break_before {
             return added;
         }
-        let run_clusters = self.ast.runs[run].cluster_range.clone();
-        let depends = |c: usize| !self.ast.clusters[c].safe_to_concat_before;
+        let depends = |c: ClusterId| !self.inputs.cluster(c).safe_to_concat_before;
         // After the seam: `after`, and each next cluster joined to it.
         let next_side = std::iter::once(after).chain(
-            (after + 1..run_clusters.end)
+            self.inputs
+                .run_clusters_after(run, after)
                 .take_while(|&c| depends(c))
                 .take(MAX_SEAM_CHAIN - 1),
         );
         // Before it: the cluster that ends there, and each one it is joined
         // to.
         let mut joined = true;
-        let line_first = self.tokens[line.token_start..]
+        let line_first = self
+            .tokens
+            .slice_from(line.token_start)
             .iter()
             .find_map(|token| match token {
                 Token::Piece(Piece {
@@ -480,27 +510,29 @@ impl<'i, 'a> Layout<'i, 'a> {
                 _ => None,
             })
             .unwrap_or(after);
-        let previous_side = (run_clusters.start.max(line_first)..after)
-            .rev()
+        let previous_side = self
+            .inputs
+            .run_clusters_before(run, line_first, after)
             .take_while(|&c| std::mem::replace(&mut joined, depends(c)))
             .take(MAX_SEAM_CHAIN);
-        let atoms = self.inputs.run_atoms(run);
+        let run_ref = self.inputs.run(run);
+        let atoms = self.inputs.run_atoms_id(run);
         let text = self.inputs.text();
         // Each side shapes with no context across the seam, which becomes a
         // line edge (a joining letter takes its final or initial form there).
-        let seam = self.ast.clusters[after].byte_range.start();
+        let seam = after_cluster.byte_range.start();
         let next_context = TextRange::new(seam, text.len());
         let previous_context = TextRange::new(0, seam);
         let sides = next_side
             .map(|c| (c, next_context))
             .chain(previous_side.map(|c| (c, previous_context)));
         for (c, context) in sides {
-            let cluster = &self.ast.clusters[c];
+            let cluster = self.inputs.cluster(c);
             if let Some((glyphs, width)) = checked_reshape_window(
                 self.shaper,
                 &ReshapeRequest {
                     context,
-                    ..ReshapeRequest::plain(text, &self.ast.runs[run], atoms, cluster.byte_range)
+                    ..ReshapeRequest::plain(text, run_ref, atoms, cluster.byte_range)
                 },
                 cluster,
             ) && reshapes.insert(c, Reshaped { glyphs, width }).is_none()
@@ -513,18 +545,21 @@ impl<'i, 'a> Layout<'i, 'a> {
 
     /// The cluster that starts at token `t`, past any span edges, and its
     /// run.
-    fn cluster_from(&self, t: usize) -> Option<(usize, usize)> {
-        self.tokens[t..].iter().find_map(|token| match token {
-            Token::Piece(Piece {
-                kind: PieceKind::SpanEdge { .. },
-                ..
-            }) => None,
-            Token::Piece(Piece {
-                kind: PieceKind::Cluster { run, cluster },
-                ..
-            }) => Some(Some((*run, *cluster))),
-            _ => Some(None),
-        })?
+    fn cluster_from(&self, t: TokenIdx) -> Option<(RunId, ClusterId)> {
+        self.tokens
+            .slice_from(t)
+            .iter()
+            .find_map(|token| match token {
+                Token::Piece(Piece {
+                    kind: PieceKind::SpanEdge { .. },
+                    ..
+                }) => None,
+                Token::Piece(Piece {
+                    kind: PieceKind::Cluster { run, cluster },
+                    ..
+                }) => Some(Some((*run, *cluster))),
+                _ => Some(None),
+            })?
     }
 
     /// The used width of a line from `line.token_start` that stops before
@@ -533,7 +568,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn used_before(
         &self,
         line: &LineCursor<'_>,
-        end: usize,
+        end: TokenIdx,
         slot: InlineSlotConstraint,
         pending: &Reshapes,
     ) -> f32 {
@@ -545,12 +580,12 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn walk_to(
         &self,
         line: &LineCursor<'_>,
-        end: usize,
+        end: TokenIdx,
         slot: InlineSlotConstraint,
         pending: &Reshapes,
     ) -> LineWalk {
         let mut walk = LineWalk::new(line.post_break_width());
-        for token in &self.tokens[line.token_start..end] {
+        for token in self.tokens.slice(line.token_start, end) {
             match token {
                 Token::Break(b) => walk.pen += b.no_break_width,
                 Token::Piece(piece) => {
@@ -564,15 +599,15 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// A cluster's font metrics, through the shaper gate (spec G2).
     pub(super) fn cluster_metrics(
         &mut self,
-        run: usize,
-        cluster: usize,
+        run: RunId,
+        cluster: ClusterId,
     ) -> Result<FontMetrics, LayoutInputError> {
-        let font = self.ast.clusters[cluster].font;
+        let font = self.inputs.cluster(cluster).font;
         let key = (font.font_id.0, font.scale.to_bits(), run);
         if let Some(found) = self.metrics.get(&key) {
             return Ok(*found);
         }
-        let metrics = checked_font_metrics(self.shaper, self.ast.runs[run].font_instance(font))?;
+        let metrics = checked_font_metrics(self.shaper, self.inputs.run(run).font_instance(font))?;
         self.metrics.insert(key, metrics);
         Ok(metrics)
     }

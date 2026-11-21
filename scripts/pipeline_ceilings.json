@@ -10,5 +10,6 @@
   "panics_behind_gates": 0,
   "unproved_kernel_sites": 0,
   "bare_indexing_in_interaction": 0,
+  "bare_indexing_in_layout": 0,
   "ignored_tests": 0
 }

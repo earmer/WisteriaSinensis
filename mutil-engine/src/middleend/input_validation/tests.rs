@@ -54,7 +54,9 @@ fn sentinel(len: usize) -> WordNode {
 #[test]
 fn the_policy_resolves_the_strut_from_raw_metrics_and_options() {
     let resolve = |options: &LayoutOptions| {
-        validate_layout_inputs(&ast(), "", &constraints(), options).unwrap()
+        validate_layout_inputs(&ast(), "", &constraints(), options)
+            .unwrap()
+            .policy
     };
     let normal = resolve(&LayoutOptions::default());
     assert_eq!(normal.strut.line_height(), 11.0);

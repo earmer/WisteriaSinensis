@@ -9,8 +9,10 @@ use super::line_builder::{AlignedLine, PlacedLine};
 use super::{Layout, Piece, PieceKind, PlacedPiece};
 use crate::frontend::{DiscretionaryNode, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH};
 use crate::middleend::tolerance::tolerance;
+use crate::middleend::validated::{BodyIdx, SpanId, VisualOrder};
 use crate::middleend::{
     AtomicFragment, DecorationKind, DecorationLine, LayoutInputError, PositionedSpanFragment,
+    ValidatedInputs,
 };
 use crate::types::{BidiLevel, FontMetrics, TextDecoration, TextRange};
 use smallvec::SmallVec;
@@ -45,9 +47,9 @@ pub(in crate::middleend::layout) struct VisualIndex {
     /// not span boundaries.
     solid_before: Vec<usize>,
     /// First and last body pieces in visual order with `width > 0.0`, as
-    /// `(visual_pos, logical_index)`.
-    first_wide: Option<(usize, usize)>,
-    last_wide: Option<(usize, usize)>,
+    /// `(visual_pos, body_idx)`.
+    first_wide: Option<(usize, BodyIdx)>,
+    last_wide: Option<(usize, BodyIdx)>,
     /// Whether every body piece has `width >= 0.0` and starts at or after the
     /// previous body piece's end, so `first_wide` and `last_wide` bound all
     /// positive-width non-members in O(1).
@@ -59,7 +61,7 @@ impl VisualIndex {
     pub(in crate::middleend::layout) fn rebuild(
         &mut self,
         placed: &[PlacedPiece<'_>],
-        order: &[usize],
+        order: &VisualOrder,
     ) {
         self.position.clear();
         self.position.resize(placed.len(), None);
@@ -67,11 +69,13 @@ impl VisualIndex {
         self.first_wide = None;
         self.last_wide = None;
         self.ordered_x = true;
+        let placed_t = order.table(placed);
+        let mut pos_t = order.table_mut(&mut self.position);
         let mut solid = 0;
         let mut prev_end = f32::NEG_INFINITY;
-        for (v, &k) in order.iter().enumerate() {
-            let p = &placed[k];
-            self.position[k] = Some(v);
+        for (v, k) in order.indices().enumerate() {
+            let p = placed_t.get(k);
+            pos_t.set(k, Some(v));
             self.solid_before.push(solid);
             solid += usize::from(!matches!(p.piece.kind, PieceKind::SpanEdge { .. }));
             if p.width > 0.0 {
@@ -87,7 +91,7 @@ impl VisualIndex {
     /// Whether a piece other than a span boundary lies strictly between
     /// visual positions `a < b`.
     fn solid_between(&self, a: usize, b: usize) -> bool {
-        self.solid_before[b] > self.solid_before[a + 1]
+        self.solid_before.get(b) > self.solid_before.get(a + 1)
     }
 
     /// Whether any positive-width non-member body piece starts strictly left
@@ -97,22 +101,22 @@ impl VisualIndex {
     fn has_other_left(
         &self,
         placed: &[PlacedPiece<'_>],
-        order: &[usize],
+        order: &VisualOrder,
         first_v: Option<usize>,
         limit: f32,
         is_member: &impl Fn(&Piece<'_>) -> bool,
     ) -> bool {
         if self.ordered_x {
+            let placed_t = order.table(placed);
             return self.first_wide.is_some_and(|(v, k)| {
                 first_v.is_none_or(|fv| v < fv) && {
-                    let x = placed[k].x;
+                    let x = placed_t.get(k).x;
                     x < limit - tolerance(x, limit)
                 }
             });
         }
         order
-            .iter()
-            .map(|&k| &placed[k])
+            .pick(placed)
             .any(|p| p.width > 0.0 && !is_member(&p.piece) && p.x < limit - tolerance(p.x, limit))
     }
 
@@ -123,20 +127,22 @@ impl VisualIndex {
     fn has_other_right(
         &self,
         placed: &[PlacedPiece<'_>],
-        order: &[usize],
+        order: &VisualOrder,
         last_v: Option<usize>,
         limit: f32,
         is_member: &impl Fn(&Piece<'_>) -> bool,
     ) -> bool {
         if self.ordered_x {
+            let placed_t = order.table(placed);
             return self.last_wide.is_some_and(|(v, k)| {
                 last_v.is_none_or(|lv| v > lv) && {
-                    let end = placed[k].x + placed[k].width;
+                    let p = placed_t.get(k);
+                    let end = p.x + p.width;
                     end > limit + tolerance(end, limit)
                 }
             });
         }
-        order.iter().map(|&k| &placed[k]).any(|p| {
+        order.pick(placed).any(|p| {
             let end = p.x + p.width;
             p.width > 0.0 && !is_member(&p.piece) && end > limit + tolerance(end, limit)
         })
@@ -158,19 +164,23 @@ fn visual_groups(
     candidates: Range<usize>,
     is_member: impl Fn(&Piece<'_>) -> bool,
 ) -> SmallVec<[VisualGroup; 2]> {
+    let slice = placed.get(candidates.clone()).unwrap_or_default();
+    let positions = index.position.get(candidates).unwrap_or_default();
     // (visual position, rank among the members in logical order, piece).
-    let mut members: SmallVec<[(usize, usize, usize); 16]> = candidates
-        .filter(|&k| is_member(&placed[k].piece))
+    let mut members: SmallVec<[(usize, usize, &PlacedPiece<'_>); 16]> = slice
+        .iter()
+        .zip(positions)
+        .filter(|(p, _)| is_member(&p.piece))
         .enumerate()
-        .filter_map(|(rank, k)| Some((index.position[k]?, rank, k)))
+        .filter_map(|(rank, (p, &pos))| Some((pos?, rank, p)))
         .collect();
     members.sort_unstable_by_key(|&(v, ..)| v);
     let mut groups: SmallVec<[VisualGroup; 2]> = SmallVec::new();
     let mut previous: Option<(usize, usize)> = None;
-    for (v, rank, k) in members {
-        let p = &placed[k];
+    for (v, rank, p) in members {
         let is_edge = matches!(p.piece.kind, PieceKind::SpanEdge { .. });
-        let (lo, hi) = (p.x, p.x + p.width);
+        let end = p.x + p.width;
+        let (lo, hi) = (p.x.min(end), p.x.max(end));
         let is_bare_boundary = is_edge && p.width == 0.0;
         let joins =
             previous.is_some_and(|(pv, pr)| pr.abs_diff(rank) == 1 && !index.solid_between(pv, v));
@@ -215,11 +225,11 @@ fn pieces_meeting(placed: &[PlacedPiece<'_>], range: TextRange) -> Range<usize> 
 }
 
 /// One line edge's break as decoration spans see it (ST2-3): the spans it
-/// clones, by slice index and outer first, each with the padding it lays out
+/// clones, by validated ID and outer first, each with the padding it lays out
 /// there; the break's whole width there (padding and its own edit), which
 /// the edge's padding starts from; and the line's empty edge bytes.
 struct ClonedEdge {
-    clones: SmallVec<[(usize, f32); MAX_DECORATION_NESTING_DEPTH]>,
+    clones: SmallVec<[(SpanId, f32); MAX_DECORATION_NESTING_DEPTH]>,
     break_width: f32,
     bytes: TextRange,
 }
@@ -227,20 +237,22 @@ struct ClonedEdge {
 impl ClonedEdge {
     /// The edge of `brk`, each cloned span laying out `padding` there.
     fn of(
-        spans: &[InlineDecorationSpan],
-        candidates: Range<usize>,
+        inputs: &ValidatedInputs<'_>,
+        candidates: impl Iterator<Item = SpanId>,
         brk: Option<&DiscretionaryNode>,
         padding: impl Fn(&InlineDecorationSpan) -> f32,
         break_width: impl Fn(&DiscretionaryNode) -> f32,
         at: usize,
     ) -> Self {
-        let cloned = brk.map_or(&[][..], |b| b.cloned_spans.as_slice());
+        let cloned: &[u64] = brk.map_or(&[], |b| b.cloned_spans.as_slice());
         let clones = if cloned.is_empty() {
             SmallVec::new()
         } else {
             candidates
-                .filter(|&index| cloned.contains(&spans[index].span_id))
-                .map(|index| (index, padding(&spans[index])))
+                .filter_map(|id| {
+                    let span = inputs.decoration_span(id);
+                    cloned.contains(&span.span_id).then(|| (id, padding(span)))
+                })
                 .collect()
         };
         Self {
@@ -254,12 +266,12 @@ impl ClonedEdge {
     /// break, so they nest with the span: those before it in slice order
     /// that contain it lie outside it, and those from it on that it contains
     /// lie inside (equal ranges nest in slice order, AST-8).
-    fn side(&self, spans: &[InlineDecorationSpan], index: usize) -> PaddingSide {
-        let span = spans[index].byte_range;
+    fn side(&self, inputs: &ValidatedInputs<'_>, index: SpanId) -> PaddingSide {
+        let span = inputs.decoration_span(index).byte_range;
         let (cloned, outside, inside) = self.clones.iter().fold(
             (false, 0.0, 0.0),
             |(cloned, outside, inside), &(c, width)| {
-                let clone = spans[c].byte_range;
+                let clone = inputs.decoration_span(c).byte_range;
                 if c < index && clone.contains_range(span) {
                     (cloned, outside + width, inside)
                 } else if c >= index && span.contains_range(clone) {
@@ -303,12 +315,11 @@ impl<'i, 'a> Layout<'i, 'a> {
         mut emit: impl FnMut(&InlineDecorationSpan, &VisualGroup),
     ) {
         let bytes = line.byte_range;
-        let spans = &self.ast.decoration_spans;
-        if spans.is_empty() {
+        if self.ast.decoration_spans.is_empty() {
             return;
         }
         let at_start = ClonedEdge::of(
-            spans,
+            self.inputs,
             self.spans_touching(TextRange::empty_at(bytes.start())),
             line.start_break,
             |s| s.start_padding,
@@ -316,7 +327,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             bytes.start(),
         );
         let at_end = ClonedEdge::of(
-            spans,
+            self.inputs,
             self.spans_touching(TextRange::empty_at(bytes.end())),
             line.end_break,
             |s| s.end_padding,
@@ -325,7 +336,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         );
         let visual = line.visual;
         for index in self.spans_touching(bytes) {
-            let span = &spans[index];
+            let span = self.inputs.decoration_span(index);
             let range = span.byte_range;
             if range.end() < bytes.start() {
                 continue;
@@ -335,7 +346,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             let is_member = |p: &Piece<'_>| match p.kind {
                 PieceKind::SpanEdge { span, .. } => {
                     span >= index
-                        && range.contains_range(self.ast.decoration_spans[span].byte_range)
+                        && range.contains_range(self.inputs.decoration_span(span).byte_range)
                 }
                 _ => !p.bytes.is_empty() && range.contains_range(p.bytes),
             };
@@ -346,7 +357,10 @@ impl<'i, 'a> Layout<'i, 'a> {
             if groups.iter().any(|g| !g.is_bare_boundary) {
                 groups.retain(|g| !g.is_bare_boundary);
             }
-            let sides = [at_start.side(spans, index), at_end.side(spans, index)];
+            let sides = [
+                at_start.side(self.inputs, index),
+                at_end.side(self.inputs, index),
+            ];
             self.attach_padding(line, trailing, sides, &is_member, &mut groups);
             let (lo, hi) = (
                 range.start().max(bytes.start()),
@@ -395,7 +409,10 @@ impl<'i, 'a> Layout<'i, 'a> {
             level: self.base.base_level(),
             is_bare_boundary: false,
         };
-        if let Some(bytes) = line.placed[trailing]
+        if let Some(bytes) = line
+            .placed
+            .get(trailing)
+            .unwrap_or_default()
             .iter()
             .filter(|p| is_member(&p.piece) && !p.piece.bytes.is_empty())
             .map(|p| p.piece.bytes)
@@ -449,7 +466,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 span_range: span.byte_range,
                 byte_range: g.bytes,
                 x: g.lo,
-                width: (g.hi - g.lo).max(0.0),
+                width: g.hi - g.lo,
                 ascent,
                 descent,
                 bidi_level: g.level,
@@ -465,11 +482,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     pub(super) fn atomic_fragments(&self, line: &AlignedLine<'_, '_>) -> Vec<AtomicFragment> {
         let mut out = Vec::new();
         let visual = line.visual;
-        let spans = &self.ast.atomic_spans;
-        // G1 proves atomic spans strictly disjoint and ascending (AST-11).
-        let lo = spans.partition_point(|s| s.byte_range.end() <= line.byte_range.start());
-        let hi = spans.partition_point(|s| s.byte_range.start() < line.byte_range.end());
-        for span in &spans[lo..hi.max(lo)] {
+        for span in self.inputs.atomic_spans_meeting(line.byte_range) {
             let full = span.byte_range;
             let part_end = full.end().min(line.byte_range.end());
             let mut covered = full.start().max(line.byte_range.start());
@@ -525,11 +538,10 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut open: Option<DecorationLine> = None;
         // Glue after the open segment joins only if a decorated cluster follows.
         let mut pending_glue: Option<TextRange> = None;
-        for &k in line.order {
-            let p = line.placed[k];
+        for &p in line.order.pick(line.placed) {
             let bytes = p.piece.bytes;
             match p.piece.kind {
-                PieceKind::Cluster { run, cluster } if drawn(self.ast.runs[run].decoration) => {
+                PieceKind::Cluster { run, cluster } if drawn(self.inputs.run(run).decoration) => {
                     let m = self.cluster_metrics(run, cluster)?;
                     let (y_offset, thickness) = (position(m) + p.y_shift, m.underline_thickness);
                     let right = p.x + p.width;

@@ -45,6 +45,16 @@ pub(super) fn check_glyph_ranges(
 ///   the run's own, and together cover them exactly.
 pub(super) fn check_storage(ast: &ParagraphAst) -> Result<TextBoxes<'_>, LayoutInputError> {
     use LayoutInputError as E;
+    if u32::try_from(ast.runs.len()).is_err() {
+        return Err(E::InvalidRunStorage {
+            run: u32::MAX as usize,
+        });
+    }
+    if u32::try_from(ast.clusters.len()).is_err() {
+        return Err(E::InvalidGlyphStorage {
+            cluster: u32::MAX as usize,
+        });
+    }
     let (mut atom_at, mut cluster_at) = (0, 0);
     for (run, r) in ast.runs.iter().enumerate() {
         let (a, c) = (&r.atom_range, &r.cluster_range);

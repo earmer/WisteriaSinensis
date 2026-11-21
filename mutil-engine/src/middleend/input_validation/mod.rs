@@ -317,14 +317,23 @@ fn check_no_paragraph_separator(text: &str) -> Result<(), LayoutInputError> {
     Ok(())
 }
 
-/// [`check_layout_inputs`], returning the policy it resolved on the way so
-/// that layout resolves the strut once.
+/// Facts proved and retained by the input gate (G1), stored in
+/// [`ValidatedInputs`](super::ValidatedInputs).
+#[derive(Clone, Debug)]
+pub(super) struct ValidatedSummary {
+    pub(super) policy: LayoutPolicySnapshot,
+    pub(super) first_break_item: usize,
+    pub(super) decoration_ids: spans::DecorationIds,
+}
+
+/// [`check_layout_inputs`], returning the summary it proved on the way so
+/// that layout reuses the resolved policy, first break and decoration-span map.
 pub(super) fn validate_layout_inputs(
     ast: &ParagraphAst,
     text: &str,
     constraints: &LayoutConstraints,
     options: &LayoutOptions,
-) -> Result<LayoutPolicySnapshot, LayoutInputError> {
+) -> Result<ValidatedSummary, LayoutInputError> {
     let policy = LayoutPolicySnapshot::resolve(ast, constraints, options)?;
     check_no_paragraph_separator(text)?;
     // Phase order is error precedence. A phase that establishes what a later
@@ -333,15 +342,19 @@ pub(super) fn validate_layout_inputs(
     storage::check_presentation(ast, &boxes)?;
     spans::check_bidi_and_annotations(ast, text, &boxes)?;
     storage::check_runs(ast, text)?;
-    let ids = spans::check_decoration_spans(ast, text)?;
+    let decoration_ids = spans::check_decoration_spans(ast, text)?;
     spans::check_atomic_spans(ast, text, &boxes)?;
     items::check_items_fit(ast, text)?;
     let in_order = items::check_item_order(ast)?;
     let spans = spans::SpanIndex::new(ast, &boxes, &in_order);
-    items::check_each_item(ast, text, &boxes, &ids, &spans)?;
-    items::check_paragraph_end(ast)?;
-    let boundaries = spans::check_boundary_order(ast, &ids)?;
+    let items_checked = items::check_each_item(ast, text, &boxes, &decoration_ids, &spans)?;
+    let first_break_item = items::check_paragraph_end(ast, &items_checked)?;
+    let boundaries = spans::check_boundary_order(ast, &decoration_ids)?;
     spans::check_span_enclosure(ast, &spans, &boundaries)?;
     storage::check_coverage(ast, text)?;
-    Ok(policy)
+    Ok(ValidatedSummary {
+        policy,
+        first_break_item,
+        decoration_ids,
+    })
 }

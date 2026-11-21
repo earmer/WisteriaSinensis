@@ -27,6 +27,7 @@ use crate::frontend::{
     WordNode,
 };
 use crate::middleend::shaper_gate::checked_line_box;
+use crate::middleend::validated::{ClusterId, RunId, SentinelTokens, SpanId, TokenIdx};
 use crate::middleend::{
     Clearance, GeometryAnswer, LayoutConstraints, LayoutInputError, LayoutOptions, LineHeight,
     PositionedLine, PositionedParagraph, StrutMetrics, ValidatedInputs,
@@ -36,7 +37,6 @@ use crate::types::{BidiDirection, BidiLevel, FontMetrics, RawShapedGlyph, TextRa
 use breaking::{LineFit, within};
 use scratch::LayoutScratch;
 use std::collections::HashMap;
-use std::ops::Range;
 
 /// How many obstructed block positions the clearance loop tries in a row
 /// before giving up on a geometry provider (spec GEO-4).
@@ -138,32 +138,26 @@ fn tallest_first_line(
     if matches!(options.line_height, LineHeight::Fixed(_)) {
         return Ok(strut_height);
     }
-    let first_break = ast
-        .items
-        .iter()
-        .position(WordNode::is_break_opportunity)
-        .unwrap_or(ast.items.len());
-    let content_end = ast
-        .items
-        .get(first_break)
-        .map_or(usize::MAX, |node| node.byte_span().start());
+    let (before, first_break) = inputs.before_first_break();
+    let content_end = first_break.byte_range.start();
     let mut content_height = strut_height;
-    for (item, node) in ast.items[..first_break].iter().enumerate() {
-        if let WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
-            ascent, descent, ..
-        })) = node
-        {
-            content_height = content_height.max(ascent + descent);
-        }
-        let Some(view) = inputs.text_box(item) else {
-            continue;
-        };
-        let run = &ast.runs[view.run_index];
-        for cluster in view.clusters {
-            let instance = run.font_instance(cluster.font);
-            let line_box =
-                checked_line_box(shaper, instance, options.line_height, ast.writing_mode)?;
-            content_height = content_height.max(line_box.line_height());
+    for node in before {
+        match node {
+            WordNode::Box(BoxNode::InlineObject(InlineObjectBox {
+                ascent, descent, ..
+            })) => {
+                content_height = content_height.max(ascent + descent);
+            }
+            WordNode::Box(BoxNode::Text(text)) => {
+                let (_, run, view) = inputs.resolve_text(text);
+                for cluster in view.clusters {
+                    let instance = run.font_instance(cluster.font);
+                    let line_box =
+                        checked_line_box(shaper, instance, options.line_height, ast.writing_mode)?;
+                    content_height = content_height.max(line_box.line_height());
+                }
+            }
+            _ => {}
         }
     }
     let (mut over, mut under) = (0.0_f32, 0.0_f32);
@@ -181,22 +175,22 @@ fn tallest_first_line(
 }
 
 /// One placeable unit of the item sequence, in logical order. Nodes of the
-/// AST are borrowed; clusters stay indexes, because an emergency re-shape
+/// AST are borrowed; clusters stay typed IDs, because an emergency re-shape
 /// replaces their glyphs in [`Layout::reshaped`] (ADR-0003, rule 5).
 #[derive(Clone, Copy, Debug)]
 pub(super) enum PieceKind<'a> {
-    /// Paragraph-level cluster index and its run.
+    /// Validated paragraph-level cluster and run IDs (8 bytes total).
     Cluster {
-        run: usize,
-        cluster: usize,
+        run: RunId,
+        cluster: ClusterId,
     },
     Object(&'a InlineObjectBox),
     Tab,
     Glue(&'a GlueNode),
     /// A decoration span edge: its padding is advance no glyph covers.
     SpanEdge {
-        /// Index into `ParagraphAst::decoration_spans`.
-        span: usize,
+        /// Validated index into `ParagraphAst::decoration_spans`.
+        span: SpanId,
         edge: SpanEdge,
     },
 }
@@ -246,11 +240,11 @@ impl Token<'_> {
 pub(super) enum LineEnd<'a> {
     /// At the break token with this index, inclusive.
     At {
-        token: usize,
+        token: TokenIdx,
         brk: &'a DiscretionaryNode,
     },
     /// Before the piece token with this index: an emergency cluster break.
-    Before(usize),
+    Before(TokenIdx),
 }
 
 /// A cluster whose glyphs an emergency re-shape replaced.
@@ -260,21 +254,21 @@ pub(super) struct Reshaped {
     pub(super) width: f32,
 }
 
-/// Emergency re-shapes by paragraph-level cluster index.
-pub(super) type Reshapes = HashMap<usize, Reshaped>;
+/// Emergency re-shapes by validated paragraph-level cluster ID.
+pub(super) type Reshapes = HashMap<ClusterId, Reshaped>;
 
 pub(super) struct Layout<'i, 'a> {
     pub(super) inputs: &'i ValidatedInputs<'a>,
     pub(super) ast: &'a ParagraphAst,
     pub(super) shaper: &'i dyn TextShaper,
     pub(super) options: &'a LayoutOptions,
-    pub(super) tokens: Vec<Token<'a>>,
+    pub(super) tokens: SentinelTokens<Token<'a>>,
     /// Prefix max of `decoration_spans[i].byte_range.end()`, so each line
     /// bisects only the spans whose ranges can touch it.
     span_reach: Vec<usize>,
     pub(super) strut: StrutMetrics,
     pub(super) base: BidiDirection,
-    pub(super) metrics: HashMap<(u32, u32, usize), FontMetrics>,
+    pub(super) metrics: HashMap<(u32, u32, RunId), FontMetrics>,
     pub(super) reshaped: Reshapes,
     pub(super) has_underline: bool,
     pub(super) has_strikethrough: bool,
@@ -297,7 +291,7 @@ pub(super) struct PlacedPiece<'a> {
 /// (whose cloned spans open it), its first source byte, its block offset and
 /// its index.
 pub(super) struct LineCursor<'a> {
-    pub(super) token_start: usize,
+    pub(super) token_start: TokenIdx,
     pub(super) start_break: Option<&'a DiscretionaryNode>,
     pub(super) byte_start: usize,
     pub(super) block_top: f32,
@@ -307,7 +301,7 @@ pub(super) struct LineCursor<'a> {
 impl<'a> LineCursor<'a> {
     fn paragraph_start() -> Self {
         Self {
-            token_start: 0,
+            token_start: TokenIdx::START,
             start_break: None,
             byte_start: 0,
             block_top: 0.0,
@@ -325,18 +319,18 @@ impl<'a> LineCursor<'a> {
     }
 
     /// Moves past the line that ended at `end` and was `line_height` tall.
-    fn advance(&mut self, end: LineEnd<'a>, tokens: &[Token<'_>], line_height: f32) {
+    fn advance(&mut self, end: LineEnd<'a>, tokens: &SentinelTokens<Token<'_>>, line_height: f32) {
         self.block_top += line_height;
         self.index += 1;
         match end {
             LineEnd::At { token, brk } => {
                 self.start_break = Some(brk);
                 self.byte_start = brk.byte_range.end();
-                self.token_start = token + 1;
+                self.token_start = token.next();
             }
             LineEnd::Before(token) => {
                 self.start_break = None;
-                self.byte_start = tokens[token].bytes().start();
+                self.byte_start = tokens.at_or_sentinel(token).bytes().start();
                 self.token_start = token;
             }
         }
@@ -345,8 +339,8 @@ impl<'a> LineCursor<'a> {
     /// Whether no token is left. Only the paragraph's final break ends a
     /// line with none left (every other line ends before it), so this is
     /// the end of the paragraph.
-    fn is_paragraph_end(&self, tokens: &[Token<'_>]) -> bool {
-        self.token_start >= tokens.len()
+    fn is_paragraph_end(&self, tokens: &SentinelTokens<Token<'_>>) -> bool {
+        tokens.is_exhausted(self.token_start)
     }
 }
 
@@ -375,16 +369,16 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// Indices into `ast.decoration_spans` of the spans whose byte ranges can
-    /// touch `range` (inclusive of both edges): G1 proves `decoration_spans`
+    /// Validated IDs into `ast.decoration_spans` of the spans whose byte ranges
+    /// can touch `range` (inclusive of both edges): G1 proves `decoration_spans`
     /// sorted by `start` ascending (AST-8).
-    pub(super) fn spans_touching(&self, range: TextRange) -> Range<usize> {
+    pub(super) fn spans_touching(&self, range: TextRange) -> impl Iterator<Item = SpanId> {
         let lo = self.span_reach.partition_point(|&end| end < range.start());
         let hi = self
             .ast
             .decoration_spans
             .partition_point(|s| s.byte_range.start() <= range.end());
-        lo..hi.max(lo)
+        self.inputs.span_ids_in(lo..hi.max(lo))
     }
 
     fn run(mut self) -> Result<PositionedParagraph, LayoutInputError> {
@@ -468,38 +462,25 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 }
 
-/// The token sequence of the validated items, in logical order. Every node
-/// the gate resolved is borrowed; clusters stay indexes.
-fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> Vec<Token<'a>> {
+/// The token sequence of the validated items, in logical order, ending with
+/// the G1-proved paragraph-end sentinel. Every node the gate resolved is
+/// borrowed; clusters and span edges carry validated 4-byte IDs.
+fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> SentinelTokens<Token<'a>> {
     let ast = inputs.ast();
+    let (body_items, sentinel) = inputs.split_paragraph_end();
     let mut tokens = Vec::with_capacity(ast.items.len() + ast.clusters.len());
-    // The gate proved every boundary names a span of the paragraph (AST-8).
-    // A map, not a stack of open spans: popping a stack would `expect` the
-    // pairing the gate proved (pipeline rule 4). It is built only for
-    // paragraphs with decoration spans, which are few.
-    let span_of_id: HashMap<u64, usize> = ast
-        .decoration_spans
-        .iter()
-        .enumerate()
-        .map(|(index, span)| (span.span_id, index))
-        .collect();
-    for item in &ast.items {
+    for item in body_items {
         match item {
             WordNode::Box(BoxNode::Text(text)) => {
-                let view = inputs.text_view(text);
-                tokens.extend(text.cluster_range.clone().zip(view.clusters).map(
-                    |(cluster, info)| {
-                        Token::Piece(Piece {
-                            kind: PieceKind::Cluster {
-                                run: view.run_index,
-                                cluster,
-                            },
-                            bytes: info.byte_range,
-                            level: info.bidi_level,
-                            width: info.natural_width,
-                        })
-                    },
-                ));
+                let (run, _, _) = inputs.resolve_text(text);
+                tokens.extend(inputs.text_clusters(text).map(|(cluster, info)| {
+                    Token::Piece(Piece {
+                        kind: PieceKind::Cluster { run, cluster },
+                        bytes: info.byte_range,
+                        level: info.bidi_level,
+                        width: info.natural_width,
+                    })
+                }));
             }
             WordNode::Box(BoxNode::InlineObject(object)) => tokens.push(Token::Piece(Piece {
                 kind: PieceKind::Object(object),
@@ -515,7 +496,7 @@ fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> Vec<Token<'a>> {
                 bidi_level,
             }) => tokens.push(Token::Piece(Piece {
                 kind: PieceKind::SpanEdge {
-                    span: span_of_id[span_id],
+                    span: inputs.boundary_span_id(*span_id),
                     edge: *edge,
                 },
                 bytes: *byte_range,
@@ -537,7 +518,7 @@ fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> Vec<Token<'a>> {
             WordNode::Discretionary(d) => tokens.push(Token::Break(d)),
         }
     }
-    tokens
+    SentinelTokens::from_body_and_sentinel(tokens, Token::Break(sentinel))
 }
 
 #[cfg(test)]
@@ -670,5 +651,13 @@ mod tests {
         assert_eq!(order(&[1, 1, 1]), [2, 1, 0]);
         assert_eq!(order(&[0, 1, 1, 0]), [0, 2, 1, 3]);
         assert_eq!(order(&[1, 2, 2, 1]), [3, 1, 2, 0]);
+    }
+
+    #[test]
+    fn layout_piece_and_token_sizes_stay_compact() {
+        // 8-byte typed IDs shrink `PieceKind` to 16B, `Piece`/`Token` to 40B,
+        // and `PlacedPiece` to 56B (within a single 64B cache line).
+        assert_eq!(core::mem::size_of::<Token<'_>>(), 40);
+        assert_eq!(core::mem::size_of::<PlacedPiece<'_>>(), 56);
     }
 }

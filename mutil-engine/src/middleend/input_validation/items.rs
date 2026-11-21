@@ -26,6 +26,13 @@ pub(super) fn check_items_fit(ast: &ParagraphAst, text: &str) -> Result<(), Layo
     }
 }
 
+/// Proof from [`check_each_item`] that every item passed its per-item checks
+/// (including text-box self-containment and non-empty inline objects), carrying
+/// the index of the first break opportunity seen.
+pub(super) struct ItemsChecked {
+    first_break_item: Option<usize>,
+}
+
 /// Each item on its own, in item order.
 pub(super) fn check_each_item(
     ast: &ParagraphAst,
@@ -33,18 +40,28 @@ pub(super) fn check_each_item(
     boxes: &TextBoxes<'_>,
     ids: &DecorationIds,
     spans: &SpanIndex,
-) -> Result<(), LayoutInputError> {
+) -> Result<ItemsChecked, LayoutInputError> {
     let mut checks = ItemChecks::new(ast, text, boxes, ids, spans);
+    let mut first_break_item = None;
     for (item, node) in ast.items.iter().enumerate() {
         checks.check(item, node)?;
+        if first_break_item.is_none() && node.is_break_opportunity() {
+            first_break_item = Some(item);
+        }
     }
-    Ok(())
+    Ok(ItemsChecked { first_break_item })
 }
 
-/// `items` ends with the paragraph-end sentinel.
-pub(super) fn check_paragraph_end(ast: &ParagraphAst) -> Result<(), LayoutInputError> {
+/// `items` ends with the paragraph-end sentinel; returns the index of the
+/// first break opportunity (`< ast.items.len()`).
+pub(super) fn check_paragraph_end(
+    ast: &ParagraphAst,
+    checked: &ItemsChecked,
+) -> Result<usize, LayoutInputError> {
     match ast.items.last() {
-        Some(WordNode::Discretionary(d)) if d.is_paragraph_end() => Ok(()),
+        Some(WordNode::Discretionary(d)) if d.is_paragraph_end() => {
+            Ok(checked.first_break_item.unwrap_or(ast.items.len() - 1))
+        }
         _ => Err(LayoutInputError::MissingParagraphEnd),
     }
 }

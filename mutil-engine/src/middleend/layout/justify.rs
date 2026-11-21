@@ -48,8 +48,8 @@ impl Layout<'_, '_> {
                 PieceKind::Cluster { run, cluster }
                     if next_is_cluster && !self.cluster_glyphs(pending, cluster).0.is_empty() =>
                 {
-                    let run = &self.ast.runs[run];
-                    let flags = self.ast.clusters[cluster].flags;
+                    let run = self.inputs.run(run);
+                    let flags = self.inputs.cluster(cluster).flags;
                     if flags.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER) {
                         Capacity {
                             level: 2,
@@ -89,8 +89,8 @@ impl Layout<'_, '_> {
 
     /// `Z`: how much the glue after the line's last tab can shrink (ST1-7).
     pub(super) fn shrink_capacity(body: &[LogicalPiece<'_>]) -> f32 {
-        body[Self::after_last_tab(body)..]
-            .iter()
+        body.iter()
+            .skip(Self::after_last_tab(body))
             .map(|p| match p.piece.kind {
                 PieceKind::Glue(glue) => glue.max_shrink,
                 _ => 0.0,
@@ -114,9 +114,9 @@ impl Layout<'_, '_> {
     ) -> bool {
         let first = Self::after_last_tab(body);
         let (body, widths, expansions) = (
-            &body[first..],
-            &mut widths[first..],
-            &mut expansions[first..],
+            body.get(first..).unwrap_or_default(),
+            widths.get_mut(first..).unwrap_or_default(),
+            expansions.get_mut(first..).unwrap_or_default(),
         );
         let capacities = self.capacities(body, pending);
         let mut remaining = slack.abs();
