@@ -193,7 +193,7 @@ pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
         let r_excess = excess / f64::from(font_size).max(1.0);
         let bad = (base + 400.0 * r_excess.powi(3)).min(f64::from(MAX_BADNESS));
         LineFit {
-            excess_slack_bits: excess.max(0.0).to_bits(),
+            excess_slack_bits: excess.to_bits(),
             ..fit(2.0 + r_excess, bad)
         }
     }

@@ -1,9 +1,10 @@
 //! Shaping the runs into the AST's storage (spec FE-27, CLU-8, AST-4).
 
+use super::runs::UnshapedRun;
 use super::{Compiler, FrontendError, Shaped};
 use crate::shaping::{ReshapeRequest, ShapeOutput};
 use crate::types::{
-    GraphemeAtom, RawShapedGlyph, ShapedCluster, ShapingRun, TextRange, natural_width,
+    GraphemeAtom, LocaleTag, RawShapedGlyph, ShapedCluster, TextRange, natural_width,
 };
 
 impl Compiler<'_> {
@@ -12,21 +13,25 @@ impl Compiler<'_> {
     pub(super) fn shape_runs(
         &self,
         all_atoms: &[GraphemeAtom],
-        runs: &[ShapingRun],
+        runs: Vec<UnshapedRun>,
+        locales: &[LocaleTag],
         box_starts: &[bool],
     ) -> Result<Shaped, FrontendError> {
         let mut ast = Shaped {
-            runs: Vec::new(),
+            runs: Vec::with_capacity(runs.len()),
             clusters: Vec::new(),
             glyphs: Vec::new(),
         };
         let mut shaped = ShapeOutput::default();
         let mut window_out = ShapeOutput::default();
-        for (run_index, run) in runs.iter().enumerate() {
+        for (run_index, unshaped) in runs.into_iter().enumerate() {
             let contract = FrontendError::ShaperContract { run: run_index };
-            let atoms = &all_atoms[run.atom_range.clone()];
+            let style = self.styles[unshaped.style];
+            let locale = locales[unshaped.atom_range.start].clone();
+            let atoms = &all_atoms[unshaped.atom_range.clone()];
+            let mut run = unshaped.into_shaping_run(style, locale, atoms);
             shaped.clear();
-            self.shaper.shape_run(self.text, run, atoms, &mut shaped);
+            self.shaper.shape_run(self.text, &run, atoms, &mut shaped);
             if !partitions(&shaped.clusters, &shaped.glyphs, 0..atoms.len()) {
                 return Err(contract);
             }
@@ -62,7 +67,7 @@ impl Compiler<'_> {
                         atoms[w_start].byte_range.start(),
                         atoms[w_end - 1].byte_range.end(),
                     );
-                    let request = ReshapeRequest::plain(self.text, run, atoms, bytes);
+                    let request = ReshapeRequest::plain(self.text, &run, atoms, bytes);
                     self.shaper.reshape_window(&request, &mut window_out);
                     if !partitions(&window_out.clusters, &window_out.glyphs, w_start..w_end) {
                         return Err(contract);
@@ -75,10 +80,8 @@ impl Compiler<'_> {
                     }
                 }
             }
-            ast.runs.push(ShapingRun {
-                cluster_range: cluster_start..ast.clusters.len(),
-                ..run.clone()
-            });
+            run.cluster_range = cluster_start..ast.clusters.len();
+            ast.runs.push(run);
         }
         Ok(ast)
     }

@@ -77,20 +77,23 @@ impl Layout<'_, '_> {
         } else {
             HangSide::Right
         };
-        let c = &self.ast.clusters[cluster];
+        let c = self.inputs.cluster(cluster);
         (c.flags.contains(flag)
             && piece.level == self.base.base_level()
             && self.options.hang_mode.allows(side, self.base, first_line))
         .then(|| self.cluster_glyphs_over(pending, cluster).1 * HANG_FRACTION)
     }
 
-    /// The index of the first or last visible piece of `body`: only
+    /// The index and piece of the first or last visible piece of `body`: only
     /// zero-width span boundaries may lie between a mark and its edge.
-    fn outermost(body: &[LogicalPiece<'_>], edge: LineEdge) -> Option<usize> {
-        let visible = |k: &usize| !body[*k].piece.is_edge_transparent();
+    fn outermost<'p>(
+        body: &'p [LogicalPiece<'_>],
+        edge: LineEdge,
+    ) -> Option<(usize, &'p LogicalPiece<'p>)> {
+        let visible = |(_, p): &(usize, &LogicalPiece<'_>)| !p.piece.is_edge_transparent();
         match edge {
-            LineEdge::Start => (0..body.len()).find(visible),
-            LineEdge::End => (0..body.len()).rev().find(visible),
+            LineEdge::Start => body.iter().enumerate().find(visible),
+            LineEdge::End => body.iter().enumerate().rev().find(visible),
         }
     }
 
@@ -104,10 +107,10 @@ impl Layout<'_, '_> {
         allowed: impl FnOnce(usize) -> bool,
         pending: &Reshapes,
     ) -> Option<(usize, f32)> {
-        let k = Self::outermost(body, edge).filter(|&k| allowed(k))?;
+        let (k, item) = Self::outermost(body, edge).filter(|&(k, _)| allowed(k))?;
         Some((
             k,
-            self.hang_protrusion(&body[k].piece, edge, first_line, Some(pending))?,
+            self.hang_protrusion(&item.piece, edge, first_line, Some(pending))?,
         ))
     }
 

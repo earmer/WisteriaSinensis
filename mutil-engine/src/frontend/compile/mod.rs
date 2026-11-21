@@ -180,7 +180,7 @@ pub fn compile_paragraph(
     let breaks_after = compiler.breaks_after(&units, &locales, &graphemes);
     let box_starts = compiler.box_starts(&units, &locales, &breaks_after, &candidates);
     let runs = compiler.build_runs(&units, &locales);
-    let shaped = compiler.shape_runs(&units.atoms, &runs, &box_starts)?;
+    let shaped = compiler.shape_runs(&units.atoms, runs, &locales, &box_starts)?;
     let seams = compiler.confirmed_seams(&candidates, &shaped);
     let items =
         compiler.assemble_items(&units, &levels, &box_starts, &breaks_after, &seams, &shaped);

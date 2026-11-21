@@ -3,6 +3,7 @@
 
 use super::line_builder::PlacedLine;
 use super::{Layout, PieceKind, PlacedPiece, Reshapes};
+use crate::middleend::validated::{ClusterId, RunId};
 use crate::middleend::{
     InlineSlotConstraint, PositionedGlyph, PositionedInlineBox, PositionedTab, VisualGlyphRun,
 };
@@ -112,8 +113,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             visible_end: line.byte_range.start(),
         };
         let mut sizes = sizes.into_iter();
-        for &k in line.order {
-            let p = line.placed[k];
+        for &p in line.order.pick(line.placed) {
             match p.piece.kind {
                 PieceKind::Cluster { run, cluster } => {
                     self.push_cluster_glyphs(&mut out, &p, (run, cluster), pending, &mut sizes)
@@ -129,8 +129,8 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     /// The key of the run a cluster's glyphs join, at level `level`.
-    fn run_key(&self, run: usize, cluster: usize, level: BidiLevel) -> RunKey<'a> {
-        let (r, c) = (&self.ast.runs[run], &self.ast.clusters[cluster]);
+    fn run_key(&self, run: RunId, cluster: ClusterId, level: BidiLevel) -> RunKey<'a> {
+        let (r, c) = (self.inputs.run(run), self.inputs.cluster(cluster));
         RunKey {
             font: c.font,
             level,
@@ -145,8 +145,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn run_sizes(&self, line: &PlacedLine<'_, '_>, pending: &Reshapes) -> SmallVec<[usize; 8]> {
         let mut sizes = SmallVec::new();
         let mut last = None;
-        for &k in line.order {
-            let p = &line.placed[k];
+        for p in line.order.pick(line.placed) {
             let PieceKind::Cluster { run, cluster } = p.piece.kind else {
                 continue;
             };
@@ -172,12 +171,12 @@ impl<'i, 'a> Layout<'i, 'a> {
         &self,
         out: &mut VisualRuns,
         p: &PlacedPiece<'_>,
-        (run, cluster): (usize, usize),
+        (run, cluster): (RunId, ClusterId),
         pending: &Reshapes,
         sizes: &mut impl Iterator<Item = usize>,
     ) {
-        let r = &self.ast.runs[run];
-        let c = &self.ast.clusters[cluster];
+        let r = self.inputs.run(run);
+        let c = self.inputs.cluster(cluster);
         let (glyphs, _) = self.cluster_glyphs(pending, cluster);
         if glyphs.is_empty() {
             return;

@@ -6,7 +6,7 @@
 //! lookups index directly, so a broken invariant is a bug that panics instead
 //! of degrading to empty content.
 
-use super::input_validation::validate_layout_inputs;
+use super::input_validation::{ValidatedSummary, validate_layout_inputs};
 // The proof kernel is a child of this module: its proof constructors are
 // `pub(super)`, so only `ValidatedLayout` builds the views that carry G4 facts.
 #[path = "proofs.rs"]
@@ -18,24 +18,26 @@ use super::{
     PositionedGlyph, PositionedLine, PositionedParagraph, PositionedSlot, StrutMetrics,
     VisualGlyphRun,
 };
-use crate::frontend::{BoxNode, ParagraphAst, TextBox, TextBoxView, WordNode};
+use crate::frontend::{BoxNode, ParagraphAst, TextBoxView, WordNode};
 use crate::types::{
     FontRef, FontVariation, GlyphOrientation, GraphemeAtom, MAX_MEASUREMENT, Point, RawShapedGlyph,
     ShapedCluster, WritingMode,
 };
-pub(crate) use proofs::NonEmptyStr;
+pub(crate) use proofs::{
+    BodyIdx, ClusterId, NonEmptyStr, RunId, SentinelTokens, SpanId, TokenIdx, VisualOrder,
+};
 use proofs::{LineIdx, NonEmptySlice, SortedCaretStops, StopIdx};
 use smallvec::SmallVec;
 
-/// Layout inputs that passed the input gate (spec AX-3, G1), with the policy
-/// the gate resolved.
+/// Layout inputs that passed the input gate (spec AX-3, G1), with the summary
+/// the gate resolved and proved.
 #[derive(Clone, Debug)]
 pub struct ValidatedInputs<'a> {
     ast: &'a ParagraphAst,
     text: &'a str,
     constraints: &'a LayoutConstraints,
     options: &'a LayoutOptions,
-    policy: LayoutPolicySnapshot,
+    summary: ValidatedSummary,
 }
 
 impl<'a> ValidatedInputs<'a> {
@@ -51,13 +53,13 @@ impl<'a> ValidatedInputs<'a> {
         constraints: &'a LayoutConstraints,
         options: &'a LayoutOptions,
     ) -> Result<Self, LayoutInputError> {
-        let policy = validate_layout_inputs(ast, text, constraints, options)?;
+        let summary = validate_layout_inputs(ast, text, constraints, options)?;
         Ok(Self {
             ast,
             text,
             constraints,
             options,
-            policy,
+            summary,
         })
     }
 
@@ -88,7 +90,7 @@ impl<'a> ValidatedInputs<'a> {
     /// The policy the gate resolved (spec PAR-1).
     #[must_use]
     pub fn policy(&self) -> &LayoutPolicySnapshot {
-        &self.policy
+        &self.summary.policy
     }
 
     /// The text box at `items[item]` with its slices resolved; `None` only
@@ -103,14 +105,7 @@ impl<'a> ValidatedInputs<'a> {
         let WordNode::Box(BoxNode::Text(text)) = &self.ast.items[item] else {
             return None;
         };
-        Some(self.text_view(text))
-    }
-
-    /// `text`, a box of this paragraph, with its slices resolved: the gate
-    /// proved every text box's ranges (spec AST-4).
-    #[must_use]
-    pub(crate) fn text_view(&self, text: &'a TextBox) -> TextBoxView<'a> {
-        self.ast.resolve(text)
+        Some(self.ast.resolve(text))
     }
 
     /// The atoms of body run `run` (spec AST-4).
@@ -210,6 +205,14 @@ impl OpenGeometry {
     pub fn first_slot(&self) -> InlineSlotConstraint {
         // PROOF(G3::classify): an open answer holds at least one slot.
         self.0.slots[0]
+    }
+
+    /// Splits the first slot from any remaining slots (spec GEO-3, ME-2).
+    pub(crate) fn split_slots(&self) -> (InlineSlotConstraint, &[InlineSlotConstraint]) {
+        let split = self.0.slots.split_first();
+        // PROOF(G3::classify): an open answer holds at least one slot.
+        let (first, rest) = split.expect("G3 proved non-empty slots");
+        (*first, rest)
     }
 }
 

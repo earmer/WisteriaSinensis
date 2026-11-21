@@ -4,6 +4,7 @@
 use super::scratch::LogicalPiece;
 use super::{Layout, PieceKind};
 use crate::middleend::shaper_gate::resolved_line_box;
+use crate::middleend::validated::{BodyIdx, RunId, VisualOrder};
 use crate::middleend::{InlineSlotConstraint, LayoutInputError, LineHeight, StrutMetrics};
 use crate::types::{BaselineAlignment, FontMetrics, TextRange};
 
@@ -27,7 +28,7 @@ impl LineRelativeEdge {
 
 #[derive(Clone, Copy)]
 struct LineRelativeItem {
-    piece_index: usize,
+    piece_index: BodyIdx,
     edge: LineRelativeEdge,
     above: f32,
     below: f32,
@@ -50,7 +51,7 @@ enum BaselinePlacement {
 struct CachedClusterMetrics {
     font_id: u32,
     scale_bits: u32,
-    run: usize,
+    run: RunId,
     own: FontMetrics,
     line_box: Option<StrutMetrics>,
 }
@@ -67,18 +68,20 @@ impl Layout<'_, '_> {
     pub(super) fn compute_line_box(
         &mut self,
         placed: &[LogicalPiece<'_>],
-        order: &[usize],
+        order: &VisualOrder,
         y_shifts: &mut Vec<f32>,
         byte_range: TextRange,
         slot: InlineSlotConstraint,
     ) -> Result<LineBoxMetrics, LayoutInputError> {
         y_shifts.clear();
         y_shifts.resize(placed.len(), 0.0);
+        let placed_t = order.table(placed);
+        let mut shifts_t = order.table_mut(y_shifts);
         let normal = matches!(self.options.line_height, LineHeight::Normal);
         let (mut above, mut below) = half_leaded(self.strut);
         let mut line_relative: Vec<LineRelativeItem> = Vec::new();
         let mut cached: Option<CachedClusterMetrics> = None;
-        for &k in order {
+        for k in order.indices() {
             let item = |edge, (above, below)| {
                 BaselinePlacement::LineEdge(LineRelativeItem {
                     piece_index: k,
@@ -87,12 +90,13 @@ impl Layout<'_, '_> {
                     below,
                 })
             };
-            let placement = match placed[k].piece.kind {
+            let placement = match placed_t.get(k).piece.kind {
                 PieceKind::Cluster { run, cluster } => {
-                    let align = self.ast.runs[run].baseline_align;
+                    let run_ref = self.inputs.run(run);
+                    let align = run_ref.baseline_align;
                     let edge = LineRelativeEdge::of(align);
                     let needs_box = edge.is_some() || normal;
-                    let font = self.ast.clusters[cluster].font;
+                    let font = self.inputs.cluster(cluster).font;
                     let scale_bits = font.scale.to_bits();
                     let (own, resolved_box) = match cached {
                         Some(entry)
@@ -108,7 +112,7 @@ impl Layout<'_, '_> {
                             let line_box = if needs_box {
                                 Some(resolved_line_box(
                                     &own,
-                                    self.ast.runs[run].font_size,
+                                    run_ref.font_size,
                                     self.options.line_height,
                                     self.ast.writing_mode,
                                 )?)
@@ -152,7 +156,7 @@ impl Layout<'_, '_> {
             match placement {
                 BaselinePlacement::LineEdge(item) => line_relative.push(item),
                 BaselinePlacement::StrutRelative { shift, extent } => {
-                    y_shifts[k] = shift;
+                    shifts_t.set(k, shift);
                     if let Some((item_above, item_below)) = extent {
                         above = above.max(item_above + shift);
                         below = below.max(item_below - shift);
@@ -165,10 +169,13 @@ impl Layout<'_, '_> {
         }
         let metrics = self.resolve_line_box(above, below, byte_range);
         for item in &line_relative {
-            y_shifts[item.piece_index] = match item.edge {
-                LineRelativeEdge::Top => metrics.ascent - item.above,
-                LineRelativeEdge::Bottom => item.below - metrics.descent,
-            };
+            shifts_t.set(
+                item.piece_index,
+                match item.edge {
+                    LineRelativeEdge::Top => metrics.ascent - item.above,
+                    LineRelativeEdge::Bottom => item.below - metrics.descent,
+                },
+            );
         }
         Ok(metrics)
     }

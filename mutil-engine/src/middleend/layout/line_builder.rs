@@ -8,8 +8,9 @@ use super::line_box::LineBoxMetrics;
 use super::scratch::{LayoutScratch, LogicalPiece, build_placed};
 use super::visual_runs::VisualRuns;
 use super::{Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Reshapes, Token};
-use crate::frontend::bidi::{LineClass, reset_line_levels, visual_order_into as bidi_order_into};
+use crate::frontend::bidi::{LineClass, reset_line_levels};
 use crate::frontend::{DiscretionaryNode, SpanEdge};
+use crate::middleend::validated::{TokenIdx, VisualOrder};
 use crate::middleend::{
     DecorationKind, DecorationLine, HangingWhitespaceMode, InlineSlotConstraint, LayoutInputError,
     OpenGeometry, PositionedLine, PositionedSlot, VisualGlyphRun,
@@ -44,7 +45,7 @@ impl ContentBlock {
 /// relative to the body's start.
 pub(super) struct PlacedLine<'l, 'a> {
     pub(super) placed: &'l mut [PlacedPiece<'a>],
-    pub(super) order: &'l [usize],
+    pub(super) order: &'l VisualOrder,
     pub(super) visual: &'l VisualIndex,
     pub(super) byte_range: TextRange,
     pub(super) bounds: LineBounds,
@@ -91,7 +92,7 @@ impl<'l, 'a> Deref for AlignedLine<'l, 'a> {
 
 /// What a line's [`LineEnd`] names.
 struct LineEndFacts<'a> {
-    last_piece: usize,
+    last_piece: TokenIdx,
     end_break: Option<&'a DiscretionaryNode>,
     byte_end: usize,
     pre: f32,
@@ -175,7 +176,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             .rposition(|p| p.piece.is_content())
             .map_or(0, |k| k + 1);
         self.apply_l1(logical, levels);
-        visual_order_into(&logical[..body_len], levels, order);
+        let (body_logical, _) = logical.split_at(body_len);
+        visual_order_into(body_logical, levels, order);
         let request = BodyRequest {
             cursor,
             pre,
@@ -223,7 +225,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         request: &BodyRequest<'_, 'a>,
         pending: &Reshapes,
     ) -> BodyFit {
-        let body = &logical[..body_len];
+        let (body, trailing) = logical.split_at(body_len);
         // Only the body is justified; the trailing whitespace has none.
         expansions.clear();
         expansions.resize(logical.len(), 0.0);
@@ -268,11 +270,12 @@ impl<'i, 'a> Layout<'i, 'a> {
         // The visible width `W`, hanging halves outside (ST3-2).
         let visible_width = distance + pre - LineHangs::protrusion(end);
         let slack = slot.width() - visible_width;
+        let (body_expansions, _) = expansions.split_at_mut(body_len);
         let is_justified = compressible
             && slot.width().is_finite()
             && (soft_wrap || slack < 0.0)
-            && self.justify(body, widths, &mut expansions[..body_len], slack, pending);
-        self.append_trailing_widths(&logical[body_len..], widths);
+            && self.justify(body, widths, body_expansions, slack, pending);
+        self.append_trailing_widths(trailing, widths);
         BodyFit {
             hangs,
             is_justified,
@@ -328,7 +331,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             LineEnd::Before(token) => LineEndFacts {
                 last_piece: token,
                 end_break: None,
-                byte_end: self.tokens[token].bytes().start(),
+                byte_end: self.tokens.at_or_sentinel(token).bytes().start(),
                 pre: 0.0,
             },
         }
@@ -340,7 +343,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn place_visual(
         &self,
         logical: &[LogicalPiece<'a>],
-        order: &[usize],
+        order: &VisualOrder,
         widths: &[f32],
         xs: &mut Vec<f32>,
         pads: Pads,
@@ -350,11 +353,14 @@ impl<'i, 'a> Layout<'i, 'a> {
         let body_len = order.len();
         xs.clear();
         xs.resize(logical.len(), 0.0);
+        let logical_t = order.table(logical);
+        let widths_t = order.table(widths);
+        let mut xs_t = order.table_mut(xs);
         let mut x = pads.left - hangs.physical(rtl).0;
-        for &k in order {
-            x += logical[k].gap;
-            xs[k] = x;
-            x += widths[k];
+        for k in order.indices() {
+            x += logical_t.get(k).gap;
+            xs_t.set(k, x);
+            x += *widths_t.get(k);
         }
         let body_end = x + pads.right;
         // In RTL the trailing whitespace lies left of everything on the line,
@@ -364,7 +370,9 @@ impl<'i, 'a> Layout<'i, 'a> {
         } else {
             body_end
         };
-        self.place_trailing_whitespace(&widths[body_len..], &mut xs[body_len..], far_edge);
+        let (_, trailing_widths) = widths.split_at(body_len);
+        let (_, trailing_xs) = xs.split_at_mut(body_len);
+        self.place_trailing_whitespace(trailing_widths, trailing_xs, far_edge);
         body_end
     }
 
@@ -378,7 +386,9 @@ impl<'i, 'a> Layout<'i, 'a> {
             PieceKind::Tab => LineClass::Separator,
             PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => LineClass::Whitespace,
             PieceKind::Cluster { cluster, .. }
-                if self.ast.clusters[cluster]
+                if self
+                    .inputs
+                    .cluster(cluster)
                     .flags
                     .contains(AtomFlags::L1_RESETTABLE) =>
             {
@@ -395,18 +405,22 @@ impl<'i, 'a> Layout<'i, 'a> {
             }
         }
         for k in 0..placed.len() {
-            let PieceKind::SpanEdge { span, edge } = placed[k].piece.kind else {
+            let (before, rest) = placed.split_at_mut(k);
+            let Some((current, after)) = rest.split_first_mut() else {
                 continue;
             };
-            let span = &self.ast.decoration_spans[span];
+            let PieceKind::SpanEdge { span, edge } = current.piece.kind else {
+                continue;
+            };
+            let span = self.inputs.decoration_span(span);
             let is_item = |p: &&LogicalPiece<'_>| {
                 !matches!(p.piece.kind, PieceKind::SpanEdge { .. }) && !p.piece.bytes.is_empty()
             };
             let neighbour = match edge {
-                SpanEdge::Leading => placed[k + 1..].iter().find(is_item),
-                SpanEdge::Trailing => placed[..k].iter().rev().find(is_item),
+                SpanEdge::Leading => after.iter().find(is_item),
+                SpanEdge::Trailing => before.iter().rev().find(is_item),
             };
-            placed[k].piece.level = neighbour
+            current.piece.level = neighbour
                 .filter(|n| span.byte_range.contains_range(n.piece.bytes))
                 .map_or_else(|| self.base.base_level(), |n| n.piece.level);
         }
@@ -417,12 +431,12 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn collect_logical(
         &self,
         logical: &mut Vec<LogicalPiece<'a>>,
-        start: usize,
-        last_piece: usize,
+        start: TokenIdx,
+        last_piece: TokenIdx,
     ) {
         logical.clear();
         let mut gap = 0.0;
-        for token in &self.tokens[start..last_piece] {
+        for token in self.tokens.slice(start, last_piece) {
             match token {
                 Token::Piece(p) => {
                     logical.push(LogicalPiece { piece: *p, gap });
@@ -490,24 +504,18 @@ impl<'i, 'a> Layout<'i, 'a> {
             self.caret_stops(&line, visible_end, &runs, &visual_boxes, pending, carets);
 
         // The line fills its first slot; the others stay empty (ME-2).
-        let slots: SmallVec<[PositionedSlot; 1]> = geometry
-            .geometry()
-            .slots
-            .iter()
-            .enumerate()
-            .map(|(i, &constraint)| match i {
-                0 => PositionedSlot {
-                    constraint,
-                    content_start: content.start,
-                    visual_width: content.width,
-                },
-                _ => PositionedSlot {
-                    constraint,
-                    content_start: constraint.start(),
-                    visual_width: 0.0,
-                },
-            })
-            .collect();
+        let (first_slot, rest_slots) = geometry.split_slots();
+        let slots: SmallVec<[PositionedSlot; 1]> = core::iter::once(PositionedSlot {
+            constraint: first_slot,
+            content_start: content.start,
+            visual_width: content.width,
+        })
+        .chain(rest_slots.iter().map(|&constraint| PositionedSlot {
+            constraint,
+            content_start: constraint.start(),
+            visual_width: 0.0,
+        }))
+        .collect();
         let baseline_y = line.block_top
             + if self.ast.writing_mode == WritingMode::VerticalLr {
                 line_box.descent
@@ -548,8 +556,8 @@ impl<'i, 'a> Layout<'i, 'a> {
     ) -> AlignedLine<'l, 'a> {
         let (mut lo, mut hi) = extent.unwrap_or((f32::INFINITY, f32::NEG_INFINITY));
         self.for_each_span_group(&line, |_, g| {
-            lo = lo.min(g.lo.min(g.hi));
-            hi = hi.max(g.lo.max(g.hi));
+            lo = lo.min(g.lo);
+            hi = hi.max(g.hi);
         });
         let rtl = self.base.is_rtl();
         // A hanging mark's protrusion lies outside the content (ST1-3).
@@ -590,16 +598,16 @@ impl<'i, 'a> Layout<'i, 'a> {
 pub(super) fn visual_order_into(
     body: &[LogicalPiece<'_>],
     levels: &mut Vec<BidiLevel>,
-    order: &mut Vec<usize>,
+    order: &mut VisualOrder,
 ) {
     levels.clear();
     levels.extend(body.iter().map(|p| p.piece.level));
-    bidi_order_into(levels, order);
+    order.rebuild(levels);
 }
 
 #[cfg(test)]
 pub(super) fn visual_order(body: &[LogicalPiece<'_>], levels: &mut Vec<BidiLevel>) -> Vec<usize> {
-    let mut order = Vec::new();
+    let mut order = VisualOrder::default();
     visual_order_into(body, levels, &mut order);
-    order
+    order.as_raw().to_vec()
 }
