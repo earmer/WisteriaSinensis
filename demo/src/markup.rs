@@ -301,13 +301,14 @@ pub fn parse(source: &str) -> Marked {
     let mut spans: Vec<(TextRange, LocaleTag)> = Vec::new();
     let mut decorations: Vec<(TextRange, TextDecoration)> = Vec::new();
     let mut paint_spans: Vec<PaintSpan> = Vec::new();
-    let mut raw_boxes: Vec<(TextRange, BoxStyleKind)> = Vec::new();
+    let mut raw_boxes: Vec<(TextRange, BoxStyleKind, usize)> = Vec::new();
     let mut removed = Vec::new();
     // Stacks of currently open paired tags.
     let mut open_kinds: Vec<&TagKind> = Vec::new();
     let mut locales: Vec<&LocaleTag> = Vec::new();
     let mut colors: Vec<&str> = Vec::new();
-    let mut box_starts: Vec<(usize, BoxStyleKind)> = Vec::new();
+    let mut box_starts: Vec<(usize, BoxStyleKind, usize)> = Vec::new();
+    let mut next_box_order: usize = 0;
     let mut underline_depth: usize = 0;
     let mut strike_depth: usize = 0;
     let mut since = 0;
@@ -377,7 +378,10 @@ pub fn parse(source: &str) -> Marked {
                     TagKind::Underline => underline_depth += 1,
                     TagKind::Strikethrough => strike_depth += 1,
                     TagKind::Color(color) => colors.push(color),
-                    TagKind::Box(style) => box_starts.push((text.len(), *style)),
+                    TagKind::Box(style) => {
+                        box_starts.push((text.len(), *style, next_box_order));
+                        next_box_order += 1;
+                    }
                 }
                 since = text.len();
             }
@@ -402,11 +406,15 @@ pub fn parse(source: &str) -> Marked {
                             colors.pop();
                         }
                         TagKind::Box(_) => {
-                            if let Some((start, style)) = box_starts.pop()
+                            if let Some((start, style, open_order)) = box_starts.pop()
                                 && start < text.len()
                                 && box_starts.len() < MAX_DECORATION_NESTING_DEPTH
                             {
-                                raw_boxes.push((TextRange::new(start, text.len()), style));
+                                raw_boxes.push((
+                                    TextRange::new(start, text.len()),
+                                    style,
+                                    open_order,
+                                ));
                             }
                         }
                     }
@@ -415,11 +423,12 @@ pub fn parse(source: &str) -> Marked {
             }
         }
     }
-    raw_boxes.sort_by_key(|(r, _)| (r.start(), core::cmp::Reverse(r.end())));
+    raw_boxes
+        .sort_by_key(|(r, _, open_order)| (r.start(), core::cmp::Reverse(r.end()), *open_order));
     let box_spans = raw_boxes
         .into_iter()
         .enumerate()
-        .map(|(i, (range, kind))| BoxSpan {
+        .map(|(i, (range, kind, _))| BoxSpan {
             span: kind.to_span((i + 1) as u64, range),
             kind,
         })

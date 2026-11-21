@@ -244,15 +244,49 @@ fn bidi_split_span_uses_bidi_split_interior_edges_and_logical_ribbon() {
     .expect("lays out");
     ValidatedLayout::try_from_paragraph(&p, text).expect("passes G4");
     let frags = &p.lines[0].span_fragments;
-    if frags.len() >= 2 {
-        assert_eq!(frags[0].edges.right, BidiSplit);
-        assert_eq!(frags[1].edges.left, BidiSplit);
-        let mut by_bytes: Vec<_> = frags.iter().collect();
-        by_bytes.sort_by_key(|f| (f.byte_range.start(), f.byte_range.end()));
-        let mut acc = 0.0;
-        for f in by_bytes {
-            assert_close(f.ribbon_offset, acc);
-            acc += f.width;
-        }
+    assert_eq!(frags.len(), 2, "Bidi split produces two fragments");
+    assert_eq!(
+        (frags[0].edges.left, frags[0].edges.right),
+        (BidiSplit, LogicalEnd)
+    );
+    assert_eq!(
+        (frags[1].edges.left, frags[1].edges.right),
+        (BidiSplit, LogicalEnd)
+    );
+    let mut by_bytes: Vec<_> = frags.iter().collect();
+    by_bytes.sort_by_key(|f| (f.byte_range.start(), f.byte_range.end()));
+    let mut acc = 0.0;
+    for f in by_bytes {
+        assert_close(f.ribbon_offset, acc);
+        acc += f.width;
     }
+}
+
+#[test]
+fn tight_span_with_large_baseline_offset_stays_non_negative() {
+    let text = "aa bb cc";
+    let mut shifted = style(10.0);
+    shifted.baseline_align = BaselineAlignment::Offset(50.0);
+    let spans = [span(
+        (3, 5),
+        BoxDecorationBreak::Slice,
+        BoxHeightStyle::Tight,
+    )];
+    let paragraph = ParagraphInput {
+        decoration_spans: &spans,
+        ..input(text, &shifted)
+    };
+    let ast =
+        compile_paragraph(&paragraph, &FrontendOptions::default(), &*SHAPER).expect("compiles");
+    let p = layout_paragraph(
+        &ast,
+        text,
+        &*SHAPER,
+        &column(300.0),
+        &LayoutOptions::default(),
+    )
+    .expect("lays out");
+    ValidatedLayout::try_from_paragraph(&p, text).expect("passes G4");
+    let f = &p.lines[0].span_fragments[0];
+    assert!(f.ascent >= 0.0 && f.descent >= 0.0);
 }

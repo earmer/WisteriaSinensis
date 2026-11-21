@@ -176,13 +176,14 @@ fn line_json(line: &PositionedLine, runs: String) -> String {
     let span_fragments = list(&line.span_fragments, |f| {
         format!(
             "{{\"spanId\":{},\"x\":{},\"width\":{},\"ascent\":{},\"descent\":{},\
-             \"edges\":[{},{}],\"ribbonOffset\":{},\"totalSpanAdvance\":{},\
+             \"rtl\":{},\"edges\":[{},{}],\"ribbonOffset\":{},\"totalSpanAdvance\":{},\
              \"byteRange\":[{},{}]}}",
             f.span_id,
             Num(f.x),
             Num(f.width),
             Num(f.ascent),
             Num(f.descent),
+            f.bidi_level.direction().is_rtl(),
             Str(edge_cut_str(f.edges.left)),
             Str(edge_cut_str(f.edges.right)),
             Num(f.ribbon_offset),

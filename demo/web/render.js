@@ -95,7 +95,9 @@ export function createRenderer(canvas) {
           const total = frag.totalSpanAdvance > 0 ? frag.totalSpanAdvance : frag.width;
           const t0 = Math.max(0, Math.min(1, frag.ribbonOffset / total));
           const t1 = Math.max(t0, Math.min(1, (frag.ribbonOffset + frag.width) / total));
-          const grad = ctx.createLinearGradient(frag.x, 0, frag.x + frag.width, 0);
+          const grad = frag.rtl
+            ? ctx.createLinearGradient(frag.x + frag.width, 0, frag.x, 0)
+            : ctx.createLinearGradient(frag.x, 0, frag.x + frag.width, 0);
           grad.addColorStop(0, ribbonColor(t0));
           grad.addColorStop(1, ribbonColor(t1));
           ctx.fillStyle = grad;

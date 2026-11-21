@@ -106,12 +106,8 @@ impl PositionedLine {
             } else {
                 (f.edges.left, f.edges.right)
             };
-            let edges_ok = (start_cut != SpanEdgeCut::LogicalEnd || f.is_first_fragment())
-                && (!f.is_first_fragment()
-                    || matches!(start_cut, SpanEdgeCut::LogicalEnd | SpanEdgeCut::BidiSplit))
-                && (end_cut != SpanEdgeCut::LogicalEnd || f.is_last_fragment())
-                && (!f.is_last_fragment()
-                    || matches!(end_cut, SpanEdgeCut::LogicalEnd | SpanEdgeCut::BidiSplit));
+            let edges_ok = (start_cut == SpanEdgeCut::LogicalEnd) == f.is_first_fragment()
+                && (end_cut == SpanEdgeCut::LogicalEnd) == f.is_last_fragment();
             if !(finite
                 && f.width >= 0.0
                 && f.ascent >= 0.0

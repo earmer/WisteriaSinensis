@@ -205,17 +205,24 @@ fn build_style_spans(marked: &markup::Marked, base: &TextStyle) -> Vec<StyleSpan
     cuts.sort_unstable();
     cuts.dedup();
     let mut out = Vec::new();
+    let (mut span_idx, mut dec_idx) = (0, 0);
     for pair in cuts.windows(2) {
         let [start, end] = [pair[0], pair[1]];
+        while span_idx < marked.spans.len() && marked.spans[span_idx].0.end() <= start {
+            span_idx += 1;
+        }
+        while dec_idx < marked.decorations.len() && marked.decorations[dec_idx].0.end() <= start {
+            dec_idx += 1;
+        }
         let locale = marked
             .spans
-            .iter()
-            .find(|(r, _)| r.contains(start))
+            .get(span_idx)
+            .filter(|(r, _)| r.contains(start))
             .map(|(_, l)| l.clone());
         let decoration = marked
             .decorations
-            .iter()
-            .find(|(r, _)| r.contains(start))
+            .get(dec_idx)
+            .filter(|(r, _)| r.contains(start))
             .map(|(_, d)| *d);
         if locale.is_none() && decoration.is_none() {
             continue;

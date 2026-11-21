@@ -40,26 +40,11 @@ pub(super) struct VisualGroup {
     /// Visual-order bounds `(first_v, last_v)` in `line.order`; `None` for a
     /// synthetic trailing-only or cloned-padding group.
     visual_span: Option<(usize, usize)>,
-    /// Logical rank among the span's members of the first and last piece in
-    /// visual order.
-    first_rank: usize,
-    last_rank: usize,
     /// The level of its first piece in visual order.
     level: BidiLevel,
     /// Whether it holds only zero-width span boundaries.
     is_bare_boundary: bool,
     kind: GroupKind,
-}
-
-impl VisualGroup {
-    /// Whether this group's pieces progress right-to-left in visual order.
-    fn is_rtl(&self) -> bool {
-        if self.first_rank != self.last_rank {
-            self.first_rank > self.last_rank
-        } else {
-            self.level.direction().is_rtl()
-        }
-    }
 }
 
 /// A line's visual order, indexed for grouping (ST2-3): each piece's
@@ -221,7 +206,6 @@ fn visual_groups(
                 if let Some((_, last_v)) = &mut g.visual_span {
                     *last_v = v;
                 }
-                g.last_rank = rank;
                 g.is_bare_boundary &= is_bare_boundary;
             }
             None => groups.push(VisualGroup {
@@ -229,8 +213,6 @@ fn visual_groups(
                 hi,
                 bytes: p.piece.bytes,
                 visual_span: Some((v, v)),
-                first_rank: rank,
-                last_rank: rank,
                 level: p.piece.level,
                 is_bare_boundary,
                 kind: GroupKind::Content,
@@ -352,69 +334,60 @@ fn wrap_cut(span: &InlineDecorationSpan, own_cloned: bool) -> SpanEdgeCut {
 /// Classifies the physical left and right edges of `group`, the
 /// `index`th of `count` groups of `span` on the line (AX-5). Which break a
 /// wrap edge belongs to follows the paragraph's base direction, as the
-/// padding placement of `attach_padding` does: the line start is the left
-/// edge in an LTR paragraph and the right edge in an RTL one. Which logical
-/// end of the span a side holds follows the group's own direction, and
-/// whether it is the span's own end follows the group's bytes.
+/// Classifies the physical left and right edges of `group` of `span` on the
+/// line (AX-5). Which break a wrap edge belongs to follows `base_rtl` (as
+/// `attach_padding` does); which physical side holds the group's logical start
+/// vs. logical end follows `group.level.direction().is_rtl()` (matching
+/// `PositionedSpanFragment::bidi_level`); and interior splits between multiple
+/// visual groups on the same line are `BidiSplit`.
 fn classify_edges(
     span: &InlineDecorationSpan,
+    line_bytes: TextRange,
     base_rtl: bool,
     [at_start_own_cloned, at_end_own_cloned]: [bool; 2],
     group: &VisualGroup,
-    index: usize,
-    count: usize,
 ) -> SpanFragmentEdges {
+    let (left_cloned, right_cloned) = if base_rtl {
+        (at_end_own_cloned, at_start_own_cloned)
+    } else {
+        (at_start_own_cloned, at_end_own_cloned)
+    };
     match group.kind {
         GroupKind::ClonedLeft => SpanFragmentEdges {
-            left: SpanEdgeCut::ClonedWrap,
+            left: wrap_cut(span, left_cloned),
             right: SpanEdgeCut::BidiSplit,
         },
         GroupKind::ClonedRight => SpanFragmentEdges {
             left: SpanEdgeCut::BidiSplit,
-            right: SpanEdgeCut::ClonedWrap,
+            right: wrap_cut(span, right_cloned),
         },
         GroupKind::Content | GroupKind::TrailingOnly => {
-            let (left_cloned, right_cloned) = if base_rtl {
-                (at_end_own_cloned, at_start_own_cloned)
-            } else {
-                (at_start_own_cloned, at_end_own_cloned)
-            };
+            let rtl = group.level.direction().is_rtl();
             let logical_start = if group.bytes.start() == span.byte_range.start() {
                 SpanEdgeCut::LogicalEnd
+            } else if group.bytes.start() > line_bytes.start() {
+                SpanEdgeCut::BidiSplit
             } else {
-                wrap_cut(
-                    span,
-                    if group.is_rtl() {
-                        right_cloned
-                    } else {
-                        left_cloned
-                    },
-                )
+                wrap_cut(span, if rtl { right_cloned } else { left_cloned })
             };
             let logical_end = if group.bytes.end() == span.byte_range.end() {
                 SpanEdgeCut::LogicalEnd
+            } else if group.bytes.end() < line_bytes.end() {
+                SpanEdgeCut::BidiSplit
             } else {
-                wrap_cut(
-                    span,
-                    if group.is_rtl() {
-                        left_cloned
-                    } else {
-                        right_cloned
-                    },
-                )
+                wrap_cut(span, if rtl { left_cloned } else { right_cloned })
             };
-            let rtl = group.is_rtl();
-            let left = match (index, rtl) {
-                (0, false) => logical_start,
-                (0, true) => logical_end,
-                _ => SpanEdgeCut::BidiSplit,
-            };
-            let right = match (index + 1 == count, rtl) {
-                (true, false) => logical_end,
-                (true, true) => logical_start,
-                _ => SpanEdgeCut::BidiSplit,
-            };
-            SpanFragmentEdges { left, right }
+            if rtl {
+                SpanFragmentEdges {
+                    left: logical_end,
+                    right: logical_start,
+                }
+            } else {
+                SpanFragmentEdges {
+                    left: logical_start,
+                    right: logical_end,
+                }
+            }
         }
     }
 }
@@ -487,17 +460,15 @@ impl<'i, 'a> Layout<'i, 'a> {
                 range.start().max(bytes.start()),
                 range.end().min(bytes.end()),
             );
-            let count = groups.len();
-            for (group_index, g) in groups.iter_mut().enumerate() {
+            for g in &mut groups {
                 let start = g.bytes.start().max(lo);
                 g.bytes = TextRange::new(start, g.bytes.end().min(hi).max(start));
                 let edges = classify_edges(
                     span,
+                    bytes,
                     self.base.is_rtl(),
                     [at_start_own_cloned, at_end_own_cloned],
                     g,
-                    group_index,
-                    count,
                 );
                 emit(span, g, edges);
             }
@@ -536,8 +507,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             hi,
             bytes,
             visual_span: None,
-            first_rank: 0,
-            last_rank: 0,
             level: self.base.base_level(),
             is_bare_boundary: false,
             kind,
@@ -620,10 +589,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                 let Some((first_v, last_v)) = g.visual_span else {
                     return strut;
                 };
-                let mut extent: Option<(f32, f32)> = None;
-                let mut include = |a: f32, d: f32| {
-                    extent = Some(extent.map_or((a, d), |(ea, ed)| (ea.max(a), ed.max(d))));
-                };
+                let (mut ascent, mut descent) = (0.0_f32, 0.0_f32);
+                let mut any_item = false;
                 for p in line.order.pick_range(line.placed, first_v, last_v) {
                     match p.piece.kind {
                         PieceKind::Cluster { run, cluster } => {
@@ -637,17 +604,21 @@ impl<'i, 'a> Layout<'i, 'a> {
                                 } else {
                                     (m.ascent, m.descent)
                                 };
-                                include(a + p.y_shift, d - p.y_shift);
+                                ascent = ascent.max(a + p.y_shift);
+                                descent = descent.max(d - p.y_shift);
+                                any_item = true;
                             }
                         }
                         PieceKind::Object(object) => {
                             let (_, a, d) = Self::fitted_object(object, slot);
-                            include(a + p.y_shift, d - p.y_shift);
+                            ascent = ascent.max(a + p.y_shift);
+                            descent = descent.max(d - p.y_shift);
+                            any_item = true;
                         }
                         _ => {}
                     }
                 }
-                extent.unwrap_or(strut)
+                if any_item { (ascent, descent) } else { strut }
             }
         }
     }
