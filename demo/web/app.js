@@ -214,13 +214,15 @@ function phase2Bits() {
   const direction = { auto: 0, ltr: 1, rtl: 2 }[$('direction').value] ?? 0;
   const start = { none: 0, first: 1, all: 2 }[$('hang-start').value] ?? 0;
   const end = { none: 0, allow: 1, force: 2 }[$('hang-end').value] ?? 0;
+  const punctTrim = { auto: 0, 'space-first': 1, 'trim-start': 2, 'space-all': 3 }[$('cjk-punct-trim').value] ?? 0;
   return direction
     | ($('justify').checked ? 1 << 2 : 0)
     | (start << 3)
     | (end << 5)
     | ($('autospace').value === 'css' ? 1 << 7 : 0)
     | ($('whitespace').value === 'preserved' ? 1 << 8 : 0)
-    | ($('compress-last').checked ? 1 << 9 : 0);
+    | ($('compress-last').checked ? 1 << 9 : 0)
+    | (punctTrim << 10);
 }
 
 function currentSettings() {
@@ -493,7 +495,7 @@ textarea.addEventListener('input', (event) => {
   }
 });
 
-const phase2Inputs = ['direction', 'justify', 'compress-last', 'hang-start', 'hang-end', 'autospace', 'whitespace']
+const phase2Inputs = ['direction', 'justify', 'compress-last', 'hang-start', 'hang-end', 'cjk-punct-trim', 'autospace', 'whitespace']
   .map((id) => $(id));
 
 const layoutInputs = [

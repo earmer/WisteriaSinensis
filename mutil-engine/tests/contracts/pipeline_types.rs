@@ -319,7 +319,6 @@ fn every_word_node_variant_is_constructible() {
             prefix_cut_bytes: 0,
             suffix_cut_bytes: 0,
         }),
-        BreakAction::CjkPunctAdjust,
         BreakAction::MathOperator {
             repeat: Some(RepeatedOperator {
                 glyph_id: 9,
@@ -332,7 +331,6 @@ fn every_word_node_variant_is_constructible() {
             BreakAction::Direct
             | BreakAction::HardBreak
             | BreakAction::Hyphenate(_)
-            | BreakAction::CjkPunctAdjust
             | BreakAction::MathOperator { .. } => {}
         }
     }

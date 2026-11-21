@@ -432,20 +432,28 @@ fn st3_3_compression_spends_tier_0_before_tier_1() {
         .map(|(offset, _)| *offset)
         .collect();
     assert_eq!(compression, [6]);
-    let probe = lay_out_bidi_ast(&ast, text, &column(1000.0), &LayoutOptions::default());
+    let space_all = LayoutOptions {
+        cjk_punctuation_trim: CjkPunctuationTrim::SpaceAll,
+        ..LayoutOptions::default()
+    };
+    let probe = lay_out_bidi_ast(&ast, text, &column(1000.0), &space_all);
     let wide = &probe.lines[0];
     let natural = x_of(wide, 19) + glyph_at(wide, 19).advance;
     // At natural width the last ideograph does not fit; under `justify` the
     // line takes it and compresses.
-    let ragged = lay_out_bidi_ast(
-        &ast,
-        text,
-        &column(natural - 4.0),
-        &LayoutOptions::default(),
-    );
+    let ragged = lay_out_bidi_ast(&ast, text, &column(natural - 4.0), &space_all);
     assert_eq!(line_texts(&ragged, text)[0], "漢、「漢漢b漢");
+    let justified_space_all = LayoutOptions {
+        cjk_punctuation_trim: CjkPunctuationTrim::SpaceAll,
+        ..justified()
+    };
     for (shortfall, tier0, tier1) in [(4.0, 4.0, 0.0), (6.0, 5.0, 0.5)] {
-        let p = lay_out_bidi_ast(&ast, text, &column(natural - shortfall), &justified());
+        let p = lay_out_bidi_ast(
+            &ast,
+            text,
+            &column(natural - shortfall),
+            &justified_space_all,
+        );
         assert_eq!(line_texts(&p, text)[0], "漢、「漢漢b漢漢", "{shortfall}");
         let line = &p.lines[0];
         assert!(line.is_justified, "{shortfall}");

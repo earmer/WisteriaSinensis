@@ -1,8 +1,9 @@
 //! Line-breaking and measurement helpers for [`Layout`] (spec §5 Stage 1).
 
 use super::hanging::LineEdge;
+use super::trim::{TrimInfo, is_trim_transparent, line_start_lead_trim, pair_trim};
 use super::{Layout, LineCursor, LineEnd, Piece, PieceKind, Reshaped, Reshapes, Token};
-use crate::frontend::{BoxOverflowPolicy, DiscretionaryNode, InlineObjectBox};
+use crate::frontend::{BoxOverflowPolicy, DiscretionaryNode, GlueKind, InlineObjectBox};
 use crate::middleend::shaper_gate::{checked_font_metrics, checked_reshape_window};
 use crate::middleend::tolerance::tolerance;
 use crate::middleend::validated::{ClusterId, RunId, TokenIdx};
@@ -43,6 +44,8 @@ struct LineWalk {
     shrink: f32,
     visible_shrink: f32,
     end_hang: f32,
+    prev_trim: Option<(TrimInfo, f32)>,
+    pending_punct_glue_shrink: f32,
 }
 
 impl LineWalk {
@@ -55,12 +58,23 @@ impl LineWalk {
             shrink: 0.0,
             visible_shrink: 0.0,
             end_hang: 0.0,
+            prev_trim: None,
+            pending_punct_glue_shrink: 0.0,
         }
     }
 
     /// The width the line uses if it stops here.
     fn used(&self) -> f32 {
         self.body - self.end_hang - self.visible_shrink
+    }
+
+    /// Advances past an untaken break opportunity; a non-zero `no_break_width`
+    /// separates the clusters on either side so they no longer pair for trim.
+    fn advance_break(&mut self, no_break_width: f32) {
+        self.pen += no_break_width;
+        if no_break_width != 0.0 {
+            self.prev_trim = None;
+        }
     }
 
     /// The width used if the line ends at a break whose cloned padding is
@@ -245,7 +259,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     if within(walk.used_at_break(b.pre_break_width, true), slot_width) {
                         fits.record(t, b);
                     }
-                    walk.pen += b.no_break_width;
+                    walk.advance_break(b.no_break_width);
                 }
                 Token::Piece(piece)
                     if matches!(piece.kind, PieceKind::Tab)
@@ -325,29 +339,72 @@ impl<'i, 'a> Layout<'i, 'a> {
         slot: InlineSlotConstraint,
         pending: Option<&Reshapes>,
     ) -> f32 {
+        let is_soft_wrap = line.is_soft_wrapped_start();
         match piece.kind {
             PieceKind::Glue(glue) if self.options.justify => {
                 walk.shrink += glue.max_shrink;
+                if glue.kind == GlueKind::CjkPunctCompression {
+                    walk.pending_punct_glue_shrink = glue.max_shrink;
+                }
             }
-            PieceKind::Tab => walk.shrink = 0.0,
+            PieceKind::Tab => {
+                walk.shrink = 0.0;
+                walk.pending_punct_glue_shrink = 0.0;
+            }
             _ => {}
         }
         if !walk.has_start && !piece.is_edge_transparent() {
             walk.has_start = true;
             if line.post_break_width() == 0.0 {
                 walk.pen -= self
-                    .hang_protrusion(piece, LineEdge::Start, line.first_line(), pending)
+                    .hang_protrusion(
+                        piece,
+                        LineEdge::Start,
+                        line.first_line(),
+                        is_soft_wrap,
+                        pending,
+                    )
                     .unwrap_or(0.0);
+            }
+        }
+        let (mut advance, mut reach) = self.measure(piece, walk.pen, slot, pending);
+        if !is_trim_transparent(piece) {
+            if let PieceKind::Cluster { run, cluster } = piece.kind {
+                let info = self.cluster_trim_info(run, cluster, advance);
+                let mut lead_trim = 0.0_f32;
+                let mut a_trail_delta = 0.0_f32;
+                if let Some(b) = info {
+                    if !walk.has_content && line.post_break_width() == 0.0 {
+                        lead_trim = line_start_lead_trim(b, is_soft_wrap);
+                    }
+                    if let Some((a, a_trail)) = walk.prev_trim {
+                        let (t_a, l_b) = pair_trim(a, b);
+                        a_trail_delta =
+                            (t_a.min(a.class.max_trail(a.font_size)) - a_trail).max(0.0);
+                        lead_trim = (lead_trim + l_b).min(b.class.max_lead(b.font_size));
+                    }
+                }
+                if a_trail_delta > 0.0 {
+                    walk.pen -= a_trail_delta;
+                }
+                let static_trim = a_trail_delta + lead_trim;
+                if static_trim > 0.0 && walk.pending_punct_glue_shrink > 0.0 {
+                    walk.shrink -= static_trim.min(walk.pending_punct_glue_shrink);
+                }
+                walk.pending_punct_glue_shrink = 0.0;
+                walk.prev_trim = info.map(|b| (b, 0.0));
+                advance = (advance - lead_trim).max(0.0);
+                reach = (reach - lead_trim).max(0.0);
+            } else {
+                walk.prev_trim = None;
+                walk.pending_punct_glue_shrink = 0.0;
             }
         }
         if piece.is_content() {
             walk.visible_shrink = walk.shrink;
             walk.end_hang = self
-                .hang_protrusion(piece, LineEdge::End, line.first_line(), pending)
+                .hang_protrusion(piece, LineEdge::End, line.first_line(), false, pending)
                 .unwrap_or(0.0);
-        }
-        let (advance, reach) = self.measure(piece, walk.pen, slot, pending);
-        if piece.is_content() {
             walk.body = walk.pen + reach;
             walk.has_content = true;
         }
@@ -587,7 +644,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut walk = LineWalk::new(line.post_break_width());
         for token in self.tokens.slice(line.token_start, end) {
             match token {
-                Token::Break(b) => walk.pen += b.no_break_width,
+                Token::Break(b) => walk.advance_break(b.no_break_width),
                 Token::Piece(piece) => {
                     self.walk_piece(&mut walk, piece, line, slot, Some(pending));
                 }

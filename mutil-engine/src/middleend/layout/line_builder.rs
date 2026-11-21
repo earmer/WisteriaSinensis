@@ -6,6 +6,7 @@ use super::hanging::{EndHang, LineHangs, clip_to_content};
 use super::line_artifacts::{CaretScratch, VisualIndex};
 use super::line_box::LineBoxMetrics;
 use super::scratch::{LayoutScratch, LogicalPiece, build_placed};
+use super::trim::{TrimInfo, is_trim_transparent, line_start_lead_trim, pair_trim};
 use super::visual_runs::VisualRuns;
 use super::{Layout, LineCursor, LineEnd, PieceKind, PlacedPiece, Reshapes, Token};
 use crate::frontend::bidi::{LineClass, reset_line_levels};
@@ -166,6 +167,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             expansions,
             xs,
             y_shifts,
+            lead_trims,
+            trail_trims,
             placed,
             visual,
             carets,
@@ -187,12 +190,22 @@ impl<'i, 'a> Layout<'i, 'a> {
         let BodyFit {
             hangs,
             is_justified,
-        } = self.measure_line(logical, body_len, widths, expansions, &request, pending);
+        } = self.measure_line(
+            logical,
+            body_len,
+            [widths, expansions, lead_trims, trail_trims],
+            &request,
+            pending,
+        );
         let pads = Pads::new(self.base.is_rtl(), pre, cursor.post_break_width());
         let body_end = self.place_visual(logical, order, widths, xs, pads, hangs);
         let byte_range = TextRange::new(cursor.byte_start, byte_end);
         let line_box = self.compute_line_box(logical, order, y_shifts, byte_range, slot)?;
-        build_placed(placed, logical, [xs, widths, expansions, y_shifts]);
+        build_placed(
+            placed,
+            logical,
+            [xs, widths, expansions, y_shifts, lead_trims, trail_trims],
+        );
         visual.rebuild(placed, order);
         let line = PlacedLine {
             placed,
@@ -220,8 +233,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         &self,
         logical: &[LogicalPiece<'a>],
         body_len: usize,
-        widths: &mut Vec<f32>,
-        expansions: &mut Vec<f32>,
+        [widths, expansions, lead_trims, trail_trims]: [&mut Vec<f32>; 4],
         request: &BodyRequest<'_, 'a>,
         pending: &Reshapes,
     ) -> BodyFit {
@@ -237,13 +249,15 @@ impl<'i, 'a> Layout<'i, 'a> {
         } = *request;
         let post = cursor.post_break_width();
         let first_line = cursor.first_line();
-        let start = self.start_hang(body, first_line, post, pending);
+        let is_soft_wrap = cursor.is_soft_wrapped_start();
+        let start = self.start_hang(body, first_line, is_soft_wrap, post, pending);
         // Widths in logical order: a tab's depends on its distance from the
         // line-start edge (spec ST3-1), the start mark's protrusion outside.
         let distance = self.measure_widths(
             body,
-            widths,
+            [widths, lead_trims, trail_trims],
             post - LineHangs::protrusion(start),
+            (post == 0.0, is_soft_wrap),
             slot,
             pending,
         );
@@ -251,7 +265,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         // a hard break is only ever compressed, and only on request (ST3-3).
         let compressible = self.options.justify && (soft_wrap || self.options.compress_last_lines);
         let shrink = if compressible {
-            Self::shrink_capacity(body)
+            Self::shrink_capacity(body, lead_trims, trail_trims)
         } else {
             0.0
         };
@@ -274,8 +288,17 @@ impl<'i, 'a> Layout<'i, 'a> {
         let is_justified = compressible
             && slot.width().is_finite()
             && (soft_wrap || slack < 0.0)
-            && self.justify(body, widths, body_expansions, slack, pending);
+            && self.justify(
+                body,
+                widths,
+                body_expansions,
+                [lead_trims, trail_trims],
+                slack,
+                pending,
+            );
         self.append_trailing_widths(trailing, widths);
+        lead_trims.resize(logical.len(), 0.0);
+        trail_trims.resize(logical.len(), 0.0);
         BodyFit {
             hangs,
             is_justified,
@@ -297,22 +320,65 @@ impl<'i, 'a> Layout<'i, 'a> {
         }));
     }
 
-    /// Fills `widths` with each body piece's width in logical order from
-    /// the pen position `distance` and returns the position after the last
-    /// one.
+    /// Fills `widths`, `lead_trims`, and `trail_trims` for each body piece in
+    /// logical order from the pen position `distance` and returns the position
+    /// after the last one.
     fn measure_widths(
         &self,
         body: &[LogicalPiece<'a>],
-        widths: &mut Vec<f32>,
+        [widths, lead_trims, trail_trims]: [&mut Vec<f32>; 3],
         mut distance: f32,
+        (no_post_pad, is_soft_wrap): (bool, bool),
         slot: InlineSlotConstraint,
         pending: &Reshapes,
     ) -> f32 {
         widths.clear();
-        for p in body {
+        lead_trims.clear();
+        trail_trims.clear();
+        let mut prev_trim: Option<(usize, TrimInfo, f32)> = None;
+        let mut has_content = false;
+        for (idx, p) in body.iter().enumerate() {
             distance += p.gap;
-            let width = self.measure(&p.piece, distance, slot, Some(pending)).0;
+            if p.gap != 0.0 {
+                prev_trim = None;
+            }
+            let raw_width = self.measure(&p.piece, distance, slot, Some(pending)).0;
+            let mut lead_trim = 0.0_f32;
+            if !is_trim_transparent(&p.piece) {
+                if let PieceKind::Cluster { run, cluster } = p.piece.kind {
+                    let info = self.cluster_trim_info(run, cluster, raw_width);
+                    if let Some(b) = info {
+                        if !has_content && no_post_pad {
+                            lead_trim = line_start_lead_trim(b, is_soft_wrap);
+                        }
+                        if let Some((prev_idx, a, a_trail)) = prev_trim {
+                            let (t_a, l_b) = pair_trim(a, b);
+                            let a_delta =
+                                (t_a.min(a.class.max_trail(a.font_size)) - a_trail).max(0.0);
+                            if a_delta > 0.0 {
+                                if let Some(w) = widths.get_mut(prev_idx) {
+                                    *w = (*w - a_delta).max(0.0);
+                                }
+                                if let Some(t) = trail_trims.get_mut(prev_idx) {
+                                    *t += a_delta;
+                                }
+                                distance -= a_delta;
+                            }
+                            lead_trim = (lead_trim + l_b).min(b.class.max_lead(b.font_size));
+                        }
+                    }
+                    prev_trim = info.map(|b| (idx, b, 0.0));
+                } else {
+                    prev_trim = None;
+                }
+            }
+            if p.piece.is_content() {
+                has_content = true;
+            }
+            let width = (raw_width - lead_trim).max(0.0);
             widths.push(width);
+            lead_trims.push(lead_trim);
+            trail_trims.push(0.0);
             distance += width;
         }
         distance

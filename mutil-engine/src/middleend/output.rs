@@ -2,8 +2,8 @@
 //! [`PositionedLine::validate`] and [`PositionedParagraph::validate`].
 
 use super::{
-    HangMode, HangingWhitespaceMode, InlineSlotConstraint, LayoutConstraints, LayoutInputError,
-    LayoutOptions, LineClampPolicy, LineHeight, StrutMetrics,
+    CjkPunctuationTrim, HangMode, HangingWhitespaceMode, InlineSlotConstraint, LayoutConstraints,
+    LayoutInputError, LayoutOptions, LineClampPolicy, LineHeight, StrutMetrics,
 };
 use crate::frontend::{AnnotationSide, BoxOverflowPolicy, ParagraphAst};
 use crate::types::{
@@ -413,6 +413,8 @@ pub struct LayoutPolicySnapshot {
     pub whitespace: HangingWhitespaceMode,
     /// The hanging-punctuation mode.
     pub hang_mode: HangMode,
+    /// The CJK punctuation side-slot trimming policy.
+    pub cjk_punctuation_trim: CjkPunctuationTrim,
     /// `LayoutConstraints::wrap_width`: positive, possibly infinite (SLT-5).
     pub wrap_width: f32,
     /// Where the lines' slots came from.
@@ -514,6 +516,7 @@ impl LayoutPolicySnapshot {
             line_height: options.line_height,
             whitespace: options.whitespace,
             hang_mode: options.hang_mode,
+            cjk_punctuation_trim: options.cjk_punctuation_trim,
             wrap_width: constraints.wrap_width,
             slot_source: SlotSource::of(constraints),
             clamp: options.clamp.clone(),

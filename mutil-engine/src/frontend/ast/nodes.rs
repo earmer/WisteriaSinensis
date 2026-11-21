@@ -223,10 +223,6 @@ pub enum BreakAction {
     /// [`ParagraphAst::break_window`](super::ParagraphAst::break_window) and
     /// [`ParagraphAst::rejoin_windows`](super::ParagraphAst::rejoin_windows).
     Hyphenate(HyphenOpportunity),
-    /// Restore or trim `chws`-compressed CJK punctuation at the line edges:
-    /// net of cloned padding, `pre_break_width` / `post_break_width` are the
-    /// deltas to the last / first cluster of the adjacent text box.
-    CjkPunctAdjust,
     /// Break after a top-level math relation or binary operator.
     MathOperator {
         /// The operator repeated at the start of the next line, if any.

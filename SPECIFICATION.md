@@ -158,8 +158,11 @@ pub struct AtomFlags(..);
 | `AtomFlags::L1_RESETTABLE` | an atom whose first code point UAX #9 L1 resets with whitespace: class WS, S, BN, an isolate initiator or PDI, or an embedding or override control (FE-30) |
 | `AtomFlags::HANGABLE_START` | an opening mark that may hang at a line start: UAX #14 class OP, or General Category Ps or Pi (ST1-3) |
 | `AtomFlags::HANGABLE_END` | a stop or comma that may hang at a line end: U+002C, U+002E, U+3001, U+3002, U+FF0C or U+FF0E (ST1-3) |
+| `AtomFlags::CJK_TRIM_OPEN` | wide/full-width CJK opening punctuation eligible for layout-time leading-blank trimming (FE-31) |
+| `AtomFlags::CJK_TRIM_CLOSE` | wide/full-width CJK closing or stop punctuation eligible for layout-time trailing-blank trimming (FE-31) |
+| `AtomFlags::CJK_TRIM_MIDDLE_DOT` | CJK middle dot (U+00B7, U+30FB, U+2027) eligible for layout-time quarter-em side-slot trimming (FE-31) |
 
-**[ATM-4]** The flags of a cluster are derived, never stored (AX-2): `AtomFlags::for_cluster` takes `AtomFlags::FIRST_ATOM_ONLY` (`IS_OPEN_PUNCT`, `BINDS_TO_PREVIOUS`, `HANGABLE_START`) from the first atom, `AtomFlags::LAST_ATOM_ONLY` (`ALLOW_CJK_JUSTIFY_AFTER`, `IS_CLOSE_PUNCT`, `HANGABLE_END`) from the last, and ORs every other flag. An empty slice gives no flags.
+**[ATM-4]** The flags of a cluster are derived, never stored (AX-2): `AtomFlags::for_cluster` takes `AtomFlags::FIRST_ATOM_ONLY` (`IS_OPEN_PUNCT`, `BINDS_TO_PREVIOUS`, `HANGABLE_START`, `CJK_TRIM_OPEN`) from the first atom, `AtomFlags::LAST_ATOM_ONLY` (`ALLOW_CJK_JUSTIFY_AFTER`, `IS_CLOSE_PUNCT`, `HANGABLE_END`, `CJK_TRIM_CLOSE`) from the last, and ORs every other flag. An empty slice gives no flags.
 
 ```rust
 pub struct InlineDecorationSpan {
@@ -317,7 +320,6 @@ pub enum BreakAction {
     Direct,
     HardBreak,
     Hyphenate(HyphenOpportunity),
-    CjkPunctAdjust,
     MathOperator { repeat: Option<RepeatedOperator> },
 }
 pub struct RepeatedOperator { pub glyph_id: u32, pub advance: f32 }
@@ -401,7 +403,7 @@ The four variants are the box-and-glue algebra; the frontend compiles every ling
 - `Direct` and a hard break in the text: `pre_break_width == clone_pre` and `post_break_width == clone_post`;
 - `MathOperator`: `pre_break_width == clone_pre` and `post_break_width == clone_post + repeat.advance` (zero without a repeat); the operator is repeated at the start of line *k + 1*, so its advance is booked there (AX-5);
 - the sentinel lists no span and has both widths `0`;
-- `Hyphenate` and `CjkPunctAdjust` carry their own shaping deltas on top of the clone sums: `net_pre = pre_break_width - clone_pre` and `net_post = post_break_width - clone_post`.
+- `Hyphenate` carries its own shaping deltas on top of the clone sums: `net_pre = pre_break_width - clone_pre` and `net_post = post_break_width - clone_post`.
 
 Equalities hold within the geometry tolerance (§2.6). The clone sums and the repeated advance folded into the widths are a validated cache (AX-8); the shaping deltas have no other home.
 
@@ -412,8 +414,6 @@ Equalities hold within the geometry tolerance (§2.6). The clone sums and the re
 ```rust
 pub struct ReshapeWindow { pub run_index: usize, pub atom_range: Range<usize>, pub byte_range: TextRange }
 ```
-
-**[WN-24] CJK punctuation seams.** Where two adjacent CJK punctuation clusters are compressed by `chws` and a break between them is allowed, the frontend emits each at its compressed width with a `CjkPunctAdjust` discretionary between them. `net_pre` is the signed delta added to the last cluster of the preceding text box when the break is taken, `net_post` the delta added to the first cluster of the following one. At least one is non-zero; a non-zero one needs that neighbouring box, and the cluster's width plus the delta stays non-negative.
 
 **[WN-25] Inline maths.** An external maths engine decomposes a top-level formula into `InlineObject` items separated by `MathOperator` discretionaries after relations (penalty 500) and binary operators (700). A sub-formula in braces, a fraction or a radical is one object with no break inside.
 
@@ -572,7 +572,7 @@ pub enum LayoutInputError {
 | `InvalidInlineBox { item }` | an inline object's size is not a non-negative measurement, an invalid baseline alignment, or no bytes | WN-7 |
 | `InvalidTab { item }` | a tab owns no bytes | WN-15 |
 | `InvalidGlue { item }` | a glue size is not a non-negative measurement, a compression pool is not shrink only or shrinks more than half its run's font size, a glue is not collapsible, its `original_bidi_class` is not `Ws` for a `WordSpace` or `Bn` for synthetic glue, or the glue's bytes do not match its kind | WN-10, WN-12 to WN-14 |
-| `InvalidDiscretionary { item }` | a width is not a measurement, the penalty is below the mandatory penalty, forbidden or disagrees with the action, the bytes break WN-17, `cloned_spans` repeats or misses a span, or the widths disagree with WN-21 or WN-24 | WN-16 to WN-18, WN-21, WN-24 |
+| `InvalidDiscretionary { item }` | a width is not a measurement, the penalty is below the mandatory penalty, forbidden or disagrees with the action, the bytes break WN-17, `cloned_spans` repeats or misses a span, or the widths disagree with WN-21 | WN-16 to WN-18, WN-21 |
 | `InvalidHyphenOpportunity { item }` | a `Hyphenate` break is not flagged, not between two same-run boxes that meet at it, or has a cut off an atom boundary or outside its chain | WN-20, WN-22 |
 | `InvalidSpanBoundary { item }` | a boundary is not empty, not at its anchor, has the wrong width, a level other than that of the first or last inline entity inside its span (the base level when it holds none), or breaks LIFO order | WN-8, AST-8 |
 | `UnknownSpan { item }` | an item names a decoration span that does not exist, or lists in `cloned_spans` a span that is not `Clone` or does not contain the break strictly inside | WN-8, WN-21 |
@@ -600,6 +600,7 @@ pub struct LayoutPolicySnapshot {
     pub line_height: LineHeight,
     pub whitespace: HangingWhitespaceMode,
     pub hang_mode: HangMode,
+    pub cjk_punctuation_trim: CjkPunctuationTrim,
     pub wrap_width: f32,
     pub slot_source: SlotSource,
     pub clamp: Option<LineClampPolicy>,
@@ -1407,10 +1408,12 @@ pub struct LayoutOptions {
     pub clamp: Option<LineClampPolicy>,
     pub strategy: LineBreakStrategy,
     pub hang_mode: HangMode,
+    pub cjk_punctuation_trim: CjkPunctuationTrim,
     pub line_height: LineHeight,
     pub whitespace: HangingWhitespaceMode,
     pub soft_hyphen: SoftHyphenPolicy,
 }
+pub enum CjkPunctuationTrim { Auto, SpaceAll, SpaceFirst, TrimStart }
 pub struct TabStops { .. }              // a finite, positive step, by construction
 pub enum LineBreakStrategy { Greedy, Balanced, Publication }
 pub enum LineHeight { Normal, Fixed(f32) }
