@@ -857,6 +857,7 @@ fn chip(span_id: u64, mode: crate::frontend::BoxDecorationBreak) -> InlineDecora
         start_padding: 2.0,
         end_padding: 2.0,
         break_mode: mode,
+        height_style: crate::types::BoxHeightStyle::Strut,
     }
 }
 

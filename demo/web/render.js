@@ -40,10 +40,12 @@ export function createRenderer(canvas) {
       ctx.save();
       ctx.translate(PAGE.pad, paragraph.y);
       drawLineGuides(paragraph, scene.guides);
+      drawSpanFragments(paragraph);
       if (scene.selBounds) {
         drawSelection(scene, paragraph.id);
       }
       drawGlyphs(scene, paragraph);
+      drawDecorations(paragraph);
       drawCaretStops(paragraph, scene.guides);
       if (scene.imeRange && scene.imeRange.paraId === paragraph.id) {
         drawImeOverlay(scene.engine, scene.imeRange);
@@ -55,8 +57,83 @@ export function createRenderer(canvas) {
     }
   }
 
+  function colorForByte(paintSpans, byteOffset) {
+    if (byteOffset === null || byteOffset === undefined || !paintSpans?.length) {
+      return '#1b1a17';
+    }
+    for (const span of paintSpans) {
+      if (byteOffset >= span.start && byteOffset < span.end) {
+        return span.color;
+      }
+    }
+    return '#1b1a17';
+  }
+
+  function drawSpanFragments(paragraph) {
+    const styles = new Map((paragraph.spanStyles ?? []).map((s) => [s.spanId, s.kind]));
+    for (const line of paragraph.lines) {
+      for (const frag of line.spanFragments ?? []) {
+        if (frag.width <= 0) {
+          continue;
+        }
+        const kind = styles.get(frag.spanId) ?? 'mark';
+        const top = line.baseline - frag.ascent;
+        const height = frag.ascent + frag.descent;
+        if (height <= 0) {
+          continue;
+        }
+        const [leftEdge, rightEdge] = frag.edges ?? ['logicalEnd', 'logicalEnd'];
+        const closedLeft = leftEdge === 'logicalEnd' || leftEdge === 'clonedWrap';
+        const closedRight = rightEdge === 'logicalEnd' || rightEdge === 'clonedWrap';
+        const radius = kind === 'pill' ? Math.min(6, height / 2) : Math.min(3, height / 2);
+        const rL = closedLeft ? radius : 0;
+        const rR = closedRight ? radius : 0;
+
+        ctx.save();
+        traceBoxPath(ctx, frag.x, top, frag.width, height, rL, rR);
+        if (kind === 'ribbon') {
+          const total = frag.totalSpanAdvance > 0 ? frag.totalSpanAdvance : frag.width;
+          const t0 = Math.max(0, Math.min(1, frag.ribbonOffset / total));
+          const t1 = Math.max(t0, Math.min(1, (frag.ribbonOffset + frag.width) / total));
+          const grad = frag.rtl
+            ? ctx.createLinearGradient(frag.x + frag.width, 0, frag.x, 0)
+            : ctx.createLinearGradient(frag.x, 0, frag.x + frag.width, 0);
+          grad.addColorStop(0, ribbonColor(t0));
+          grad.addColorStop(1, ribbonColor(t1));
+          ctx.fillStyle = grad;
+          ctx.fill();
+          strokeOpenEdges(ctx, frag.x, top, frag.width, height, closedLeft, closedRight, 'rgba(14, 116, 144, 0.45)');
+        } else if (kind === 'pill') {
+          ctx.fillStyle = 'rgba(79, 112, 189, 0.14)';
+          ctx.fill();
+          strokeOpenEdges(ctx, frag.x, top, frag.width, height, closedLeft, closedRight, 'rgba(79, 112, 189, 0.55)');
+        } else {
+          ctx.fillStyle = 'rgba(250, 204, 21, 0.34)';
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+  }
+
+  function drawDecorations(paragraph) {
+    const paintSpans = paragraph.paintSpans;
+    for (const line of paragraph.lines) {
+      for (const dec of line.decorations ?? []) {
+        if (dec.width <= 0) {
+          continue;
+        }
+        const y = line.baseline - dec.yOffset;
+        const thickness = Math.max(1, dec.thickness);
+        ctx.fillStyle = colorForByte(paintSpans, dec.byteRange?.[0]);
+        ctx.fillRect(dec.x, y - thickness / 2, dec.width, thickness);
+      }
+    }
+  }
+
   function drawGlyphs({ engine, fonts }, paragraph) {
-    const path = new Path2D();
+    const paintSpans = paragraph.paintSpans;
+    const byColor = new Map();
     for (const line of paragraph.lines) {
       for (const run of line.runs) {
         const info = fonts.get(run.font);
@@ -67,16 +144,25 @@ export function createRenderer(canvas) {
         // units-per-em is the only scale applied (spec HST-5: geometry is
         // never adjusted at draw time).
         const scale = run.size / info.upem;
-        for (const [glyphId, x, originY] of run.glyphs) {
+        for (const [glyphId, x, originY, byteStart] of run.glyphs) {
           const outline = glyphPath(engine, run.font, glyphId);
-          if (outline) {
-            path.addPath(outline, new DOMMatrix([scale, 0, 0, scale, x, originY]));
+          if (!outline) {
+            continue;
           }
+          const color = colorForByte(paintSpans, byteStart);
+          let path = byColor.get(color);
+          if (!path) {
+            path = new Path2D();
+            byColor.set(color, path);
+          }
+          path.addPath(outline, new DOMMatrix([scale, 0, 0, scale, x, originY]));
         }
       }
     }
-    ctx.fillStyle = '#1b1a17';
-    ctx.fill(path);
+    for (const [color, path] of byColor) {
+      ctx.fillStyle = color;
+      ctx.fill(path);
+    }
   }
 
   function glyphPath(engine, fontId, glyphId) {
@@ -273,4 +359,44 @@ function strokeInside(ctx, start, end, line) {
     Math.max(0, end - start - 1),
     Math.max(0, line.height - 1),
   );
+}
+
+function traceBoxPath(ctx, x, y, w, h, rLeft, rRight) {
+  const rl = Math.min(rLeft, w / 2, h / 2);
+  const rr = Math.min(rRight, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rl, y);
+  ctx.lineTo(x + w - rr, y);
+  if (rr > 0) ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h - rr);
+  if (rr > 0) ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  ctx.lineTo(x + rl, y + h);
+  if (rl > 0) ctx.quadraticCurveTo(x, y + h, x, y + h - rl);
+  ctx.lineTo(x, y + rl);
+  if (rl > 0) ctx.quadraticCurveTo(x, y, x + rl, y);
+  ctx.closePath();
+}
+
+function strokeOpenEdges(ctx, x, y, w, h, closedLeft, closedRight, strokeStyle) {
+  ctx.strokeStyle = strokeStyle;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x, y + 0.5);
+  ctx.lineTo(x + w, y + 0.5);
+  ctx.moveTo(x, y + h - 0.5);
+  ctx.lineTo(x + w, y + h - 0.5);
+  if (closedLeft) {
+    ctx.moveTo(x + 0.5, y);
+    ctx.lineTo(x + 0.5, y + h);
+  }
+  if (closedRight) {
+    ctx.moveTo(x + w - 0.5, y);
+    ctx.lineTo(x + w - 0.5, y + h);
+  }
+  ctx.stroke();
+}
+
+function ribbonColor(t) {
+  const hue = 195 + t * 130;
+  return `hsla(${hue.toFixed(1)}, 78%, 78%, 0.42)`;
 }

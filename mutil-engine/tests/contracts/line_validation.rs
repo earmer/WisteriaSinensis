@@ -184,6 +184,12 @@ fn multi_slot_containment_and_conserved_width() {
         ascent: 8.0,
         descent: 2.0,
         bidi_level: BidiLevel::LTR,
+        edges: SpanFragmentEdges {
+            left: SpanEdgeCut::LogicalEnd,
+            right: SpanEdgeCut::LogicalEnd,
+        },
+        ribbon_offset: 0.0,
+        total_span_advance: 70.0,
     });
     assert_eq!(
         bad.validate(&c),
@@ -1034,6 +1040,20 @@ fn span_fragment(span: (usize, usize), bytes: (usize, usize)) -> PositionedSpanF
         ascent: 8.,
         descent: 2.,
         bidi_level: BidiLevel::LTR,
+        edges: SpanFragmentEdges {
+            left: if bytes.0 == span.0 {
+                SpanEdgeCut::LogicalEnd
+            } else {
+                SpanEdgeCut::SlicedWrap
+            },
+            right: if bytes.1 == span.1 {
+                SpanEdgeCut::LogicalEnd
+            } else {
+                SpanEdgeCut::SlicedWrap
+            },
+        },
+        ribbon_offset: 0.,
+        total_span_advance: 100.,
     }
 }
 

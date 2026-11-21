@@ -32,6 +32,7 @@ fn decoration_spans_compile_to_nested_boundaries_with_cloned_padding() {
             start_padding: 2.0,
             end_padding: 3.0,
             break_mode: BoxDecorationBreak::Clone,
+            height_style: mutil_engine::BoxHeightStyle::Strut,
         },
         InlineDecorationSpan {
             span_id: 9,
@@ -39,6 +40,7 @@ fn decoration_spans_compile_to_nested_boundaries_with_cloned_padding() {
             start_padding: 1.0,
             end_padding: 1.0,
             break_mode: BoxDecorationBreak::Slice,
+            height_style: mutil_engine::BoxHeightStyle::Strut,
         },
     ];
     let paragraph = ParagraphInput {
@@ -138,6 +140,7 @@ fn malformed_spans_are_reported() {
         start_padding: 0.0,
         end_padding: 0.0,
         break_mode: BoxDecorationBreak::Slice,
+        height_style: mutil_engine::BoxHeightStyle::Strut,
     };
     let error = |spans: &[InlineDecorationSpan], text: &str| {
         compile_paragraph(
@@ -563,6 +566,7 @@ fn many_spans_compile_in_linear_time() {
             break_mode: BoxDecorationBreak::Clone,
             start_padding: 1.0,
             end_padding: 1.0,
+            height_style: mutil_engine::BoxHeightStyle::Strut,
         });
         decoration.push(InlineDecorationSpan {
             span_id: i as u64 + 1,
@@ -570,6 +574,7 @@ fn many_spans_compile_in_linear_time() {
             break_mode: BoxDecorationBreak::Slice,
             start_padding: 0.0,
             end_padding: 0.0,
+            height_style: mutil_engine::BoxHeightStyle::Strut,
         });
     }
     let atomic: Vec<AtomicEditSpan> = (1..n)

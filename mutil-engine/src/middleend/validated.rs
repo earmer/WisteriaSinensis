@@ -21,7 +21,7 @@ use super::{
 use crate::frontend::{BoxNode, ParagraphAst, TextBoxView, WordNode};
 use crate::types::{
     FontRef, FontVariation, GlyphOrientation, GraphemeAtom, MAX_MEASUREMENT, Point, RawShapedGlyph,
-    ShapedCluster, WritingMode,
+    ShapedCluster, TextRange, WritingMode,
 };
 pub(crate) use proofs::{
     BodyIdx, ClusterId, NonEmptyStr, RunId, SentinelTokens, SpanId, TokenIdx, VisualOrder,
@@ -578,6 +578,8 @@ impl<'a> PlacedRun<'a> {
         self.source.glyphs().iter().map(move |glyph| PlacedGlyph {
             glyph_id: glyph.glyph_id,
             origin: drawing_origin(glyph, baseline_y, mode, total_block_size),
+            byte_range: glyph.byte_range,
+            advance: glyph.advance,
         })
     }
 }
@@ -666,8 +668,9 @@ pub(super) fn check_drawing_origins(
     Ok(())
 }
 
-/// One glyph to draw: its id in the run's font and its paragraph-local
-/// physical drawing origin (spec HST-4).
+/// One glyph to draw: its id in the run's font, its paragraph-local physical
+/// drawing origin, its source byte range for paint attribution, and its
+/// advance (spec HST-4).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlacedGlyph {
     /// The glyph id in the run's font.
@@ -675,4 +678,9 @@ pub struct PlacedGlyph {
     /// Where the glyph outline's origin is drawn, in paragraph-local physical
     /// coordinates.
     pub origin: Point,
+    /// Non-empty source bytes covered by this glyph; `None` for synthesized
+    /// and annotation glyphs (spec AX-1, FE-17).
+    pub byte_range: Option<TextRange>,
+    /// Advance width of the glyph; may be negative.
+    pub advance: f32,
 }

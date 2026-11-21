@@ -382,7 +382,8 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     fn run(mut self) -> Result<PositionedParagraph, LayoutInputError> {
-        let (lines, total_block_size) = self.place_lines()?;
+        let (mut lines, total_block_size) = self.place_lines()?;
+        backfill_span_ribbons(&mut lines);
         Ok(PositionedParagraph {
             policy: self.inputs.policy().clone(),
             base_direction: self.base,
@@ -519,6 +520,36 @@ fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> SentinelTokens<Token<'a>> {
         }
     }
     SentinelTokens::from_body_and_sentinel(tokens, Token::Break(sentinel))
+}
+
+/// Second pass over laid-out lines (after hanging clipping): assigns
+/// `ribbon_offset` monotonically in logical order per `span_id` across lines
+/// and writes each span's total advance into `total_span_advance`.
+fn backfill_span_ribbons(lines: &mut [PositionedLine]) {
+    let mut totals: HashMap<u64, f32> = HashMap::new();
+    for line in lines.iter_mut() {
+        if line.span_fragments.is_empty() {
+            continue;
+        }
+        let mut ordered: Vec<&mut crate::middleend::PositionedSpanFragment> =
+            line.span_fragments.iter_mut().collect();
+        ordered.sort_by_key(|f| (f.byte_range.start(), f.byte_range.end()));
+        for f in ordered {
+            let acc = totals.entry(f.span_id).or_insert(0.0);
+            f.ribbon_offset = *acc;
+            *acc += f.width;
+        }
+    }
+    if totals.is_empty() {
+        return;
+    }
+    for line in lines.iter_mut() {
+        for f in &mut line.span_fragments {
+            if let Some(&total) = totals.get(&f.span_id) {
+                f.total_span_advance = total;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

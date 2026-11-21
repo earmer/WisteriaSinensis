@@ -240,6 +240,7 @@ fn lay_out_span(
         start_padding: 0.0,
         end_padding,
         break_mode: mode,
+        height_style: mutil_engine::BoxHeightStyle::Strut,
     }];
     let paragraph = ParagraphInput {
         decoration_spans: &spans,

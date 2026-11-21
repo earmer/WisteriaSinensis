@@ -6,7 +6,7 @@
 //! A Notion-style mention is usually both; an inline `code` span is often only
 //! the first, a hidden-metadata range only the second.
 
-use crate::types::{ByteIndex, TextRange};
+use crate::types::{BoxHeightStyle, ByteIndex, TextRange};
 
 /// Deepest proper nesting `check_layout_inputs` accepts for decoration spans
 /// (a span inside a span inside ...). **[Design decision]**
@@ -44,6 +44,8 @@ pub struct InlineDecorationSpan {
     pub end_padding: f32,
     /// Fragmentation behaviour.
     pub break_mode: BoxDecorationBreak,
+    /// Vertical extent policy for the span's positioned fragments.
+    pub height_style: BoxHeightStyle,
 }
 
 impl InlineDecorationSpan {
@@ -113,6 +115,7 @@ mod tests {
             start_padding,
             end_padding,
             break_mode: BoxDecorationBreak::Clone,
+            height_style: BoxHeightStyle::Strut,
         }
     }
 

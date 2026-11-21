@@ -23,7 +23,7 @@ pub use font::{
     FamilyStack, FontFamily, FontFeature, FontFeatures, FontId, FontInstanceRef, FontMetrics,
     FontRef, FontSlant, FontStyle, FontVariation, FontWeight, GenericFamily,
 };
-pub use geometry::{MAX_MEASUREMENT, Point, Rect, Size, is_extent, is_measurement};
+pub use geometry::{BoxHeightStyle, MAX_MEASUREMENT, Point, Rect, Size, is_extent, is_measurement};
 pub use hyphen::{HyphenOpportunity, ReplacementText};
 pub use run::{ShapingRun, TextDecoration};
 pub use tag::{InvalidLocaleTag, InvalidScriptTag, LocaleTag, ScriptTag};

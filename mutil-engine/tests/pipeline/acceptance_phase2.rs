@@ -311,6 +311,7 @@ fn decorated(
         start_padding: padding.0,
         end_padding: padding.1,
         break_mode,
+        height_style: mutil_engine::BoxHeightStyle::Strut,
     }];
     let paragraph = ParagraphInput {
         decoration_spans: &spans,

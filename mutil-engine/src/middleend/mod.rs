@@ -25,8 +25,8 @@ pub use badness::{
 };
 pub use input_validation::{LayoutInputError, check_layout_inputs};
 pub use interaction::{
-    BoxHeightStyle, CaretVisual, CursorMove, CursorPosition, FlowMotion, HitResult, Motion,
-    ParagraphEdge, Selection, SelectionRect, resolve_ligature_carets, utf8_to_utf16, utf16_to_utf8,
+    CaretVisual, CursorMove, CursorPosition, FlowMotion, HitResult, Motion, ParagraphEdge,
+    Selection, SelectionRect, resolve_ligature_carets, utf8_to_utf16, utf16_to_utf8,
 };
 pub use layout::layout_paragraph;
 pub use line_geometry::GlyphRole;
@@ -39,7 +39,8 @@ pub use output::{
     AtomicFragment, CaretAffinity, CaretStop, DecorationKind, DecorationLine, HangSide,
     LayoutPolicySnapshot, LineContext, PositionedAnnotationRun, PositionedGlyph,
     PositionedInlineBox, PositionedLine, PositionedParagraph, PositionedSlot,
-    PositionedSpanFragment, PositionedTab, SlotSource, VisualGlyphRun,
+    PositionedSpanFragment, PositionedTab, SlotSource, SpanEdgeCut, SpanFragmentEdges,
+    VisualGlyphRun,
 };
 pub use output_validation::{
     AnnotationErrorReason, LineInvariantError, ParagraphErrorReason, SlotErrorReason,

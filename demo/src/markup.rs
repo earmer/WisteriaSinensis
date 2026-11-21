@@ -15,15 +15,88 @@
 //! are flattened: each byte takes its innermost tag, so the spans the engine
 //! receives are disjoint and ascending (spec FE-25).
 
-use mutil_engine::{LocaleTag, TextRange};
+use mutil_engine::{
+    BoxDecorationBreak, BoxHeightStyle, InlineDecorationSpan, LocaleTag,
+    MAX_DECORATION_NESTING_DEPTH, TextDecoration, TextRange,
+};
 
-/// Plain text and the locale of each tagged stretch of it.
-#[derive(Debug, PartialEq, Eq)]
+/// Host-side foreground colour attribution over source bytes (never splits
+/// shaping runs, spec FE-17).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaintSpan {
+    pub byte_range: TextRange,
+    pub color: String,
+}
+
+/// Visual preset for an inline decoration box in the demo canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxStyleKind {
+    Mark,
+    Pill,
+    Ribbon,
+}
+
+impl BoxStyleKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mark => "mark",
+            Self::Pill => "pill",
+            Self::Ribbon => "ribbon",
+        }
+    }
+
+    fn to_span(self, span_id: u64, byte_range: TextRange) -> InlineDecorationSpan {
+        match self {
+            Self::Mark => InlineDecorationSpan {
+                span_id,
+                byte_range,
+                start_padding: 3.0,
+                end_padding: 3.0,
+                break_mode: BoxDecorationBreak::Slice,
+                height_style: BoxHeightStyle::Strut,
+            },
+            Self::Pill => InlineDecorationSpan {
+                span_id,
+                byte_range,
+                start_padding: 6.0,
+                end_padding: 6.0,
+                break_mode: BoxDecorationBreak::Clone,
+                height_style: BoxHeightStyle::Strut,
+            },
+            Self::Ribbon => InlineDecorationSpan {
+                span_id,
+                byte_range,
+                start_padding: 4.0,
+                end_padding: 4.0,
+                break_mode: BoxDecorationBreak::Slice,
+                height_style: BoxHeightStyle::Tight,
+            },
+        }
+    }
+}
+
+/// An engine [`InlineDecorationSpan`] paired with its host-side canvas style.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoxSpan {
+    pub span: InlineDecorationSpan,
+    pub kind: BoxStyleKind,
+}
+
+/// Plain text and the locale, decoration, paint, and box spans of each tagged
+/// stretch of it.
+#[derive(Debug, PartialEq)]
 pub struct Marked {
     /// The text with the markup removed.
     pub text: String,
     /// Disjoint, ascending, non-empty ranges of `text` with their locale.
     pub spans: Vec<(TextRange, LocaleTag)>,
+    /// Disjoint, ascending, non-empty ranges of `text` with underline /
+    /// strikethrough decorations.
+    pub decorations: Vec<(TextRange, TextDecoration)>,
+    /// Host-side foreground colour spans (never split shaping runs, FE-17).
+    pub paint_spans: Vec<PaintSpan>,
+    /// Engine inline decoration spans, ordered for G1 (`AST-8`).
+    pub box_spans: Vec<BoxSpan>,
     /// The removed tags, as ascending byte ranges of the source.
     pub removed: Vec<core::ops::Range<usize>>,
 }
@@ -52,17 +125,34 @@ pub fn text_offset(removed: &[core::ops::Range<usize>], source_offset: usize) ->
     source_offset - gone
 }
 
+enum TagKind {
+    Locale(LocaleTag),
+    Underline,
+    Strikethrough,
+    Color(String),
+    Box(BoxStyleKind),
+}
+
 enum Token {
     Text(core::ops::Range<usize>),
     Open {
         close: String,
-        locale: LocaleTag,
+        kind: TagKind,
         raw: core::ops::Range<usize>,
     },
     Close {
         key: String,
         raw: core::ops::Range<usize>,
     },
+}
+
+fn unquote(value: &str) -> &str {
+    match value.as_bytes() {
+        [q @ (b'"' | b'\''), .., last] if last == q && value.len() >= 2 => {
+            &value[1..value.len() - 1]
+        }
+        _ => value,
+    }
 }
 
 /// Reads `<…>` at `at`, if it is a tag of this markup.
@@ -92,28 +182,49 @@ fn tag_at(source: &str, at: usize) -> Option<(Token, usize)> {
             )
         });
     }
-    let (close, value) = match inner.split_once('=') {
-        Some((attr, value)) if attr.eq_ignore_ascii_case("lang") => {
-            // Unquoted, or inside one matching pair of quotes.
-            let value = match value.as_bytes() {
-                [q @ (b'"' | b'\''), .., last] if last == q && value.len() >= 2 => {
-                    &value[1..value.len() - 1]
+    let (close, kind) = if let Some((attr, value)) = inner.split_once('=') {
+        let value = unquote(value);
+        match attr.to_ascii_lowercase().as_str() {
+            "lang" => {
+                if !name_ok(value) {
+                    return None;
                 }
-                _ => value,
-            };
-            ("lang".to_owned(), value)
+                let locale = LocaleTag::try_from_str_lenient(value).ok()?;
+                ("lang".to_owned(), TagKind::Locale(locale))
+            }
+            "color" => {
+                let color_ok = !value.is_empty()
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'#' || b == b'-' || b == b'_');
+                if !color_ok {
+                    return None;
+                }
+                ("color".to_owned(), TagKind::Color(value.to_owned()))
+            }
+            _ => return None,
         }
-        Some(_) => return None,
-        None => (inner.to_ascii_lowercase(), inner),
+    } else {
+        let key = inner.to_ascii_lowercase();
+        match key.as_str() {
+            "u" => (key, TagKind::Underline),
+            "s" => (key, TagKind::Strikethrough),
+            "mark" => (key, TagKind::Box(BoxStyleKind::Mark)),
+            "pill" => (key, TagKind::Box(BoxStyleKind::Pill)),
+            "ribbon" => (key, TagKind::Box(BoxStyleKind::Ribbon)),
+            _ => {
+                if !name_ok(inner) {
+                    return None;
+                }
+                let locale = LocaleTag::try_from_str_lenient(inner).ok()?;
+                (key, TagKind::Locale(locale))
+            }
+        }
     };
-    if !name_ok(value) {
-        return None;
-    }
-    let locale = LocaleTag::try_from_str_lenient(value).ok()?;
     Some((
         Token::Open {
             close,
-            locale,
+            kind,
             raw: raw.clone(),
         },
         raw.end,
@@ -180,53 +291,154 @@ fn pair(tokens: &[Token]) -> Vec<bool> {
     paired
 }
 
-/// Strips the locale markup from `source` (see the module documentation).
+/// Strips the locale and rich-text markup from `source` (see the module
+/// documentation).
 #[must_use]
 pub fn parse(source: &str) -> Marked {
     let tokens = tokens(source);
     let paired = pair(&tokens);
     let mut text = String::with_capacity(source.len());
     let mut spans: Vec<(TextRange, LocaleTag)> = Vec::new();
+    let mut decorations: Vec<(TextRange, TextDecoration)> = Vec::new();
+    let mut paint_spans: Vec<PaintSpan> = Vec::new();
+    let mut raw_boxes: Vec<(TextRange, BoxStyleKind, usize)> = Vec::new();
     let mut removed = Vec::new();
-    // The open paired tags, innermost last; the stretch since the last tag
-    // edge takes the innermost one's locale.
-    let mut open: Vec<&LocaleTag> = Vec::new();
+    // Stacks of currently open paired tags.
+    let mut open_kinds: Vec<&TagKind> = Vec::new();
+    let mut locales: Vec<&LocaleTag> = Vec::new();
+    let mut colors: Vec<&str> = Vec::new();
+    let mut box_starts: Vec<(usize, BoxStyleKind, usize)> = Vec::new();
+    let mut next_box_order: usize = 0;
+    let mut underline_depth: usize = 0;
+    let mut strike_depth: usize = 0;
     let mut since = 0;
-    let mut flush = |open: &[&LocaleTag], since: usize, end: usize| {
-        let Some(&locale) = open.last() else { return };
+
+    let mut flush = |locales: &[&LocaleTag],
+                     colors: &[&str],
+                     u_depth: usize,
+                     s_depth: usize,
+                     since: usize,
+                     end: usize| {
         if since == end {
             return;
         }
-        match spans.last_mut() {
-            Some((range, last)) if range.end() == since && last == locale => {
-                *range = TextRange::new(range.start(), end);
+        let range = TextRange::new(since, end);
+        if let Some(&locale) = locales.last() {
+            match spans.last_mut() {
+                Some((prev, last)) if prev.end() == since && last == locale => {
+                    *prev = TextRange::new(prev.start(), end);
+                }
+                _ => spans.push((range, locale.clone())),
             }
-            _ => spans.push((TextRange::new(since, end), locale.clone())),
+        }
+        if u_depth > 0 || s_depth > 0 {
+            let deco = TextDecoration {
+                underline: u_depth > 0,
+                strikethrough: s_depth > 0,
+            };
+            match decorations.last_mut() {
+                Some((prev, last)) if prev.end() == since && *last == deco => {
+                    *prev = TextRange::new(prev.start(), end);
+                }
+                _ => decorations.push((range, deco)),
+            }
+        }
+        if let Some(&color) = colors.last() {
+            match paint_spans.last_mut() {
+                Some(prev) if prev.byte_range.end() == since && prev.color == color => {
+                    prev.byte_range = TextRange::new(prev.byte_range.start(), end);
+                }
+                _ => paint_spans.push(PaintSpan {
+                    byte_range: range,
+                    color: color.to_owned(),
+                }),
+            }
         }
     };
+
     for (index, token) in tokens.iter().enumerate() {
         match token {
             Token::Text(range) => text.push_str(&source[range.clone()]),
             Token::Open { raw, .. } | Token::Close { raw, .. } if !paired[index] => {
                 text.push_str(&source[raw.clone()]);
             }
-            Token::Open { locale, raw, .. } => {
+            Token::Open { kind, raw, .. } => {
                 removed.push(raw.clone());
-                flush(&open, since, text.len());
-                open.push(locale);
+                flush(
+                    &locales,
+                    &colors,
+                    underline_depth,
+                    strike_depth,
+                    since,
+                    text.len(),
+                );
+                open_kinds.push(kind);
+                match kind {
+                    TagKind::Locale(locale) => locales.push(locale),
+                    TagKind::Underline => underline_depth += 1,
+                    TagKind::Strikethrough => strike_depth += 1,
+                    TagKind::Color(color) => colors.push(color),
+                    TagKind::Box(style) => {
+                        box_starts.push((text.len(), *style, next_box_order));
+                        next_box_order += 1;
+                    }
+                }
                 since = text.len();
             }
             Token::Close { raw, .. } => {
                 removed.push(raw.clone());
-                flush(&open, since, text.len());
-                open.pop();
+                flush(
+                    &locales,
+                    &colors,
+                    underline_depth,
+                    strike_depth,
+                    since,
+                    text.len(),
+                );
+                if let Some(kind) = open_kinds.pop() {
+                    match kind {
+                        TagKind::Locale(_) => {
+                            locales.pop();
+                        }
+                        TagKind::Underline => underline_depth -= 1,
+                        TagKind::Strikethrough => strike_depth -= 1,
+                        TagKind::Color(_) => {
+                            colors.pop();
+                        }
+                        TagKind::Box(_) => {
+                            if let Some((start, style, open_order)) = box_starts.pop()
+                                && start < text.len()
+                                && box_starts.len() < MAX_DECORATION_NESTING_DEPTH
+                            {
+                                raw_boxes.push((
+                                    TextRange::new(start, text.len()),
+                                    style,
+                                    open_order,
+                                ));
+                            }
+                        }
+                    }
+                }
                 since = text.len();
             }
         }
     }
+    raw_boxes
+        .sort_by_key(|(r, _, open_order)| (r.start(), core::cmp::Reverse(r.end()), *open_order));
+    let box_spans = raw_boxes
+        .into_iter()
+        .enumerate()
+        .map(|(i, (range, kind, _))| BoxSpan {
+            span: kind.to_span((i + 1) as u64, range),
+            kind,
+        })
+        .collect();
     Marked {
         text,
         spans,
+        decorations,
+        paint_spans,
+        box_spans,
         removed,
     }
 }
@@ -358,6 +570,9 @@ mod tests {
             Marked {
                 text: "ab".into(),
                 spans: vec![],
+                decorations: vec![],
+                paint_spans: vec![],
+                box_spans: vec![],
                 removed: vec![1..5, 5..10],
             }
         );

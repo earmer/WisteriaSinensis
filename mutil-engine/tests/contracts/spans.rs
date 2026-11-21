@@ -17,6 +17,7 @@ fn decorated(ranges: &[(usize, usize)]) -> ParagraphAst {
             start_padding: 0.,
             end_padding: 0.,
             break_mode: BoxDecorationBreak::Slice,
+            height_style: mutil_engine::BoxHeightStyle::Strut,
         })
         .collect();
     // Nodes stay in canonical geometric order even when the span array is

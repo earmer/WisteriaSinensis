@@ -5,9 +5,9 @@ use crate::frontend::AnnotationSide;
 use crate::middleend::tolerance::{approx_eq, approx_lt};
 use crate::middleend::{
     AnnotationErrorReason, LineContext, LineHeight, LineInvariantError, PositionedGlyph,
-    PositionedLine,
+    PositionedLine, SpanEdgeCut,
 };
-use crate::types::{BidiLevel, GlyphOrientation, MAX_MEASUREMENT, TextRange};
+use crate::types::{BidiLevel, GlyphOrientation, MAX_MEASUREMENT, TextRange, is_extent};
 use std::collections::HashSet;
 
 impl PositionedLine {
@@ -97,7 +97,24 @@ impl PositionedLine {
             let finite = [f.x, f.width, f.ascent, f.descent, f.x + f.width]
                 .into_iter()
                 .all(f32::is_finite);
-            if !(finite && f.width >= 0.0 && f.ascent >= 0.0 && f.descent >= 0.0) {
+            let ribbon_ok = is_extent(f.ribbon_offset)
+                && is_extent(f.total_span_advance)
+                && (f.ribbon_offset + f.width).is_finite()
+                && !approx_lt(f.total_span_advance, f.ribbon_offset + f.width);
+            let (start_cut, end_cut) = if f.bidi_level.direction().is_rtl() {
+                (f.edges.right, f.edges.left)
+            } else {
+                (f.edges.left, f.edges.right)
+            };
+            let edges_ok = (start_cut == SpanEdgeCut::LogicalEnd) == f.is_first_fragment()
+                && (end_cut == SpanEdgeCut::LogicalEnd) == f.is_last_fragment();
+            if !(finite
+                && f.width >= 0.0
+                && f.ascent >= 0.0
+                && f.descent >= 0.0
+                && ribbon_ok
+                && edges_ok)
+            {
                 return Err(E::InvalidSpanFragment { index });
             }
         }

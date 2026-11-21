@@ -1,7 +1,10 @@
 //! Paragraph-level validation for [`PositionedParagraph`].
 
-use crate::middleend::tolerance::{keeps_extent, tolerance};
-use crate::middleend::{LineInvariantError, ParagraphErrorReason, PositionedParagraph, validated};
+use crate::middleend::tolerance::{approx_eq, keeps_extent, tolerance};
+use crate::middleend::{
+    LineInvariantError, ParagraphErrorReason, PositionedParagraph, PositionedSpanFragment,
+    validated,
+};
 use crate::types::TextRange;
 use std::collections::{HashMap, HashSet};
 
@@ -156,9 +159,10 @@ impl PositionedParagraph {
 
     /// Across the lines, the fragments of one decoration span carry one
     /// `span_range`, exactly one of them is the first and exactly one the
-    /// last. Each line already ties the flags to the fragment's bytes, so the
-    /// fragments are in logical order. A span whose end lies in the truncated
-    /// tail (beyond `rendered_end`) has no last fragment.
+    /// last, and their `ribbon_offset` values start at `0.0`, advance by each
+    /// fragment's `width` in logical order, and sum to `total_span_advance`.
+    /// A span whose end lies in the truncated tail (beyond `rendered_end`)
+    /// has no last fragment.
     fn check_span_fragment_identity(
         &self,
         rendered_end: usize,
@@ -168,38 +172,49 @@ impl PositionedParagraph {
             line: usize,
             has_first: bool,
             has_last: bool,
+            ribbon_acc: f32,
+            total_span_advance: f32,
         }
         use ParagraphErrorReason as R;
         let invalid = |line| Err(R::InconsistentSpanFragments.at(line));
         let mut spans: HashMap<u64, Seen> = HashMap::new();
-        for (line, fragment) in self
-            .lines
-            .iter()
-            .enumerate()
-            .flat_map(|(i, line)| line.span_fragments.iter().map(move |f| (i, f)))
-        {
-            let seen = spans.entry(fragment.span_id).or_insert(Seen {
-                span_range: fragment.span_range,
-                line,
-                has_first: false,
-                has_last: false,
-            });
-            if seen.span_range != fragment.span_range
-                || (seen.has_first && fragment.is_first_fragment())
-                || (seen.has_last && fragment.is_last_fragment())
-            {
-                return invalid(line);
+        for (line_idx, line) in self.lines.iter().enumerate() {
+            if line.span_fragments.is_empty() {
+                continue;
             }
-            seen.line = line;
-            seen.has_first |= fragment.is_first_fragment();
-            seen.has_last |= fragment.is_last_fragment();
+            let mut ordered: Vec<&PositionedSpanFragment> = line.span_fragments.iter().collect();
+            ordered.sort_by_key(|f| (f.byte_range.start(), f.byte_range.end()));
+            for fragment in ordered {
+                let seen = spans.entry(fragment.span_id).or_insert(Seen {
+                    span_range: fragment.span_range,
+                    line: line_idx,
+                    has_first: false,
+                    has_last: false,
+                    ribbon_acc: 0.0,
+                    total_span_advance: fragment.total_span_advance,
+                });
+                if seen.span_range != fragment.span_range
+                    || (seen.has_first && fragment.is_first_fragment())
+                    || (seen.has_last && fragment.is_last_fragment())
+                    || !approx_eq(fragment.ribbon_offset, seen.ribbon_acc)
+                    || !approx_eq(fragment.total_span_advance, seen.total_span_advance)
+                {
+                    return invalid(line_idx);
+                }
+                seen.line = line_idx;
+                seen.has_first |= fragment.is_first_fragment();
+                seen.has_last |= fragment.is_last_fragment();
+                seen.ribbon_acc += fragment.width;
+            }
         }
         // Report the earliest offending line, whatever the map's order.
         spans
             .values()
             .filter(|seen| {
                 let ends_in_tail = seen.span_range.end() > rendered_end;
-                !seen.has_first || (!seen.has_last && !ends_in_tail)
+                !seen.has_first
+                    || (!seen.has_last && !ends_in_tail)
+                    || !approx_eq(seen.ribbon_acc, seen.total_span_advance)
             })
             .map(|seen| seen.line)
             .min()

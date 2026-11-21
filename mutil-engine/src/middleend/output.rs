@@ -138,6 +138,32 @@ pub struct PositionedTab {
     pub width: f32,
 }
 
+/// Why a physical edge of a [`PositionedSpanFragment`] ended where it did
+/// (spec §2.6, FRG-1, ST2-3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SpanEdgeCut {
+    /// True logical start or end of the decoration span.
+    LogicalEnd,
+    /// Line break edge where the span's padding/border was cloned
+    /// (`BoxDecorationBreak::Clone`).
+    ClonedWrap,
+    /// Line break edge where the span was sliced (`BoxDecorationBreak::Slice`
+    /// or not cloned at this break).
+    SlicedWrap,
+    /// Interior boundary where Bidi reordering split the span into multiple
+    /// visual fragments on the same line.
+    BidiSplit,
+}
+
+/// Physical left and right edge classifications of a [`PositionedSpanFragment`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SpanFragmentEdges {
+    /// Physical left edge cut.
+    pub left: SpanEdgeCut,
+    /// Physical right edge cut.
+    pub right: SpanEdgeCut,
+}
+
 /// The visual box of one bidi-reordered line fragment of an inline decoration
 /// span (spec §2.6). First/last-ness follows from the two ranges (AX-2).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -158,6 +184,12 @@ pub struct PositionedSpanFragment {
     pub descent: f32,
     /// UAX #9 level of the fragment's text.
     pub bidi_level: BidiLevel,
+    /// Classification of the fragment's physical left and right edges.
+    pub edges: SpanFragmentEdges,
+    /// Cumulative logical advance of this span's fragments preceding this one.
+    pub ribbon_offset: f32,
+    /// Total advance across all fragments of this span in the paragraph.
+    pub total_span_advance: f32,
 }
 
 impl PositionedSpanFragment {

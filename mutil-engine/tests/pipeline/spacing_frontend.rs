@@ -206,6 +206,7 @@ fn span(id: u64, range: (usize, usize), padding: (f32, f32)) -> InlineDecoration
         start_padding: padding.0,
         end_padding: padding.1,
         break_mode: BoxDecorationBreak::Slice,
+        height_style: mutil_engine::BoxHeightStyle::Strut,
     }
 }
 

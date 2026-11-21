@@ -290,6 +290,7 @@ fn st5_1_trailing_whitespace_in_decoration_span_collapses_at_wrap() {
         start_padding: 0.0,
         end_padding: 0.0,
         break_mode: BoxDecorationBreak::Slice,
+        height_style: mutil_engine::BoxHeightStyle::Strut,
     }];
     let paragraph_input = ParagraphInput {
         decoration_spans: &spans,
@@ -334,6 +335,7 @@ fn st5_1_nested_zero_padding_decoration_span_does_not_split_underline() {
             start_padding: 0.0,
             end_padding: 0.0,
             break_mode: BoxDecorationBreak::Slice,
+            height_style: mutil_engine::BoxHeightStyle::Strut,
         },
         InlineDecorationSpan {
             span_id: 2,
@@ -341,6 +343,7 @@ fn st5_1_nested_zero_padding_decoration_span_does_not_split_underline() {
             start_padding: 0.0,
             end_padding: 0.0,
             break_mode: BoxDecorationBreak::Slice,
+            height_style: mutil_engine::BoxHeightStyle::Strut,
         },
     ];
     let paragraph_input = ParagraphInput {

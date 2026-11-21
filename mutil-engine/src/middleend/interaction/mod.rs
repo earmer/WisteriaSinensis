@@ -139,20 +139,6 @@ pub struct Selection {
     pub focus: CursorPosition,
 }
 
-/// Height policy for selection rectangles, after Flutter's `BoxHeightStyle`
-/// `[C1]` (spec §6.6).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum BoxHeightStyle {
-    /// Union of selected font-instance ascent/descent, excluding gap and
-    /// leading (`TextShaper::font_metrics` of every selected instance).
-    #[default]
-    Tight,
-    /// Includes line gap and maximum inline-box height.
-    Max,
-    /// The paragraph's resolved strut (`ParagraphAst::strut_metrics` after `LineHeight::resolve_strut`).
-    Strut,
-}
-
 impl AtomicFragment {
     /// Snaps to the entire span's outer endpoints by midpoint rule.
     /// Even level: left half → start/Downstream, right half → end/Upstream.

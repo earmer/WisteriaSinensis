@@ -392,6 +392,12 @@ fn fragment(span_id: u64, x: f32, width: f32, bytes: (usize, usize)) -> Position
         ascent: 12.0,
         descent: 4.0,
         bidi_level: BidiLevel::LTR,
+        edges: crate::middleend::SpanFragmentEdges {
+            left: crate::middleend::SpanEdgeCut::LogicalEnd,
+            right: crate::middleend::SpanEdgeCut::LogicalEnd,
+        },
+        ribbon_offset: 0.0,
+        total_span_advance: width.max(0.0),
     }
 }
 

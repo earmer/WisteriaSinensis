@@ -667,6 +667,7 @@ pub fn spanned(n: usize) -> (String, ParagraphAst) {
             start_padding: 0.,
             end_padding: 0.,
             break_mode: BoxDecorationBreak::Slice,
+            height_style: mutil_engine::BoxHeightStyle::Strut,
         });
         a.atomic_spans.push(AtomicEditSpan {
             span_id: (n + i) as u64,
