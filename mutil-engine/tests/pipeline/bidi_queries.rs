@@ -492,6 +492,7 @@ fn the_input_gate_rejects_a_span_boundary_below_the_base_level() {
         start_padding: 1.0,
         end_padding: 1.0,
         break_mode: BoxDecorationBreak::Slice,
+        height_style: mutil_engine::BoxHeightStyle::Strut,
     }];
     let paragraph = ParagraphInput {
         decoration_spans: &spans,

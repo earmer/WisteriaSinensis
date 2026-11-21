@@ -18,10 +18,10 @@ use std::sync::Mutex;
 use mutil_engine::{
     AutospaceProfile, BaselineAlignment, BidiDirection, BoxHeightStyle, CaretAffinity,
     CursorPosition, FontStyle, FrontendOptions, HangEndMode, HangMode, HangStartMode,
-    HangingWhitespaceMode, LayoutConstraints, LayoutOptions, LineBreakStrictness, LineHeight,
-    LocalePolicy, LocaleTag, Motion, ParagraphInput, Point, PositionedParagraph, QuotePolicy,
-    StyleSpan, TextDecoration, TextRange, TextStyle, ValidatedLayout, WordBreakOption,
-    compile_paragraph, layout_paragraph,
+    HangingWhitespaceMode, InlineDecorationSpan, LayoutConstraints, LayoutOptions,
+    LineBreakStrictness, LineHeight, LocalePolicy, LocaleTag, Motion, ParagraphInput, Point,
+    PositionedParagraph, QuotePolicy, StyleSpan, TextDecoration, TextRange, TextStyle,
+    ValidatedLayout, WordBreakOption, compile_paragraph, layout_paragraph,
 };
 
 use fonts::Fonts;
@@ -144,23 +144,15 @@ impl Demo {
             script: None,
             locale: locale.clone(),
         };
-        let style_spans: Vec<StyleSpan> = marked
-            .spans
-            .iter()
-            .map(|(range, span_locale)| StyleSpan {
-                byte_range: *range,
-                style: TextStyle {
-                    locale: Some(span_locale.clone()),
-                    ..style.clone()
-                },
-            })
-            .collect();
+        let style_spans = build_style_spans(&marked, &style);
+        let decoration_spans: Vec<InlineDecorationSpan> =
+            marked.box_spans.iter().map(|b| b.span).collect();
         let input = ParagraphInput {
             text: &marked.text,
             default_style: &style,
             style_spans: &style_spans,
             inline_objects: &[],
-            decoration_spans: &[],
+            decoration_spans: &decoration_spans,
             atomic_spans: &[],
             bidi_spans: &[],
             annotations: &[],
@@ -181,10 +173,63 @@ impl Demo {
             ValidatedLayout::try_from_paragraph(&s.paragraph, &s.marked.text)
         })
         .map_err(|(_, e)| error_json("validate", e))?;
-        let json = layout_json(validated.borrow_dependent(), self.paragraphs.len());
+        let json = layout_json(
+            validated.borrow_dependent(),
+            self.paragraphs.len(),
+            &validated.borrow_owner().marked,
+        );
         self.paragraphs.push(validated);
         Ok(json)
     }
+}
+
+/// Flattens orthogonal locale and text-decoration ranges into disjoint,
+/// ascending [`StyleSpan`]s for the frontend (spec FE-25). Host-only
+/// `paint_spans` are deliberately excluded so colour changes never break
+/// shaping or ligatures (spec FE-17).
+fn build_style_spans(marked: &markup::Marked, base: &TextStyle) -> Vec<StyleSpan> {
+    if marked.spans.is_empty() && marked.decorations.is_empty() {
+        return Vec::new();
+    }
+    let mut cuts: Vec<usize> = marked
+        .spans
+        .iter()
+        .flat_map(|(r, _)| [r.start(), r.end()])
+        .chain(
+            marked
+                .decorations
+                .iter()
+                .flat_map(|(r, _)| [r.start(), r.end()]),
+        )
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out = Vec::new();
+    for pair in cuts.windows(2) {
+        let [start, end] = [pair[0], pair[1]];
+        let locale = marked
+            .spans
+            .iter()
+            .find(|(r, _)| r.contains(start))
+            .map(|(_, l)| l.clone());
+        let decoration = marked
+            .decorations
+            .iter()
+            .find(|(r, _)| r.contains(start))
+            .map(|(_, d)| *d);
+        if locale.is_none() && decoration.is_none() {
+            continue;
+        }
+        out.push(StyleSpan {
+            byte_range: TextRange::new(start, end),
+            style: TextStyle {
+                locale: locale.or_else(|| base.locale.clone()),
+                decoration: decoration.unwrap_or(base.decoration),
+                ..base.clone()
+            },
+        });
+    }
+    out
 }
 
 impl LayoutRequest<'_> {

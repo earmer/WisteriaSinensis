@@ -440,6 +440,7 @@ fn main() {
             start_padding: 2.0,
             end_padding: 2.0,
             break_mode: BoxDecorationBreak::Slice,
+            height_style: mutil_engine::BoxHeightStyle::Strut,
         });
     }
     workloads_json.push(bench_workload(&Workload {

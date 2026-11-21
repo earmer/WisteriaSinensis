@@ -238,6 +238,7 @@ fn wn8_span_boundaries_take_the_level_of_the_first_and_last_inline_entity() {
             start_padding: 1.0,
             end_padding: 1.0,
             break_mode: BoxDecorationBreak::Slice,
+            height_style: mutil_engine::BoxHeightStyle::Strut,
         }];
         let paragraph = ParagraphInput {
             decoration_spans: &spans,

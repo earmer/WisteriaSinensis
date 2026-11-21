@@ -1,10 +1,11 @@
 //! Selection geometry (spec INT-16, INT-18): the rectangles a logical range
 //! covers, merged over visual order, at the requested block height.
 
-use super::{BoxHeightStyle, SelectionRect, line_box};
+use super::{SelectionRect, line_box};
 use crate::middleend::ValidatedLayout;
 use crate::middleend::output::{PositionedLine, PositionedParagraph};
 use crate::middleend::tolerance::{approx_eq, tolerance};
+use crate::types::BoxHeightStyle;
 use crate::types::{BidiLevel, Rect, TextRange};
 
 /// Calls `emit(index, line, x0, x1, level)` for each inline interval that

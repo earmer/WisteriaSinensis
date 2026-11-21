@@ -5,18 +5,31 @@ mod carets;
 
 pub(super) use carets::CaretScratch;
 
+use super::line_box::LineBoxMetrics;
 use super::line_builder::{AlignedLine, PlacedLine};
 use super::{Layout, Piece, PieceKind, PlacedPiece};
-use crate::frontend::{DiscretionaryNode, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH};
+use crate::frontend::{
+    BoxDecorationBreak, DiscretionaryNode, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH,
+};
 use crate::middleend::tolerance::tolerance;
 use crate::middleend::validated::{BodyIdx, SpanId, VisualOrder};
 use crate::middleend::{
-    AtomicFragment, DecorationKind, DecorationLine, LayoutInputError, PositionedSpanFragment,
-    ValidatedInputs,
+    AtomicFragment, DecorationKind, DecorationLine, InlineSlotConstraint, LayoutInputError,
+    PositionedSpanFragment, SpanEdgeCut, SpanFragmentEdges, ValidatedInputs,
 };
-use crate::types::{BidiLevel, FontMetrics, TextDecoration, TextRange};
+use crate::types::{BidiLevel, BoxHeightStyle, FontMetrics, TextDecoration, TextRange};
 use smallvec::SmallVec;
 use std::ops::Range;
+
+/// Origin of a [`VisualGroup`]: real content on the line, trailing whitespace
+/// only, or synthetic cloned padding inserted at the left or right line edge.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GroupKind {
+    Content,
+    TrailingOnly,
+    ClonedLeft,
+    ClonedRight,
+}
 
 /// One group of a span's pieces on a line: contiguous in visual order and in
 /// logical order (spec ST2-3, FRG-1, FRG-3).
@@ -27,10 +40,26 @@ pub(super) struct VisualGroup {
     /// Visual-order bounds `(first_v, last_v)` in `line.order`; `None` for a
     /// synthetic trailing-only or cloned-padding group.
     visual_span: Option<(usize, usize)>,
+    /// Logical rank among the span's members of the first and last piece in
+    /// visual order.
+    first_rank: usize,
+    last_rank: usize,
     /// The level of its first piece in visual order.
     level: BidiLevel,
     /// Whether it holds only zero-width span boundaries.
     is_bare_boundary: bool,
+    kind: GroupKind,
+}
+
+impl VisualGroup {
+    /// Whether this group's pieces progress right-to-left in visual order.
+    fn is_rtl(&self) -> bool {
+        if self.first_rank != self.last_rank {
+            self.first_rank > self.last_rank
+        } else {
+            self.level.direction().is_rtl()
+        }
+    }
 }
 
 /// A line's visual order, indexed for grouping (ST2-3): each piece's
@@ -192,6 +221,7 @@ fn visual_groups(
                 if let Some((_, last_v)) = &mut g.visual_span {
                     *last_v = v;
                 }
+                g.last_rank = rank;
                 g.is_bare_boundary &= is_bare_boundary;
             }
             None => groups.push(VisualGroup {
@@ -199,8 +229,11 @@ fn visual_groups(
                 hi,
                 bytes: p.piece.bytes,
                 visual_span: Some((v, v)),
+                first_rank: rank,
+                last_rank: rank,
                 level: p.piece.level,
                 is_bare_boundary,
+                kind: GroupKind::Content,
             }),
         }
         previous = Some((v, rank));
@@ -268,21 +301,22 @@ impl ClonedEdge {
     /// lie inside (equal ranges nest in slice order, AST-8).
     fn side(&self, inputs: &ValidatedInputs<'_>, index: SpanId) -> PaddingSide {
         let span = inputs.decoration_span(index).byte_range;
-        let (cloned, outside, inside) = self.clones.iter().fold(
-            (false, 0.0, 0.0),
-            |(cloned, outside, inside), &(c, width)| {
+        let (cloned, own_cloned, outside, inside) = self.clones.iter().fold(
+            (false, false, 0.0, 0.0),
+            |(cloned, own_cloned, outside, inside), &(c, width)| {
                 let clone = inputs.decoration_span(c).byte_range;
                 if c < index && clone.contains_range(span) {
-                    (cloned, outside + width, inside)
+                    (cloned, own_cloned, outside + width, inside)
                 } else if c >= index && span.contains_range(clone) {
-                    (true, outside, inside + width)
+                    (true, own_cloned || c == index, outside, inside + width)
                 } else {
-                    (cloned, outside, inside)
+                    (cloned, own_cloned, outside, inside)
                 }
             },
         );
         PaddingSide {
             cloned,
+            own_cloned,
             outside,
             inside,
             break_width: self.break_width,
@@ -292,27 +326,108 @@ impl ClonedEdge {
 }
 
 /// The cloned padding on one physical side of a line (ST2-3), as one span
-/// sees it: whether the span or a span inside it is cloned there, the
-/// padding of the cloned spans enclosing it (outermost, at the line edge)
-/// and of those inside it, the break's whole width there, and the line's
-/// empty edge bytes there.
+/// sees it: whether the span or a span inside it is cloned there, whether this
+/// span itself is cloned there, the padding of the cloned spans enclosing it
+/// (outermost, at the line edge) and of those inside it, the break's whole
+/// width there, and the line's empty edge bytes there.
 struct PaddingSide {
     cloned: bool,
+    own_cloned: bool,
     outside: f32,
     inside: f32,
     break_width: f32,
     bytes: TextRange,
 }
 
+/// How a physical side of a fragment ends where the span does not end there:
+/// cloned when the span itself is cloned at that break, else sliced.
+fn wrap_cut(span: &InlineDecorationSpan, own_cloned: bool) -> SpanEdgeCut {
+    if span.break_mode == BoxDecorationBreak::Clone && own_cloned {
+        SpanEdgeCut::ClonedWrap
+    } else {
+        SpanEdgeCut::SlicedWrap
+    }
+}
+
+/// Classifies the physical left and right edges of `group`, the
+/// `index`th of `count` groups of `span` on the line (AX-5). Which break a
+/// wrap edge belongs to follows the paragraph's base direction, as the
+/// padding placement of `attach_padding` does: the line start is the left
+/// edge in an LTR paragraph and the right edge in an RTL one. Which logical
+/// end of the span a side holds follows the group's own direction, and
+/// whether it is the span's own end follows the group's bytes.
+fn classify_edges(
+    span: &InlineDecorationSpan,
+    base_rtl: bool,
+    [at_start_own_cloned, at_end_own_cloned]: [bool; 2],
+    group: &VisualGroup,
+    index: usize,
+    count: usize,
+) -> SpanFragmentEdges {
+    match group.kind {
+        GroupKind::ClonedLeft => SpanFragmentEdges {
+            left: SpanEdgeCut::ClonedWrap,
+            right: SpanEdgeCut::BidiSplit,
+        },
+        GroupKind::ClonedRight => SpanFragmentEdges {
+            left: SpanEdgeCut::BidiSplit,
+            right: SpanEdgeCut::ClonedWrap,
+        },
+        GroupKind::Content | GroupKind::TrailingOnly => {
+            let (left_cloned, right_cloned) = if base_rtl {
+                (at_end_own_cloned, at_start_own_cloned)
+            } else {
+                (at_start_own_cloned, at_end_own_cloned)
+            };
+            let logical_start = if group.bytes.start() == span.byte_range.start() {
+                SpanEdgeCut::LogicalEnd
+            } else {
+                wrap_cut(
+                    span,
+                    if group.is_rtl() {
+                        right_cloned
+                    } else {
+                        left_cloned
+                    },
+                )
+            };
+            let logical_end = if group.bytes.end() == span.byte_range.end() {
+                SpanEdgeCut::LogicalEnd
+            } else {
+                wrap_cut(
+                    span,
+                    if group.is_rtl() {
+                        left_cloned
+                    } else {
+                        right_cloned
+                    },
+                )
+            };
+            let rtl = group.is_rtl();
+            let left = match (index, rtl) {
+                (0, false) => logical_start,
+                (0, true) => logical_end,
+                _ => SpanEdgeCut::BidiSplit,
+            };
+            let right = match (index + 1 == count, rtl) {
+                (true, false) => logical_end,
+                (true, true) => logical_start,
+                _ => SpanEdgeCut::BidiSplit,
+            };
+            SpanFragmentEdges { left, right }
+        }
+    }
+}
+
 impl<'i, 'a> Layout<'i, 'a> {
     /// Walks each fragment of each decoration span on the line, left to
-    /// right (spec ST2-3, FRG-1), calling `emit(span, group)`. Groups of bare
-    /// zero-width boundaries are dropped beside any other group; a fragment's
-    /// bytes stay inside its span and the line.
+    /// right (spec ST2-3, FRG-1), calling `emit(span, group, edges)`. Groups
+    /// of bare zero-width boundaries are dropped beside any other group; a
+    /// fragment's bytes stay inside its span and the line.
     pub(super) fn for_each_span_group(
         &self,
         line: &PlacedLine<'_, '_>,
-        mut emit: impl FnMut(&InlineDecorationSpan, &VisualGroup),
+        mut emit: impl FnMut(&InlineDecorationSpan, &VisualGroup, SpanFragmentEdges),
     ) {
         let bytes = line.byte_range;
         if self.ast.decoration_spans.is_empty() {
@@ -357,19 +472,34 @@ impl<'i, 'a> Layout<'i, 'a> {
             if groups.iter().any(|g| !g.is_bare_boundary) {
                 groups.retain(|g| !g.is_bare_boundary);
             }
-            let sides = [
-                at_start.side(self.inputs, index),
-                at_end.side(self.inputs, index),
-            ];
-            self.attach_padding(line, trailing, sides, &is_member, &mut groups);
+            let start_side = at_start.side(self.inputs, index);
+            let end_side = at_end.side(self.inputs, index);
+            let (at_start_own_cloned, at_end_own_cloned) =
+                (start_side.own_cloned, end_side.own_cloned);
+            self.attach_padding(
+                line,
+                trailing,
+                [start_side, end_side],
+                &is_member,
+                &mut groups,
+            );
             let (lo, hi) = (
                 range.start().max(bytes.start()),
                 range.end().min(bytes.end()),
             );
-            for g in &mut groups {
+            let count = groups.len();
+            for (group_index, g) in groups.iter_mut().enumerate() {
                 let start = g.bytes.start().max(lo);
                 g.bytes = TextRange::new(start, g.bytes.end().min(hi).max(start));
-                emit(span, g);
+                let edges = classify_edges(
+                    span,
+                    self.base.is_rtl(),
+                    [at_start_own_cloned, at_end_own_cloned],
+                    g,
+                    group_index,
+                    count,
+                );
+                emit(span, g, edges);
             }
         }
     }
@@ -401,13 +531,16 @@ impl<'i, 'a> Layout<'i, 'a> {
         // spans enclosing it.
         let (line_lo, line_hi) = (line.bounds.body_lo - left.break_width, line.bounds.body_hi);
         let (span_lo, span_hi) = (line_lo + left.outside, line_hi - right.outside);
-        let group = |lo: f32, hi: f32, bytes: TextRange| VisualGroup {
+        let group = |lo: f32, hi: f32, bytes: TextRange, kind: GroupKind| VisualGroup {
             lo,
             hi,
             bytes,
             visual_span: None,
+            first_rank: 0,
+            last_rank: 0,
             level: self.base.base_level(),
             is_bare_boundary: false,
+            kind,
         };
         if let Some(bytes) = line
             .placed
@@ -423,7 +556,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 last.is_bare_boundary = false;
             } else {
                 let edge = if rtl { line_lo } else { line_hi };
-                groups.push(group(edge, edge, bytes));
+                groups.push(group(edge, edge, bytes, GroupKind::TrailingOnly));
             }
         }
         if left.cloned
@@ -434,7 +567,15 @@ impl<'i, 'a> Layout<'i, 'a> {
                 .visual
                 .has_other_left(line.placed, line.order, first_v, first.lo, is_member)
             {
-                groups.insert(0, group(span_lo, span_lo + left.inside, left.bytes));
+                groups.insert(
+                    0,
+                    group(
+                        span_lo,
+                        span_lo + left.inside,
+                        left.bytes,
+                        GroupKind::ClonedLeft,
+                    ),
+                );
             } else {
                 first.lo = first.lo.min(span_lo);
             }
@@ -447,9 +588,66 @@ impl<'i, 'a> Layout<'i, 'a> {
                 .visual
                 .has_other_right(line.placed, line.order, last_v, last.hi, is_member)
             {
-                groups.push(group(span_hi - right.inside, span_hi, right.bytes));
+                groups.push(group(
+                    span_hi - right.inside,
+                    span_hi,
+                    right.bytes,
+                    GroupKind::ClonedRight,
+                ));
             } else {
                 last.hi = last.hi.max(span_hi);
+            }
+        }
+    }
+
+    /// Vertical `(ascent, descent)` of one fragment under `span.height_style`:
+    /// `Strut` uses the resolved strut, `Max` uses the line box, and `Tight`
+    /// unions the cached font metrics and inline boxes of the group's pieces,
+    /// falling back to `Strut` for synthetic or empty groups.
+    fn fragment_vertical_extent(
+        &self,
+        span: &InlineDecorationSpan,
+        g: &VisualGroup,
+        line: &AlignedLine<'_, '_>,
+        line_box: &LineBoxMetrics,
+        slot: InlineSlotConstraint,
+    ) -> (f32, f32) {
+        let strut = (self.strut.ascent, self.strut.descent);
+        match span.height_style {
+            BoxHeightStyle::Strut => strut,
+            BoxHeightStyle::Max => (line_box.ascent, line_box.descent),
+            BoxHeightStyle::Tight => {
+                let Some((first_v, last_v)) = g.visual_span else {
+                    return strut;
+                };
+                let mut extent: Option<(f32, f32)> = None;
+                let mut include = |a: f32, d: f32| {
+                    extent = Some(extent.map_or((a, d), |(ea, ed)| (ea.max(a), ed.max(d))));
+                };
+                for p in line.order.pick_range(line.placed, first_v, last_v) {
+                    match p.piece.kind {
+                        PieceKind::Cluster { run, cluster } => {
+                            let font = self.inputs.cluster(cluster).font;
+                            if let Some(m) =
+                                self.metrics
+                                    .get(&(font.font_id.0, font.scale.to_bits(), run))
+                            {
+                                let (a, d) = if self.ast.writing_mode.is_vertical() {
+                                    (m.vertical_ascent, m.vertical_descent)
+                                } else {
+                                    (m.ascent, m.descent)
+                                };
+                                include(a + p.y_shift, d - p.y_shift);
+                            }
+                        }
+                        PieceKind::Object(object) => {
+                            let (_, a, d) = Self::fitted_object(object, slot);
+                            include(a + p.y_shift, d - p.y_shift);
+                        }
+                        _ => {}
+                    }
+                }
+                extent.unwrap_or(strut)
             }
         }
     }
@@ -457,10 +655,15 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// One fragment per visual group of each decoration span on the line
     /// (spec ST2-3, FRG-1), padding included; a span cloned across this
     /// line's breaks reaches the line's edge.
-    pub(super) fn span_fragments(&self, line: &AlignedLine<'_, '_>) -> Vec<PositionedSpanFragment> {
+    pub(super) fn span_fragments(
+        &self,
+        line: &AlignedLine<'_, '_>,
+        line_box: &LineBoxMetrics,
+        slot: InlineSlotConstraint,
+    ) -> Vec<PositionedSpanFragment> {
         let mut fragments = Vec::new();
-        let (ascent, descent) = (self.strut.ascent.max(0.0), self.strut.descent.max(0.0));
-        self.for_each_span_group(line, |span, g| {
+        self.for_each_span_group(line, |span, g, edges| {
+            let (ascent, descent) = self.fragment_vertical_extent(span, g, line, line_box, slot);
             fragments.push(PositionedSpanFragment {
                 span_id: span.span_id,
                 span_range: span.byte_range,
@@ -470,6 +673,9 @@ impl<'i, 'a> Layout<'i, 'a> {
                 ascent,
                 descent,
                 bidi_level: g.level,
+                edges,
+                ribbon_offset: 0.0,
+                total_span_advance: 0.0,
             });
         });
         fragments

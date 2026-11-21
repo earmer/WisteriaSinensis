@@ -3,9 +3,10 @@
 
 use std::fmt::{self, Display, Write as _};
 
+use crate::markup::Marked;
 use mutil_engine::{
-    CaretAffinity, CaretVisual, CursorMove, CursorPosition, HitResult, ParagraphEdge,
-    PositionedLine, Rect, ValidatedLayout,
+    CaretAffinity, CaretVisual, CursorMove, CursorPosition, DecorationKind, HitResult,
+    ParagraphEdge, PositionedLine, Rect, SpanEdgeCut, ValidatedLayout,
 };
 
 /// A number, or `null` when it is not finite.
@@ -90,16 +91,36 @@ pub fn conformance_json() -> String {
     out + "}"
 }
 
-/// The engine's own verdict on the paragraph: every line, its slots and
-/// carets, and every placed glyph origin (spec HST-3/HST-4).
-pub fn layout_json(layout: &ValidatedLayout<'_>, id: usize) -> String {
+fn edge_cut_str(cut: SpanEdgeCut) -> &'static str {
+    match cut {
+        SpanEdgeCut::LogicalEnd => "logicalEnd",
+        SpanEdgeCut::ClonedWrap => "clonedWrap",
+        SpanEdgeCut::SlicedWrap => "slicedWrap",
+        SpanEdgeCut::BidiSplit => "bidiSplit",
+    }
+}
+
+/// The engine's own verdict on the paragraph: every line, its slots, carets,
+/// span fragments, decorations, and every placed glyph origin with byte-range
+/// paint attribution (spec HST-3/HST-4, FE-17).
+pub fn layout_json(layout: &ValidatedLayout<'_>, id: usize, marked: &Marked) -> String {
     let paragraph = layout.paragraph();
     let runs: Vec<(usize, String)> = layout
         .glyph_runs()
         .map(|run| {
             let glyphs = list(run.glyphs(), |glyph| {
                 let origin = glyph.origin;
-                format!("[{},{},{}]", glyph.glyph_id, Num(origin.x), Num(origin.y))
+                let (b_start, b_end) = match glyph.byte_range {
+                    Some(r) => (r.start().to_string(), r.end().to_string()),
+                    None => ("null".to_owned(), "null".to_owned()),
+                };
+                format!(
+                    "[{},{},{},{b_start},{b_end},{}]",
+                    glyph.glyph_id,
+                    Num(origin.x),
+                    Num(origin.y),
+                    Num(glyph.advance),
+                )
             });
             let size = Num(run.font_size() * run.font().scale);
             let font = run.font().font_id.0;
@@ -111,20 +132,36 @@ pub fn layout_json(layout: &ValidatedLayout<'_>, id: usize) -> String {
         let line_runs = runs.iter().filter(|(run_line, _)| *run_line == index);
         line_json(line, list(line_runs, |(_, json)| json.clone()))
     });
+    let paint_spans = list(&marked.paint_spans, |span| {
+        format!(
+            "{{\"start\":{},\"end\":{},\"color\":{}}}",
+            span.byte_range.start(),
+            span.byte_range.end(),
+            Str(&span.color),
+        )
+    });
+    let span_styles = list(&marked.box_spans, |b| {
+        format!(
+            "{{\"spanId\":{},\"kind\":{}}}",
+            b.span.span_id,
+            Str(b.kind.as_str()),
+        )
+    });
     let direction = if paragraph.base_direction.is_rtl() {
         "rtl"
     } else {
         "ltr"
     };
     format!(
-        "{{\"ok\":true,\"id\":{id},\"blockSize\":{},\"direction\":\"{direction}\",\"lines\":{lines}}}",
+        "{{\"ok\":true,\"id\":{id},\"blockSize\":{},\"direction\":\"{direction}\",\
+         \"paintSpans\":{paint_spans},\"spanStyles\":{span_styles},\"lines\":{lines}}}",
         Num(paragraph.total_block_size)
     )
 }
 
 /// One line: its box, the content and available interval of each slot (a
 /// hanging mark protrudes from the latter, spec HNG-1), the pen interval of
-/// each hanging glyph, its caret stops and its `runs`.
+/// each hanging glyph, its caret stops, span fragments, decorations and `runs`.
 fn line_json(line: &PositionedLine, runs: String) -> String {
     let slots = list(&line.slots, |slot| {
         interval(slot.content_start, slot.content_end())
@@ -136,9 +173,44 @@ fn line_json(line: &PositionedLine, runs: String) -> String {
         interval(glyph.x, glyph.x + glyph.advance)
     });
     let carets = list(&line.caret_stops, |stop| Num(stop.x).to_string());
+    let span_fragments = list(&line.span_fragments, |f| {
+        format!(
+            "{{\"spanId\":{},\"x\":{},\"width\":{},\"ascent\":{},\"descent\":{},\
+             \"edges\":[{},{}],\"ribbonOffset\":{},\"totalSpanAdvance\":{},\
+             \"byteRange\":[{},{}]}}",
+            f.span_id,
+            Num(f.x),
+            Num(f.width),
+            Num(f.ascent),
+            Num(f.descent),
+            Str(edge_cut_str(f.edges.left)),
+            Str(edge_cut_str(f.edges.right)),
+            Num(f.ribbon_offset),
+            Num(f.total_span_advance),
+            f.byte_range.start(),
+            f.byte_range.end(),
+        )
+    });
+    let decorations = list(&line.decorations, |d| {
+        let kind = match d.kind {
+            DecorationKind::Underline => "underline",
+            DecorationKind::Strikethrough => "strikethrough",
+        };
+        format!(
+            "{{\"kind\":\"{kind}\",\"x\":{},\"width\":{},\"yOffset\":{},\"thickness\":{},\
+             \"byteRange\":[{},{}]}}",
+            Num(d.x),
+            Num(d.width),
+            Num(d.y_offset),
+            Num(d.thickness),
+            d.byte_range.start(),
+            d.byte_range.end(),
+        )
+    });
     format!(
         "{{\"top\":{},\"baseline\":{},\"height\":{},\"justified\":{},\"hang\":{},\
-         \"slots\":{slots},\"columns\":{columns},\"hangs\":{hangs},\"carets\":{carets},\"runs\":{runs}}}",
+         \"slots\":{slots},\"columns\":{columns},\"hangs\":{hangs},\"carets\":{carets},\
+         \"spanFragments\":{span_fragments},\"decorations\":{decorations},\"runs\":{runs}}}",
         Num(line.baseline_y - line.ascent),
         Num(line.baseline_y),
         Num(line.line_height),

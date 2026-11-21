@@ -168,13 +168,14 @@ pub struct InlineDecorationSpan {
     pub start_padding: f32,
     pub end_padding: f32,
     pub break_mode: BoxDecorationBreak,
+    pub height_style: BoxHeightStyle,
 }
 pub enum BoxDecorationBreak { Slice, Clone }
 pub struct AtomicEditSpan { pub span_id: u64, pub byte_range: TextRange }
 pub struct CompositionSpan { pub byte_range: TextRange }
 ```
 
-**[SPN-1]** An `InlineDecorationSpan` gives a stretch of text padding and a fragmentation mode. Its range is non-empty and its paddings are finite and non-negative (`InlineDecorationSpan::is_valid`). Under `BoxDecorationBreak::Slice` the paddings apply only at the span's logical start and end; under `BoxDecorationBreak::Clone` every line fragment receives both.
+**[SPN-1]** An `InlineDecorationSpan` gives a stretch of text padding, a fragmentation mode and a vertical `height_style` (`BoxHeightStyle`). Its range is non-empty and its paddings are finite and non-negative (`InlineDecorationSpan::is_valid`). Under `BoxDecorationBreak::Slice` the paddings apply only at the span's logical start and end; under `BoxDecorationBreak::Clone` every line fragment receives both. `BoxHeightStyle::Strut` sizes fragment `ascent`/`descent` from the resolved strut, `BoxHeightStyle::Max` from the line box, and `BoxHeightStyle::Tight` from the union of the fragment's member clusters' font metrics and inline boxes (falling back to `Strut` when a fragment has none).
 
 **[SPN-2]** An `AtomicEditSpan` is a caret and deletion unit (a mention, a page-reference chip, an inline code span). It has a non-empty range. It MAY wrap across lines: whether it can break is decided only by the `Discretionary` nodes the frontend emits inside it (AX-4). No caret stop lies strictly inside it (`AtomicEditSpan::is_interior`, §6.1), and Backspace and Delete remove it whole (§6.5). Membership of an atom is looked up, never stored on atoms: `ParagraphAst::atomic_span_containing` (binary search), or a cursor in an in-order sweep.
 
@@ -669,6 +670,8 @@ pub struct PositionedInlineBox {
     pub bidi_level: BidiLevel,
 }
 pub struct PositionedTab { pub byte_range: TextRange, pub x: f32, pub width: f32 }
+pub enum SpanEdgeCut { LogicalEnd, ClonedWrap, SlicedWrap, BidiSplit }
+pub struct SpanFragmentEdges { pub left: SpanEdgeCut, pub right: SpanEdgeCut }
 pub struct PositionedSpanFragment {
     pub span_id: u64,
     pub span_range: TextRange,
@@ -678,6 +681,9 @@ pub struct PositionedSpanFragment {
     pub ascent: f32,
     pub descent: f32,
     pub bidi_level: BidiLevel,
+    pub edges: SpanFragmentEdges,
+    pub ribbon_offset: f32,
+    pub total_span_advance: f32,
 }
 pub struct AtomicFragment {
     pub atomic_id: u64,
@@ -769,7 +775,7 @@ pub struct CaretStop { pub x: f32, pub offset: ByteIndex, pub affinity: CaretAff
 
 **Decoration span fragments.**
 
-**[FRG-1]** A `PositionedSpanFragment` is one post-bidi group of a decoration span on a line: a maximal sequence of the span's items that is contiguous both in visual order and in logical order, so that its bytes are one range (ST2-3). A visual group whose logical bytes have a gap splits there. Its `span_range` is the span's whole range, the same on every fragment of the span; its `byte_range` lies inside `span_range` and inside the line. `PositionedSpanFragment::is_first_fragment` (it starts where the span starts) and `PositionedSpanFragment::is_last_fragment` (it ends where the span ends) follow from the two ranges. Its sizes are finite and non-negative.
+**[FRG-1]** A `PositionedSpanFragment` is one post-bidi group of a decoration span on a line: a maximal sequence of the span's items that is contiguous both in visual order and in logical order, so that its bytes are one range (ST2-3). A visual group whose logical bytes have a gap splits there. Its `span_range` is the span's whole range, the same on every fragment of the span; its `byte_range` lies inside `span_range` and inside the line. `PositionedSpanFragment::is_first_fragment` (it starts where the span starts) and `PositionedSpanFragment::is_last_fragment` (it ends where the span ends) follow from the two ranges. Its `edges` (`SpanFragmentEdges`) classify each physical side as `LogicalEnd`, `ClonedWrap`, `SlicedWrap` or `BidiSplit`. Its `ribbon_offset` and `total_span_advance` are finite non-negative extents (`is_extent`); across all fragments of a span in logical order across lines, `ribbon_offset` starts at `0.0`, advances by each fragment's `width`, and sums to `total_span_advance`. Its sizes are finite and non-negative.
 
 **[FRG-2]** Every glyph (hanging, trailing-whitespace and synthesized glyphs excepted) and inline box whose bytes lie inside a fragment of span *S* lies inside at least one fragment of *S*. The check is containment, not tiling.
 
@@ -1691,7 +1697,7 @@ pub struct FontFace { .. }              // bytes and face index, private fields
 pub trait FontSource: Send + Sync { fn resolve_font(&self, font: FontId) -> Option<FontFace>; }
 pub struct PlacedRun<'a> { .. }         // one body or annotation glyph run with its line
 pub enum PlacedRunSource<'a> { Body(&'a VisualGlyphRun), Annotation(&'a PositionedAnnotationRun) }
-pub struct PlacedGlyph { pub glyph_id: u32, pub origin: Point }
+pub struct PlacedGlyph { pub glyph_id: u32, pub origin: Point, pub byte_range: Option<TextRange>, pub advance: f32 }
 ```
 
 **[HST-1] Fonts.** A renderer resolves each run's `FontId` (`PlacedRun::font`) through the `FontSource` that covers the issuing shaper's id space (FNT-3), with `FontSource::resolve_font`, and draws the face `FontFace::face_index` of `FontFace::bytes`. Variation coordinates come only from `PlacedRun::variations`. `FontBytes::from_static`, `FontBytes::new` and `FontBytes::from_shared` wrap static data, an owned buffer and a shared buffer without copying their bytes (`FontBytes::as_bytes`).
@@ -1700,7 +1706,7 @@ pub struct PlacedGlyph { pub glyph_id: u32, pub origin: Point }
 
 **[HST-3] No re-shaping.** A renderer draws the glyph ids of the output, run by run, at the origins `ValidatedLayout::glyph_runs` gives. It yields every glyph of the paragraph: each line's visual runs, then its annotation runs (`PlacedRun::source`, `PlacedRunSource::Body`, `PlacedRunSource::Annotation`), with `PlacedRun::line`, `PlacedRun::font`, `PlacedRun::font_size`, `PlacedRun::orientation` and `PlacedRun::glyphs`. It never re-shapes, re-positions, substitutes or merges glyphs.
 
-**[HST-4] Placement and orientation.** A `PlacedGlyph`'s `origin` is the paragraph-local physical point where the glyph outline's own origin is drawn: OUT-1's drawing origin mapped by the writing mode (ORI-1). An annotation glyph's baseline is the line's moved towards line-over by its run's `baseline_offset` (ANO-3, ORI-2), and its offsets are applied from there. The output gate checks that every origin is finite (AX-3), so `PlacedRun::glyphs` never yields a non-finite one. `Horizontal` and `VerticalUpright` glyphs are drawn unrotated there; a `VerticalSideways` glyph is rotated 90° clockwise about it, with `y` growing downwards. Vertical-origin and baseline adjustments are already in the origin (SHP-19), so a renderer never reads a font's vertical metrics or vertical-origin table to correct a position.
+**[HST-4] Placement and orientation.** A `PlacedGlyph`'s `origin` is the paragraph-local physical point where the glyph outline's own origin is drawn: OUT-1's drawing origin mapped by the writing mode (ORI-1), and `byte_range` and `advance` carry through `PositionedGlyph::byte_range` (for host paint attribution, FE-17) and `PositionedGlyph::advance`. An annotation glyph's baseline is the line's moved towards line-over by its run's `baseline_offset` (ANO-3, ORI-2), and its offsets are applied from there. The output gate checks that every origin is finite (AX-3), so `PlacedRun::glyphs` never yields a non-finite one. `Horizontal` and `VerticalUpright` glyphs are drawn unrotated there; a `VerticalSideways` glyph is rotated 90° clockwise about it, with `y` growing downwards. Vertical-origin and baseline adjustments are already in the origin (SHP-19), so a renderer never reads a font's vertical metrics or vertical-origin table to correct a position.
 
 **[HST-5] Locked geometry.** A renderer keeps every glyph origin and advance exactly, on both axes, under any scale, and never changes a variation coordinate, `opsz` included. How it rasterises an outline (bitmap atlas, distance field, path rendering) is its own choice.
 

@@ -169,7 +169,12 @@ fn block_geometry_reasons_are_distinct() {
     );
 }
 
-fn span_fragment(span: (usize, usize), bytes: (usize, usize)) -> PositionedSpanFragment {
+fn span_fragment(
+    span: (usize, usize),
+    bytes: (usize, usize),
+    ribbon_offset: f32,
+    total_span_advance: f32,
+) -> PositionedSpanFragment {
     PositionedSpanFragment {
         span_id: 1,
         span_range: TextRange::new(span.0, span.1),
@@ -179,6 +184,20 @@ fn span_fragment(span: (usize, usize), bytes: (usize, usize)) -> PositionedSpanF
         ascent: 8.,
         descent: 2.,
         bidi_level: BidiLevel::LTR,
+        edges: SpanFragmentEdges {
+            left: if bytes.0 == span.0 {
+                SpanEdgeCut::LogicalEnd
+            } else {
+                SpanEdgeCut::SlicedWrap
+            },
+            right: if bytes.1 == span.1 {
+                SpanEdgeCut::LogicalEnd
+            } else {
+                SpanEdgeCut::SlicedWrap
+            },
+        },
+        ribbon_offset,
+        total_span_advance,
     }
 }
 
@@ -188,7 +207,12 @@ fn a_span_has_one_first_and_one_last_fragment_across_the_lines() {
     // A span over all three lines: first, middle and last fragment.
     let mut p = three_lines();
     for (i, l) in p.lines.iter_mut().enumerate() {
-        l.span_fragments = vec![span_fragment((0, 6), (2 * i, 2 * i + 2))];
+        l.span_fragments = vec![span_fragment(
+            (0, 6),
+            (2 * i, 2 * i + 2),
+            100. * i as f32,
+            300.,
+        )];
     }
     assert_eq!(p.validate(TEXT), Ok(()));
     // The fragments of one span agree about its range. (A line alone cannot
@@ -199,10 +223,17 @@ fn a_span_has_one_first_and_one_last_fragment_across_the_lines() {
     // The line holding the span's start has no fragment: no first fragment.
     let mut headless = p.clone();
     headless.lines[0].span_fragments.clear();
+    for (i, l) in headless.lines[1..].iter_mut().enumerate() {
+        l.span_fragments[0].ribbon_offset = 100. * i as f32;
+        l.span_fragments[0].total_span_advance = 200.;
+    }
     assert_eq!(headless.validate(TEXT), inconsistent(2));
     // Nor may the last one be missing ...
     let mut tailless = p.clone();
     tailless.lines[2].span_fragments.clear();
+    for l in &mut tailless.lines[..2] {
+        l.span_fragments[0].total_span_advance = 200.;
+    }
     assert_eq!(tailless.validate(TEXT), inconsistent(1));
     // ... unless a clamp cut the paragraph before the span's end.
     let mut clamped = tailless;

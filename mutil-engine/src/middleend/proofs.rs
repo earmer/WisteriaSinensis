@@ -370,6 +370,23 @@ impl VisualOrder {
         let table = self.table(slice);
         self.indices().map(move |k| table.get(k))
     }
+
+    /// Borrows the elements of `slice` at visual positions `first..=last`,
+    /// bounds `visual_groups` took from this order.
+    pub(crate) fn pick_range<'s, T>(
+        &'s self,
+        slice: &'s [T],
+        first: usize,
+        last: usize,
+    ) -> impl Iterator<Item = &'s T> + 's {
+        let table = self.table(slice);
+        // PROOF(visual_groups): `first <= last < self.len()`, visual
+        // positions of this order's own pieces.
+        self.0[first..=last]
+            .iter()
+            .copied()
+            .map(move |k| table.get(BodyIdx(k)))
+    }
 }
 
 /// Read-only view over a line column proved at least as long as its

@@ -103,6 +103,7 @@ fn chip_ast() -> ParagraphAst {
             start_padding: PAD,
             end_padding: PAD,
             break_mode: BoxDecorationBreak::Clone,
+            height_style: BoxHeightStyle::Strut,
         }],
         atomic_spans: vec![AtomicEditSpan {
             span_id: SPAN_ID,
@@ -139,7 +140,13 @@ fn pen_glyph(range: (usize, usize), x: f32) -> PositionedGlyph {
     }
 }
 
-fn fragment(range: (usize, usize), x: f32, width: f32) -> PositionedSpanFragment {
+fn fragment(
+    range: (usize, usize),
+    x: f32,
+    width: f32,
+    ribbon_offset: f32,
+    total_span_advance: f32,
+) -> PositionedSpanFragment {
     PositionedSpanFragment {
         span_id: SPAN_ID,
         span_range: CHIP,
@@ -149,6 +156,20 @@ fn fragment(range: (usize, usize), x: f32, width: f32) -> PositionedSpanFragment
         ascent: 12.0,
         descent: 4.0,
         bidi_level: BidiLevel::LTR,
+        edges: SpanFragmentEdges {
+            left: if range.0 == CHIP.start() {
+                SpanEdgeCut::LogicalEnd
+            } else {
+                SpanEdgeCut::ClonedWrap
+            },
+            right: if range.1 == CHIP.end() {
+                SpanEdgeCut::LogicalEnd
+            } else {
+                SpanEdgeCut::ClonedWrap
+            },
+        },
+        ribbon_offset,
+        total_span_advance,
     }
 }
 
@@ -250,7 +271,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         byte_range: TextRange::new(0, 8),
         glyphs: glyphs0,
     }];
-    l0.span_fragments = vec![fragment((3, 8), 24.0, 56.0)];
+    l0.span_fragments = vec![fragment((3, 8), 24.0, 56.0, 0.0, 92.0)];
 
     // Line 1: cloned leading pad 0..3, "Lee" 3..33, trailing pad 33..36,
     //   space 36..40, "ok" 40..60.
@@ -269,7 +290,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
         byte_range: TextRange::new(8, 14),
         glyphs: glyphs1,
     }];
-    l1.span_fragments = vec![fragment((8, 11), 0.0, 36.0)];
+    l1.span_fragments = vec![fragment((8, 11), 0.0, 36.0, 56.0, 92.0)];
 
     // Atomic editing: no caret stop strictly inside the chip, even at the wrap
     // (offset 8). Only the logical boundaries 3 and 11 survive.

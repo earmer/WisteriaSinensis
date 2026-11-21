@@ -42,6 +42,9 @@ const SAMPLES = {
   cjkJustify:
     '日本語とEnglishが混ざる文章では、和欧間に自動でアキが入ります。「括弧」や句読点、句点。行末の約物はぶら下げ組みもできます。両端揃えでは、まず単語間、次に和欧間、それから字間の順に調整します。\n' +
     '中文和English混排时，引擎会在中西文之间插入间距。标点挤压：“引号”（括号）。两端对齐按优先级逐级分配剩余空间，最后一行不对齐。',
+  richText:
+    'Rich text with <pill>cloned pills that wrap cleanly across lines</pill>, <mark>sliced highlights</mark>, <u>underlined</u> and <s>struck</s> runs, plus per-glyph paint attribution across <color=#c0392b>fi</color><color=#1d4ed8>ne</color> <color=#0f766e>office</color> ligatures.\n' +
+    'A multi-line <ribbon>continuous gradient ribbon whose shader coordinate advances seamlessly across line wraps and mixed עברית Bidi fragments</ribbon> without breaking shaping.',
 };
 
 const state = {

@@ -84,6 +84,20 @@ impl Rect {
     }
 }
 
+/// Height policy for selection rectangles and inline decoration span boxes,
+/// after Flutter's `BoxHeightStyle` `[C1]` (spec §2.2, §6.6).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum BoxHeightStyle {
+    /// Union of covered font-instance ascent/descent and inline boxes,
+    /// excluding line gap and leading.
+    #[default]
+    Tight,
+    /// Includes line gap and maximum inline-box height (the line box).
+    Max,
+    /// The paragraph's resolved strut (`ParagraphAst::strut_metrics` after `LineHeight::resolve_strut`).
+    Strut,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

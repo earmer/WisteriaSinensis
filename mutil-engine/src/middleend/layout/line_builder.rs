@@ -484,7 +484,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let content = &line.content;
         let content_edges = content.edges();
         let (visual_boxes, tabs) = self.build_boxes_and_tabs(line.placed, slot);
-        let mut span_fragments = self.span_fragments(&line);
+        let mut span_fragments = self.span_fragments(&line, line_box, slot);
 
         let mut decorations: Vec<DecorationLine> = Vec::new();
         if self.has_underline {
@@ -555,7 +555,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         slot: InlineSlotConstraint,
     ) -> AlignedLine<'l, 'a> {
         let (mut lo, mut hi) = extent.unwrap_or((f32::INFINITY, f32::NEG_INFINITY));
-        self.for_each_span_group(&line, |_, g| {
+        self.for_each_span_group(&line, |_, g, _| {
             lo = lo.min(g.lo);
             hi = hi.max(g.hi);
         });

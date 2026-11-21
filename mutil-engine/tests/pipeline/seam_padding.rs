@@ -18,6 +18,7 @@ fn span(
         start_padding: padding,
         end_padding: padding,
         break_mode,
+        height_style: mutil_engine::BoxHeightStyle::Strut,
     }
 }
 

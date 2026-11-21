@@ -100,6 +100,7 @@ fn decoration(span_id: u64, start: usize, end: usize, start_padding: f32) -> Inl
         start_padding,
         end_padding: 0.0,
         break_mode: BoxDecorationBreak::Slice,
+        height_style: mutil_engine::BoxHeightStyle::Strut,
     }
 }
 
