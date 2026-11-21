@@ -64,11 +64,15 @@ struct ClusterGlyphs {
     byte_range: TextRange,
     /// An LTR cluster's justification, on its last glyph in visual order.
     ltr_expansion: Option<f32>,
+    /// Visual-left trim (lead_trim in LTR, trail_trim in RTL).
+    left_trim: f32,
+    /// Total side-slot trim (lead_trim + trail_trim).
+    total_trim: f32,
 }
 
 impl ClusterGlyphs {
     /// Appends `glyphs`, already in visual order, to `target`, widening
-    /// `extent` by each shaped advance (not the expansion).
+    /// `extent` by each shaped advance (net of side-slot trim, not the expansion).
     fn push<'g>(
         &self,
         target: &mut Vec<PositionedGlyph>,
@@ -76,19 +80,23 @@ impl ClusterGlyphs {
         extent: &mut Option<(f32, f32)>,
     ) {
         let mut pen = self.pen;
+        let mut remaining_trim = self.total_trim;
         target.extend(glyphs.map(|g| {
-            if g.x_advance != 0.0 {
-                extend_extent(extent, pen, pen + g.x_advance);
+            let trim = remaining_trim.min(g.x_advance.max(0.0));
+            remaining_trim -= trim;
+            let advance = g.x_advance - trim;
+            if advance != 0.0 {
+                extend_extent(extent, pen, pen + advance);
             }
             let glyph = PositionedGlyph {
                 glyph_id: g.glyph_id,
                 x: pen,
-                x_offset: g.x_offset,
+                x_offset: g.x_offset - self.left_trim,
                 y_offset: g.y_offset + self.y_shift,
-                advance: g.x_advance,
+                advance,
                 byte_range: (!g.is_synthesized).then_some(self.byte_range),
             };
-            pen += g.x_advance;
+            pen += advance;
             glyph
         }));
         if let (Some(expansion), Some(last)) = (self.ltr_expansion, target.last_mut()) {
@@ -194,6 +202,12 @@ impl<'i, 'a> Layout<'i, 'a> {
             y_shift: p.y_shift,
             byte_range: c.byte_range,
             ltr_expansion: (!rtl_cluster).then_some(p.expansion),
+            left_trim: if rtl_cluster {
+                p.trail_trim
+            } else {
+                p.lead_trim
+            },
+            total_trim: p.lead_trim + p.trail_trim,
         };
         let extent = &mut out.extent;
         let mut place = |target: &mut Vec<PositionedGlyph>| {

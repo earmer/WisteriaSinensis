@@ -8,6 +8,11 @@ use crate::types::{LocaleTag, ScriptTag};
 use icu_properties::props::{EastAsianWidth, GeneralCategory, GeneralCategoryGroup, LineBreak};
 use icu_properties::{CodePointMapData, CodePointMapDataBorrowed};
 
+/// Share of the run's font size a full-width punctuation cluster must exceed
+/// to be eligible for compression or side-slot trimming, or the shaper has
+/// already compressed it (FE-31).
+pub(crate) const COMPRESSED_PAIR_FRACTION: f32 = 0.75;
+
 static WIDTH: CodePointMapDataBorrowed<'static, EastAsianWidth> =
     CodePointMapData::<EastAsianWidth>::new();
 static CATEGORY: CodePointMapDataBorrowed<'static, GeneralCategory> =

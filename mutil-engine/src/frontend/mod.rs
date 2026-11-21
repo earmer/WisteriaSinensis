@@ -17,7 +17,7 @@ mod locale;
 mod options;
 mod script;
 mod segment;
-mod spacing;
+pub(crate) mod spacing;
 mod span;
 mod url;
 

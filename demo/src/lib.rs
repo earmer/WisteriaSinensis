@@ -17,8 +17,8 @@ use std::sync::Mutex;
 
 use mutil_engine::{
     AutospaceProfile, BaselineAlignment, BidiDirection, BoxHeightStyle, CaretAffinity,
-    CursorPosition, FontStyle, FrontendOptions, HangEndMode, HangMode, HangStartMode,
-    HangingWhitespaceMode, InlineDecorationSpan, LayoutConstraints, LayoutOptions,
+    CjkPunctuationTrim, CursorPosition, FontStyle, FrontendOptions, HangEndMode, HangMode,
+    HangStartMode, HangingWhitespaceMode, InlineDecorationSpan, LayoutConstraints, LayoutOptions,
     LineBreakStrictness, LineHeight, LocalePolicy, LocaleTag, Motion, ParagraphInput, Point,
     PositionedParagraph, QuotePolicy, StyleSpan, TextDecoration, TextRange, TextStyle,
     ValidatedLayout, WordBreakOption, compile_paragraph, layout_paragraph,
@@ -254,7 +254,10 @@ impl LayoutRequest<'_> {
     }
 
     fn layout_options(&self) -> LayoutOptions {
-        use {HangEndMode as End, HangStartMode as Start, HangingWhitespaceMode::*};
+        use {
+            CjkPunctuationTrim as Trim, HangEndMode as End, HangStartMode as Start,
+            HangingWhitespaceMode::*,
+        };
         let bits = self.phase2;
         LayoutOptions {
             line_height: if self.line_height > 0.0 {
@@ -268,6 +271,15 @@ impl LayoutRequest<'_> {
                 start: bits.field(3, &[Start::None, Start::FirstLine, Start::AllLines]),
                 end: bits.field(5, &[End::None, End::Allow, End::Force]),
             },
+            cjk_punctuation_trim: bits.field(
+                10,
+                &[
+                    Trim::Auto,
+                    Trim::SpaceFirst,
+                    Trim::TrimStart,
+                    Trim::SpaceAll,
+                ],
+            ),
             whitespace: pick(bits.flag(8), &[Collapsible, Preserved]),
             ..LayoutOptions::default()
         }

@@ -428,28 +428,6 @@ impl<'a> ItemChecks<'a> {
                     return Err(E::InvalidHyphenOpportunity { item });
                 }
             }
-            // At least one net delta is real; each needs its neighbouring
-            // text box and may not drive that edge cluster's width below zero.
-            BreakAction::CjkPunctAdjust => {
-                let fits_cluster = |net: f64, width: Option<f32>| {
-                    is_zero(net)
-                        || width
-                            .is_some_and(|w| f64::from(w) + net >= -f64::from(tolerance(w, 0.0)))
-                };
-                let trailing = item
-                    .checked_sub(1)
-                    .and_then(|i| self.boxes.get(i)?.clusters.last().map(|c| c.natural_width));
-                let leading = self
-                    .boxes
-                    .get(item + 1)
-                    .and_then(|v| v.clusters.first().map(|c| c.natural_width));
-                if (is_zero(net.pre) && is_zero(net.post))
-                    || !fits_cluster(net.pre, trailing)
-                    || !fits_cluster(net.post, leading)
-                {
-                    return invalid;
-                }
-            }
             BreakAction::Direct | BreakAction::HardBreak => {
                 if !(is_zero(net.pre) && is_zero(net.post)) {
                     return invalid;

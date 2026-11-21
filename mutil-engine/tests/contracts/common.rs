@@ -395,6 +395,7 @@ pub fn policy(ctx: &LineContext) -> LayoutPolicySnapshot {
         line_height: ctx.line_height,
         whitespace: ctx.whitespace,
         hang_mode: ctx.hang_mode,
+        cjk_punctuation_trim: mutil_engine::CjkPunctuationTrim::default(),
         wrap_width: ctx.wrap_width,
         clamp: None,
     }

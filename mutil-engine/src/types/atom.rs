@@ -119,8 +119,8 @@ pub enum LineBreakClass {
 bitflags::bitflags! {
     /// Per-atom boolean properties, stored as a 16-bit mask (spec §2.2).
     ///
-    /// Twelve of sixteen bits are assigned (bits 0 to 11); the high four
-    /// are reserved and are masked off by `from_bits_truncate` and `!`.
+    /// Fifteen of sixteen bits are assigned (bits 0 to 14); bit 15
+    /// is reserved and is masked off by `from_bits_truncate` and `!`.
     /// Layout: 2 bytes, alignment 2.
     #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
     #[repr(transparent)]
@@ -157,6 +157,15 @@ bitflags::bitflags! {
         /// A stop or comma that may hang at a line end: U+002C, U+002E, U+3001,
         /// U+3002, U+FF0C or U+FF0E (spec ST1-3).
         const HANGABLE_END = 1 << 11;
+        /// Wide/full-width CJK opening punctuation eligible for layout-time
+        /// leading-blank trimming (spec FE-31).
+        const CJK_TRIM_OPEN = 1 << 12;
+        /// Wide/full-width CJK closing or stop punctuation eligible for
+        /// layout-time trailing-blank trimming (spec FE-31).
+        const CJK_TRIM_CLOSE = 1 << 13;
+        /// CJK middle dot (U+00B7, U+30FB, U+2027) eligible for layout-time
+        /// quarter-em side-slot trimming (spec FE-31).
+        const CJK_TRIM_MIDDLE_DOT = 1 << 14;
     }
 }
 
@@ -167,7 +176,10 @@ impl AtomFlags {
     pub const ALL: Self = Self::all();
     /// Flags a cluster takes only from its **first** atom.
     pub const FIRST_ATOM_ONLY: Self = Self::from_bits_truncate(
-        Self::IS_OPEN_PUNCT.bits() | Self::BINDS_TO_PREVIOUS.bits() | Self::HANGABLE_START.bits(),
+        Self::IS_OPEN_PUNCT.bits()
+            | Self::BINDS_TO_PREVIOUS.bits()
+            | Self::HANGABLE_START.bits()
+            | Self::CJK_TRIM_OPEN.bits(),
     );
     /// Flags a cluster takes only from its **last** atom: the justification
     /// opportunity *after* a ligature is the one after its last component, and
@@ -175,7 +187,8 @@ impl AtomFlags {
     pub const LAST_ATOM_ONLY: Self = Self::from_bits_truncate(
         Self::ALLOW_CJK_JUSTIFY_AFTER.bits()
             | Self::IS_CLOSE_PUNCT.bits()
-            | Self::HANGABLE_END.bits(),
+            | Self::HANGABLE_END.bits()
+            | Self::CJK_TRIM_CLOSE.bits(),
     );
 
     /// Aggregates the flags of the atoms a cluster covers (spec §2.3):

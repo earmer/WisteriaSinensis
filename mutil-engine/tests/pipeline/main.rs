@@ -7,6 +7,7 @@ mod acceptance_phase2;
 mod bidi_frontend;
 mod bidi_queries;
 mod canonical_features;
+mod cjk_punctuation_trim;
 mod cjk_routing;
 mod clearance;
 mod common;

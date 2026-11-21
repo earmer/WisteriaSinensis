@@ -62,6 +62,7 @@ impl Layout<'_, '_> {
         piece: &Piece<'_>,
         edge: LineEdge,
         first_line: bool,
+        is_soft_wrap: bool,
         pending: Option<&Reshapes>,
     ) -> Option<f32> {
         let PieceKind::Cluster { cluster, .. } = piece.kind else {
@@ -81,7 +82,14 @@ impl Layout<'_, '_> {
         (c.flags.contains(flag)
             && piece.level == self.base.base_level()
             && self.options.hang_mode.allows(side, self.base, first_line))
-        .then(|| self.cluster_glyphs_over(pending, cluster).1 * HANG_FRACTION)
+        .then(|| {
+            let raw = self.cluster_glyphs_over(pending, cluster).1;
+            let outer_trim = match edge {
+                LineEdge::Start => self.start_edge_trim(piece, is_soft_wrap, pending),
+                LineEdge::End => 0.0,
+            };
+            (raw * HANG_FRACTION - outer_trim).max(0.0)
+        })
     }
 
     /// The index and piece of the first or last visible piece of `body`: only
@@ -104,13 +112,14 @@ impl Layout<'_, '_> {
         body: &[LogicalPiece<'_>],
         edge: LineEdge,
         first_line: bool,
+        is_soft_wrap: bool,
         allowed: impl FnOnce(usize) -> bool,
         pending: &Reshapes,
     ) -> Option<(usize, f32)> {
         let (k, item) = Self::outermost(body, edge).filter(|&(k, _)| allowed(k))?;
         Some((
             k,
-            self.hang_protrusion(&item.piece, edge, first_line, Some(pending))?,
+            self.hang_protrusion(&item.piece, edge, first_line, is_soft_wrap, Some(pending))?,
         ))
     }
 
@@ -120,10 +129,18 @@ impl Layout<'_, '_> {
         &self,
         body: &[LogicalPiece<'_>],
         first_line: bool,
+        is_soft_wrap: bool,
         post: f32,
         pending: &Reshapes,
     ) -> Option<(usize, f32)> {
-        self.hang_at(body, LineEdge::Start, first_line, |_| post == 0.0, pending)
+        self.hang_at(
+            body,
+            LineEdge::Start,
+            first_line,
+            is_soft_wrap,
+            |_| post == 0.0,
+            pending,
+        )
     }
 
     /// The mark hanging at the end of a line whose body is `body`, with no
@@ -144,6 +161,7 @@ impl Layout<'_, '_> {
             body,
             LineEdge::End,
             first_line,
+            false,
             |k| {
                 pre == 0.0
                     && start.is_none_or(|(s, _)| s != k)

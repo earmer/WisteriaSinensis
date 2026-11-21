@@ -15,7 +15,7 @@ const defaults = {
   width: '400', 'font-size': '18', 'line-height': 'normal', quotes: 'standard', 'locale-policy': 'explicit',
   'line-break': '0', 'word-break': '0', 'letter-spacing': '0', 'word-spacing': '0', 'first-indent': '0',
   'hanging-indent': '0', 'selection-height': '0', direction: 'auto', 'hang-start': 'none', 'hang-end': 'none',
-  autospace: 'jlreq', whitespace: 'collapsible', face: 'JetBrains Mono', samples: 'latin', locale: '',
+  autospace: 'jlreq', whitespace: 'collapsible', 'cjk-punct-trim': 'auto', face: 'JetBrains Mono', samples: 'latin', locale: '',
 };
 const els = new Map();
 function el(id) {
