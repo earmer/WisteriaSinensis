@@ -339,6 +339,9 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut has_content = false;
         for (idx, p) in body.iter().enumerate() {
             distance += p.gap;
+            if p.gap != 0.0 {
+                prev_trim = None;
+            }
             let raw_width = self.measure(&p.piece, distance, slot, Some(pending)).0;
             let mut lead_trim = 0.0_f32;
             if !is_trim_transparent(&p.piece) {
