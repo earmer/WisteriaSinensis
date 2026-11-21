@@ -530,12 +530,12 @@ fn atomic_span_content_independent_faults_precede_unsorted_items() {
         ),
         (
             "overlapping",
-            vec![atomic_span(1, 0, 3), atomic_span(2, 2, 4)],
+            vec![atomic_span(1, 0, 2), atomic_span(2, 1, 4)],
             1,
         ),
         (
             "nested",
-            vec![atomic_span(1, 0, 4), atomic_span(2, 1, 3)],
+            vec![atomic_span(1, 0, 4), atomic_span(2, 1, 2)],
             1,
         ),
         (
@@ -899,12 +899,18 @@ fn atomic_span_tab_hardbreak_and_outer_glue_faults_with_permuted_items() {
         );
     }
 
-    // Permute items out of byte order (preserving text-box run storage order
-    // by swapping inline object / glue / tab / hard break around them).
+    // Permute items out of byte order while preserving text-box run storage order
+    // (swapping only glue, tab and hard break around the text boxes).
     let mut permuted = base.clone();
     permuted.items.swap(0, 6);
     permuted.items.swap(2, 4);
-    permuted.items.swap(1, 5);
+    assert!(
+        matches!(
+            check_both(&permuted, text),
+            Err(LayoutInputError::ItemsOutOfOrder { .. })
+        ),
+        "permuted fixture with valid atomic spans must reach ItemsOutOfOrder"
+    );
 
     for (name, spans) in faults {
         let mut case = permuted.clone();
@@ -914,6 +920,36 @@ fn atomic_span_tab_hardbreak_and_outer_glue_faults_with_permuted_items() {
             "permuted items + {name} must never bypass G1"
         );
     }
+}
+
+#[test]
+fn atomic_span_edge_fault_precedes_unsorted_inline_objects() {
+    let text = "XXXX";
+    let mut a = ast(text);
+    rebuild_items(&mut a, |_| {
+        vec![inline_object(1, 2, 4), inline_object(2, 0, 2), end(4)]
+    });
+    a.runs.clear();
+
+    // Without atomic spans, or with a valid atomic span `0..2`, AST-3 reports
+    // the out-of-order second inline object.
+    assert_eq!(
+        check_both(&a, text),
+        Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
+    );
+    a.atomic_spans = vec![atomic_span(1, 0, 2)];
+    assert_eq!(
+        check_both(&a, text),
+        Err(LayoutInputError::ItemsOutOfOrder { item: 1 })
+    );
+
+    // With an atomic span `0..1` whose end splits the inline object `0..2`,
+    // AST-11 checks AST-9 before AST-3 item order.
+    a.atomic_spans = vec![atomic_span(1, 0, 1)];
+    assert_eq!(
+        check_both(&a, text),
+        Err(LayoutInputError::InvalidAtomicSpan { span: 0 })
+    );
 }
 
 #[derive(Clone, Debug)]

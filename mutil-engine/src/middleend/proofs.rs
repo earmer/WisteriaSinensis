@@ -370,11 +370,6 @@ impl VisualOrder {
         let table = self.table(slice);
         self.indices().map(move |k| table.get(k))
     }
-
-    #[cfg(test)]
-    pub(crate) fn as_raw(&self) -> &[usize] {
-        &self.0
-    }
 }
 
 /// Read-only view over a line column proved at least as long as its
@@ -544,5 +539,12 @@ impl<'a> ValidatedInputs<'a> {
         let hi = spans.partition_point(|s| s.byte_range.start() < range.end());
         // PROOF(G1::check_atomic_spans): `lo <= hi.max(lo) <= spans.len()`.
         &spans[lo..hi.max(lo)]
+    }
+}
+
+#[cfg(test)]
+impl VisualOrder {
+    pub(crate) fn as_raw(&self) -> &[usize] {
+        &self.0
     }
 }

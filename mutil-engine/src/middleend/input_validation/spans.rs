@@ -1,6 +1,6 @@
 //! Span, bidi-span, annotation, and boundary-enclosure checks for input validation.
 
-use super::items::{ItemsChecked, ItemsInOrder};
+use super::items::ItemsInOrder;
 use super::storage::{
     TextBoxes, check_glyph_ranges, check_run, check_run_presentation, check_text_payload,
     check_text_presentation,
@@ -221,14 +221,6 @@ impl SortedContent {
     }
 }
 
-/// Proof obligation returned by [`check_atomic_spans`] and discharged by
-/// [`discharge_atomic_spans`] after item order and self-containment run.
-#[must_use]
-pub(super) enum AtomicSpanCheck {
-    Verified,
-    Deferred,
-}
-
 /// Validates the decoration spans: ranges fit the text, ids are unique,
 /// paddings are finite and non-negative, and the spans **nest properly**
 /// (two spans are disjoint or one contains the other, never a partial
@@ -276,66 +268,78 @@ pub(super) fn check_decoration_spans(
 /// content).
 ///
 /// Runs before the item checks to honor AST-11 error precedence. When
-/// concrete content is not yet in byte order, span-intrinsic invariants still
-/// run here and the content-edge check is returned as
-/// [`AtomicSpanCheck::Deferred`], which [`discharge_atomic_spans`] must
-/// discharge after `check_item_order` and `check_each_item`.
+/// concrete content is in byte order, validates with a linear cursor and
+/// binary search on [`SortedContent`]; when concrete content is unsorted,
+/// validates edges and containment in a single pass without relying on item
+/// order, so every AST-9 fault still reports before `ItemOutsideText` /
+/// `ItemsOutOfOrder`.
 pub(super) fn check_atomic_spans(
     ast: &ParagraphAst,
     text: &str,
     boxes: &TextBoxes<'_>,
-) -> Result<AtomicSpanCheck, LayoutInputError> {
+) -> Result<(), LayoutInputError> {
     if ast.atomic_spans.is_empty() {
-        return Ok(AtomicSpanCheck::Verified);
+        return Ok(());
     }
     if let Some(sorted) = SortedContent::try_from_ast(ast, boxes) {
-        validate_atomic_spans(ast, text, &sorted)?;
-        return Ok(AtomicSpanCheck::Verified);
+        return validate_atomic_spans_sorted(ast, text, &sorted);
     }
-    check_atomic_span_basics(ast, text)?;
-    Ok(AtomicSpanCheck::Deferred)
+    validate_atomic_spans_unsorted(ast, text, boxes)
 }
 
-/// Discharges an [`AtomicSpanCheck`] after item order and per-item
-/// self-containment have been proved, ensuring no AST can bypass atomic-span
-/// edge validation via unsorted content.
-pub(super) fn discharge_atomic_spans(
+/// Full atomic-span validation when concrete content is not in byte order:
+/// indexes concrete content edge offsets in a hash set and records containment
+/// against the maximal ascending-disjoint prefix of `atomic_spans`, reporting
+/// the first failing span in index order without sorting the input.
+fn validate_atomic_spans_unsorted(
     ast: &ParagraphAst,
     text: &str,
     boxes: &TextBoxes<'_>,
-    check: AtomicSpanCheck,
-    _: &ItemsInOrder,
-    _: &ItemsChecked,
 ) -> Result<(), LayoutInputError> {
-    match check {
-        AtomicSpanCheck::Verified => Ok(()),
-        AtomicSpanCheck::Deferred => {
-            let Some(sorted) = SortedContent::try_from_ast(ast, boxes) else {
-                return Err(LayoutInputError::InvalidAtomicSpan { span: 0 });
-            };
-            validate_atomic_spans(ast, text, &sorted)
+    use LayoutInputError as E;
+    let spans = &ast.atomic_spans;
+    let mut ordered_prefix = 0;
+    let mut prev_end = 0;
+    for s in spans {
+        if s.byte_range.is_empty() || (ordered_prefix > 0 && prev_end > s.byte_range.start()) {
+            break;
+        }
+        prev_end = s.byte_range.end();
+        ordered_prefix += 1;
+    }
+    let prefix = &spans[..ordered_prefix];
+    let mut edges = HashSet::new();
+    let mut has_content = vec![false; ordered_prefix];
+    for r in concrete_content_ranges(ast, boxes) {
+        edges.insert(r.start());
+        edges.insert(r.end());
+        if !r.is_empty() {
+            let after = prefix.partition_point(|s| s.byte_range.start() <= r.start());
+            if let Some(idx) = after.checked_sub(1)
+                && prefix[idx].byte_range.contains_range(r)
+            {
+                has_content[idx] = true;
+            }
         }
     }
-}
-
-/// Content-independent atomic-span checks: unique ids, non-empty ranges inside
-/// `text`, and strictly disjoint ascending order.
-fn check_atomic_span_basics(ast: &ParagraphAst, text: &str) -> Result<(), LayoutInputError> {
-    let mut atomic_ids = HashSet::with_capacity(ast.atomic_spans.len());
-    for (span, s) in ast.atomic_spans.iter().enumerate() {
+    let mut atomic_ids = HashSet::with_capacity(spans.len());
+    for (span, s) in spans.iter().enumerate() {
         if !atomic_ids.insert(s.span_id)
             || s.byte_range.is_empty()
             || !fits(text, s.byte_range)
-            || (span > 0 && ast.atomic_spans[span - 1].byte_range.end() > s.byte_range.start())
+            || (span > 0 && spans[span - 1].byte_range.end() > s.byte_range.start())
+            || !edges.contains(&s.byte_range.start())
+            || !edges.contains(&s.byte_range.end())
+            || !has_content.get(span).copied().unwrap_or(false)
         {
-            return Err(LayoutInputError::InvalidAtomicSpan { span });
+            return Err(E::InvalidAtomicSpan { span });
         }
     }
     Ok(())
 }
 
 /// Full atomic-span validation against concrete content proved in byte order.
-fn validate_atomic_spans(
+fn validate_atomic_spans_sorted(
     ast: &ParagraphAst,
     text: &str,
     SortedContent(content): &SortedContent,

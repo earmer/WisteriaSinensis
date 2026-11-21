@@ -343,12 +343,11 @@ pub(super) fn validate_layout_inputs(
     spans::check_bidi_and_annotations(ast, text, &boxes)?;
     storage::check_runs(ast, text)?;
     let decoration_ids = spans::check_decoration_spans(ast, text)?;
-    let atomic_check = spans::check_atomic_spans(ast, text, &boxes)?;
+    spans::check_atomic_spans(ast, text, &boxes)?;
     items::check_items_fit(ast, text)?;
     let in_order = items::check_item_order(ast)?;
     let spans = spans::SpanIndex::new(ast, &boxes, &in_order);
     let items_checked = items::check_each_item(ast, text, &boxes, &decoration_ids, &spans)?;
-    spans::discharge_atomic_spans(ast, text, &boxes, atomic_check, &in_order, &items_checked)?;
     let first_break_item = items::check_paragraph_end(ast, &items_checked)?;
     let boundaries = spans::check_boundary_order(ast, &decoration_ids)?;
     spans::check_span_enclosure(ast, &spans, &boundaries)?;
