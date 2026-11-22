@@ -35,6 +35,7 @@ mod shaper;
 mod shaper_numbers;
 mod spacing_frontend;
 mod span_topology;
+mod spatial_compression;
 mod steps;
 mod stopless_lines;
 mod variable_fonts;

@@ -281,6 +281,16 @@ impl LayoutRequest<'_> {
                 ],
             ),
             whitespace: pick(bits.flag(8), &[Collapsible, Preserved]),
+            min_horizontal_scale: bits.field(13, &[1.0, 0.85, 0.7, 0.5]),
+            allow_variable_width_axis: bits.flag(12) || bits.field(13, &[1.0, 0.85, 0.7, 0.5]) < 1.0,
+            shape_fit: bits.flag(12).then_some(mutil_engine::ShapeFitPolicy {
+                target_aspect_ratio: Some(3.0),
+                max_width: self.width,
+                max_height: None,
+                max_lines: 4,
+                min_font_scale: 0.5,
+                max_font_scale: 2.0,
+            }),
             ..LayoutOptions::default()
         }
     }

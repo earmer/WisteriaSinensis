@@ -144,6 +144,7 @@ export function createRenderer(canvas) {
         // units-per-em is the only scale applied (spec HST-5: geometry is
         // never adjusted at draw time).
         const scale = run.size / info.upem;
+        const sx = scale * (run.xScale ?? 1);
         for (const [glyphId, x, originY, byteStart] of run.glyphs) {
           const outline = glyphPath(engine, run.font, glyphId);
           if (!outline) {
@@ -155,7 +156,7 @@ export function createRenderer(canvas) {
             path = new Path2D();
             byColor.set(color, path);
           }
-          path.addPath(outline, new DOMMatrix([scale, 0, 0, scale, x, originY]));
+          path.addPath(outline, new DOMMatrix([sx, 0, 0, scale, x, originY]));
         }
       }
     }

@@ -204,6 +204,7 @@ pub(super) enum LineEnd<'a> {
 pub(super) struct Reshaped {
     pub(super) glyphs: Vec<RawShapedGlyph>,
     pub(super) width: f64,
+    pub(super) wdth: Option<f32>,
 }
 
 pub(super) type Reshapes = HashMap<ClusterId, Reshaped>;
@@ -217,6 +218,8 @@ pub(super) struct Layout<'i, 'a> {
     pub(super) tokens: SentinelTokens<Token<'a>>,
     span_reach: Vec<usize>,
     pub(super) strut: StrutMetrics,
+    pub(super) font_scale: f64,
+    pub(super) effective_wrap_width: Option<f32>,
     pub(super) base: BidiDirection,
     pub(super) metrics: HashMap<(u32, u32, RunId), FontMetrics>,
     pub(super) reshaped: Reshapes,
@@ -312,6 +315,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             tokens: tokenize(inputs),
             span_reach,
             strut: inputs.policy().strut,
+            font_scale: 1.0,
+            effective_wrap_width: None,
             base: ast.base_direction,
             metrics: HashMap::new(),
             reshaped: HashMap::new(),
@@ -330,15 +335,151 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     fn run(mut self) -> Result<PositionedParagraph, LayoutInputError> {
+        self.apply_shape_fit();
         let (mut lines, total_block_size, truncated_range) = self.place_lines()?;
         backfill_span_ribbons(&mut lines);
+        let mut policy = self.inputs.policy().clone();
+        policy.strut = self.strut;
+        if let Some(w) = self.effective_wrap_width {
+            policy.wrap_width = w;
+        }
         Ok(PositionedParagraph {
-            policy: self.inputs.policy().clone(),
+            policy,
             base_direction: self.base,
             total_block_size,
             lines,
             truncated_range,
         })
+    }
+
+    fn apply_shape_fit(&mut self) {
+        let Some(sf) = self.options.shape_fit else {
+            return;
+        };
+        let (h1, c_min) = (
+            f64::from(self.strut.line_height()),
+            f64::from(self.options.min_horizontal_scale),
+        );
+        let (w_max, s_lo, s_hi0) = (
+            f64::from(sf.max_width),
+            f64::from(sf.min_font_scale),
+            f64::from(sf.max_font_scale),
+        );
+        let total_w: f64 = self
+            .tokens
+            .iter_from(TokenIdx::START)
+            .map(|(_, t)| match t {
+                Token::Piece(p) => p.width,
+                Token::Break(_) => 0.0,
+            })
+            .sum();
+        let mut best: Option<(f64, f64, f64)> = None;
+        for k in 1..=sf.max_lines {
+            let (target, mut lines_fu) = (total_w / k as f64, [(0.0, 0.0, 0.0); 16]);
+            let (mut li, mut f_acc, mut u_acc, mut obj_h, mut cw, mut overflowed) =
+                (0usize, 0.0, 0.0, 0.0_f64, 0.0, false);
+            for (_, tok) in self.tokens.iter_from(TokenIdx::START) {
+                match tok {
+                    Token::Piece(p) => {
+                        match p.kind {
+                            PieceKind::Cluster { .. } | PieceKind::Glue(_) => f_acc += p.width,
+                            PieceKind::Object(o) => {
+                                u_acc += p.width;
+                                obj_h = obj_h.max(f64::from(o.ascent + o.descent));
+                            }
+                            PieceKind::SpanEdge { .. } => u_acc += p.width,
+                            PieceKind::Tab => {}
+                        }
+                        cw += p.width;
+                    }
+                    Token::Break(b)
+                        if !b.is_paragraph_end()
+                            && (b.is_mandatory() || (cw >= target && li + 1 < k)) =>
+                    {
+                        if b.is_mandatory() && li + 1 >= k {
+                            overflowed = true;
+                            break;
+                        }
+                        if let Some(s) = lines_fu.get_mut(li) {
+                            *s = (f_acc, u_acc, obj_h);
+                        }
+                        li += 1;
+                        (f_acc, u_acc, obj_h, cw) = (0.0, 0.0, 0.0, 0.0);
+                    }
+                    Token::Break(_) => {}
+                }
+            }
+            if overflowed {
+                continue;
+            }
+            if let Some(s) = lines_fu.get_mut(li) {
+                *s = (f_acc, u_acc, obj_h);
+            }
+            let used = lines_fu.get(..=li).unwrap_or(&[]);
+            let uk = used.len() as f64;
+            let mut s_hi = s_hi0;
+            if let Some(h_max) = sf.max_height {
+                let h_max = f64::from(h_max);
+                let fixed_h: f64 = used.iter().map(|&(_, _, oh)| oh).sum();
+                if fixed_h > h_max {
+                    s_hi = s_lo;
+                } else {
+                    s_hi = s_hi.min(h_max / (uk * h1));
+                    while used
+                        .iter()
+                        .map(|&(_, _, oh)| (h1 * s_hi).max(oh))
+                        .sum::<f64>()
+                        > h_max
+                        && s_hi > s_lo
+                    {
+                        s_hi = (s_hi * 0.95).max(s_lo);
+                    }
+                }
+            }
+            for &(fj, uj, _) in used {
+                if fj > 0.0 {
+                    s_hi = s_hi.min((w_max - uj).max(0.0) / (c_min * fj));
+                }
+            }
+            let s = sf
+                .target_aspect_ratio
+                .map_or(s_hi, |r| s_hi.min(w_max / (f64::from(r) * uk * h1)))
+                .clamp(s_lo, s_hi0);
+            let total_h: f64 = used.iter().map(|&(_, _, oh)| (h1 * s).max(oh)).sum();
+            let w_min = used
+                .iter()
+                .map(|&(fj, uj, _)| uj + c_min * s * fj)
+                .fold(0.0_f64, f64::max);
+            let w = sf.target_aspect_ratio.map_or(w_max, |r| {
+                (f64::from(r) * total_h).clamp(w_min.min(w_max), w_max)
+            });
+            let dist = used
+                .iter()
+                .map(|&(fj, uj, _)| {
+                    if fj <= 0.0 {
+                        0.0
+                    } else {
+                        (1.0 - ((w - uj) / (s * fj)).min(1.0)).powi(2)
+                    }
+                })
+                .fold(0.0_f64, f64::max);
+            let infeas = (w_min - w).max(0.0) * 1e6;
+            let score = sf.target_aspect_ratio.map_or(-s + dist * 0.1, |r| {
+                ((w / total_h.max(1e-9) - f64::from(r)) / f64::from(r)).abs() + dist
+            }) + infeas;
+            if best.is_none_or(|(b, _, _)| score < b) {
+                best = Some((score, s, w));
+            }
+        }
+        if let Some((_, s, w)) = best {
+            self.font_scale = s;
+            self.effective_wrap_width = Some(w.max(1e-3) as f32);
+            self.strut = StrutMetrics {
+                ascent: (f64::from(self.strut.ascent) * s) as f32,
+                descent: (f64::from(self.strut.descent) * s) as f32,
+                line_gap: (f64::from(self.strut.line_gap) * s) as f32,
+            };
+        }
     }
 
     fn place_lines(
@@ -403,6 +544,16 @@ impl<'i, 'a> Layout<'i, 'a> {
         height: f64,
         obstructed: &mut usize,
     ) -> Result<OpenGeometry, LayoutInputError> {
+        if let Some(w) = self.effective_wrap_width
+            && self.inputs.constraints().geometry_provider.is_none()
+            && let Some(slot) = self
+                .inputs
+                .policy()
+                .slot_source
+                .standard_slot(cursor.index, w)
+        {
+            return Ok(OpenGeometry::single(slot));
+        }
         loop {
             match self.inputs.line_geometry(
                 cursor.index,

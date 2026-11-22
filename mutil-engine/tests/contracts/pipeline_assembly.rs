@@ -199,6 +199,7 @@ fn run_of(byte_range: TextRange, glyphs: Vec<PositionedGlyph>) -> VisualGlyphRun
     VisualGlyphRun {
         orientation: GlyphOrientation::Horizontal,
         font_size: 16.0,
+        x_scale: 1.0,
         variations: Default::default(),
         font: FontRef::unscaled(FontId(1)),
         bidi_level: BidiLevel::LTR,
@@ -673,6 +674,7 @@ fn small_line() -> PositionedLine {
         visual_runs: vec![VisualGlyphRun {
             orientation: GlyphOrientation::Horizontal,
             font_size: 16.0,
+            x_scale: 1.0,
             variations: Default::default(),
 
             font: FontRef::unscaled(FontId(1)),
@@ -995,6 +997,7 @@ fn context_follows_the_layout_options() {
         line_height: LineHeight::Fixed(1.5),
         whitespace: HangingWhitespaceMode::Preserved,
         soft_hyphen: SoftHyphenPolicy::Strip,
+        ..LayoutOptions::default()
     };
     let mut ast = crate::common::ast("a");
     ast.base_direction = BidiDirection::Rtl;

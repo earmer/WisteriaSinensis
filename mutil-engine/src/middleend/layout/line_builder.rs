@@ -46,6 +46,7 @@ pub(super) struct PlacedLine<'l, 'a> {
     pub(super) end_break: Option<&'a DiscretionaryNode>,
     hangs: LineHangs,
     is_justified: bool,
+    pub(super) x_scale: f64,
     block_top: f64,
     pub(super) truncated: bool,
 }
@@ -96,6 +97,7 @@ struct BodyRequest<'c, 'a> {
 struct BodyFit {
     hangs: LineHangs,
     is_justified: bool,
+    x_scale: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -172,17 +174,30 @@ impl<'i, 'a> Layout<'i, 'a> {
             has_suffix: ellipsis.flatten().is_some(),
             slot,
         };
+        let mut line_pending = pending.clone();
         let BodyFit {
             hangs,
             is_justified,
+            x_scale,
         } = self.measure_line(
             logical,
             body_len,
             [widths, expansions, lead_trims, trail_trims],
             &request,
-            pending,
+            &mut line_pending,
         );
-        let pads = Pads::new(self.base.is_rtl(), pre, post);
+        let mut pads = Pads::new(self.base.is_rtl(), pre, post);
+        let mut hangs = hangs;
+        if x_scale < 1.0 {
+            pads.left *= x_scale;
+            pads.right *= x_scale;
+            if let Some(s) = &mut hangs.start {
+                s.1 *= x_scale;
+            }
+            if let Some(e) = &mut hangs.end {
+                e.1 *= x_scale;
+            }
+        }
         let body_end = self.place_visual(logical, order, widths, xs, pads, hangs);
         let byte_range = TextRange::new(cursor.byte_start, byte_end);
         let suffix_extent = ellipsis.flatten().map(|s| (s.ascent, s.descent));
@@ -207,10 +222,12 @@ impl<'i, 'a> Layout<'i, 'a> {
             end_break,
             hangs,
             is_justified,
+            x_scale,
             block_top: cursor.block_top,
             truncated: ellipsis.is_some(),
         };
-        let positioned = self.build_line(line, &line_box, carets, geometry, pending, ellipsis)?;
+        let positioned =
+            self.build_line(line, &line_box, carets, geometry, &line_pending, ellipsis)?;
         Ok((positioned, line_box.line_height))
     }
 
@@ -220,7 +237,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         body_len: usize,
         [widths, expansions, lead_trims, trail_trims]: [&mut Vec<f64>; 4],
         request: &BodyRequest<'_, 'a>,
-        pending: &Reshapes,
+        pending: &mut Reshapes,
     ) -> BodyFit {
         let (body, trailing) = logical.split_at(body_len);
         expansions.clear();
@@ -270,9 +287,12 @@ impl<'i, 'a> Layout<'i, 'a> {
         let visible_width = distance + pre - LineHangs::protrusion(end);
         let slack = slot_width - visible_width;
         let (body_expansions, _) = expansions.split_at_mut(body_len);
-        let is_justified = compressible
+        let can_compress =
+            self.options.min_horizontal_scale < 1.0 || self.options.allow_variable_width_axis;
+        let try_tier1 =
+            (compressible && (soft_wrap || slack < 0.0)) || (can_compress && slack < 0.0);
+        let is_justified = try_tier1
             && slot_width.is_finite()
-            && (soft_wrap || slack < 0.0)
             && self.justify(
                 body,
                 widths,
@@ -281,13 +301,148 @@ impl<'i, 'a> Layout<'i, 'a> {
                 slack,
                 pending,
             );
+        let mut cur_width = post - LineHangs::protrusion(start)
+            + body
+                .iter()
+                .zip(widths.iter())
+                .map(|(p, &w)| p.gap + w)
+                .sum::<f64>()
+            + pre
+            - LineHangs::protrusion(end);
+        if slot_width.is_finite()
+            && !within(cur_width, slot_width)
+            && self.options.allow_variable_width_axis
+            && self.try_wdth_condense(body, slot_width / cur_width, pending)
+        {
+            let d2 = self.measure_widths(
+                body,
+                [widths, lead_trims, trail_trims],
+                post - LineHangs::protrusion(start),
+                (post == 0.0, is_soft_wrap),
+                slot,
+                pending,
+            );
+            cur_width = d2 + pre - LineHangs::protrusion(end);
+            if !within(cur_width, slot_width) {
+                body_expansions.fill(0.0);
+                self.justify(
+                    body,
+                    widths,
+                    body_expansions,
+                    [lead_trims, trail_trims],
+                    slot_width - cur_width,
+                    pending,
+                );
+                cur_width = post - LineHangs::protrusion(start)
+                    + body
+                        .iter()
+                        .zip(widths.iter())
+                        .map(|(p, &w)| p.gap + w)
+                        .sum::<f64>()
+                    + pre
+                    - LineHangs::protrusion(end);
+            }
+        }
+        let fixed_w: f64 = body
+            .iter()
+            .zip(widths.iter())
+            .map(|(p, &w)| {
+                p.gap
+                    + if matches!(p.piece.kind, PieceKind::Object(_)) {
+                        w
+                    } else {
+                        0.0
+                    }
+            })
+            .sum();
+        let scalable_w = cur_width - fixed_w;
+        let x_scale = if slot_width.is_finite()
+            && !within(cur_width, slot_width)
+            && scalable_w > 0.0
+            && self.options.min_horizontal_scale < 1.0
+        {
+            let s = ((slot_width - fixed_w).max(0.0) / scalable_w)
+                .clamp(f64::from(self.options.min_horizontal_scale), 1.0);
+            for (p, w) in body.iter().zip(widths.iter_mut()) {
+                if !matches!(p.piece.kind, PieceKind::Object(_)) {
+                    *w *= s;
+                }
+            }
+            for v in [&mut *lead_trims, &mut *trail_trims] {
+                for x in v.iter_mut() {
+                    *x *= s;
+                }
+            }
+            for x in body_expansions.iter_mut() {
+                *x *= s;
+            }
+            s
+        } else {
+            1.0
+        };
         self.append_trailing_widths(trailing, widths);
         lead_trims.resize(logical.len(), 0.0);
         trail_trims.resize(logical.len(), 0.0);
         BodyFit {
             hangs,
             is_justified,
+            x_scale,
         }
+    }
+
+    fn try_wdth_condense(
+        &self,
+        body: &[LogicalPiece<'a>],
+        ratio: f64,
+        pending: &mut Reshapes,
+    ) -> bool {
+        let mut changed = false;
+        for p in body {
+            let PieceKind::Cluster { run, cluster } = p.piece.kind else {
+                continue;
+            };
+            let c = self.inputs.cluster(cluster);
+            let Some((min_w, def_w, _)) =
+                self.shaper.variation_axis_range(c.font.font_id, *b"wdth")
+            else {
+                continue;
+            };
+            let mut r = self.inputs.run(run).clone();
+            let cur_w = r
+                .features
+                .variations()
+                .iter()
+                .find(|v| v.tag() == *b"wdth")
+                .map_or(def_w, |v| v.value());
+            if min_w >= cur_w {
+                continue;
+            }
+            let target = (cur_w * ratio as f32).clamp(min_w, cur_w);
+            let Some(var) = crate::types::FontVariation::try_new(*b"wdth", target) else {
+                continue;
+            };
+            r.features.push_variation(var);
+            let req = crate::shaping::ReshapeRequest::plain(
+                self.inputs.text(),
+                &r,
+                self.inputs.run_atoms_id(run),
+                c.byte_range,
+            );
+            if let Some((glyphs, width)) =
+                crate::middleend::shaper_gate::checked_reshape_window(self.shaper, &req, c)
+            {
+                pending.insert(
+                    cluster,
+                    super::Reshaped {
+                        glyphs,
+                        width: f64::from(width) * self.font_scale,
+                        wdth: Some(target),
+                    },
+                );
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn append_trailing_widths(&self, trailing: &[LogicalPiece<'_>], widths: &mut Vec<f64>) {

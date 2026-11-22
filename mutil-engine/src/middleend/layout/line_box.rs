@@ -124,11 +124,19 @@ impl Layout<'_, '_> {
                             (own, line_box)
                         }
                     };
+                    let scale_hl = |(a, b): (f64, f64)| (a * self.font_scale, b * self.font_scale);
                     match edge {
-                        Some(edge) => item(edge, half_leaded(resolved_box.unwrap_or(self.strut))),
+                        Some(edge) => item(
+                            edge,
+                            resolved_box.map_or_else(
+                                || half_leaded(self.strut),
+                                |b| scale_hl(half_leaded(b)),
+                            ),
+                        ),
                         None => BaselinePlacement::StrutRelative {
-                            shift: baseline_shift(align, &self.ast.strut_metrics, Some(&own)),
-                            extent: resolved_box.map(half_leaded),
+                            shift: baseline_shift(align, &self.ast.strut_metrics, Some(&own))
+                                * self.font_scale,
+                            extent: resolved_box.map(|b| scale_hl(half_leaded(b))),
                         },
                     }
                 }

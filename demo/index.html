@@ -172,8 +172,19 @@
             <span class="field-label">Justification</span>
             <span><input id="justify" type="checkbox" /> justify (ST3-2)</span>
             <span><input id="compress-last" type="checkbox" /> compress last lines (ST3-3)</span>
+            <span><input id="shape-fit" type="checkbox" /> shape-fit (3:1)</span>
           </label>
         </div>
+
+        <label class="field">
+          <span class="field-label">Min horizontal scale</span>
+          <select id="min-h-scale">
+            <option value="0" selected>1.0 (off)</option>
+            <option value="1">0.85</option>
+            <option value="2">0.70</option>
+            <option value="3">0.50</option>
+          </select>
+        </label>
 
         <div class="two-up">
           <label class="field">

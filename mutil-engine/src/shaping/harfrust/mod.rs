@@ -654,6 +654,16 @@ impl TextShaper for HarfRustShaper {
             })
             .unwrap_or(0.25 * size)
     }
+
+    fn variation_axis_range(&self, font: FontId, tag: [u8; 4]) -> Option<(f32, f32, f32)> {
+        let face = self.registry.face(font)?;
+        let target = Tag::new(&tag);
+        face.font
+            .axes()
+            .iter()
+            .find(|a| a.tag() == target)
+            .map(|a| (a.min_value(), a.default_value(), a.max_value()))
+    }
 }
 
 impl FontSource for HarfRustShaper {

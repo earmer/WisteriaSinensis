@@ -168,6 +168,7 @@ fn test_pipeline_types_compile() {
         visual_runs: vec![VisualGlyphRun {
             orientation: GlyphOrientation::Horizontal,
             font_size: 16.0,
+            x_scale: 1.0,
             variations: Default::default(),
 
             font: FontRef::unscaled(FontId(1)),

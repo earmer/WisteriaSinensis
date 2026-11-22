@@ -122,6 +122,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             cluster_range: 0..0,
             bidi_level: level,
             orientation,
+            font_size: (f64::from(run.font_size) * self.font_scale) as f32,
             ..run.clone()
         };
         let mut runs = Vec::new();
@@ -149,6 +150,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 runs.push(VisualGlyphRun {
                     orientation: cluster.orientation,
                     font_size: synthetic.font_size,
+                    x_scale: 1.0,
                     variations: variations.clone(),
                     font: cluster.font,
                     bidi_level: cluster.bidi_level,

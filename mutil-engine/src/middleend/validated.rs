@@ -190,6 +190,13 @@ pub enum GeometryAnswer {
 pub struct OpenGeometry(LineGeometry);
 
 impl OpenGeometry {
+    pub(crate) fn single(slot: InlineSlotConstraint) -> Self {
+        Self(LineGeometry {
+            slots: smallvec::smallvec![slot],
+            next_feature_block_offset: None,
+        })
+    }
+
     /// The answer as the provider gave it.
     #[must_use]
     pub fn geometry(&self) -> &LineGeometry {
@@ -546,6 +553,15 @@ impl<'a> PlacedRun<'a> {
         match self.source {
             PlacedRunSource::Body(run) => &run.variations,
             PlacedRunSource::Annotation(run) => &run.variations,
+        }
+    }
+
+    /// Horizontal affine glyph scale in `(0.0, 1.0]`.
+    #[must_use]
+    pub fn x_scale(&self) -> f32 {
+        match self.source {
+            PlacedRunSource::Body(run) => run.x_scale,
+            PlacedRunSource::Annotation(_) => 1.0,
         }
     }
 

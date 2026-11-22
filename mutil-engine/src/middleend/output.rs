@@ -3,7 +3,7 @@
 
 use super::{
     CjkPunctuationTrim, HangMode, HangingWhitespaceMode, InlineSlotConstraint, LayoutConstraints,
-    LayoutInputError, LayoutOptions, LineClampPolicy, LineHeight, StrutMetrics,
+    LayoutInputError, LayoutOptions, LineClampPolicy, LineHeight, ShapeFitPolicy, StrutMetrics,
 };
 use crate::frontend::{AnnotationSide, BoxOverflowPolicy, ParagraphAst};
 use crate::types::{
@@ -59,6 +59,8 @@ pub struct VisualGlyphRun {
     pub orientation: GlyphOrientation,
     /// Requested size before fallback scaling.
     pub font_size: f32,
+    /// Horizontal affine glyph scale in `(0.0, 1.0]`.
+    pub x_scale: f32,
     /// Variable font instance coordinates.
     pub variations: SmallVec<[FontVariation; 2]>,
     /// Font and fallback scale shared by every glyph.
@@ -421,6 +423,12 @@ pub struct LayoutPolicySnapshot {
     pub slot_source: SlotSource,
     /// `LayoutOptions::clamp`.
     pub clamp: Option<LineClampPolicy>,
+    /// Minimum horizontal affine scale in `(0.0, 1.0]`.
+    pub min_horizontal_scale: f32,
+    /// Whether variable-font `wdth` condensation is enabled.
+    pub allow_variable_width_axis: bool,
+    /// Optional shape-fit solver policy.
+    pub shape_fit: Option<ShapeFitPolicy>,
 }
 
 /// Where a paragraph's slots came from (spec §5, GEO-2).
@@ -486,7 +494,12 @@ impl LayoutPolicySnapshot {
         if !constraints.is_valid() {
             return Err(LayoutInputError::InvalidConstraints);
         }
-        if options.clamp.as_ref().is_some_and(|c| !c.is_valid()) {
+        if options.clamp.as_ref().is_some_and(|c| !c.is_valid())
+            || !(options.min_horizontal_scale.is_finite()
+                && options.min_horizontal_scale > 0.0
+                && options.min_horizontal_scale <= 1.0)
+            || options.shape_fit.as_ref().is_some_and(|s| !s.is_valid())
+        {
             return Err(LayoutInputError::InvalidLayoutOptions);
         }
         let (raw, font_size) = (&ast.strut_metrics, ast.strut_font_size);
@@ -520,6 +533,9 @@ impl LayoutPolicySnapshot {
             wrap_width: constraints.wrap_width,
             slot_source: SlotSource::of(constraints),
             clamp: options.clamp.clone(),
+            min_horizontal_scale: options.min_horizontal_scale,
+            allow_variable_width_axis: options.allow_variable_width_axis,
+            shape_fit: options.shape_fit,
         })
     }
 
@@ -550,6 +566,10 @@ impl LayoutPolicySnapshot {
             && wrap_ok
             && indents_are_valid
             && self.clamp.as_ref().is_none_or(LineClampPolicy::is_valid)
+            && self.min_horizontal_scale.is_finite()
+            && self.min_horizontal_scale > 0.0
+            && self.min_horizontal_scale <= 1.0
+            && self.shape_fit.as_ref().is_none_or(ShapeFitPolicy::is_valid)
     }
 
     /// The context line `line_index` is validated against.
