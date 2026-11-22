@@ -714,14 +714,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             DecorationKind::Underline => |m| m.underline_position,
             DecorationKind::Strikethrough => |m| m.strikeout_position,
         };
-        let mut open: Option<(DecorationLine, f64, f64)> = None;
-        let finish = |out: &mut Vec<DecorationLine>, seg: Option<(DecorationLine, f64, f64)>| {
-            if let Some((mut d, left, right)) = seg {
-                d.x = left as f32;
-                d.width = (right - left) as f32;
-                out.push(d);
-            }
-        };
+        let mut open: Option<DecorationLine> = None;
+        let (mut open_x, mut open_right) = (0.0_f64, 0.0_f64);
         // Glue after the open segment joins only if a decorated cluster follows.
         let mut pending_glue: Option<TextRange> = None;
         for &p in line.order.pick(line.placed) {
@@ -729,28 +723,28 @@ impl<'i, 'a> Layout<'i, 'a> {
             match p.piece.kind {
                 PieceKind::Cluster { run, cluster } if drawn(self.inputs.run(run).decoration) => {
                     let m = self.cluster_metrics(run, cluster)?;
-                    let y_offset = (f64::from(position(m)) + p.y_shift) as f32;
-                    let thickness = m.underline_thickness;
+                    let (y_offset, thickness) = (
+                        (f64::from(position(m)) + p.y_shift) as f32,
+                        m.underline_thickness,
+                    );
                     let right = p.x + p.width;
-                    let Some((segment, _, seg_right)) = open.as_mut() else {
-                        open = Some((
-                            DecorationLine {
-                                kind,
-                                byte_range: bytes,
-                                x: 0.0,
-                                width: 0.0,
-                                y_offset,
-                                thickness,
-                            },
-                            p.x,
-                            right,
-                        ));
+                    let Some(segment) = open.as_mut() else {
+                        (open_x, open_right) = (p.x, right);
+                        open = Some(DecorationLine {
+                            kind,
+                            byte_range: bytes,
+                            x: p.x as f32,
+                            width: (right - p.x) as f32,
+                            y_offset,
+                            thickness,
+                        });
                         continue;
                     };
                     if let Some(glue) = pending_glue.take() {
                         segment.byte_range = segment.byte_range.cover(glue);
                     }
-                    *seg_right = right.max(*seg_right);
+                    open_right = right.max(open_right);
+                    segment.width = (open_right - open_x) as f32;
                     segment.byte_range = segment.byte_range.cover(bytes);
                     if kind == DecorationKind::Underline && y_offset < segment.y_offset {
                         segment.y_offset = y_offset;
@@ -762,12 +756,12 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => {}
                 _ => {
-                    finish(out, open.take());
+                    out.extend(open.take());
                     pending_glue = None;
                 }
             }
         }
-        finish(out, open);
+        out.extend(open);
         Ok(())
     }
 }

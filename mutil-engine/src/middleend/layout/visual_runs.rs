@@ -106,24 +106,9 @@ impl ClusterGlyphs {
     }
 }
 
-/// Accumulates the `f64` inline extent of one cluster's glyphs (net of
-/// side-slot trim, not the expansion).
-fn extend_cluster_extent<'g>(
-    pen: f64,
-    total_trim: f64,
-    glyphs: impl Iterator<Item = &'g RawShapedGlyph>,
-    extent: &mut Option<(f64, f64)>,
-) {
-    for (_, start, advance) in trimmed_glyphs(pen, total_trim, glyphs) {
-        if advance != 0.0 {
-            extend_extent(extent, start, start + advance);
-        }
-    }
-}
-
 impl<'i, 'a> Layout<'i, 'a> {
-    /// Computes the pre-alignment `f64` inline extent of the line's visible
-    /// glyphs, objects and tabs, and the end of its last visible source byte.
+    /// Pre-alignment `f64` inline extent of visible glyphs, objects and tabs,
+    /// and the end of the last visible source byte.
     pub(super) fn visual_extent(
         &self,
         line: &PlacedLine<'_, '_>,
@@ -138,16 +123,23 @@ impl<'i, 'a> Layout<'i, 'a> {
                     if glyphs.is_empty() {
                         continue;
                     }
-                    let rtl_cluster = p.piece.level.direction().is_rtl();
-                    let pen = p.x + if rtl_cluster { p.expansion } else { 0.0 };
+                    let rtl = p.piece.level.direction().is_rtl();
+                    let pen = p.x + if rtl { p.expansion } else { 0.0 };
                     if glyphs.iter().any(|g| !g.is_synthesized) {
                         visible_end = visible_end.max(p.piece.bytes.end());
                     }
-                    let total_trim = p.lead_trim + p.trail_trim;
-                    if rtl_cluster {
-                        extend_cluster_extent(pen, total_trim, glyphs.iter().rev(), &mut extent);
+                    let trim = p.lead_trim + p.trail_trim;
+                    let mut scan = |it: &mut dyn Iterator<Item = &RawShapedGlyph>| {
+                        for (_, s, adv) in trimmed_glyphs(pen, trim, it) {
+                            if adv != 0.0 {
+                                extend_extent(&mut extent, s, s + adv);
+                            }
+                        }
+                    };
+                    if rtl {
+                        scan(&mut glyphs.iter().rev());
                     } else {
-                        extend_cluster_extent(pen, total_trim, glyphs.iter(), &mut extent);
+                        scan(&mut glyphs.iter());
                     }
                 }
                 PieceKind::Object(_) | PieceKind::Tab => {
