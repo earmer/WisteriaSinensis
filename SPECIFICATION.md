@@ -602,6 +602,9 @@ pub struct LayoutPolicySnapshot {
     pub wrap_width: f32,
     pub slot_source: SlotSource,
     pub clamp: Option<LineClampPolicy>,
+    pub min_horizontal_scale: f32,
+    pub allow_variable_width_axis: bool,
+    pub shape_fit: Option<ShapeFitPolicy>,
 }
 pub enum SlotSource {
     Standard { first_line_indent: f32, hanging_indent: f32 },
@@ -642,6 +645,7 @@ pub enum GlyphRole { Trailing, ZeroAdvance, Hanging, Body }
 pub struct VisualGlyphRun {
     pub orientation: GlyphOrientation,
     pub font_size: f32,
+    pub x_scale: f32,
     pub variations: SmallVec<[FontVariation; 2]>,
     pub font: FontRef,
     pub bidi_level: BidiLevel,
@@ -1248,6 +1252,7 @@ pub trait TextShaper: Send + Sync {
     fn ligature_carets(&self, instance: FontInstanceRef<'_>, glyph_id: u32, direction: Direction)
         -> SmallVec<[f32; 4]>;
     fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32;
+    fn variation_axis_range(&self, font: FontId, tag: [u8; 4]) -> Option<(f32, f32, f32)>;
 }
 pub struct ShapeOutput { pub clusters: Vec<ShapedCluster>, pub glyphs: Vec<RawShapedGlyph> }
 impl ShapeOutput { pub fn clear(&mut self); }
@@ -1409,6 +1414,17 @@ pub struct LayoutOptions {
     pub line_height: LineHeight,
     pub whitespace: HangingWhitespaceMode,
     pub soft_hyphen: SoftHyphenPolicy,
+    pub min_horizontal_scale: f32,
+    pub allow_variable_width_axis: bool,
+    pub shape_fit: Option<ShapeFitPolicy>,
+}
+pub struct ShapeFitPolicy {
+    pub target_aspect_ratio: Option<f32>,
+    pub max_width: f32,
+    pub max_height: Option<f32>,
+    pub max_lines: usize,
+    pub min_font_scale: f32,
+    pub max_font_scale: f32,
 }
 pub enum CjkPunctuationTrim { Auto, SpaceAll, SpaceFirst, TrimStart }
 pub struct TabStops { .. }              // a finite, positive step, by construction

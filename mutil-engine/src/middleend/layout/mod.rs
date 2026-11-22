@@ -204,6 +204,7 @@ pub(super) enum LineEnd<'a> {
 pub(super) struct Reshaped {
     pub(super) glyphs: Vec<RawShapedGlyph>,
     pub(super) width: f64,
+    pub(super) wdth: Option<f32>,
 }
 
 pub(super) type Reshapes = HashMap<ClusterId, Reshaped>;
@@ -217,6 +218,8 @@ pub(super) struct Layout<'i, 'a> {
     pub(super) tokens: SentinelTokens<Token<'a>>,
     span_reach: Vec<usize>,
     pub(super) strut: StrutMetrics,
+    pub(super) font_scale: f64,
+    pub(super) effective_wrap_width: Option<f32>,
     pub(super) base: BidiDirection,
     pub(super) metrics: HashMap<(u32, u32, RunId), FontMetrics>,
     pub(super) reshaped: Reshapes,
@@ -312,6 +315,8 @@ impl<'i, 'a> Layout<'i, 'a> {
             tokens: tokenize(inputs),
             span_reach,
             strut: inputs.policy().strut,
+            font_scale: 1.0,
+            effective_wrap_width: None,
             base: ast.base_direction,
             metrics: HashMap::new(),
             reshaped: HashMap::new(),
@@ -330,15 +335,123 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     fn run(mut self) -> Result<PositionedParagraph, LayoutInputError> {
+        self.apply_shape_fit();
         let (mut lines, total_block_size, truncated_range) = self.place_lines()?;
         backfill_span_ribbons(&mut lines);
+        let mut policy = self.inputs.policy().clone();
+        policy.strut = self.strut;
+        if let Some(w) = self.effective_wrap_width {
+            policy.wrap_width = w;
+        }
         Ok(PositionedParagraph {
-            policy: self.inputs.policy().clone(),
+            policy,
             base_direction: self.base,
             total_block_size,
             lines,
             truncated_range,
         })
+    }
+
+    fn apply_shape_fit(&mut self) {
+        let Some(sf) = self.options.shape_fit else {
+            return;
+        };
+        let (h1, c_min) = (
+            f64::from(self.strut.line_height()),
+            f64::from(self.options.min_horizontal_scale),
+        );
+        let (w_max, s_lo, s_hi0) = (
+            f64::from(sf.max_width),
+            f64::from(sf.min_font_scale),
+            f64::from(sf.max_font_scale),
+        );
+        let total_w: f64 = self
+            .tokens
+            .iter_from(TokenIdx::START)
+            .map(|(_, t)| match t {
+                Token::Piece(p) => p.width,
+                Token::Break(_) => 0.0,
+            })
+            .sum();
+        let mut best: Option<(f64, f64, f64)> = None;
+        for k in 1..=sf.max_lines {
+            let (target, mut lines_fu) = (total_w / k as f64, [(0.0, 0.0); 16]);
+            let (mut li, mut f_acc, mut u_acc, mut cw) = (0usize, 0.0, 0.0, 0.0);
+            for (_, tok) in self.tokens.iter_from(TokenIdx::START) {
+                match tok {
+                    Token::Piece(p) => {
+                        match p.kind {
+                            PieceKind::Cluster { .. } | PieceKind::Glue(_) => f_acc += p.width,
+                            PieceKind::Object(_) | PieceKind::SpanEdge { .. } => u_acc += p.width,
+                            PieceKind::Tab => {}
+                        }
+                        cw += p.width;
+                    }
+                    Token::Break(b)
+                        if !b.is_paragraph_end()
+                            && (b.is_mandatory() || (cw >= target && li + 1 < k)) =>
+                    {
+                        if let Some(s) = lines_fu.get_mut(li) {
+                            *s = (f_acc, u_acc);
+                        }
+                        li = (li + 1).min(k - 1);
+                        (f_acc, u_acc, cw) = (0.0, 0.0, 0.0);
+                    }
+                    Token::Break(_) => {}
+                }
+            }
+            if let Some(s) = lines_fu.get_mut(li) {
+                *s = (f_acc, u_acc);
+            }
+            let uk = (li + 1).max(1) as f64;
+            let mut s_hi = sf
+                .max_height
+                .map_or(s_hi0, |h| s_hi0.min(f64::from(h) / (uk * h1)));
+            for &(fj, uj) in lines_fu.iter().take(li + 1) {
+                if fj > 0.0 {
+                    s_hi = s_hi.min((w_max - uj).max(0.0) / (c_min * fj));
+                }
+            }
+            let s = sf
+                .target_aspect_ratio
+                .map_or(s_hi, |r| s_hi.min(w_max / (f64::from(r) * uk * h1)))
+                .clamp(s_lo, s_hi0);
+            let w_min = lines_fu
+                .iter()
+                .take(li + 1)
+                .map(|&(fj, uj)| uj + c_min * s * fj)
+                .fold(0.0_f64, f64::max);
+            let w = sf.target_aspect_ratio.map_or(w_max, |r| {
+                (f64::from(r) * uk * h1 * s).clamp(w_min.min(w_max), w_max)
+            });
+            let dist = lines_fu
+                .iter()
+                .take(li + 1)
+                .map(|&(fj, uj)| {
+                    if fj <= 0.0 {
+                        0.0
+                    } else {
+                        (1.0 - ((w - uj) / (s * fj)).min(1.0)).powi(2)
+                    }
+                })
+                .fold(0.0_f64, f64::max);
+            let infeas = (w_min - w).max(0.0) * 1e6;
+            let score = sf.target_aspect_ratio.map_or(-s + dist * 0.1, |r| {
+                ((w / (uk * h1 * s).max(1e-9) - f64::from(r)) / f64::from(r)).abs() + dist
+            }) + infeas;
+            if best.is_none_or(|(b, _, _)| score < b) {
+                best = Some((score, s, w));
+            }
+        }
+        if let Some((_, s, w)) = best {
+            self.font_scale = s;
+            self.effective_wrap_width = Some(w.max(1e-3) as f32);
+            self.strut = StrutMetrics {
+                ascent: (f64::from(self.strut.ascent) * s) as f32,
+                descent: (f64::from(self.strut.descent) * s) as f32,
+                line_gap: (f64::from(self.strut.line_gap) * s) as f32,
+            };
+        }
     }
 
     fn place_lines(
@@ -403,6 +516,16 @@ impl<'i, 'a> Layout<'i, 'a> {
         height: f64,
         obstructed: &mut usize,
     ) -> Result<OpenGeometry, LayoutInputError> {
+        if let Some(w) = self.effective_wrap_width
+            && self.inputs.constraints().geometry_provider.is_none()
+            && let Some(slot) = self
+                .inputs
+                .policy()
+                .slot_source
+                .standard_slot(cursor.index, w)
+        {
+            return Ok(OpenGeometry::single(slot));
+        }
         loop {
             match self.inputs.line_geometry(
                 cursor.index,

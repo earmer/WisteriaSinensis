@@ -80,7 +80,7 @@ pub enum CjkPunctuationTrim {
 }
 
 /// Layout policy (spec §5, §6.6); the geometry is [`LayoutConstraints`].
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LayoutOptions {
     /// Whether elastic capacity is used to justify content.
     pub justify: bool,
@@ -101,6 +101,66 @@ pub struct LayoutOptions {
     pub whitespace: HangingWhitespaceMode,
     /// Clipboard policy for a source U+00AD.
     pub soft_hyphen: SoftHyphenPolicy,
+    /// Minimum horizontal affine scale in `(0.0, 1.0]` for fixed-slot compression.
+    pub min_horizontal_scale: f32,
+    /// Whether to condense variable fonts along the `wdth` axis before affine scaling.
+    pub allow_variable_width_axis: bool,
+    /// Optional joint aspect-ratio / bounding-box solver policy.
+    pub shape_fit: Option<ShapeFitPolicy>,
+}
+
+impl Default for LayoutOptions {
+    fn default() -> Self {
+        Self {
+            justify: false,
+            compress_last_lines: false,
+            clamp: None,
+            strategy: LineBreakStrategy::default(),
+            hang_mode: HangMode::default(),
+            cjk_punctuation_trim: CjkPunctuationTrim::default(),
+            line_height: LineHeight::default(),
+            whitespace: HangingWhitespaceMode::default(),
+            soft_hyphen: SoftHyphenPolicy::default(),
+            min_horizontal_scale: 1.0,
+            allow_variable_width_axis: false,
+            shape_fit: None,
+        }
+    }
+}
+
+/// Aspect-ratio / bounding-box solver policy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShapeFitPolicy {
+    /// Target width-to-height ratio `W / H`, if any.
+    pub target_aspect_ratio: Option<f32>,
+    /// Maximum allowed inline width.
+    pub max_width: f32,
+    /// Maximum allowed block height, if any.
+    pub max_height: Option<f32>,
+    /// Maximum number of lines (`1..=16`).
+    pub max_lines: usize,
+    /// Minimum global font scale factor (`> 0`).
+    pub min_font_scale: f32,
+    /// Maximum global font scale factor (`>= min_font_scale`).
+    pub max_font_scale: f32,
+}
+
+impl ShapeFitPolicy {
+    /// Checks line count (`1..=16`), positive finite dimensions, and scale bounds.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        (1..=16).contains(&self.max_lines)
+            && self.max_width > 0.0
+            && is_measurement(self.max_width)
+            && self.max_height.is_none_or(|h| h > 0.0 && is_measurement(h))
+            && self
+                .target_aspect_ratio
+                .is_none_or(|r| r.is_finite() && r > 0.0)
+            && self.min_font_scale.is_finite()
+            && self.max_font_scale.is_finite()
+            && self.min_font_scale > 0.0
+            && self.min_font_scale <= self.max_font_scale
+    }
 }
 
 /// Truncation limits; at least one must be set.

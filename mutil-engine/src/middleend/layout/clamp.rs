@@ -149,6 +149,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 runs.push(VisualGlyphRun {
                     orientation: cluster.orientation,
                     font_size: synthetic.font_size,
+                    x_scale: 1.0,
                     variations: variations.clone(),
                     font: cluster.font,
                     bidi_level: cluster.bidi_level,

@@ -178,7 +178,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 let mut x = 0.0_f64;
                 let mut reach = width;
                 for g in glyphs {
-                    x += f64::from(g.x_advance);
+                    x += f64::from(g.x_advance) * self.font_scale;
                     reach = reach.max(x);
                 }
                 (width, reach)
@@ -186,6 +186,10 @@ impl<'i, 'a> Layout<'i, 'a> {
             PieceKind::Object(object) => {
                 let (width, _, _) = Self::fitted_object(object, slot);
                 (width, width)
+            }
+            PieceKind::Glue(_) => {
+                let w = piece.width * self.font_scale;
+                (w, w)
             }
             _ => (piece.width, piece.width),
         }
@@ -233,7 +237,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
         (
             self.inputs.cluster_glyphs_id(cluster),
-            f64::from(self.inputs.cluster(cluster).natural_width),
+            f64::from(self.inputs.cluster(cluster).natural_width) * self.font_scale,
         )
     }
 
@@ -244,6 +248,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         candidates: &mut SmallVec<[FitCandidate<'a>; 16]>,
     ) -> (LineEnd<'a>, Reshapes) {
         let slot_width = f64::from(slot.width());
+        let min_scale = f64::from(self.options.min_horizontal_scale);
         let mut walk = LineWalk::new(line.post_break_width());
         candidates.clear();
         let mut fits = Fits {
@@ -258,7 +263,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     let natural = walk.used_at_break(pre, false);
                     if b.is_mandatory() {
                         let used = walk.used_at_break(pre, self.options.compress_last_lines);
-                        let feasible = within(used, slot_width);
+                        let feasible = within(used * min_scale, slot_width);
                         if feasible {
                             fits.record(t, b, &walk, natural);
                         }
@@ -267,7 +272,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                             .filter(|_| !feasible)
                             .unwrap_or(LineEnd::At { token: t, brk: b });
                     }
-                    if within(walk.used_at_break(pre, true), slot_width) {
+                    if within(walk.used_at_break(pre, true) * min_scale, slot_width) {
                         fits.record(t, b, &walk, natural);
                     }
                     walk.advance_break(f64::from(b.no_break_width));
@@ -292,7 +297,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 }
                 Token::Piece(piece) => {
                     let used = self.walk_piece(&mut walk, &piece, line, slot, None);
-                    if !within(used, slot_width) && piece.is_content() {
+                    if !within(used * min_scale, slot_width) && piece.is_content() {
                         match fits.best() {
                             Some(end) => break end,
                             None => return self.emergency(line, t, slot),
@@ -455,6 +460,9 @@ impl<'i, 'a> Layout<'i, 'a> {
         let fitness = badness::fitness_class(fit.ratio);
         let mut demerits =
             badness::line_demerits(&fit, penalty, flagged, forced, fitness, previous);
+        if slack < 0.0 && self.options.min_horizontal_scale < 1.0 && candidate.used > 0.0 {
+            demerits += 1_000.0 * (1.0 - slot_width / candidate.used).abs();
+        }
         if is_paragraph_end && candidate.content_clusters < 4 {
             demerits += badness::RUNT_PENALTY;
         }
@@ -735,7 +743,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                     c,
                     Reshaped {
                         glyphs,
-                        width: f64::from(width),
+                        width: f64::from(width) * self.font_scale,
+                        wdth: None,
                     },
                 )
                 .is_none()

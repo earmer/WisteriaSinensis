@@ -304,6 +304,11 @@ pub trait TextShaper: Send + Sync {
     /// (spec WN-10). A face without a space glyph answers
     /// `0.25 · font_size · font.scale`. The answer is finite and non-negative.
     fn space_advance(&self, instance: FontInstanceRef<'_>, orientation: GlyphOrientation) -> f32;
+
+    /// Variable-font axis `(min, default, max)` for `tag`, if present.
+    fn variation_axis_range(&self, _font: FontId, _tag: [u8; 4]) -> Option<(f32, f32, f32)> {
+        None
+    }
 }
 
 #[cfg(test)]

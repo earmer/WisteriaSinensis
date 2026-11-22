@@ -38,6 +38,9 @@ impl PositionedLine {
         for (run, r) in self.visual_runs.iter().enumerate() {
             if !(r.font_size.is_finite()
                 && r.font_size > 0.0
+                && r.x_scale.is_finite()
+                && r.x_scale > 0.0
+                && r.x_scale <= 1.0
                 && r.font.scale.is_finite()
                 && r.font.scale > 0.0)
             {

@@ -123,8 +123,11 @@ pub fn layout_json(layout: &ValidatedLayout<'_>, id: usize, marked: &Marked) -> 
                 )
             });
             let size = Num(run.font_size() * run.font().scale);
+            let x_scale = Num(run.x_scale());
             let font = run.font().font_id.0;
-            let json = format!("{{\"font\":{font},\"size\":{size},\"glyphs\":{glyphs}}}");
+            let json = format!(
+                "{{\"font\":{font},\"size\":{size},\"xScale\":{x_scale},\"glyphs\":{glyphs}}}"
+            );
             (run.line(), json)
         })
         .collect();

@@ -398,6 +398,9 @@ pub fn policy(ctx: &LineContext) -> LayoutPolicySnapshot {
         cjk_punctuation_trim: mutil_engine::CjkPunctuationTrim::default(),
         wrap_width: ctx.wrap_width,
         clamp: None,
+        min_horizontal_scale: 1.0,
+        allow_variable_width_axis: false,
+        shape_fit: None,
     }
 }
 
@@ -428,6 +431,7 @@ pub fn run(g: PositionedGlyph) -> VisualGlyphRun {
     VisualGlyphRun {
         orientation: GlyphOrientation::Horizontal,
         font_size: 16.0,
+        x_scale: 1.0,
         variations: Default::default(),
 
         font: FontRef::unscaled(FontId(1)),

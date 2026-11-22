@@ -27,7 +27,8 @@ pub use line_geometry::GlyphRole;
 pub use options::{
     CjkPunctuationTrim, HangEndMode, HangMode, HangStartMode, HangingWhitespaceMode,
     InlineSlotConstraint, LayoutConstraints, LayoutOptions, LineBreakStrategy, LineClampPolicy,
-    LineGeometry, LineGeometryProvider, LineHeight, SoftHyphenPolicy, StrutMetrics, TabStops,
+    LineGeometry, LineGeometryProvider, LineHeight, ShapeFitPolicy, SoftHyphenPolicy, StrutMetrics,
+    TabStops,
 };
 pub use output::{
     AtomicFragment, CaretAffinity, CaretStop, DecorationKind, DecorationLine, HangSide,

@@ -264,6 +264,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
     l0.visual_runs = vec![VisualGlyphRun {
         orientation: GlyphOrientation::Horizontal,
         font_size: 16.0,
+        x_scale: 1.0,
         variations: Default::default(),
 
         font: FontRef::unscaled(FontId(1)),
@@ -283,6 +284,7 @@ fn a_chip_wrapped_across_two_lines_clones_its_padding_and_validates() {
     l1.visual_runs = vec![VisualGlyphRun {
         orientation: GlyphOrientation::Horizontal,
         font_size: 16.0,
+        x_scale: 1.0,
         variations: Default::default(),
 
         font: FontRef::unscaled(FontId(1)),
