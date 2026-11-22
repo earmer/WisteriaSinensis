@@ -488,7 +488,7 @@ fn main() {
             &text,
             &style,
             &stub,
-            1e9,
+            f32::INFINITY,
             9,
         )));
     }

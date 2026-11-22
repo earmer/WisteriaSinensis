@@ -86,12 +86,12 @@ pub fn layout_paragraph(
 fn advance_clearance(
     obstructed: &mut usize,
     clearance: Clearance,
-) -> Result<f32, LayoutInputError> {
+) -> Result<f64, LayoutInputError> {
     *obstructed += 1;
     if *obstructed > MAX_CLEARANCE_PROBES {
         return Err(LayoutInputError::ClearanceExhausted);
     }
-    Ok(clearance.clear_at())
+    Ok(f64::from(clearance.clear_at()))
 }
 
 /// Checks that a geometry provider offers the first line a place to start.
@@ -119,7 +119,7 @@ fn probe_first_line(
         let GeometryAnswer::Obstructed(clearance) = probe else {
             return Ok(());
         };
-        block_start = advance_clearance(&mut obstructed, clearance)?;
+        block_start = advance_clearance(&mut obstructed, clearance)? as f32;
     }
 }
 
@@ -202,7 +202,7 @@ pub(super) struct Piece<'a> {
     pub(super) bytes: TextRange,
     pub(super) level: BidiLevel,
     /// Natural advance (a tab's is resolved at placement).
-    pub(super) width: f32,
+    pub(super) width: f64,
 }
 
 impl Piece<'_> {
@@ -252,7 +252,7 @@ pub(super) enum LineEnd<'a> {
 #[derive(Clone, Debug)]
 pub(super) struct Reshaped {
     pub(super) glyphs: Vec<RawShapedGlyph>,
-    pub(super) width: f32,
+    pub(super) width: f64,
 }
 
 /// Emergency re-shapes by validated paragraph-level cluster ID.
@@ -281,15 +281,15 @@ pub(super) struct Layout<'i, 'a> {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PlacedPiece<'a> {
     pub(super) piece: Piece<'a>,
-    pub(super) x: f32,
-    pub(super) width: f32,
+    pub(super) x: f64,
+    pub(super) width: f64,
     /// Justification space after a cluster, inside `width` (ST3-2).
-    pub(super) expansion: f32,
-    pub(super) y_shift: f32,
+    pub(super) expansion: f64,
+    pub(super) y_shift: f64,
     /// Leading blank trimmed from a CJK punctuation cluster.
-    pub(super) lead_trim: f32,
+    pub(super) lead_trim: f64,
     /// Trailing blank trimmed from a CJK punctuation cluster.
-    pub(super) trail_trim: f32,
+    pub(super) trail_trim: f64,
 }
 
 /// Where the next line starts: its first token, the break it starts after
@@ -299,7 +299,7 @@ pub(super) struct LineCursor<'a> {
     pub(super) token_start: TokenIdx,
     pub(super) start_break: Option<&'a DiscretionaryNode>,
     pub(super) byte_start: usize,
-    pub(super) block_top: f32,
+    pub(super) block_top: f64,
     pub(super) index: usize,
 }
 
@@ -325,12 +325,13 @@ impl<'a> LineCursor<'a> {
     }
 
     /// The padding cloned before the line's first piece (spec ST2-3).
-    pub(super) fn post_break_width(&self) -> f32 {
-        self.start_break.map_or(0.0, |b| b.post_break_width)
+    pub(super) fn post_break_width(&self) -> f64 {
+        self.start_break
+            .map_or(0.0, |b| f64::from(b.post_break_width))
     }
 
     /// Moves past the line that ended at `end` and was `line_height` tall.
-    fn advance(&mut self, end: LineEnd<'a>, tokens: &SentinelTokens<Token<'_>>, line_height: f32) {
+    fn advance(&mut self, end: LineEnd<'a>, tokens: &SentinelTokens<Token<'_>>, line_height: f64) {
         self.block_top += line_height;
         self.index += 1;
         match end {
@@ -412,11 +413,11 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut cursor = LineCursor::paragraph_start();
         let mut scratch = LayoutScratch::default();
         loop {
-            let (line, end) = self.place_next_line(&mut cursor, &mut scratch)?;
-            cursor.advance(end, &self.tokens, line.line_height);
+            let (line, end, line_height) = self.place_next_line(&mut cursor, &mut scratch)?;
+            cursor.advance(end, &self.tokens, line_height);
             lines.push(line);
             if cursor.is_paragraph_end(&self.tokens) {
-                return Ok((lines, cursor.block_top));
+                return Ok((lines, cursor.block_top as f32));
             }
         }
     }
@@ -426,15 +427,20 @@ impl<'i, 'a> Layout<'i, 'a> {
         &mut self,
         cursor: &mut LineCursor<'a>,
         scratch: &mut LayoutScratch<'a>,
-    ) -> Result<(PositionedLine, LineEnd<'a>), LayoutInputError> {
-        let strut_height = self.strut.line_height();
+    ) -> Result<(PositionedLine, LineEnd<'a>, f64), LayoutInputError> {
+        let strut_height = f64::from(self.strut.ascent)
+            + f64::from(self.strut.descent)
+            + f64::from(self.strut.line_gap);
         let has_provider = self.inputs.constraints().geometry_provider.is_some();
         let mut obstructed = 0;
         'place: loop {
             let mut envelope = strut_height;
-            let answer =
-                self.inputs
-                    .line_geometry(cursor.index, cursor.block_top, envelope, None)?;
+            let answer = self.inputs.line_geometry(
+                cursor.index,
+                cursor.block_top as f32,
+                envelope as f32,
+                None,
+            )?;
             let mut geometry = match answer {
                 GeometryAnswer::Open(geometry) => geometry,
                 GeometryAnswer::Obstructed(clearance) => {
@@ -445,22 +451,22 @@ impl<'i, 'a> Layout<'i, 'a> {
             for _ in 0..MAX_ENVELOPE_REFITS {
                 let slot = geometry.first_slot();
                 let LineFit { end, reshapes } = self.fit(cursor, slot);
-                let line = self.place(cursor, end, &geometry, &reshapes, scratch)?;
-                if within(line.line_height, envelope) || !has_provider {
+                let (line, line_height) = self.place(cursor, end, &geometry, &reshapes, scratch)?;
+                if within(line_height, envelope) || !has_provider {
                     self.reshaped.extend(reshapes);
-                    return Ok((line, end));
+                    return Ok((line, end, line_height));
                 }
-                envelope = line.line_height;
+                envelope = line_height;
                 let expanded = self.inputs.line_geometry(
                     cursor.index,
-                    cursor.block_top,
-                    envelope,
+                    cursor.block_top as f32,
+                    envelope as f32,
                     Some(geometry.geometry()),
                 )?;
                 match expanded {
                     GeometryAnswer::Open(open) if open == geometry => {
                         self.reshaped.extend(reshapes);
-                        return Ok((line, end));
+                        return Ok((line, end, line_height));
                     }
                     GeometryAnswer::Open(open) => geometry = open,
                     GeometryAnswer::Obstructed(clearance) => {
@@ -490,7 +496,7 @@ fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> SentinelTokens<Token<'a>> {
                         kind: PieceKind::Cluster { run, cluster },
                         bytes: info.byte_range,
                         level: info.bidi_level,
-                        width: info.natural_width,
+                        width: f64::from(info.natural_width),
                     })
                 }));
             }
@@ -498,7 +504,7 @@ fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> SentinelTokens<Token<'a>> {
                 kind: PieceKind::Object(object),
                 bytes: object.byte_range,
                 level: object.bidi_level,
-                width: object.width,
+                width: f64::from(object.width),
             })),
             WordNode::Box(BoxNode::SpanBoundary {
                 byte_range,
@@ -513,13 +519,13 @@ fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> SentinelTokens<Token<'a>> {
                 },
                 bytes: *byte_range,
                 level: *bidi_level,
-                width: *width,
+                width: f64::from(*width),
             })),
             WordNode::Glue(glue) => tokens.push(Token::Piece(Piece {
                 kind: PieceKind::Glue(glue),
                 bytes: glue.byte_range,
                 level: glue.bidi_level,
-                width: glue.natural_width,
+                width: f64::from(glue.natural_width),
             })),
             WordNode::Tab { byte_range } => tokens.push(Token::Piece(Piece {
                 kind: PieceKind::Tab,
@@ -537,7 +543,7 @@ fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> SentinelTokens<Token<'a>> {
 /// `ribbon_offset` monotonically in logical order per `span_id` across lines
 /// and writes each span's total advance into `total_span_advance`.
 fn backfill_span_ribbons(lines: &mut [PositionedLine]) {
-    let mut totals: HashMap<u64, f32> = HashMap::new();
+    let mut totals: HashMap<u64, f64> = HashMap::new();
     for line in lines.iter_mut() {
         if line.span_fragments.is_empty() {
             continue;
@@ -547,8 +553,8 @@ fn backfill_span_ribbons(lines: &mut [PositionedLine]) {
         ordered.sort_by_key(|f| (f.byte_range.start(), f.byte_range.end()));
         for f in ordered {
             let acc = totals.entry(f.span_id).or_insert(0.0);
-            f.ribbon_offset = *acc;
-            *acc += f.width;
+            f.ribbon_offset = *acc as f32;
+            *acc += f64::from(f.width);
         }
     }
     if totals.is_empty() {
@@ -557,7 +563,7 @@ fn backfill_span_ribbons(lines: &mut [PositionedLine]) {
     for line in lines.iter_mut() {
         for f in &mut line.span_fragments {
             if let Some(&total) = totals.get(&f.span_id) {
-                f.total_span_advance = total;
+                f.total_span_advance = total as f32;
             }
         }
     }
@@ -697,9 +703,9 @@ mod tests {
 
     #[test]
     fn layout_piece_and_token_sizes_stay_compact() {
-        // 8-byte typed IDs keep `PieceKind` at 16B, `Piece`/`Token` at 40B,
-        // and `PlacedPiece` at 64B (a single 64B cache line).
-        assert_eq!(core::mem::size_of::<Token<'_>>(), 40);
-        assert_eq!(core::mem::size_of::<PlacedPiece<'_>>(), 64);
+        // 8-byte typed IDs keep `PieceKind` at 16B, `Piece`/`Token` at 48B
+        // (with `f64` width), and `PlacedPiece` at 96B (six `f64` fields).
+        assert_eq!(core::mem::size_of::<Token<'_>>(), 48);
+        assert_eq!(core::mem::size_of::<PlacedPiece<'_>>(), 96);
     }
 }

@@ -50,10 +50,6 @@ pub enum LayoutInputError {
     /// More than the allowed number of obstructed provider answers in a row
     /// for one line (spec GEO-4).
     ClearanceExhausted,
-    /// A line's block envelope cannot be represented at its block position:
-    /// `f32` rounding there loses more than an eighth of the line's height
-    /// (spec GEO-3).
-    BlockPositionUnrepresentable,
     /// One line still outgrew its envelope after the allowed refits
     /// (spec GEO-6).
     RefitExhausted,

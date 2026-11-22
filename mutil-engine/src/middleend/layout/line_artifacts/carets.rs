@@ -3,7 +3,7 @@
 use crate::frontend::GlueKind;
 use crate::middleend::layout::line_builder::AlignedLine;
 use crate::middleend::layout::{Layout, PieceKind, PlacedPiece, Reshapes};
-use crate::middleend::tolerance::approx_eq;
+use crate::middleend::tolerance::approx_eq_f64;
 use crate::middleend::{
     CaretAffinity, CaretStop, HangingWhitespaceMode, PositionedInlineBox, VisualGlyphRun,
     resolve_ligature_carets,
@@ -16,7 +16,7 @@ use smallvec::SmallVec;
 /// start, and the level of its entity if that renders.
 #[derive(Clone, Copy)]
 struct RawStop {
-    x: f32,
+    x: f64,
     offset: usize,
     affinity: CaretAffinity,
     level: Option<BidiLevel>,
@@ -30,7 +30,7 @@ struct RawStop {
 pub(in crate::middleend::layout) struct CaretScratch {
     raw: Vec<RawStop>,
     /// `(offset, x, index)` tuples sorted by offset for non-monotone dedup.
-    by_offset: Vec<(usize, f32, usize)>,
+    by_offset: Vec<(usize, f64, usize)>,
     /// `(offset, index)` pairs sorted by offset.
     pairs: Vec<(usize, usize)>,
     entities: Vec<Entity>,
@@ -115,7 +115,7 @@ impl Layout<'_, '_> {
             return raw
                 .iter()
                 .map(|s| CaretStop {
-                    x: s.x,
+                    x: s.x as f32,
                     offset: s.offset,
                     affinity: s.affinity,
                     level: s.level.unwrap_or(base_level),
@@ -129,7 +129,7 @@ impl Layout<'_, '_> {
         let mut level_at = |offset: usize| levels.at(runs, boxes, offset).unwrap_or(base_level);
         raw.iter()
             .map(|s| CaretStop {
-                x: s.x,
+                x: s.x as f32,
                 offset: s.offset,
                 affinity: s.affinity,
                 level: s.level.unwrap_or_else(|| level_at(s.offset)),
@@ -162,7 +162,7 @@ impl Layout<'_, '_> {
             PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => None,
             _ => Some(p.level),
         };
-        let edge = |x: f32, affinity: CaretAffinity| RawStop {
+        let edge = |x: f64, affinity: CaretAffinity| RawStop {
             x,
             offset: match affinity {
                 CaretAffinity::Downstream => p.bytes.start(),
@@ -202,9 +202,9 @@ impl Layout<'_, '_> {
                 offsets.reverse();
             }
             let origin = placed.x + if rtl { placed.expansion } else { 0.0 };
-            let positions = resolve_ligature_carets(width, c.atom_count(), &carets);
+            let positions = resolve_ligature_carets(width as f32, c.atom_count(), &carets);
             raw.extend(positions.iter().zip(offsets).map(|(&pos, offset)| RawStop {
-                x: origin + pos,
+                x: origin + f64::from(pos),
                 offset,
                 affinity: CaretAffinity::Downstream,
                 level,
@@ -223,7 +223,7 @@ impl Layout<'_, '_> {
 /// offset, not with its recent neighbours.
 ///
 /// `by_offset` is a working buffer.
-fn distinct_stops(raw: &mut Vec<RawStop>, by_offset: &mut Vec<(usize, f32, usize)>) {
+fn distinct_stops(raw: &mut Vec<RawStop>, by_offset: &mut Vec<(usize, f64, usize)>) {
     // Fast path: when offsets are already monotone (pure LTR or pure RTL),
     // equal offsets are contiguous and in emission order, so deduplication is
     // one linear in-place pass with no sort.
@@ -231,13 +231,13 @@ fn distinct_stops(raw: &mut Vec<RawStop>, by_offset: &mut Vec<(usize, f32, usize
         raw.is_sorted_by_key(|s| s.offset) || raw.is_sorted_by(|a, b| a.offset >= b.offset);
     if monotone {
         let mut current_offset: Option<usize> = None;
-        let mut kept_xs: SmallVec<[f32; 4]> = SmallVec::new();
+        let mut kept_xs: SmallVec<[f64; 4]> = SmallVec::new();
         raw.retain(|stop| {
             if current_offset != Some(stop.offset) {
                 current_offset = Some(stop.offset);
                 kept_xs.clear();
             }
-            if kept_xs.iter().any(|&x| approx_eq(x, stop.x)) {
+            if kept_xs.iter().any(|&x| approx_eq_f64(x, stop.x)) {
                 return false;
             }
             kept_xs.push(stop.x);
@@ -249,11 +249,11 @@ fn distinct_stops(raw: &mut Vec<RawStop>, by_offset: &mut Vec<(usize, f32, usize
     by_offset.extend(raw.iter().enumerate().map(|(i, s)| (s.offset, s.x, i)));
     // Stable: emission order within an offset.
     by_offset.sort_by_key(|&(offset, ..)| offset);
-    let mut kept_xs: SmallVec<[f32; 4]> = SmallVec::new();
+    let mut kept_xs: SmallVec<[f64; 4]> = SmallVec::new();
     for same in by_offset.chunk_by(|a, b| a.0 == b.0) {
         kept_xs.clear();
         for &(_, x, i) in same {
-            if kept_xs.iter().any(|&kept| approx_eq(kept, x)) {
+            if kept_xs.iter().any(|&kept| approx_eq_f64(kept, x)) {
                 if let Some(stop) = raw.get_mut(i) {
                     stop.dropped = true;
                 }
@@ -279,7 +279,7 @@ fn resolve_ordered_shared_offsets(stops: &mut Vec<RawStop>, soft_wrap: bool) {
         let level = first.level;
         let last_x = rest.last().map_or(x, |s| s.x);
         let merges =
-            level.is_some() && rest.iter().all(|s| s.level == level) && !approx_eq(x, last_x);
+            level.is_some() && rest.iter().all(|s| s.level == level) && !approx_eq_f64(x, last_x);
         if merges {
             first.x = (x + last_x) / 2.0;
             first.affinity = if soft_wrap && Some(offset) == last_offset {
@@ -292,7 +292,7 @@ fn resolve_ordered_shared_offsets(stops: &mut Vec<RawStop>, soft_wrap: bool) {
                 dropped.dropped = true;
             }
             any_merged = true;
-        } else if !rest.iter().any(|s| !approx_eq(s.x, x)) {
+        } else if !rest.iter().any(|s| !approx_eq_f64(s.x, x)) {
             first.affinity = CaretAffinity::Downstream;
             first.level = None;
             for s in rest.iter_mut() {
@@ -343,7 +343,7 @@ fn resolve_shared_offsets(
             && same
                 .iter()
                 .all(|&(_, i)| stops.get(i).is_some_and(|s| s.level == level))
-            && !approx_eq(x, last_stop.x);
+            && !approx_eq_f64(x, last_stop.x);
         if merges {
             if let Some(s) = stops.get_mut(first) {
                 s.x = (x + last_stop.x) / 2.0;
@@ -356,7 +356,7 @@ fn resolve_shared_offsets(
             any_merged = true;
         } else if same
             .iter()
-            .any(|&(_, i)| stops.get(i).is_some_and(|s| !approx_eq(s.x, x)))
+            .any(|&(_, i)| stops.get(i).is_some_and(|s| !approx_eq_f64(s.x, x)))
         {
             continue;
         }

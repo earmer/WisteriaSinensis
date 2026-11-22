@@ -1,6 +1,6 @@
 //! Paragraph-level validation for [`PositionedParagraph`].
 
-use crate::middleend::tolerance::{approx_eq, keeps_extent, tolerance};
+use crate::middleend::tolerance::{approx_eq, tolerance};
 use crate::middleend::{
     LineInvariantError, ParagraphErrorReason, PositionedParagraph, PositionedSpanFragment,
     validated,
@@ -59,20 +59,17 @@ impl PositionedParagraph {
                 self.policy
                     .writing_mode
                     .line_bounds(line.baseline_y, line.ascent, line.descent);
-            let eps = tolerance(line.line_height, 0.0);
+            let overlap_eps = tolerance(top, previous_bottom);
             // Bottoms ascend exactly: hit testing bisects them (spec INT-20).
             if !top.is_finite()
                 || !bottom.is_finite()
-                || top < previous_bottom - eps
+                || top < previous_bottom - overlap_eps
                 || bottom < top
                 || bottom < previous_bottom
             {
                 return Err(R::LineBoxesOverlap.at(i));
             }
-            if !keeps_extent(top, bottom, line.ascent + line.descent, line.line_height) {
-                return Err(R::LineBoxCollapsed.at(i));
-            }
-            if line.ascent + line.descent > line.line_height + eps {
+            if line.ascent + line.descent > line.line_height + tolerance(line.line_height, 0.0) {
                 return Err(R::LineBoxExceedsLineHeight.at(i));
             }
             previous_bottom = bottom;

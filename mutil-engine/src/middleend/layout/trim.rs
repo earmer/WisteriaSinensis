@@ -34,7 +34,7 @@ impl PunctTrimClass {
     }
 
     /// Maximum leading blank that may be trimmed from this cluster.
-    pub(super) fn max_lead(self, font_size: f32) -> f32 {
+    pub(super) fn max_lead(self, font_size: f64) -> f64 {
         match self {
             Self::Open => 0.5 * font_size,
             Self::MiddleDot => 0.25 * font_size,
@@ -43,7 +43,7 @@ impl PunctTrimClass {
     }
 
     /// Maximum trailing blank that may be trimmed from this cluster.
-    pub(super) fn max_trail(self, font_size: f32) -> f32 {
+    pub(super) fn max_trail(self, font_size: f64) -> f64 {
         match self {
             Self::Close => 0.5 * font_size,
             Self::MiddleDot => 0.25 * font_size,
@@ -57,7 +57,7 @@ impl PunctTrimClass {
 pub(super) struct TrimInfo {
     pub(super) class: PunctTrimClass,
     pub(super) policy: CjkPunctuationTrim,
-    pub(super) font_size: f32,
+    pub(super) font_size: f64,
 }
 
 /// Resolves `CjkPunctuationTrim::Auto` against a run's locale.
@@ -89,7 +89,7 @@ pub(super) fn is_trim_transparent(piece: &Piece<'_>) -> bool {
 
 /// Leading trim for an opening mark at the start of a line (no prior content,
 /// `post_break_width == 0.0`).
-pub(super) fn line_start_lead_trim(info: TrimInfo, is_soft_wrap: bool) -> f32 {
+pub(super) fn line_start_lead_trim(info: TrimInfo, is_soft_wrap: bool) -> f64 {
     if info.class != PunctTrimClass::Open {
         return 0.0;
     }
@@ -101,7 +101,7 @@ pub(super) fn line_start_lead_trim(info: TrimInfo, is_soft_wrap: bool) -> f32 {
 }
 
 /// Static side-slot trim `(trail_on_a, lead_on_b)` for an adjacent pair `(a, b)`.
-pub(super) fn pair_trim(a: TrimInfo, b: TrimInfo) -> (f32, f32) {
+pub(super) fn pair_trim(a: TrimInfo, b: TrimInfo) -> (f64, f64) {
     use PunctTrimClass::{Close, MiddleDot, Open};
     match (a.class, b.class) {
         (Close, Close) | (Close, Open) => (0.5 * a.font_size, 0.0),
@@ -124,7 +124,7 @@ impl Layout<'_, '_> {
         &self,
         run: RunId,
         cluster: ClusterId,
-        raw_width: f32,
+        raw_width: f64,
     ) -> Option<TrimInfo> {
         let r = self.inputs.run(run);
         let policy = effective_trim_policy(self.options.cjk_punctuation_trim, &r.locale);
@@ -133,13 +133,14 @@ impl Layout<'_, '_> {
         }
         let c = self.inputs.cluster(cluster);
         let class = PunctTrimClass::from_flags(c.flags)?;
-        if raw_width <= COMPRESSED_PAIR_FRACTION * r.font_size {
+        let font_size = f64::from(r.font_size);
+        if raw_width <= f64::from(COMPRESSED_PAIR_FRACTION) * font_size {
             return None;
         }
         Some(TrimInfo {
             class,
             policy,
-            font_size: r.font_size,
+            font_size,
         })
     }
 
@@ -150,7 +151,7 @@ impl Layout<'_, '_> {
         piece: &Piece<'_>,
         is_soft_wrap: bool,
         pending: Option<&Reshapes>,
-    ) -> f32 {
+    ) -> f64 {
         let PieceKind::Cluster { run, cluster } = piece.kind else {
             return 0.0;
         };

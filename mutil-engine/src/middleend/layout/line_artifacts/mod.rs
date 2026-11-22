@@ -11,7 +11,7 @@ use super::{Layout, Piece, PieceKind, PlacedPiece};
 use crate::frontend::{
     BoxDecorationBreak, DiscretionaryNode, InlineDecorationSpan, MAX_DECORATION_NESTING_DEPTH,
 };
-use crate::middleend::tolerance::tolerance;
+use crate::middleend::tolerance::tolerance_f64;
 use crate::middleend::validated::{BodyIdx, SpanId, VisualOrder};
 use crate::middleend::{
     AtomicFragment, DecorationKind, DecorationLine, InlineSlotConstraint, LayoutInputError,
@@ -34,8 +34,8 @@ enum GroupKind {
 /// One group of a span's pieces on a line: contiguous in visual order and in
 /// logical order (spec ST2-3, FRG-1, FRG-3).
 pub(super) struct VisualGroup {
-    pub(super) lo: f32,
-    pub(super) hi: f32,
+    pub(super) lo: f64,
+    pub(super) hi: f64,
     bytes: TextRange,
     /// Visual-order bounds `(first_v, last_v)` in `line.order`; `None` for a
     /// synthetic trailing-only or cloned-padding group.
@@ -86,7 +86,7 @@ impl VisualIndex {
         let placed_t = order.table(placed);
         let mut pos_t = order.table_mut(&mut self.position);
         let mut solid = 0;
-        let mut prev_end = f32::NEG_INFINITY;
+        let mut prev_end = f64::NEG_INFINITY;
         for (v, k) in order.indices().enumerate() {
             let p = placed_t.get(k);
             pos_t.set(k, Some(v));
@@ -117,7 +117,7 @@ impl VisualIndex {
         placed: &[PlacedPiece<'_>],
         order: &VisualOrder,
         first_v: Option<usize>,
-        limit: f32,
+        limit: f64,
         is_member: &impl Fn(&Piece<'_>) -> bool,
     ) -> bool {
         if self.ordered_x {
@@ -125,13 +125,13 @@ impl VisualIndex {
             return self.first_wide.is_some_and(|(v, k)| {
                 first_v.is_none_or(|fv| v < fv) && {
                     let x = placed_t.get(k).x;
-                    x < limit - tolerance(x, limit)
+                    x < limit - tolerance_f64(x, limit)
                 }
             });
         }
-        order
-            .pick(placed)
-            .any(|p| p.width > 0.0 && !is_member(&p.piece) && p.x < limit - tolerance(p.x, limit))
+        order.pick(placed).any(|p| {
+            p.width > 0.0 && !is_member(&p.piece) && p.x < limit - tolerance_f64(p.x, limit)
+        })
     }
 
     /// Whether any positive-width non-member body piece ends strictly right
@@ -143,7 +143,7 @@ impl VisualIndex {
         placed: &[PlacedPiece<'_>],
         order: &VisualOrder,
         last_v: Option<usize>,
-        limit: f32,
+        limit: f64,
         is_member: &impl Fn(&Piece<'_>) -> bool,
     ) -> bool {
         if self.ordered_x {
@@ -152,13 +152,13 @@ impl VisualIndex {
                 last_v.is_none_or(|lv| v > lv) && {
                     let p = placed_t.get(k);
                     let end = p.x + p.width;
-                    end > limit + tolerance(end, limit)
+                    end > limit + tolerance_f64(end, limit)
                 }
             });
         }
         order.pick(placed).any(|p| {
             let end = p.x + p.width;
-            p.width > 0.0 && !is_member(&p.piece) && end > limit + tolerance(end, limit)
+            p.width > 0.0 && !is_member(&p.piece) && end > limit + tolerance_f64(end, limit)
         })
     }
 }
@@ -244,8 +244,8 @@ fn pieces_meeting(placed: &[PlacedPiece<'_>], range: TextRange) -> Range<usize> 
 /// there; the break's whole width there (padding and its own edit), which
 /// the edge's padding starts from; and the line's empty edge bytes.
 struct ClonedEdge {
-    clones: SmallVec<[(SpanId, f32); MAX_DECORATION_NESTING_DEPTH]>,
-    break_width: f32,
+    clones: SmallVec<[(SpanId, f64); MAX_DECORATION_NESTING_DEPTH]>,
+    break_width: f64,
     bytes: TextRange,
 }
 
@@ -266,13 +266,15 @@ impl ClonedEdge {
             candidates
                 .filter_map(|id| {
                     let span = inputs.decoration_span(id);
-                    cloned.contains(&span.span_id).then(|| (id, padding(span)))
+                    cloned
+                        .contains(&span.span_id)
+                        .then(|| (id, f64::from(padding(span))))
                 })
                 .collect()
         };
         Self {
             clones,
-            break_width: brk.map_or(0.0, break_width),
+            break_width: brk.map_or(0.0, |b| f64::from(break_width(b))),
             bytes: TextRange::empty_at(at),
         }
     }
@@ -315,9 +317,9 @@ impl ClonedEdge {
 struct PaddingSide {
     cloned: bool,
     own_cloned: bool,
-    outside: f32,
-    inside: f32,
-    break_width: f32,
+    outside: f64,
+    inside: f64,
+    break_width: f64,
     bytes: TextRange,
 }
 
@@ -502,7 +504,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         // spans enclosing it.
         let (line_lo, line_hi) = (line.bounds.body_lo - left.break_width, line.bounds.body_hi);
         let (span_lo, span_hi) = (line_lo + left.outside, line_hi - right.outside);
-        let group = |lo: f32, hi: f32, bytes: TextRange, kind: GroupKind| VisualGroup {
+        let group = |lo: f64, hi: f64, bytes: TextRange, kind: GroupKind| VisualGroup {
             lo,
             hi,
             bytes,
@@ -580,8 +582,8 @@ impl<'i, 'a> Layout<'i, 'a> {
         line: &AlignedLine<'_, '_>,
         line_box: &LineBoxMetrics,
         slot: InlineSlotConstraint,
-    ) -> (f32, f32) {
-        let strut = (self.strut.ascent, self.strut.descent);
+    ) -> (f64, f64) {
+        let strut = (f64::from(self.strut.ascent), f64::from(self.strut.descent));
         match span.height_style {
             BoxHeightStyle::Strut => strut,
             BoxHeightStyle::Max => (line_box.ascent, line_box.descent),
@@ -589,7 +591,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 let Some((first_v, last_v)) = g.visual_span else {
                     return strut;
                 };
-                let (mut ascent, mut descent) = (0.0_f32, 0.0_f32);
+                let (mut ascent, mut descent) = (0.0_f64, 0.0_f64);
                 let mut any_item = false;
                 for p in line.order.pick_range(line.placed, first_v, last_v) {
                     match p.piece.kind {
@@ -600,9 +602,9 @@ impl<'i, 'a> Layout<'i, 'a> {
                                     .get(&(font.font_id.0, font.scale.to_bits(), run))
                             {
                                 let (a, d) = if self.ast.writing_mode.is_vertical() {
-                                    (m.vertical_ascent, m.vertical_descent)
+                                    (f64::from(m.vertical_ascent), f64::from(m.vertical_descent))
                                 } else {
-                                    (m.ascent, m.descent)
+                                    (f64::from(m.ascent), f64::from(m.descent))
                                 };
                                 ascent = ascent.max(a + p.y_shift);
                                 descent = descent.max(d - p.y_shift);
@@ -639,10 +641,10 @@ impl<'i, 'a> Layout<'i, 'a> {
                 span_id: span.span_id,
                 span_range: span.byte_range,
                 byte_range: g.bytes,
-                x: g.lo,
-                width: g.hi - g.lo,
-                ascent,
-                descent,
+                x: g.lo as f32,
+                width: (g.hi - g.lo) as f32,
+                ascent: ascent as f32,
+                descent: descent as f32,
                 bidi_level: g.level,
                 edges,
                 ribbon_offset: 0.0,
@@ -685,8 +687,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                     atomic_id: span.span_id,
                     full_byte_range: full,
                     fragment_byte_range: TextRange::new(covered, end),
-                    x: g.lo,
-                    width: g.hi - g.lo,
+                    x: g.lo as f32,
+                    width: (g.hi - g.lo) as f32,
                     bidi_level: g.level,
                 });
                 covered = end;
@@ -713,6 +715,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             DecorationKind::Strikethrough => |m| m.strikeout_position,
         };
         let mut open: Option<DecorationLine> = None;
+        let (mut open_x, mut open_right) = (0.0_f64, 0.0_f64);
         // Glue after the open segment joins only if a decorated cluster follows.
         let mut pending_glue: Option<TextRange> = None;
         for &p in line.order.pick(line.placed) {
@@ -720,14 +723,18 @@ impl<'i, 'a> Layout<'i, 'a> {
             match p.piece.kind {
                 PieceKind::Cluster { run, cluster } if drawn(self.inputs.run(run).decoration) => {
                     let m = self.cluster_metrics(run, cluster)?;
-                    let (y_offset, thickness) = (position(m) + p.y_shift, m.underline_thickness);
+                    let (y_offset, thickness) = (
+                        (f64::from(position(m)) + p.y_shift) as f32,
+                        m.underline_thickness,
+                    );
                     let right = p.x + p.width;
                     let Some(segment) = open.as_mut() else {
+                        (open_x, open_right) = (p.x, right);
                         open = Some(DecorationLine {
                             kind,
                             byte_range: bytes,
-                            x: p.x,
-                            width: right - p.x,
+                            x: p.x as f32,
+                            width: (right - p.x) as f32,
                             y_offset,
                             thickness,
                         });
@@ -736,7 +743,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                     if let Some(glue) = pending_glue.take() {
                         segment.byte_range = segment.byte_range.cover(glue);
                     }
-                    segment.width = right.max(segment.x + segment.width) - segment.x;
+                    open_right = right.max(open_right);
+                    segment.width = (open_right - open_x) as f32;
                     segment.byte_range = segment.byte_range.cover(bytes);
                     if kind == DecorationKind::Underline && y_offset < segment.y_offset {
                         segment.y_offset = y_offset;
