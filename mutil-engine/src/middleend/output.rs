@@ -531,13 +531,15 @@ impl LayoutPolicySnapshot {
     /// `resolve` produced it.
     #[must_use]
     pub fn is_valid(&self) -> bool {
+        let wrap_ok = self.wrap_width == f32::INFINITY
+            || (self.wrap_width > 0.0 && is_measurement(self.wrap_width));
         let indents_are_valid = match self.slot_source {
             SlotSource::Standard {
                 first_line_indent,
                 hanging_indent,
             } => [first_line_indent, hanging_indent]
                 .into_iter()
-                .all(|indent| (0.0..self.wrap_width).contains(&indent)),
+                .all(|indent| is_measurement(indent) && (0.0..self.wrap_width).contains(&indent)),
             SlotSource::Provider => true,
         };
         let strut_box_is_valid = self.strut.ascent + self.strut.descent >= 0.0
@@ -545,7 +547,7 @@ impl LayoutPolicySnapshot {
         self.strut.is_valid()
             && strut_box_is_valid
             && self.line_height.is_valid()
-            && self.wrap_width > 0.0
+            && wrap_ok
             && indents_are_valid
             && self.clamp.as_ref().is_none_or(LineClampPolicy::is_valid)
     }

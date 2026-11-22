@@ -328,13 +328,16 @@ impl Default for LayoutConstraints {
 }
 
 impl LayoutConstraints {
-    /// Positive `wrap_width`, finite indents, each in `[0, wrap_width)` without a provider.
+    /// Positive `wrap_width` (infinite or a measurement), measurement indents,
+    /// each in `[0, wrap_width)` without a provider.
     #[must_use]
     pub fn is_valid(&self) -> bool {
+        let wrap_ok = self.wrap_width == f32::INFINITY
+            || (self.wrap_width > 0.0 && is_measurement(self.wrap_width));
         let in_envelope = |indent: f32| indent >= 0.0 && indent < self.wrap_width;
-        self.wrap_width > 0.0
-            && self.first_line_indent.is_finite()
-            && self.hanging_indent.is_finite()
+        wrap_ok
+            && is_measurement(self.first_line_indent)
+            && is_measurement(self.hanging_indent)
             && (self.geometry_provider.is_some()
                 || (in_envelope(self.first_line_indent) && in_envelope(self.hanging_indent)))
     }
@@ -602,8 +605,10 @@ mod tests {
     fn standard_slots_start_inside_the_wrap_envelope() {
         assert!(constraints(0.0, 0.0, 100.0).is_valid());
         assert!(constraints(99.0, 50.0, 100.0).is_valid());
-        // Unbounded width: any non-negative finite indent.
-        assert!(constraints(1e9, 0.0, f32::INFINITY).is_valid());
+        // Unbounded width: any non-negative measurement indent.
+        assert!(constraints(crate::types::MAX_MEASUREMENT, 0.0, f32::INFINITY).is_valid());
+        assert!(!constraints(1e9, 0.0, f32::INFINITY).is_valid());
+        assert!(!constraints(0.0, 0.0, 1e9).is_valid());
         for (first, hanging) in [
             (-1.0, 0.0),
             (0.0, -1.0),

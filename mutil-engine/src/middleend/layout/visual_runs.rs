@@ -129,11 +129,19 @@ impl<'i, 'a> Layout<'i, 'a> {
                         visible_end = visible_end.max(p.piece.bytes.end());
                     }
                     let trim = p.lead_trim + p.trail_trim;
+                    let ltr_expansion = if rtl { 0.0 } else { p.expansion };
                     let mut scan = |it: &mut dyn Iterator<Item = &RawShapedGlyph>| {
+                        let mut last = None;
                         for (_, s, adv) in trimmed_glyphs(pen, trim, it) {
                             if adv != 0.0 {
                                 extend_extent(&mut extent, s, s + adv);
                             }
+                            last = Some((s, adv));
+                        }
+                        if ltr_expansion != 0.0
+                            && let Some((s, adv)) = last
+                        {
+                            extend_extent(&mut extent, s, s + adv + ltr_expansion);
                         }
                     };
                     if rtl {

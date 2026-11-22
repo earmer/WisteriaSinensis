@@ -136,11 +136,11 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// (spec ST3-1): a stop further than the slot's width is not reachable.
     pub(super) fn reachable_stop(&self, distance: f64, slot: InlineSlotConstraint) -> Option<f64> {
         let width = f64::from(slot.width());
-        self.inputs
-            .constraints()
-            .tab_stops
-            .next_stop(distance as f32)
-            .map(f64::from)
+        let step = f64::from(self.inputs.constraints().tab_stops.step());
+        let next = ((distance / step).floor() + 1.0) * step;
+        [next, distance + step]
+            .into_iter()
+            .find(|&stop| stop.is_finite() && stop > distance)
             .filter(|&stop| within(stop, width))
     }
 
