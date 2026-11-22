@@ -27,6 +27,7 @@ mod layout;
 mod line_only;
 mod long_word;
 mod motion_modes;
+mod parameterized_and_clamp;
 mod queries;
 mod seam_padding;
 mod shape_buffers;

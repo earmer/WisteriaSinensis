@@ -1,10 +1,4 @@
-//! Middle-end: layout options, the validators of the layout inputs and
-//! outputs, the output containers and the interaction types (spec §2.6, §5,
-//! §6).
-//!
-//! Layout breaks greedily with per-line L1/L2 bidi reordering (spec ME-2);
-//! justification, hanging punctuation, hyphenation, annotations, clamping and
-//! the optimising strategies are not implemented yet.
+//! Middle-end: options, validators, layout, and interaction (spec §2.6, §5, §6).
 
 mod badness;
 mod error_messages;
@@ -28,7 +22,7 @@ pub use interaction::{
     CaretVisual, CursorMove, CursorPosition, FlowMotion, HitResult, Motion, ParagraphEdge,
     Selection, SelectionRect, resolve_ligature_carets, utf8_to_utf16, utf16_to_utf8,
 };
-pub use layout::layout_paragraph;
+pub use layout::{break_lines_parameterized, layout_paragraph};
 pub use line_geometry::GlyphRole;
 pub use options::{
     CjkPunctuationTrim, HangEndMode, HangMode, HangStartMode, HangingWhitespaceMode,

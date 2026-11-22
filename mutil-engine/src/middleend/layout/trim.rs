@@ -1,8 +1,4 @@
 //! Layout-time side-slot trimming of full-width CJK punctuation (spec §5).
-//!
-//! Keeps `ParagraphAst` cluster widths and glyph advances immutable so
-//! `repair_seam` and `checked_reshape_window` never erase trims, and resolves
-//! per-cluster `(lead_trim, trail_trim)` cleanly per line.
 
 use super::{Layout, Piece, PieceKind, Reshapes};
 use crate::frontend::GlueKind;
@@ -11,7 +7,6 @@ use crate::middleend::CjkPunctuationTrim;
 use crate::middleend::validated::{ClusterId, RunId};
 use crate::types::{AtomFlags, LocaleTag};
 
-/// Trim class of a full-width CJK punctuation cluster (spec FE-31).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PunctTrimClass {
     Open,
@@ -20,7 +15,6 @@ pub(super) enum PunctTrimClass {
 }
 
 impl PunctTrimClass {
-    /// Extracts the trim class from a cluster's aggregated `AtomFlags`.
     pub(super) fn from_flags(flags: AtomFlags) -> Option<Self> {
         if flags.contains(AtomFlags::CJK_TRIM_OPEN) {
             Some(Self::Open)
@@ -33,7 +27,6 @@ impl PunctTrimClass {
         }
     }
 
-    /// Maximum leading blank that may be trimmed from this cluster.
     pub(super) fn max_lead(self, font_size: f64) -> f64 {
         match self {
             Self::Open => 0.5 * font_size,
@@ -42,7 +35,6 @@ impl PunctTrimClass {
         }
     }
 
-    /// Maximum trailing blank that may be trimmed from this cluster.
     pub(super) fn max_trail(self, font_size: f64) -> f64 {
         match self {
             Self::Close => 0.5 * font_size,
@@ -52,7 +44,6 @@ impl PunctTrimClass {
     }
 }
 
-/// Trim metadata for an eligible punctuation cluster.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TrimInfo {
     pub(super) class: PunctTrimClass,
@@ -60,7 +51,6 @@ pub(super) struct TrimInfo {
     pub(super) font_size: f64,
 }
 
-/// Resolves `CjkPunctuationTrim::Auto` against a run's locale.
 pub(super) fn effective_trim_policy(
     policy: CjkPunctuationTrim,
     locale: &LocaleTag,
@@ -77,8 +67,6 @@ pub(super) fn effective_trim_policy(
     }
 }
 
-/// Whether `piece` is transparent between adjacent punctuation clusters:
-/// zero-width span boundaries and `GlueKind::CjkPunctCompression`.
 pub(super) fn is_trim_transparent(piece: &Piece<'_>) -> bool {
     piece.is_edge_transparent()
         || matches!(
@@ -87,8 +75,6 @@ pub(super) fn is_trim_transparent(piece: &Piece<'_>) -> bool {
         )
 }
 
-/// Leading trim for an opening mark at the start of a line (no prior content,
-/// `post_break_width == 0.0`).
 pub(super) fn line_start_lead_trim(info: TrimInfo, is_soft_wrap: bool) -> f64 {
     if info.class != PunctTrimClass::Open {
         return 0.0;
@@ -100,7 +86,6 @@ pub(super) fn line_start_lead_trim(info: TrimInfo, is_soft_wrap: bool) -> f64 {
     }
 }
 
-/// Static side-slot trim `(trail_on_a, lead_on_b)` for an adjacent pair `(a, b)`.
 pub(super) fn pair_trim(a: TrimInfo, b: TrimInfo) -> (f64, f64) {
     use PunctTrimClass::{Close, MiddleDot, Open};
     match (a.class, b.class) {
@@ -115,11 +100,6 @@ pub(super) fn pair_trim(a: TrimInfo, b: TrimInfo) -> (f64, f64) {
 }
 
 impl Layout<'_, '_> {
-    /// Returns the trim metadata for `cluster` if it is eligible for
-    /// layout-time side-slot trimming: its effective policy is not `SpaceAll`,
-    /// it carries a punctuation trim class, and its untrimmed `raw_width`
-    /// exceeds `COMPRESSED_PAIR_FRACTION * font_size` (not already compressed
-    /// by `chws`).
     pub(super) fn cluster_trim_info(
         &self,
         run: RunId,
@@ -144,8 +124,6 @@ impl Layout<'_, '_> {
         })
     }
 
-    /// Leading trim applied to `piece` when it is the first visible content on
-    /// a line with `post_break_width == 0.0`.
     pub(super) fn start_edge_trim(
         &self,
         piece: &Piece<'_>,

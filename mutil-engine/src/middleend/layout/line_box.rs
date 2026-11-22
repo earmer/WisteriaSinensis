@@ -1,5 +1,4 @@
-//! The line box (spec §5 Stage 4, BAS-1): the line's ascent and descent
-//! from the strut and the items on it, and each item's baseline shift.
+//! Line-box metrics and baseline shifts (spec §5 Stage 4, BAS-1).
 
 use super::scratch::LogicalPiece;
 use super::{Layout, PieceKind};
@@ -15,8 +14,6 @@ enum LineRelativeEdge {
 }
 
 impl LineRelativeEdge {
-    /// The line-box edge an alignment is placed against, if it is placed
-    /// against the finished line box at all.
     fn of(align: BaselineAlignment) -> Option<Self> {
         match align {
             BaselineAlignment::LineTop => Some(Self::Top),
@@ -34,10 +31,6 @@ struct LineRelativeItem {
     below: f64,
 }
 
-/// Where an item's baseline goes, classified once from its alignment
-/// (BAS-1): against an edge of the finished line box, or shifted from the
-/// strut's baseline, with the extent it adds to the line when it counts
-/// (under `Normal`, and always for an object).
 enum BaselinePlacement {
     LineEdge(LineRelativeItem),
     StrutRelative {
@@ -46,7 +39,6 @@ enum BaselinePlacement {
     },
 }
 
-/// Single-entry metrics cache inside [`Layout::compute_line_box`].
 #[derive(Clone, Copy)]
 struct CachedClusterMetrics {
     font_id: u32,
@@ -63,8 +55,6 @@ pub(super) struct LineBoxMetrics {
 }
 
 impl Layout<'_, '_> {
-    /// Computes line-box ascent/descent and fills `y_shifts` with each body
-    /// piece's baseline shift, 0 for the others (spec §5 Stage 4, BAS-1).
     pub(super) fn compute_line_box(
         &mut self,
         placed: &[LogicalPiece<'_>],
@@ -72,6 +62,7 @@ impl Layout<'_, '_> {
         y_shifts: &mut Vec<f64>,
         byte_range: TextRange,
         slot: InlineSlotConstraint,
+        extra: Option<(f64, f64)>,
     ) -> Result<LineBoxMetrics, LayoutInputError> {
         y_shifts.clear();
         y_shifts.resize(placed.len(), 0.0);
@@ -79,6 +70,10 @@ impl Layout<'_, '_> {
         let mut shifts_t = order.table_mut(y_shifts);
         let normal = matches!(self.options.line_height, LineHeight::Normal);
         let (mut above, mut below) = half_leaded(self.strut);
+        if let Some((extra_above, extra_below)) = extra {
+            above = above.max(extra_above);
+            below = below.max(extra_below);
+        }
         let mut line_relative: Vec<LineRelativeItem> = Vec::new();
         let mut cached: Option<CachedClusterMetrics> = None;
         for k in order.indices() {
@@ -180,12 +175,8 @@ impl Layout<'_, '_> {
         Ok(metrics)
     }
 
-    /// The line box from the content's `above` and `below` the baseline: the
-    /// strut's under a fixed line height, or for an empty line (spec MET-3).
     fn resolve_line_box(&self, above: f64, below: f64, byte_range: TextRange) -> LineBoxMetrics {
-        let strut_height = f64::from(self.strut.ascent)
-            + f64::from(self.strut.descent)
-            + f64::from(self.strut.line_gap);
+        let strut_height = self.strut_height();
         let (ascent, descent, line_height) = match self.options.line_height {
             LineHeight::Fixed(_) => (
                 f64::from(self.strut.ascent),
@@ -206,8 +197,7 @@ impl Layout<'_, '_> {
     }
 }
 
-/// A strut's or box's ascent and descent with half its line gap added to each.
-fn half_leaded(m: StrutMetrics) -> (f64, f64) {
+pub(super) fn half_leaded(m: StrutMetrics) -> (f64, f64) {
     let half_gap = f64::from(m.line_gap) / 2.0;
     (
         f64::from(m.ascent) + half_gap,
@@ -215,8 +205,6 @@ fn half_leaded(m: StrutMetrics) -> (f64, f64) {
     )
 }
 
-/// A line-relative item taller than the line deepens it on its free side
-/// under `Normal` (spec BAS-1).
 fn deepen_for_line_relative(items: &[LineRelativeItem], above: &mut f64, below: &mut f64) {
     for item in items {
         let room = *above + *below;
@@ -230,8 +218,6 @@ fn deepen_for_line_relative(items: &[LineRelativeItem], above: &mut f64, below: 
     }
 }
 
-/// A font's offset of a named baseline from its alphabetic one, positive
-/// towards line-over (FNT-4); `None` for the other alignments.
 fn baseline_offset(align: BaselineAlignment, m: &FontMetrics) -> Option<f64> {
     match align {
         BaselineAlignment::Auto | BaselineAlignment::Alphabetic => Some(0.0),
@@ -245,9 +231,6 @@ fn baseline_offset(align: BaselineAlignment, m: &FontMetrics) -> Option<f64> {
     }
 }
 
-/// The shift of an item towards line-over (spec BAS-1): its own named
-/// baseline (a run's font's; an object's is its alphabetic one, `own` is
-/// `None`) onto the strut's, or an explicit offset.
 fn baseline_shift(align: BaselineAlignment, strut: &FontMetrics, own: Option<&FontMetrics>) -> f64 {
     match align {
         BaselineAlignment::Offset(offset) => f64::from(offset),

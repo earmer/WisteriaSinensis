@@ -1,13 +1,4 @@
-//! Tiered piecewise badness of a candidate line (spec §5 Stage 1.6.3).
-//!
-//! A pure function of the line's slack and its stretch / shrink capacities per
-//! glue tier. The beam line breaker (not yet implemented) calls it once per
-//! candidate; keeping it free of any layout state makes the curve testable on
-//! its own.
-//!
-//! The capacities are the net sums over the visible content `(a, b_vis]`:
-//! `Y_t` for `t in {0, 1, 2}` (stretch) and `Z_t` for `t in {0, 1}` (shrink;
-//! Tier 2, the ideographs, never shrinks below natural width).
+//! Tiered piecewise badness and Knuth-Plass demerits (spec §5 Stage 1.6.3, ST1-11).
 
 /// Slack with an absolute value at or below this counts as an exact fit.
 pub const FIT_EPSILON: f32 = 1e-3;
@@ -21,6 +12,10 @@ pub const OVERFULL_RATIO: f32 = -2.0;
 pub const UNDERFULL_BADNESS_CAP: f32 = 100_000.0;
 /// Maximum underfull badness; saturated candidates retain excess-slack ordering.
 pub const MAX_BADNESS: f32 = UNDERFULL_BADNESS_CAP;
+
+pub(crate) const FLAGGED_ALPHA: f64 = 100.0;
+pub(crate) const FITNESS_GAMMA: f64 = 100.0;
+pub(crate) const RUNT_PENALTY: f64 = 100.0;
 
 /// Stretch and shrink capacity of a candidate line, per tier.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -54,18 +49,13 @@ impl TierCapacities {
 /// Adjustment ratio and badness of a candidate line.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LineFit {
-    /// Negative when the line is compressed, in `[-1, 0)`; `0` for an exact
-    /// fit; in `(0, 1]` while only Tiers 0 and 1 stretch; in `(1, 2]` while
-    /// Tier 2 stretches; above `2` when even that is exhausted. `-2` for an
-    /// overfull line.
+    /// Adjustment ratio across compression, primary, Tier 2, and excess (`-2` when overfull).
     pub ratio: f32,
     /// Knuth-Plass badness; `0` is perfect.
     pub badness: f32,
     /// `true` when the line cannot be compressed to `wrap_width`.
     pub overfull: bool,
-    /// `f64` bits of finite nonnegative excess slack, for saturated-score
-    /// ties. Kept at `f64` precision so distinct excesses do not collapse to
-    /// the same key.
+    /// `f64` bits of finite nonnegative excess slack for saturated-score ties.
     pub excess_slack_bits: u64,
 }
 
@@ -73,11 +63,7 @@ impl LineFit {
     /// Lower keys win; excess slack breaks ties between saturated scores.
     #[must_use]
     pub fn comparison_key(&self) -> (u32, u64) {
-        (
-            // Adding zero turns `-0.0` into `+0.0`, so both sort alike.
-            (self.badness + 0.0).to_bits(),
-            self.excess_slack_bits,
-        )
+        ((self.badness + 0.0).to_bits(), self.excess_slack_bits)
     }
 
     const OVERFULL: Self = Self {
@@ -88,33 +74,49 @@ impl LineFit {
     };
 }
 
-/// Badness of a line whose natural width is `wrap_width - slack`.
-///
-/// `slack = wrap_width - W(a, b)`: positive when the line is short. Five
-/// exhaustive cases, continuous (C0) at every seam (spec §5 Stage 1.6.3).
-///
-/// * **A** `|slack| <= FIT_EPSILON`, or `slack == +inf` (an unbounded line,
-///   whose glue is never stretched): ratio 0, badness 0.
-/// * **B** `slack < 0`: with `Z = Z_0 + Z_1`, overfull (`Z <= CAPACITY_EPSILON`
-///   or `-slack > Z`) is ratio `-2`, badness `1_000_000`; otherwise ratio
-///   `slack / Z` and badness `100 |r|^3`.
-/// * **C** `slack <= Y_01`: ratio `slack / Y_01`, badness `100 r^3`.
-/// * **D** `slack <= Y_01 + Y_2`: with `r2 = (slack - Y_01) / Y_2`, ratio
-///   `1 + r2`, badness `100 + 300 r2^3` (100 at the seam, 400 at `Y_total`).
-/// * **E** `slack > Y_total`. With `r_excess = (slack - Y_total) /
-///   max(font_size, 1)`: ratio `2 + r_excess` and badness
-///   `min(100_000, 400 + 400 r_excess^3)`. There is no branch on `Y_total`.
-///   The cap sits below the overfull badness, so an underfull line always beats
-///   an overfull one.
-///
-/// `font_size` normalises the excess slack of case E.
-///
-/// # Precondition
-/// `slack` is finite or `+inf`, `font_size` is finite and non-negative, and every
-/// capacity is finite and non-negative (spec ST1-8). The input gate guarantees
-/// this for every sum the breaker forms (spec MSR-1), so `line_fit` does not
-/// check it; a violation is a bug in the caller and is caught by a debug
-/// assertion.
+pub(crate) fn fitness_class(ratio: f32) -> u8 {
+    if ratio < -0.5 {
+        0
+    } else if ratio <= 0.5 {
+        1
+    } else if ratio <= 1.0 {
+        2
+    } else {
+        3
+    }
+}
+
+pub(crate) fn line_demerits(
+    fit: &LineFit,
+    penalty: i32,
+    flagged: bool,
+    forced: bool,
+    fitness: u8,
+    previous: Option<(bool, u8)>,
+) -> f64 {
+    if fit.overfull {
+        return OVERFULL_BADNESS as f64;
+    }
+    let (b, n) = (f64::from(fit.badness), f64::from(penalty));
+    let base = if forced {
+        (1.0 + b).powi(2)
+    } else if penalty >= 0 {
+        (1.0 + b + n).powi(2)
+    } else {
+        (1.0 + b).powi(2) - n * n
+    };
+    let alpha = if flagged && previous.is_some_and(|(w, _)| w) {
+        FLAGGED_ALPHA
+    } else {
+        0.0
+    };
+    let gamma = previous.map_or(0.0, |(_, pf)| {
+        FITNESS_GAMMA * f64::from(fitness.abs_diff(pf)).powi(2)
+    });
+    base + alpha + gamma
+}
+
+/// Tiered badness of a line whose natural width is `wrap_width - slack` (spec §5 Stage 1.6.3, ST1-8).
 #[must_use]
 pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
     debug_assert!(
@@ -134,19 +136,13 @@ pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
         overfull: false,
         excess_slack_bits: 0,
     };
-    // An unbounded line (`wrap_width == +inf`, spec GEO-2) is an exact fit:
-    // widening the envelope never makes a line worse (spec AX-6).
     if slack == f32::INFINITY {
         return fit(0.0, 0.0);
     }
-    // The sums run in f64, so capacities near `f32::MAX` cannot overflow to
-    // infinity before the ratios are formed.
     let slack = f64::from(slack);
     let stretch = cap.stretch.map(f64::from);
     let z = f64::from(cap.shrink[0]) + f64::from(cap.shrink[1]);
-    // The seams are also accepted at their f32 rounding, so a caller passing
-    // `primary_stretch()` / `total_stretch()` (f32 sums) as the slack lands on
-    // the boundary instead of just past it.
+    // Accept f32-rounded seams so callers passing `primary_stretch()`/`total_stretch()` land on them.
     let seam = |sum: f64| {
         let rounded = f64::from(sum as f32);
         if rounded.is_finite() {
@@ -177,11 +173,9 @@ pub fn line_fit(slack: f32, cap: &TierCapacities, font_size: f32) -> LineFit {
         if has_primary {
             fit(1.0 + r2, 100.0 + 300.0 * r2.powi(3))
         } else {
-            // Tier2 only: start at 0, reach 400 at top (C0 with A and E base).
             fit(1.0 + r2, 400.0 * r2.powi(3))
         }
     } else {
-        // E: C0 base 400 (Tier2) / 100 (primary only) / 0 (none).
         let base: f64 = if has_tier2 {
             400.0
         } else if has_primary {

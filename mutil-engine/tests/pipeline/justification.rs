@@ -15,6 +15,7 @@ const CHAR: f32 = 6.0;
 pub fn justified() -> LayoutOptions {
     LayoutOptions {
         justify: true,
+        strategy: LineBreakStrategy::Greedy,
         ..Default::default()
     }
 }
@@ -319,7 +320,11 @@ fn two_word_line(
         })
         .sum();
     let constraints = column(natural + slack);
-    let ragged = lay_out_bidi_ast(&ast, text, &constraints, &LayoutOptions::default());
+    let greedy = LayoutOptions {
+        strategy: LineBreakStrategy::Greedy,
+        ..Default::default()
+    };
+    let ragged = lay_out_bidi_ast(&ast, text, &constraints, &greedy);
     let justified = lay_out_bidi_ast(&ast, text, &constraints, &justified());
     (ast, natural, ragged, justified)
 }

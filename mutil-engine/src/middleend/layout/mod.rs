@@ -1,19 +1,7 @@
-//! The mid-end entry point (spec §5): the `Greedy` line breaker, line
-//! placement and vertical stacking.
-//!
-//! Scope (spec RM-3, ME-3): natural-width greedy breaking with the overflow
-//! ladder of ST1-1 (UAX #14 opportunities, then the emergency cluster break
-//! of ST1-5), tabs measured from the line-start edge, hard breaks and blank
-//! lines (MET-3), the strut and line boxes (Stage 4), decorations (Stage 5),
-//! and a geometry provider's first slot. Each line applies UAX #9 L1 and L2
-//! to the frontend's resolved levels (Stage 2) and groups span fragments
-//! visually and logically (ST2-3). Under `LayoutOptions::justify` the
-//! breaker fits with shrink and Stage 3 spends the slack through the
-//! priority ladder (ST3-2 to ST3-5); marks hang by the `HangMode` (ST1-3).
-//! Not yet: hyphenation, the optimising strategies (every strategy breaks
-//! greedily), annotations and clamping.
+//! Mid-end layout entry point (spec §5).
 
 mod breaking;
+mod clamp;
 mod hanging;
 mod justify;
 mod line_artifacts;
@@ -27,45 +15,23 @@ use crate::frontend::{
     AnnotationSide, BoxNode, DiscretionaryNode, GlueNode, InlineObjectBox, ParagraphAst, SpanEdge,
     WordNode,
 };
+use crate::middleend::options::BreakingParameters;
 use crate::middleend::shaper_gate::checked_line_box;
 use crate::middleend::validated::{ClusterId, RunId, SentinelTokens, SpanId, TokenIdx};
 use crate::middleend::{
     Clearance, GeometryAnswer, LayoutConstraints, LayoutInputError, LayoutOptions, LineHeight,
-    PositionedLine, PositionedParagraph, StrutMetrics, ValidatedInputs,
+    OpenGeometry, PositionedLine, PositionedParagraph, StrutMetrics, ValidatedInputs,
 };
 use crate::shaping::TextShaper;
 use crate::types::{BidiDirection, BidiLevel, FontMetrics, RawShapedGlyph, TextRange};
-use breaking::{LineFit, within};
+use breaking::within;
 use scratch::LayoutScratch;
 use std::collections::HashMap;
 
-/// How many obstructed block positions the clearance loop tries in a row
-/// before giving up on a geometry provider (spec GEO-4).
 const MAX_CLEARANCE_PROBES: usize = 1024;
-
-/// How often one line may be refitted because a taller envelope changed its
-/// slots before layout gives up (spec GEO-6: an explicit failure, not a
-/// clipped line).
 const MAX_ENVELOPE_REFITS: usize = 16;
 
-/// Lays out one paragraph (spec §5).
-///
-/// * `ast`: frontend output; `text`: the paragraph text it was built from
-///   (shapers receive it per call).
-/// * `shaper`: answers font metrics for line boxes and decorations through
-///   the shaper gate, ligature carets, and re-shapes an unsafe emergency
-///   seam.
-/// * `constraints`: container geometry; `options`: layout policy.
-///
-/// The inputs pass the input gate ([`ValidatedInputs::try_from_ast`]) first; with a
-/// geometry provider, the first line is probed (spec GEO-5) and every answer
-/// passes the provider gate. Every strategy breaks greedily; `justify` and
-/// the hang mode apply (spec ME-3), while the clamp is not applied yet, so
-/// every line is rendered.
-///
-/// # Errors
-/// The first invalid input, or a shaper or geometry provider that breaks its
-/// contract.
+/// Lays out one paragraph under `options.strategy` (spec §5, ST1-6).
 pub fn layout_paragraph(
     ast: &ParagraphAst,
     text: &str,
@@ -73,16 +39,39 @@ pub fn layout_paragraph(
     constraints: &LayoutConstraints,
     options: &LayoutOptions,
 ) -> Result<PositionedParagraph, LayoutInputError> {
+    let parameters = options.strategy.parameters();
+    break_lines_parameterized(
+        ast,
+        text,
+        shaper,
+        constraints,
+        options,
+        parameters.beam_width,
+        parameters.window_depth,
+    )
+}
+
+/// Runs the parameterised line breaker with `beam_width` and `window_depth` (spec ST1-6).
+pub fn break_lines_parameterized(
+    ast: &ParagraphAst,
+    text: &str,
+    shaper: &dyn TextShaper,
+    constraints: &LayoutConstraints,
+    options: &LayoutOptions,
+    beam_width: usize,
+    window_depth: usize,
+) -> Result<PositionedParagraph, LayoutInputError> {
     let inputs = ValidatedInputs::try_from_ast(ast, text, constraints, options)?;
     if constraints.geometry_provider.is_some() {
         probe_first_line(&inputs, shaper)?;
     }
-    Layout::new(&inputs, shaper).run()
+    let parameters = BreakingParameters {
+        beam_width: beam_width.max(1),
+        window_depth: window_depth.max(1),
+    };
+    Layout::new(&inputs, shaper, parameters).run()
 }
 
-/// Advances `obstructed` past an obstructed provider answer that clears at
-/// `clear_at`, failing once more than [`MAX_CLEARANCE_PROBES`] obstructed
-/// attempts occur in a row (spec GEO-4).
 fn advance_clearance(
     obstructed: &mut usize,
     clearance: Clearance,
@@ -94,12 +83,6 @@ fn advance_clearance(
     Ok(f64::from(clearance.clear_at()))
 }
 
-/// Checks that a geometry provider offers the first line a place to start.
-///
-/// Only the geometry that can begin at the block start is probed: the strut
-/// and the input up to the first break opportunity. A tall object later in the
-/// paragraph is not evidence about the first line, so it must not turn a legal
-/// provider into a clearance failure.
 fn probe_first_line(
     inputs: &ValidatedInputs<'_>,
     shaper: &dyn TextShaper,
@@ -111,9 +94,6 @@ fn probe_first_line(
     loop {
         let probe = inputs.line_geometry(0, block_start, strut_height, None)?;
         if tallest > strut_height {
-            // Contract check only: an expanded envelope must stay inside the
-            // original one. Its contents do not decide whether the initial
-            // position is legal.
             inputs.line_geometry(0, block_start, tallest, Some(&probe.geometry()))?;
         }
         let GeometryAnswer::Obstructed(clearance) = probe else {
@@ -123,11 +103,6 @@ fn probe_first_line(
     }
 }
 
-/// The tallest line box the first line could need: the strut, the content up
-/// to the first break opportunity, and the annotations over that content.
-///
-/// Every term is a measurement (spec MSR-1: the input gate bounds the AST's,
-/// the shaper gate the shaper's), so the sum cannot overflow.
 fn tallest_first_line(
     inputs: &ValidatedInputs<'_>,
     shaper: &dyn TextShaper,
@@ -135,7 +110,6 @@ fn tallest_first_line(
 ) -> Result<f32, LayoutInputError> {
     let ast = inputs.ast();
     let options = inputs.options();
-    // A fixed line box is the strut's whatever the line holds (ME-2).
     if matches!(options.line_height, LineHeight::Fixed(_)) {
         return Ok(strut_height);
     }
@@ -175,25 +149,13 @@ fn tallest_first_line(
     Ok(content_height + over + under)
 }
 
-/// One placeable unit of the item sequence, in logical order. Nodes of the
-/// AST are borrowed; clusters stay typed IDs, because an emergency re-shape
-/// replaces their glyphs in [`Layout::reshaped`] (ADR-0003, rule 5).
 #[derive(Clone, Copy, Debug)]
 pub(super) enum PieceKind<'a> {
-    /// Validated paragraph-level cluster and run IDs (8 bytes total).
-    Cluster {
-        run: RunId,
-        cluster: ClusterId,
-    },
+    Cluster { run: RunId, cluster: ClusterId },
     Object(&'a InlineObjectBox),
     Tab,
     Glue(&'a GlueNode),
-    /// A decoration span edge: its padding is advance no glyph covers.
-    SpanEdge {
-        /// Validated index into `ParagraphAst::decoration_spans`.
-        span: SpanId,
-        edge: SpanEdge,
-    },
+    SpanEdge { span: SpanId, edge: SpanEdge },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -201,25 +163,19 @@ pub(super) struct Piece<'a> {
     pub(super) kind: PieceKind<'a>,
     pub(super) bytes: TextRange,
     pub(super) level: BidiLevel,
-    /// Natural advance (a tab's is resolved at placement).
     pub(super) width: f64,
 }
 
 impl Piece<'_> {
-    /// Content (as opposed to whitespace): what ends a line's visible part.
     pub(super) fn is_content(&self) -> bool {
         !matches!(self.kind, PieceKind::Glue(_)) && !self.is_edge_transparent()
     }
 
-    /// A zero-width span boundary: the only piece that may lie between a
-    /// hanging mark and its line edge (ST1-3).
     pub(super) fn is_edge_transparent(&self) -> bool {
         matches!(self.kind, PieceKind::SpanEdge { .. }) && self.width == 0.0
     }
 }
 
-/// One element of the line-breaking sequence: a piece, or a break
-/// opportunity (a `Discretionary` item).
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Token<'a> {
     Piece(Piece<'a>),
@@ -227,7 +183,6 @@ pub(super) enum Token<'a> {
 }
 
 impl Token<'_> {
-    /// The source bytes the token owns.
     pub(super) fn bytes(&self) -> TextRange {
         match self {
             Self::Piece(piece) => piece.bytes,
@@ -236,26 +191,21 @@ impl Token<'_> {
     }
 }
 
-/// Where a line ends.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum LineEnd<'a> {
-    /// At the break token with this index, inclusive.
     At {
         token: TokenIdx,
         brk: &'a DiscretionaryNode,
     },
-    /// Before the piece token with this index: an emergency cluster break.
     Before(TokenIdx),
 }
 
-/// A cluster whose glyphs an emergency re-shape replaced.
 #[derive(Clone, Debug)]
 pub(super) struct Reshaped {
     pub(super) glyphs: Vec<RawShapedGlyph>,
     pub(super) width: f64,
 }
 
-/// Emergency re-shapes by validated paragraph-level cluster ID.
 pub(super) type Reshapes = HashMap<ClusterId, Reshaped>;
 
 pub(super) struct Layout<'i, 'a> {
@@ -263,9 +213,8 @@ pub(super) struct Layout<'i, 'a> {
     pub(super) ast: &'a ParagraphAst,
     pub(super) shaper: &'i dyn TextShaper,
     pub(super) options: &'a LayoutOptions,
+    pub(super) parameters: BreakingParameters,
     pub(super) tokens: SentinelTokens<Token<'a>>,
-    /// Prefix max of `decoration_spans[i].byte_range.end()`, so each line
-    /// bisects only the spans whose ranges can touch it.
     span_reach: Vec<usize>,
     pub(super) strut: StrutMetrics,
     pub(super) base: BidiDirection,
@@ -275,26 +224,18 @@ pub(super) struct Layout<'i, 'a> {
     pub(super) has_strikethrough: bool,
 }
 
-/// One piece of the current line, its level resolved by UAX #9 L1 in
-/// `piece.level`, with its final horizontal placement and baseline shift.
-/// Built once, when the line's columns are final (`LayoutScratch`).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PlacedPiece<'a> {
     pub(super) piece: Piece<'a>,
     pub(super) x: f64,
     pub(super) width: f64,
-    /// Justification space after a cluster, inside `width` (ST3-2).
     pub(super) expansion: f64,
     pub(super) y_shift: f64,
-    /// Leading blank trimmed from a CJK punctuation cluster.
     pub(super) lead_trim: f64,
-    /// Trailing blank trimmed from a CJK punctuation cluster.
     pub(super) trail_trim: f64,
 }
 
-/// Where the next line starts: its first token, the break it starts after
-/// (whose cloned spans open it), its first source byte, its block offset and
-/// its index.
+#[derive(Clone, Copy)]
 pub(super) struct LineCursor<'a> {
     pub(super) token_start: TokenIdx,
     pub(super) start_break: Option<&'a DiscretionaryNode>,
@@ -318,19 +259,15 @@ impl<'a> LineCursor<'a> {
         self.index == 0
     }
 
-    /// Whether this line starts after a soft wrap (not line 0 and not after a
-    /// mandatory hard break).
     pub(super) fn is_soft_wrapped_start(&self) -> bool {
         self.index > 0 && self.start_break.is_none_or(|b| !b.is_mandatory())
     }
 
-    /// The padding cloned before the line's first piece (spec ST2-3).
     pub(super) fn post_break_width(&self) -> f64 {
         self.start_break
             .map_or(0.0, |b| f64::from(b.post_break_width))
     }
 
-    /// Moves past the line that ended at `end` and was `line_height` tall.
     fn advance(&mut self, end: LineEnd<'a>, tokens: &SentinelTokens<Token<'_>>, line_height: f64) {
         self.block_top += line_height;
         self.index += 1;
@@ -348,16 +285,17 @@ impl<'a> LineCursor<'a> {
         }
     }
 
-    /// Whether no token is left. Only the paragraph's final break ends a
-    /// line with none left (every other line ends before it), so this is
-    /// the end of the paragraph.
     fn is_paragraph_end(&self, tokens: &SentinelTokens<Token<'_>>) -> bool {
         tokens.is_exhausted(self.token_start)
     }
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
-    fn new(inputs: &'i ValidatedInputs<'a>, shaper: &'i dyn TextShaper) -> Self {
+    fn new(
+        inputs: &'i ValidatedInputs<'a>,
+        shaper: &'i dyn TextShaper,
+        parameters: BreakingParameters,
+    ) -> Self {
         let ast = inputs.ast();
         let mut span_reach = Vec::with_capacity(ast.decoration_spans.len());
         let mut reach = 0;
@@ -370,6 +308,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             ast,
             shaper,
             options: inputs.options(),
+            parameters,
             tokens: tokenize(inputs),
             span_reach,
             strut: inputs.policy().strut,
@@ -381,9 +320,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// Validated IDs into `ast.decoration_spans` of the spans whose byte ranges
-    /// can touch `range` (inclusive of both edges): G1 proves `decoration_spans`
-    /// sorted by `start` ascending (AST-8).
     pub(super) fn spans_touching(&self, range: TextRange) -> impl Iterator<Item = SpanId> {
         let lo = self.span_reach.partition_point(|&end| end < range.start());
         let hi = self
@@ -394,95 +330,176 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 
     fn run(mut self) -> Result<PositionedParagraph, LayoutInputError> {
-        let (mut lines, total_block_size) = self.place_lines()?;
+        let (mut lines, total_block_size, truncated_range) = self.place_lines()?;
         backfill_span_ribbons(&mut lines);
         Ok(PositionedParagraph {
             policy: self.inputs.policy().clone(),
             base_direction: self.base,
             total_block_size,
             lines,
-            truncated_range: None,
+            truncated_range,
         })
     }
 
-    /// Places lines from the paragraph start until no token is left; returns
-    /// them with the block size they stack to. One [`LayoutScratch`] serves
-    /// every line.
-    fn place_lines(&mut self) -> Result<(Vec<PositionedLine>, f32), LayoutInputError> {
-        let mut lines = Vec::new();
+    fn place_lines(
+        &mut self,
+    ) -> Result<(Vec<PositionedLine>, f32, Option<TextRange>), LayoutInputError> {
+        let clamp = self.inputs.policy().clamp.as_ref();
+        let mut retained: Vec<PlacedNextLine<'a>> = Vec::new();
         let mut cursor = LineCursor::paragraph_start();
         let mut scratch = LayoutScratch::default();
         loop {
-            let (line, end, line_height) = self.place_next_line(&mut cursor, &mut scratch)?;
-            cursor.advance(end, &self.tokens, line_height);
-            lines.push(line);
+            let mut line_cursor = cursor;
+            let placed = self.place_next_line(&mut line_cursor, &mut scratch)?;
+            let over_block = clamp
+                .and_then(|c| c.max_block_size)
+                .is_some_and(|max| line_cursor.block_top + placed.line_height > f64::from(max));
+            if over_block && !retained.is_empty() {
+                break;
+            }
+            self.reshaped.extend(placed.reshapes);
+            cursor = line_cursor;
+            cursor.advance(placed.end, &self.tokens, placed.line_height);
+            retained.push(PlacedNextLine {
+                cursor: line_cursor,
+                reshapes: Reshapes::new(),
+                ..placed
+            });
             if cursor.is_paragraph_end(&self.tokens) {
-                return Ok((lines, cursor.block_top as f32));
+                let lines = retained.into_iter().map(|r| r.line).collect();
+                return Ok((lines, cursor.block_top as f32, None));
+            }
+            if over_block
+                || clamp
+                    .and_then(|c| c.max_lines)
+                    .is_some_and(|m| retained.len() >= m)
+            {
+                break;
+            }
+        }
+        let ellipsis = clamp.map_or("", |c| c.ellipsis.as_ref());
+        let mut obstructed = 0;
+        while let Some(mut last) = retained.pop() {
+            if let Some((clamped, clamped_height, _)) = self.refit_line(
+                &mut last.cursor,
+                last.geometry,
+                last.line_height,
+                &mut obstructed,
+                |this, c, g| this.clamp_line(c, last.end, ellipsis, g, &mut scratch),
+            )? {
+                let end_top = last.cursor.block_top + clamped_height;
+                let tail = TextRange::new(clamped.byte_range.end(), self.inputs.text().len());
+                let mut lines: Vec<_> = retained.into_iter().map(|r| r.line).collect();
+                lines.push(clamped);
+                return Ok((lines, end_top as f32, Some(tail)));
+            }
+        }
+        Err(LayoutInputError::RefitExhausted)
+    }
+
+    pub(super) fn open_geometry(
+        &self,
+        cursor: &mut LineCursor<'a>,
+        height: f64,
+        obstructed: &mut usize,
+    ) -> Result<OpenGeometry, LayoutInputError> {
+        loop {
+            match self.inputs.line_geometry(
+                cursor.index,
+                cursor.block_top as f32,
+                height as f32,
+                None,
+            )? {
+                GeometryAnswer::Open(geometry) => return Ok(geometry),
+                GeometryAnswer::Obstructed(clearance) => {
+                    cursor.block_top = advance_clearance(obstructed, clearance)?;
+                }
             }
         }
     }
 
-    /// Probes geometry and refits until the line fits its envelope (spec GEO-3–6).
+    fn refit_line<T>(
+        &mut self,
+        cursor: &mut LineCursor<'a>,
+        mut geometry: OpenGeometry,
+        mut envelope: f64,
+        obstructed: &mut usize,
+        mut attempt: impl FnMut(
+            &mut Self,
+            &LineCursor<'a>,
+            &OpenGeometry,
+        ) -> Result<Option<(T, f64)>, LayoutInputError>,
+    ) -> Result<Option<(T, f64, OpenGeometry)>, LayoutInputError> {
+        let has_provider = self.inputs.constraints().geometry_provider.is_some();
+        for _ in 0..MAX_ENVELOPE_REFITS {
+            let Some((value, height)) = attempt(self, cursor, &geometry)? else {
+                return Ok(None);
+            };
+            if within(height, envelope) || !has_provider {
+                return Ok(Some((value, height, geometry)));
+            }
+            envelope = height;
+            match self.inputs.line_geometry(
+                cursor.index,
+                cursor.block_top as f32,
+                envelope as f32,
+                Some(geometry.geometry()),
+            )? {
+                GeometryAnswer::Open(open) if open == geometry => {
+                    return Ok(Some((value, height, geometry)));
+                }
+                GeometryAnswer::Open(open) => geometry = open,
+                GeometryAnswer::Obstructed(clearance) => {
+                    cursor.block_top = advance_clearance(obstructed, clearance)?;
+                    geometry = self.open_geometry(cursor, envelope, obstructed)?;
+                }
+            }
+        }
+        Err(LayoutInputError::RefitExhausted)
+    }
+
     fn place_next_line(
         &mut self,
         cursor: &mut LineCursor<'a>,
         scratch: &mut LayoutScratch<'a>,
-    ) -> Result<(PositionedLine, LineEnd<'a>, f64), LayoutInputError> {
-        let strut_height = f64::from(self.strut.ascent)
-            + f64::from(self.strut.descent)
-            + f64::from(self.strut.line_gap);
-        let has_provider = self.inputs.constraints().geometry_provider.is_some();
+    ) -> Result<PlacedNextLine<'a>, LayoutInputError> {
+        let strut_height = self.strut_height();
         let mut obstructed = 0;
-        'place: loop {
-            let mut envelope = strut_height;
-            let answer = self.inputs.line_geometry(
-                cursor.index,
-                cursor.block_top as f32,
-                envelope as f32,
-                None,
-            )?;
-            let mut geometry = match answer {
-                GeometryAnswer::Open(geometry) => geometry,
-                GeometryAnswer::Obstructed(clearance) => {
-                    cursor.block_top = advance_clearance(&mut obstructed, clearance)?;
-                    continue;
-                }
-            };
-            for _ in 0..MAX_ENVELOPE_REFITS {
-                let slot = geometry.first_slot();
-                let LineFit { end, reshapes } = self.fit(cursor, slot);
-                let (line, line_height) = self.place(cursor, end, &geometry, &reshapes, scratch)?;
-                if within(line_height, envelope) || !has_provider {
-                    self.reshaped.extend(reshapes);
-                    return Ok((line, end, line_height));
-                }
-                envelope = line_height;
-                let expanded = self.inputs.line_geometry(
-                    cursor.index,
-                    cursor.block_top as f32,
-                    envelope as f32,
-                    Some(geometry.geometry()),
-                )?;
-                match expanded {
-                    GeometryAnswer::Open(open) if open == geometry => {
-                        self.reshaped.extend(reshapes);
-                        return Ok((line, end, line_height));
-                    }
-                    GeometryAnswer::Open(open) => geometry = open,
-                    GeometryAnswer::Obstructed(clearance) => {
-                        cursor.block_top = advance_clearance(&mut obstructed, clearance)?;
-                        continue 'place;
-                    }
-                }
-            }
+        let geometry = self.open_geometry(cursor, strut_height, &mut obstructed)?;
+        let Some(((line, end, reshapes), line_height, geometry)) = self.refit_line(
+            cursor,
+            geometry,
+            strut_height,
+            &mut obstructed,
+            |this, c, g| {
+                let (end, reshapes) = this.break_line(c, g.first_slot())?;
+                let (line, h) = this.place(c, end, g, &reshapes, scratch, None)?;
+                Ok(Some(((line, end, reshapes), h)))
+            },
+        )?
+        else {
             return Err(LayoutInputError::RefitExhausted);
-        }
+        };
+        Ok(PlacedNextLine {
+            line,
+            cursor: *cursor,
+            end,
+            geometry,
+            line_height,
+            reshapes,
+        })
     }
 }
 
-/// The token sequence of the validated items, in logical order, ending with
-/// the G1-proved paragraph-end sentinel. Every node the gate resolved is
-/// borrowed; clusters and span edges carry validated 4-byte IDs.
+struct PlacedNextLine<'a> {
+    line: PositionedLine,
+    cursor: LineCursor<'a>,
+    end: LineEnd<'a>,
+    geometry: OpenGeometry,
+    line_height: f64,
+    reshapes: Reshapes,
+}
+
 fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> SentinelTokens<Token<'a>> {
     let ast = inputs.ast();
     let (body_items, sentinel) = inputs.split_paragraph_end();
@@ -539,9 +556,6 @@ fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> SentinelTokens<Token<'a>> {
     SentinelTokens::from_body_and_sentinel(tokens, Token::Break(sentinel))
 }
 
-/// Second pass over laid-out lines (after hanging clipping): assigns
-/// `ribbon_offset` monotonically in logical order per `span_id` across lines
-/// and writes each span's total advance into `total_span_advance`.
 fn backfill_span_ribbons(lines: &mut [PositionedLine]) {
     let mut totals: HashMap<u64, f64> = HashMap::new();
     for line in lines.iter_mut() {

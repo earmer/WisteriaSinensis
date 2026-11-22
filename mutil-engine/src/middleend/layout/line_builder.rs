@@ -1,7 +1,7 @@
-//! Line placement, line-box calculation, alignment, and visual run assembly
-//! (spec §5 Stages 2–4).
+//! Line placement, line-box calculation, alignment, and visual run assembly (spec §5 Stages 2–4).
 
 use super::breaking::within;
+use super::clamp::SynthesizedEllipsis;
 use super::hanging::{EndHang, LineHangs, clip_to_content};
 use super::line_artifacts::{CaretScratch, VisualIndex};
 use super::line_box::LineBoxMetrics;
@@ -13,21 +13,18 @@ use crate::frontend::{DiscretionaryNode, SpanEdge};
 use crate::middleend::validated::{TokenIdx, VisualOrder};
 use crate::middleend::{
     DecorationKind, DecorationLine, HangingWhitespaceMode, InlineSlotConstraint, LayoutInputError,
-    OpenGeometry, PositionedLine, PositionedSlot,
+    OpenGeometry, PositionedLine, PositionedSlot, VisualGlyphRun,
 };
 use crate::types::{AtomFlags, BidiLevel, TextRange, WritingMode};
 use smallvec::SmallVec;
 use std::ops::Deref;
 
-/// Horizontal extent of the line's body (excluding trailing whitespace) in the
-/// current coordinate frame.
 #[derive(Clone, Copy)]
 pub(super) struct LineBounds {
     pub(super) body_lo: f64,
     pub(super) body_hi: f64,
 }
 
-/// Where a line's content block lies in its slot (SLT-3), after alignment.
 pub(super) struct ContentBlock {
     pub(super) start: f64,
     pub(super) width: f64,
@@ -39,10 +36,6 @@ impl ContentBlock {
     }
 }
 
-/// A line placed in logical order, before alignment: the pieces, borrowed
-/// from the paragraph's [`LayoutScratch`], their visual order and its index,
-/// and what the line's end and hanging marks leave. Its `x` coordinates are
-/// relative to the body's start.
 pub(super) struct PlacedLine<'l, 'a> {
     pub(super) placed: &'l mut [PlacedPiece<'a>],
     pub(super) order: &'l VisualOrder,
@@ -54,29 +47,23 @@ pub(super) struct PlacedLine<'l, 'a> {
     hangs: LineHangs,
     is_justified: bool,
     block_top: f64,
+    pub(super) truncated: bool,
 }
 
 impl PlacedLine<'_, '_> {
-    /// The pieces before the trailing whitespace: `order` ranks exactly
-    /// those.
     pub(super) fn body_len(&self) -> usize {
         self.order.len()
     }
 
-    /// Whether the line wraps at a soft break or before an emergency cluster
-    /// seam, as opposed to ending at a hard break or the paragraph.
     pub(super) fn soft_wrap(&self) -> bool {
-        soft_wraps(self.end_break)
+        !self.truncated && soft_wraps(self.end_break)
     }
 }
 
-/// Whether a line ending at `end_break` (none: an emergency seam) wraps.
 fn soft_wraps(end_break: Option<&DiscretionaryNode>) -> bool {
     end_break.is_none_or(|b| !b.is_mandatory())
 }
 
-/// A [`PlacedLine`] after alignment: every coordinate is final, and the
-/// content block it lies in is known.
 pub(super) struct AlignedLine<'l, 'a> {
     line: PlacedLine<'l, 'a>,
     pub(super) content: ContentBlock,
@@ -90,7 +77,6 @@ impl<'l, 'a> Deref for AlignedLine<'l, 'a> {
     }
 }
 
-/// What a line's [`LineEnd`] names.
 struct LineEndFacts<'a> {
     last_piece: TokenIdx,
     end_break: Option<&'a DiscretionaryNode>,
@@ -98,23 +84,20 @@ struct LineEndFacts<'a> {
     pre: f64,
 }
 
-/// How the body of a line is measured: where it starts, the line-end pad
-/// `pre`, whether it soft-wraps, and the slot it fills.
 struct BodyRequest<'c, 'a> {
     cursor: &'c LineCursor<'a>,
+    post: f64,
     pre: f64,
     soft_wrap: bool,
+    has_suffix: bool,
     slot: InlineSlotConstraint,
 }
 
-/// What measuring the body settled: the marks that hang and whether the
-/// line was justified flush.
 struct BodyFit {
     hangs: LineHangs,
     is_justified: bool,
 }
 
-/// The pads between a line's body and its left and right edges (physical).
 #[derive(Clone, Copy)]
 struct Pads {
     left: f64,
@@ -122,7 +105,6 @@ struct Pads {
 }
 
 impl Pads {
-    /// The line-end pad `pre` and line-start pad `post` on their physical sides.
     fn new(rtl: bool, pre: f64, post: f64) -> Self {
         if rtl {
             Self {
@@ -139,10 +121,6 @@ impl Pads {
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
-    /// Places the line `(cursor.token_start, end]` in the first slot of
-    /// `geometry`, working in `scratch`: the pieces are collected, their L1
-    /// levels and visual order resolved, the body measured, justified and
-    /// placed, the line box found, and only then are the placed pieces built.
     pub(super) fn place(
         &mut self,
         cursor: &LineCursor<'a>,
@@ -150,6 +128,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         geometry: &OpenGeometry,
         pending: &Reshapes,
         scratch: &mut LayoutScratch<'a>,
+        ellipsis: Option<Option<&SynthesizedEllipsis>>,
     ) -> Result<(PositionedLine, f64), LayoutInputError> {
         let slot = geometry.first_slot();
         let LineEndFacts {
@@ -180,10 +159,17 @@ impl<'i, 'a> Layout<'i, 'a> {
         self.apply_l1(logical, levels);
         let (body_logical, _) = logical.split_at(body_len);
         visual_order_into(body_logical, levels, order);
+        let post = if ellipsis.is_some() && byte_end == cursor.byte_start {
+            0.0
+        } else {
+            cursor.post_break_width()
+        };
         let request = BodyRequest {
             cursor,
+            post,
             pre,
-            soft_wrap: soft_wraps(end_break),
+            soft_wrap: ellipsis.is_none() && soft_wraps(end_break),
+            has_suffix: ellipsis.flatten().is_some(),
             slot,
         };
         let BodyFit {
@@ -196,10 +182,12 @@ impl<'i, 'a> Layout<'i, 'a> {
             &request,
             pending,
         );
-        let pads = Pads::new(self.base.is_rtl(), pre, cursor.post_break_width());
+        let pads = Pads::new(self.base.is_rtl(), pre, post);
         let body_end = self.place_visual(logical, order, widths, xs, pads, hangs);
         let byte_range = TextRange::new(cursor.byte_start, byte_end);
-        let line_box = self.compute_line_box(logical, order, y_shifts, byte_range, slot)?;
+        let suffix_extent = ellipsis.flatten().map(|s| (s.ascent, s.descent));
+        let line_box =
+            self.compute_line_box(logical, order, y_shifts, byte_range, slot, suffix_extent)?;
         build_placed(
             placed,
             logical,
@@ -220,15 +208,12 @@ impl<'i, 'a> Layout<'i, 'a> {
             hangs,
             is_justified,
             block_top: cursor.block_top,
+            truncated: ellipsis.is_some(),
         };
-        let positioned = self.build_line(line, &line_box, carets, geometry, pending)?;
+        let positioned = self.build_line(line, &line_box, carets, geometry, pending, ellipsis)?;
         Ok((positioned, line_box.line_height))
     }
 
-    /// Measures the line in logical order, finds the marks that hang,
-    /// justifies a compressible body (ST1-3, ST3-1 to ST3-4), and appends the
-    /// trailing whitespace's collapsed/preserved widths (WN-10, ST1-12):
-    /// fills both `widths` and `expansions` for every piece of `logical`.
     fn measure_line(
         &self,
         logical: &[LogicalPiece<'a>],
@@ -238,21 +223,19 @@ impl<'i, 'a> Layout<'i, 'a> {
         pending: &Reshapes,
     ) -> BodyFit {
         let (body, trailing) = logical.split_at(body_len);
-        // Only the body is justified; the trailing whitespace has none.
         expansions.clear();
         expansions.resize(logical.len(), 0.0);
         let BodyRequest {
             cursor,
+            post,
             pre,
             soft_wrap,
+            has_suffix,
             slot,
         } = *request;
-        let post = cursor.post_break_width();
         let first_line = cursor.first_line();
         let is_soft_wrap = cursor.is_soft_wrapped_start();
         let start = self.start_hang(body, first_line, is_soft_wrap, post, pending);
-        // Widths in logical order: a tab's depends on its distance from the
-        // line-start edge (spec ST3-1), the start mark's protrusion outside.
         let distance = self.measure_widths(
             body,
             [widths, lead_trims, trail_trims],
@@ -261,8 +244,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             slot,
             pending,
         );
-        // A soft-wrapped line is justified; one that ends the paragraph or at
-        // a hard break is only ever compressed, and only on request (ST3-3).
         let compressible = self.options.justify && (soft_wrap || self.options.compress_last_lines);
         let shrink = if compressible {
             Self::shrink_capacity(body, lead_trims, trail_trims)
@@ -271,18 +252,21 @@ impl<'i, 'a> Layout<'i, 'a> {
         };
         let slot_width = f64::from(slot.width());
         let fits_without = within(distance + pre - shrink, slot_width);
-        let end = self.end_hang(
-            body,
-            first_line,
-            EndHang {
-                pre,
-                start,
-                fits_without,
-            },
-            pending,
-        );
+        let end = if has_suffix {
+            None
+        } else {
+            self.end_hang(
+                body,
+                first_line,
+                EndHang {
+                    pre,
+                    start,
+                    fits_without,
+                },
+                pending,
+            )
+        };
         let hangs = LineHangs { start, end };
-        // The visible width `W`, hanging halves outside (ST3-2).
         let visible_width = distance + pre - LineHangs::protrusion(end);
         let slack = slot_width - visible_width;
         let (body_expansions, _) = expansions.split_at_mut(body_len);
@@ -306,9 +290,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// Appends each trailing whitespace piece's width to `widths`: synthetic
-    /// glue collapses under both modes, collapsible glue under `Collapsible`
-    /// (WN-10, ST1-12).
     fn append_trailing_widths(&self, trailing: &[LogicalPiece<'_>], widths: &mut Vec<f64>) {
         let collapsible = self.options.whitespace == HangingWhitespaceMode::Collapsible;
         widths.extend(trailing.iter().map(|p| match p.piece.kind {
@@ -321,9 +302,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         }));
     }
 
-    /// Fills `widths`, `lead_trims`, and `trail_trims` for each body piece in
-    /// logical order from the pen position `distance` and returns the position
-    /// after the last one.
     fn measure_widths(
         &self,
         body: &[LogicalPiece<'a>],
@@ -385,8 +363,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         distance
     }
 
-    /// What the line's end names: its last piece, the break it ends at, the
-    /// byte it ends before and the break's pre-break width.
     fn end_facts(&self, end: LineEnd<'a>) -> LineEndFacts<'a> {
         match end {
             LineEnd::At { token, brk } => LineEndFacts {
@@ -404,9 +380,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// Fills `xs` with each body piece's `x` in visual `order`, which ranks
-    /// exactly the body, and places the trailing whitespace beyond the far
-    /// edge; returns the body's far end including the right pad.
     fn place_visual(
         &self,
         logical: &[LogicalPiece<'a>],
@@ -430,8 +403,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             x += *widths_t.get(k);
         }
         let body_end = x + pads.right;
-        // In RTL the trailing whitespace lies left of everything on the line,
-        // a hanging mark's protrusion included (HNG-3).
         let far_edge = if rtl {
             -hangs.physical(rtl).0
         } else {
@@ -443,11 +414,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         body_end
     }
 
-    /// UAX #9 L1 on the line (spec ST2-1): tabs, the whitespace before them
-    /// and the whitespace at the line end take the paragraph level, read
-    /// from glue classes, cluster flags and tabs, never from the text. A span
-    /// boundary is transparent and then takes the level of its span's next
-    /// (leading) or previous (trailing) item on the line.
     fn apply_l1(&self, placed: &mut [LogicalPiece<'_>], levels: &mut Vec<BidiLevel>) {
         let class = |p: &LogicalPiece<'_>| match p.piece.kind {
             PieceKind::Tab => LineClass::Separator,
@@ -493,8 +459,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// Refills `logical` with the line's pieces `[start, last_piece)`, each
-    /// with the no-break width of the breaks before it.
     fn collect_logical(
         &self,
         logical: &mut Vec<LogicalPiece<'a>>,
@@ -514,11 +478,8 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// Trailing whitespace beyond the far edge `far_edge` (UAX #9 L1, HNG-3),
-    /// its positions written to `xs`.
     fn place_trailing_whitespace(&self, widths: &[f64], xs: &mut [f64], far_edge: f64) {
         let rtl = self.base.is_rtl();
-        // Away from the body: leftwards in RTL, rightwards in LTR.
         let mut tx = far_edge;
         for (&width, x) in widths.iter().zip(xs) {
             if rtl {
@@ -531,8 +492,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// The positioned line from a placed one and its line box: its glyph
-    /// runs, alignment, boxes, fragments, decorations and caret stops.
     fn build_line(
         &mut self,
         line: PlacedLine<'_, 'a>,
@@ -540,11 +499,21 @@ impl<'i, 'a> Layout<'i, 'a> {
         carets: &mut CaretScratch,
         geometry: &OpenGeometry,
         pending: &Reshapes,
+        ellipsis: Option<Option<&SynthesizedEllipsis>>,
     ) -> Result<PositionedLine, LayoutInputError> {
         let slot = geometry.first_slot();
-        let (extent, visible_end) = self.visual_extent(&line, pending);
+        let (mut extent, visible_end) = self.visual_extent(&line, pending);
+        if let Some(suffix) = ellipsis.flatten() {
+            let (lo, hi) = if self.base.is_rtl() {
+                (line.bounds.body_lo - suffix.width, line.bounds.body_lo)
+            } else {
+                (line.bounds.body_hi, line.bounds.body_hi + suffix.width)
+            };
+            extent = Some(extent.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+        }
         let line = self.align_line_content(line, extent, slot);
         let runs = self.build_visual_runs(&line, pending);
+        let runs = self.with_ellipsis(runs, &line, ellipsis.flatten());
         let content = &line.content;
         let content_edges = content.edges();
         let (visual_boxes, tabs) = self.build_boxes_and_tabs(line.placed, slot);
@@ -567,7 +536,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         let caret_stops =
             self.caret_stops(&line, visible_end, &runs, &visual_boxes, pending, carets);
 
-        // The line fills its first slot; the others stay empty (ME-2).
         let (first_slot, rest_slots) = geometry.split_slots();
         let slots: SmallVec<[PositionedSlot; 1]> = core::iter::once(PositionedSlot {
             constraint: first_slot,
@@ -588,7 +556,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             };
         Ok(PositionedLine {
             slots,
-            is_ellipsized: false,
+            is_ellipsized: ellipsis.is_some(),
             annotations: Vec::new(),
             atomic_fragments,
             byte_range: line.byte_range,
@@ -607,10 +575,41 @@ impl<'i, 'a> Layout<'i, 'a> {
         })
     }
 
-    /// Aligns the line in `slot` (SLT-3): finds the content block from the
-    /// glyph and box `extent` and the span fragments, then shifts every
-    /// placed piece and the body bounds in `f64` by the same amount, so every
-    /// later stage reads final coordinates and rounds to `f32` once.
+    fn with_ellipsis(
+        &self,
+        mut runs: Vec<VisualGlyphRun>,
+        line: &AlignedLine<'_, '_>,
+        suffix: Option<&SynthesizedEllipsis>,
+    ) -> Vec<VisualGlyphRun> {
+        let Some(suffix) = suffix else {
+            return runs;
+        };
+        let end = line.byte_range.end();
+        let rtl = self.base.is_rtl();
+        let mut pen = if rtl {
+            line.content.start
+        } else {
+            line.content.start + line.content.width - suffix.width
+        };
+        let mut synth = suffix.runs.clone();
+        if rtl {
+            synth.reverse();
+        }
+        for r in &mut synth {
+            r.byte_range = TextRange::empty_at(end);
+            if rtl {
+                r.glyphs.reverse();
+            }
+            for g in &mut r.glyphs {
+                g.x = pen as f32;
+                pen += f64::from(g.advance);
+            }
+        }
+        let at = if rtl { 0 } else { runs.len() };
+        runs.splice(at..at, synth);
+        runs
+    }
+
     fn align_line_content<'l>(
         &self,
         mut line: PlacedLine<'l, 'a>,
@@ -623,7 +622,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             hi = hi.max(g.hi);
         });
         let rtl = self.base.is_rtl();
-        // A hanging mark's protrusion lies outside the content (ST1-3).
         let (hang_left, hang_right) = line.hangs.physical(rtl);
         let (content_lo, width) = if lo > hi {
             (if rtl { line.bounds.body_hi } else { 0.0 }, 0.0)
@@ -633,10 +631,11 @@ impl<'i, 'a> Layout<'i, 'a> {
         } else {
             (0.0, hi - hang_right)
         };
-        // Alignment: the line start of the base direction.
-        let slot_start = f64::from(slot.start());
-        let slot_end = f64::from(slot.end());
-        let slot_width = f64::from(slot.width());
+        let (slot_start, slot_end, slot_width) = (
+            f64::from(slot.start()),
+            f64::from(slot.end()),
+            f64::from(slot.width()),
+        );
         let start = if rtl && slot_end.is_finite() && width <= slot_width {
             slot_end - width
         } else {
@@ -655,9 +654,6 @@ impl<'i, 'a> Layout<'i, 'a> {
     }
 }
 
-/// Visual indices of a line's pieces from their levels (UAX #9 L2, spec
-/// ST2-2), through the frontend's shared rule; `levels` and `order` are working
-/// buffers.
 pub(super) fn visual_order_into(
     body: &[LogicalPiece<'_>],
     levels: &mut Vec<BidiLevel>,

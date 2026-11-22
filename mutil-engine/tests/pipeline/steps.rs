@@ -614,13 +614,17 @@ fn greedy_breaking_prefers_the_lowest_tier_of_the_overflow_ladder() {
     // the long piece "abcdefghijklmnop" may break anywhere, but the break at
     // the slash (URL punctuation, tier 1) wins over one inside the piece
     // (tier 2).
+    let greedy = LayoutOptions {
+        strategy: LineBreakStrategy::Greedy,
+        ..Default::default()
+    };
     let text = "https://example.com/abcdefghijklmnop";
-    let p = lay_out(text, &column(156.0), &LayoutOptions::default());
+    let p = lay_out(text, &column(156.0), &greedy);
     assert_eq!(line_texts(&p, text)[0], "https://example.com/");
     // A natural break (tier 0) wins over URL punctuation, and a long piece
     // breaks inside only when it holds the line alone.
     let text = "see https://example.com/abcdefghijklmnopqrstuvwxyz";
-    let p = lay_out(text, &column(96.0), &LayoutOptions::default());
+    let p = lay_out(text, &column(96.0), &greedy);
     assert_eq!(
         line_texts(&p, text),
         [

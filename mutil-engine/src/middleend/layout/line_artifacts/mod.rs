@@ -1,5 +1,4 @@
-//! Line-level fragments (ST2-3, FRG-1, FRG-3), decorations (ST5-1) and, in
-//! `carets`, caret stops (§6.1).
+//! Line-level fragments (ST2-3, FRG-1, FRG-3), decorations (ST5-1) and caret stops (§6.1).
 
 mod carets;
 
@@ -21,8 +20,6 @@ use crate::types::{BidiLevel, BoxHeightStyle, FontMetrics, TextDecoration, TextR
 use smallvec::SmallVec;
 use std::ops::Range;
 
-/// Origin of a [`VisualGroup`]: real content on the line, trailing whitespace
-/// only, or synthetic cloned padding inserted at the left or right line edge.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GroupKind {
     Content,
@@ -31,47 +28,26 @@ enum GroupKind {
     ClonedRight,
 }
 
-/// One group of a span's pieces on a line: contiguous in visual order and in
-/// logical order (spec ST2-3, FRG-1, FRG-3).
 pub(super) struct VisualGroup {
     pub(super) lo: f64,
     pub(super) hi: f64,
     bytes: TextRange,
-    /// Visual-order bounds `(first_v, last_v)` in `line.order`; `None` for a
-    /// synthetic trailing-only or cloned-padding group.
     visual_span: Option<(usize, usize)>,
-    /// The level of its first piece in visual order.
     level: BidiLevel,
-    /// Whether it holds only zero-width span boundaries.
     is_bare_boundary: bool,
     kind: GroupKind,
 }
 
-/// A line's visual order, indexed for grouping (ST2-3): each piece's
-/// visual position, how many pieces other than span boundaries come before
-/// each visual position, and the outermost positive-width body pieces for
-/// O(1) cloned-padding checks. Rebuilt once per line in the paragraph's
-/// scratch.
 #[derive(Default)]
 pub(in crate::middleend::layout) struct VisualIndex {
-    /// The visual position of each piece in logical order; `None` for the
-    /// trailing whitespace, which has none.
     position: Vec<Option<usize>>,
-    /// `solid_before[v]`: the pieces at visual positions below `v` that are
-    /// not span boundaries.
     solid_before: Vec<usize>,
-    /// First and last body pieces in visual order with `width > 0.0`, as
-    /// `(visual_pos, body_idx)`.
     first_wide: Option<(usize, BodyIdx)>,
     last_wide: Option<(usize, BodyIdx)>,
-    /// Whether every body piece has `width >= 0.0` and starts at or after the
-    /// previous body piece's end, so `first_wide` and `last_wide` bound all
-    /// positive-width non-members in O(1).
     ordered_x: bool,
 }
 
 impl VisualIndex {
-    /// Indexes `order`, the visual order of the body of `placed`.
     pub(in crate::middleend::layout) fn rebuild(
         &mut self,
         placed: &[PlacedPiece<'_>],
@@ -102,16 +78,10 @@ impl VisualIndex {
         self.solid_before.push(solid);
     }
 
-    /// Whether a piece other than a span boundary lies strictly between
-    /// visual positions `a < b`.
     fn solid_between(&self, a: usize, b: usize) -> bool {
         self.solid_before.get(b) > self.solid_before.get(a + 1)
     }
 
-    /// Whether any positive-width non-member body piece starts strictly left
-    /// of `limit` (beyond tolerance). O(1) when body `x` positions are
-    /// ordered; falls back to scanning `order` only on lines with negative
-    /// glue or no-break gaps.
     fn has_other_left(
         &self,
         placed: &[PlacedPiece<'_>],
@@ -134,10 +104,6 @@ impl VisualIndex {
         })
     }
 
-    /// Whether any positive-width non-member body piece ends strictly right
-    /// of `limit` (beyond tolerance). O(1) when body `x` positions are
-    /// ordered; falls back to scanning `order` only on lines with negative
-    /// glue or no-break gaps.
     fn has_other_right(
         &self,
         placed: &[PlacedPiece<'_>],
@@ -163,15 +129,6 @@ impl VisualIndex {
     }
 }
 
-/// The visual groups, left to right, of the pieces `is_member` selects,
-/// all of which lie in the logical range `candidates`. A piece outside the
-/// selection splits a group, except another span's boundary, which neither
-/// joins nor splits it: a nested span's padding lies inside the enclosing
-/// one. Visually adjacent members join only when they are also adjacent
-/// among the members in logical order, `placed` being in logical order.
-///
-/// Only the candidates are read, so a line with many spans costs the sum of
-/// their pieces, not pieces × spans.
 fn visual_groups(
     placed: &[PlacedPiece<'_>],
     index: &VisualIndex,
@@ -180,7 +137,6 @@ fn visual_groups(
 ) -> SmallVec<[VisualGroup; 2]> {
     let slice = placed.get(candidates.clone()).unwrap_or_default();
     let positions = index.position.get(candidates).unwrap_or_default();
-    // (visual position, rank among the members in logical order, piece).
     let mut members: SmallVec<[(usize, usize, &PlacedPiece<'_>); 16]> = slice
         .iter()
         .zip(positions)
@@ -223,26 +179,18 @@ fn visual_groups(
     groups
 }
 
-/// The pieces whose bytes may lie inside `range`, as a logical range: G1
-/// proves the items in byte order (AST-3, `ItemsOutOfOrder`), so the pieces'
-/// starts and ends both ascend and bisect.
 fn pieces_within(placed: &[PlacedPiece<'_>], range: TextRange) -> Range<usize> {
     let lo = placed.partition_point(|p| p.piece.bytes.start() < range.start());
     let hi = placed.partition_point(|p| p.piece.bytes.end() <= range.end());
     lo..hi.max(lo)
 }
 
-/// The pieces whose bytes may meet `range`, as a logical range (AST-3).
 fn pieces_meeting(placed: &[PlacedPiece<'_>], range: TextRange) -> Range<usize> {
     let lo = placed.partition_point(|p| p.piece.bytes.end() <= range.start());
     let hi = placed.partition_point(|p| p.piece.bytes.start() < range.end());
     lo..hi.max(lo)
 }
 
-/// One line edge's break as decoration spans see it (ST2-3): the spans it
-/// clones, by validated ID and outer first, each with the padding it lays out
-/// there; the break's whole width there (padding and its own edit), which
-/// the edge's padding starts from; and the line's empty edge bytes.
 struct ClonedEdge {
     clones: SmallVec<[(SpanId, f64); MAX_DECORATION_NESTING_DEPTH]>,
     break_width: f64,
@@ -250,7 +198,6 @@ struct ClonedEdge {
 }
 
 impl ClonedEdge {
-    /// The edge of `brk`, each cloned span laying out `padding` there.
     fn of(
         inputs: &ValidatedInputs<'_>,
         candidates: impl Iterator<Item = SpanId>,
@@ -279,10 +226,6 @@ impl ClonedEdge {
         }
     }
 
-    /// The edge as span `index` sees it. The cloned spans all contain the
-    /// break, so they nest with the span: those before it in slice order
-    /// that contain it lie outside it, and those from it on that it contains
-    /// lie inside (equal ranges nest in slice order, AST-8).
     fn side(&self, inputs: &ValidatedInputs<'_>, index: SpanId) -> PaddingSide {
         let span = inputs.decoration_span(index).byte_range;
         let (cloned, own_cloned, outside, inside) = self.clones.iter().fold(
@@ -309,11 +252,6 @@ impl ClonedEdge {
     }
 }
 
-/// The cloned padding on one physical side of a line (ST2-3), as one span
-/// sees it: whether the span or a span inside it is cloned there, whether this
-/// span itself is cloned there, the padding of the cloned spans enclosing it
-/// (outermost, at the line edge) and of those inside it, the break's whole
-/// width there, and the line's empty edge bytes there.
 struct PaddingSide {
     cloned: bool,
     own_cloned: bool,
@@ -323,8 +261,6 @@ struct PaddingSide {
     bytes: TextRange,
 }
 
-/// How a physical side of a fragment ends where the span does not end there:
-/// cloned when the span itself is cloned at that break, else sliced.
 fn wrap_cut(span: &InlineDecorationSpan, own_cloned: bool) -> SpanEdgeCut {
     if span.break_mode == BoxDecorationBreak::Clone && own_cloned {
         SpanEdgeCut::ClonedWrap
@@ -333,15 +269,6 @@ fn wrap_cut(span: &InlineDecorationSpan, own_cloned: bool) -> SpanEdgeCut {
     }
 }
 
-/// Classifies the physical left and right edges of `group`, the
-/// `index`th of `count` groups of `span` on the line (AX-5). Which break a
-/// wrap edge belongs to follows the paragraph's base direction, as the
-/// Classifies the physical left and right edges of `group` of `span` on the
-/// line (AX-5). Which break a wrap edge belongs to follows `base_rtl` (as
-/// `attach_padding` does); which physical side holds the group's logical start
-/// vs. logical end follows `group.level.direction().is_rtl()` (matching
-/// `PositionedSpanFragment::bidi_level`); and interior splits between multiple
-/// visual groups on the same line are `BidiSplit`.
 fn classify_edges(
     span: &InlineDecorationSpan,
     line_bytes: TextRange,
@@ -395,10 +322,6 @@ fn classify_edges(
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
-    /// Walks each fragment of each decoration span on the line, left to
-    /// right (spec ST2-3, FRG-1), calling `emit(span, group, edges)`. Groups
-    /// of bare zero-width boundaries are dropped beside any other group; a
-    /// fragment's bytes stay inside its span and the line.
     pub(super) fn for_each_span_group(
         &self,
         line: &PlacedLine<'_, '_>,
@@ -431,8 +354,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             if range.end() < bytes.start() {
                 continue;
             }
-            // The edges of the span and of the spans nested in it: their
-            // padding lies inside it.
             let is_member = |p: &Piece<'_>| match p.kind {
                 PieceKind::SpanEdge { span, .. } => {
                     span >= index
@@ -477,14 +398,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// Gives a span's bytes in the line's collapsed trailing white space,
-    /// which has no visual order, to its last group by bytes, or to an empty
-    /// group at the line end when it has none on the line. Then extends its
-    /// outermost groups with the padding cloned at the line's start or end,
-    /// its own and that of the spans inside it, which the cloned spans
-    /// enclosing it surround (ST2-3): that padding joins the outermost group
-    /// only if no other content lies between them, else it is a fragment of
-    /// its own at the line's edge offset on that side (AX-5).
     fn attach_padding(
         &self,
         line: &PlacedLine<'_, '_>,
@@ -499,9 +412,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         } else {
             (at_start, at_end)
         };
-        // The line's outer edges (the body bounds hold each break's whole
-        // width), and the span's own edges inside the padding of the cloned
-        // spans enclosing it.
         let (line_lo, line_hi) = (line.bounds.body_lo - left.break_width, line.bounds.body_hi);
         let (span_lo, span_hi) = (line_lo + left.outside, line_hi - right.outside);
         let group = |lo: f64, hi: f64, bytes: TextRange, kind: GroupKind| VisualGroup {
@@ -571,10 +481,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// Vertical `(ascent, descent)` of one fragment under `span.height_style`:
-    /// `Strut` uses the resolved strut, `Max` uses the line box, and `Tight`
-    /// unions the cached font metrics and inline boxes of the group's pieces,
-    /// falling back to `Strut` for synthetic or empty groups.
     fn fragment_vertical_extent(
         &self,
         span: &InlineDecorationSpan,
@@ -625,9 +531,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// One fragment per visual group of each decoration span on the line
-    /// (spec ST2-3, FRG-1), padding included; a span cloned across this
-    /// line's breaks reaches the line's edge.
     pub(super) fn span_fragments(
         &self,
         line: &AlignedLine<'_, '_>,
@@ -654,10 +557,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         fragments
     }
 
-    /// One fragment per visual group of each atomic span on the line (spec
-    /// FRG-3), together covering exactly the part of the span on the line:
-    /// each group takes the bytes from where the previous one stopped to its
-    /// own end, at least one byte, and the last takes the rest.
     pub(super) fn atomic_fragments(&self, line: &AlignedLine<'_, '_>) -> Vec<AtomicFragment> {
         let mut out = Vec::new();
         let visual = line.visual;
@@ -697,9 +596,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         out
     }
 
-    /// Underline or strike-through segments merged across adjacent decorated
-    /// clusters and the glue between them (spec ST5-1); an underline takes
-    /// the lowest of the fonts it crosses.
     pub(super) fn decorations(
         &mut self,
         kind: DecorationKind,
@@ -716,7 +612,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         };
         let mut open: Option<DecorationLine> = None;
         let (mut open_x, mut open_right) = (0.0_f64, 0.0_f64);
-        // Glue after the open segment joins only if a decorated cluster follows.
         let mut pending_glue: Option<TextRange> = None;
         for &p in line.order.pick(line.placed) {
             let bytes = p.piece.bytes;
