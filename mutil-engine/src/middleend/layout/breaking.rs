@@ -3,15 +3,13 @@
 use super::hanging::LineEdge;
 use super::justify::CJK_GAP_STRETCH;
 use super::trim::{TrimInfo, is_trim_transparent, line_start_lead_trim, pair_trim};
-use super::{
-    Layout, LineCursor, LineEnd, Piece, PieceKind, Reshaped, Reshapes, Token, advance_clearance,
-};
+use super::{Layout, LineCursor, LineEnd, Piece, PieceKind, Reshaped, Reshapes, Token};
 use crate::frontend::{BoxOverflowPolicy, DiscretionaryNode, GlueKind, InlineObjectBox};
 use crate::middleend::badness::{self, TierCapacities};
 use crate::middleend::shaper_gate::{checked_font_metrics, checked_reshape_window};
 use crate::middleend::tolerance::tolerance_f64;
 use crate::middleend::validated::{ClusterId, RunId, TokenIdx};
-use crate::middleend::{GeometryAnswer, InlineSlotConstraint, LayoutInputError};
+use crate::middleend::{InlineSlotConstraint, LayoutInputError};
 use crate::shaping::ReshapeRequest;
 use crate::types::{AtomFlags, FontMetrics, RawShapedGlyph, TextRange};
 use smallvec::SmallVec;
@@ -45,6 +43,8 @@ struct LineWalk {
     pending_punct_glue_shrink: f64,
     stretch: [f64; 3],
     shrink_capacity: [f64; 2],
+    visible_stretch: [f64; 3],
+    visible_shrink_cap: [f64; 2],
     pending_cjk_gap: f64,
     content_clusters: usize,
 }
@@ -60,14 +60,16 @@ impl LineWalk {
 
     fn capacities(&self) -> TierCapacities {
         TierCapacities {
-            stretch: self.stretch.map(|v| v as f32),
-            shrink: self.shrink_capacity.map(|v| v as f32),
+            stretch: self.visible_stretch.map(|v| v as f32),
+            shrink: self.visible_shrink_cap.map(|v| v as f32),
         }
     }
 
     fn reset_capacities(&mut self) {
         self.stretch = [0.0; 3];
         self.shrink_capacity = [0.0; 2];
+        self.visible_stretch = [0.0; 3];
+        self.visible_shrink_cap = [0.0; 2];
         self.pending_cjk_gap = 0.0;
     }
 
@@ -283,6 +285,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                     if earlier.is_none()
                         && let LineEnd::At { token, brk } = chosen
                     {
+                        walk.reset_capacities();
                         fits.record(token, brk, &walk, walk.used_at_break(0.0, false));
                     }
                     break chosen;
@@ -462,21 +465,10 @@ impl<'i, 'a> Layout<'i, 'a> {
         &self,
         cursor: &mut LineCursor<'a>,
     ) -> Result<InlineSlotConstraint, LayoutInputError> {
-        let height = self.strut_height();
         let mut obstructed = 0;
-        loop {
-            match self.inputs.line_geometry(
-                cursor.index,
-                cursor.block_top as f32,
-                height as f32,
-                None,
-            )? {
-                GeometryAnswer::Open(geometry) => return Ok(geometry.first_slot()),
-                GeometryAnswer::Obstructed(clearance) => {
-                    cursor.block_top = advance_clearance(&mut obstructed, clearance)?;
-                }
-            }
-        }
+        Ok(self
+            .open_geometry(cursor, self.strut_height(), &mut obstructed)?
+            .first_slot())
     }
 
     pub(super) fn strut_height(&self) -> f64 {
@@ -588,6 +580,8 @@ impl<'i, 'a> Layout<'i, 'a> {
                 walk.content_clusters += 1;
             }
             walk.visible_shrink = walk.shrink;
+            walk.visible_stretch = walk.stretch;
+            walk.visible_shrink_cap = walk.shrink_capacity;
             walk.end_hang = self
                 .hang_protrusion(piece, LineEdge::End, line.first_line(), false, pending)
                 .unwrap_or(0.0);
@@ -679,7 +673,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         t
     }
 
-    fn repair_seam(
+    pub(super) fn repair_seam(
         &self,
         line: &LineCursor<'_>,
         t: TokenIdx,

@@ -20,7 +20,7 @@ use crate::middleend::shaper_gate::checked_line_box;
 use crate::middleend::validated::{ClusterId, RunId, SentinelTokens, SpanId, TokenIdx};
 use crate::middleend::{
     Clearance, GeometryAnswer, LayoutConstraints, LayoutInputError, LayoutOptions, LineHeight,
-    PositionedLine, PositionedParagraph, StrutMetrics, ValidatedInputs,
+    OpenGeometry, PositionedLine, PositionedParagraph, StrutMetrics, ValidatedInputs,
 };
 use crate::shaping::TextShaper;
 use crate::types::{BidiDirection, BidiLevel, FontMetrics, RawShapedGlyph, TextRange};
@@ -344,20 +344,118 @@ impl<'i, 'a> Layout<'i, 'a> {
     fn place_lines(
         &mut self,
     ) -> Result<(Vec<PositionedLine>, f32, Option<TextRange>), LayoutInputError> {
-        let mut lines = Vec::new();
+        let clamp = self.inputs.policy().clamp.as_ref();
+        let mut retained: Vec<PlacedNextLine<'a>> = Vec::new();
         let mut cursor = LineCursor::paragraph_start();
         let mut scratch = LayoutScratch::default();
         loop {
-            let placed = self.place_next_line(&mut cursor, &mut scratch)?;
-            cursor.advance(placed.end, &self.tokens, placed.line_height);
-            lines.push(placed.line);
-            if let Some(tail) = placed.truncated_range {
-                return Ok((lines, cursor.block_top as f32, Some(tail)));
+            let mut line_cursor = cursor;
+            let placed = self.place_next_line(&mut line_cursor, &mut scratch)?;
+            let over_block = clamp
+                .and_then(|c| c.max_block_size)
+                .is_some_and(|max| line_cursor.block_top + placed.line_height > f64::from(max));
+            if over_block && !retained.is_empty() {
+                break;
             }
+            self.reshaped.extend(placed.reshapes);
+            cursor = line_cursor;
+            cursor.advance(placed.end, &self.tokens, placed.line_height);
+            retained.push(PlacedNextLine {
+                cursor: line_cursor,
+                reshapes: Reshapes::new(),
+                ..placed
+            });
             if cursor.is_paragraph_end(&self.tokens) {
+                let lines = retained.into_iter().map(|r| r.line).collect();
                 return Ok((lines, cursor.block_top as f32, None));
             }
+            if over_block
+                || clamp
+                    .and_then(|c| c.max_lines)
+                    .is_some_and(|m| retained.len() >= m)
+            {
+                break;
+            }
         }
+        let ellipsis = clamp.map_or("", |c| c.ellipsis.as_ref());
+        let mut obstructed = 0;
+        while let Some(mut last) = retained.pop() {
+            if let Some((clamped, clamped_height, _)) = self.refit_line(
+                &mut last.cursor,
+                last.geometry,
+                last.line_height,
+                &mut obstructed,
+                |this, c, g| this.clamp_line(c, last.end, ellipsis, g, &mut scratch),
+            )? {
+                let end_top = last.cursor.block_top + clamped_height;
+                let tail = TextRange::new(clamped.byte_range.end(), self.inputs.text().len());
+                let mut lines: Vec<_> = retained.into_iter().map(|r| r.line).collect();
+                lines.push(clamped);
+                return Ok((lines, end_top as f32, Some(tail)));
+            }
+        }
+        Err(LayoutInputError::RefitExhausted)
+    }
+
+    pub(super) fn open_geometry(
+        &self,
+        cursor: &mut LineCursor<'a>,
+        height: f64,
+        obstructed: &mut usize,
+    ) -> Result<OpenGeometry, LayoutInputError> {
+        loop {
+            match self.inputs.line_geometry(
+                cursor.index,
+                cursor.block_top as f32,
+                height as f32,
+                None,
+            )? {
+                GeometryAnswer::Open(geometry) => return Ok(geometry),
+                GeometryAnswer::Obstructed(clearance) => {
+                    cursor.block_top = advance_clearance(obstructed, clearance)?;
+                }
+            }
+        }
+    }
+
+    fn refit_line<T>(
+        &mut self,
+        cursor: &mut LineCursor<'a>,
+        mut geometry: OpenGeometry,
+        mut envelope: f64,
+        obstructed: &mut usize,
+        mut attempt: impl FnMut(
+            &mut Self,
+            &LineCursor<'a>,
+            &OpenGeometry,
+        ) -> Result<Option<(T, f64)>, LayoutInputError>,
+    ) -> Result<Option<(T, f64, OpenGeometry)>, LayoutInputError> {
+        let has_provider = self.inputs.constraints().geometry_provider.is_some();
+        for _ in 0..MAX_ENVELOPE_REFITS {
+            let Some((value, height)) = attempt(self, cursor, &geometry)? else {
+                return Ok(None);
+            };
+            if within(height, envelope) || !has_provider {
+                return Ok(Some((value, height, geometry)));
+            }
+            envelope = height;
+            match self.inputs.line_geometry(
+                cursor.index,
+                cursor.block_top as f32,
+                envelope as f32,
+                Some(geometry.geometry()),
+            )? {
+                GeometryAnswer::Open(open) if open == geometry => {
+                    return Ok(Some((value, height, geometry)));
+                }
+                GeometryAnswer::Open(open) => geometry = open,
+                GeometryAnswer::Obstructed(clearance) => {
+                    cursor.block_top = advance_clearance(obstructed, clearance)?;
+                    geometry = self.open_geometry(cursor, envelope, obstructed)?;
+                }
+            }
+        }
+        Err(LayoutInputError::RefitExhausted)
     }
 
     fn place_next_line(
@@ -366,99 +464,40 @@ impl<'i, 'a> Layout<'i, 'a> {
         scratch: &mut LayoutScratch<'a>,
     ) -> Result<PlacedNextLine<'a>, LayoutInputError> {
         let strut_height = self.strut_height();
-        let has_provider = self.inputs.constraints().geometry_provider.is_some();
         let mut obstructed = 0;
-        'place: loop {
-            let mut envelope = strut_height;
-            let answer = self.inputs.line_geometry(
-                cursor.index,
-                cursor.block_top as f32,
-                envelope as f32,
-                None,
-            )?;
-            let mut geometry = match answer {
-                GeometryAnswer::Open(geometry) => geometry,
-                GeometryAnswer::Obstructed(clearance) => {
-                    cursor.block_top = advance_clearance(&mut obstructed, clearance)?;
-                    continue;
-                }
-            };
-            for _ in 0..MAX_ENVELOPE_REFITS {
-                let slot = geometry.first_slot();
-                let (end, reshapes) = self.break_line(cursor, slot)?;
-                let (mut line, mut line_height) =
-                    self.place(cursor, end, &geometry, &reshapes, scratch, None)?;
-                let mut truncated_range = None;
-                if let Some(ellipsis) = self.should_clamp(cursor, end, line_height) {
-                    (line, line_height) =
-                        self.clamp_line(cursor, end, ellipsis, &geometry, scratch)?;
-                    truncated_range = Some(TextRange::new(
-                        line.byte_range.end(),
-                        self.inputs.text().len(),
-                    ));
-                }
-                if within(line_height, envelope) || !has_provider {
-                    self.reshaped.extend(reshapes);
-                    return Ok(PlacedNextLine {
-                        line,
-                        end,
-                        line_height,
-                        truncated_range,
-                    });
-                }
-                envelope = line_height;
-                let expanded = self.inputs.line_geometry(
-                    cursor.index,
-                    cursor.block_top as f32,
-                    envelope as f32,
-                    Some(geometry.geometry()),
-                )?;
-                match expanded {
-                    GeometryAnswer::Open(open) if open == geometry => {
-                        self.reshaped.extend(reshapes);
-                        return Ok(PlacedNextLine {
-                            line,
-                            end,
-                            line_height,
-                            truncated_range,
-                        });
-                    }
-                    GeometryAnswer::Open(open) => geometry = open,
-                    GeometryAnswer::Obstructed(clearance) => {
-                        cursor.block_top = advance_clearance(&mut obstructed, clearance)?;
-                        continue 'place;
-                    }
-                }
-            }
+        let geometry = self.open_geometry(cursor, strut_height, &mut obstructed)?;
+        let Some(((line, end, reshapes), line_height, geometry)) = self.refit_line(
+            cursor,
+            geometry,
+            strut_height,
+            &mut obstructed,
+            |this, c, g| {
+                let (end, reshapes) = this.break_line(c, g.first_slot())?;
+                let (line, h) = this.place(c, end, g, &reshapes, scratch, None)?;
+                Ok(Some(((line, end, reshapes), h)))
+            },
+        )?
+        else {
             return Err(LayoutInputError::RefitExhausted);
-        }
-    }
-
-    fn should_clamp(
-        &self,
-        cursor: &LineCursor<'a>,
-        end: LineEnd<'a>,
-        line_height: f64,
-    ) -> Option<&'i str> {
-        let clamp = self.inputs.policy().clamp.as_ref()?;
-        let mut next = *cursor;
-        next.advance(end, &self.tokens, line_height);
-        if next.is_paragraph_end(&self.tokens) {
-            return None;
-        }
-        (clamp.max_lines.is_some_and(|m| cursor.index + 1 >= m)
-            || clamp
-                .max_block_size
-                .is_some_and(|m| cursor.block_top + 2.0 * line_height > f64::from(m)))
-        .then_some(clamp.ellipsis.as_ref())
+        };
+        Ok(PlacedNextLine {
+            line,
+            cursor: *cursor,
+            end,
+            geometry,
+            line_height,
+            reshapes,
+        })
     }
 }
 
 struct PlacedNextLine<'a> {
     line: PositionedLine,
+    cursor: LineCursor<'a>,
     end: LineEnd<'a>,
+    geometry: OpenGeometry,
     line_height: f64,
-    truncated_range: Option<TextRange>,
+    reshapes: Reshapes,
 }
 
 fn tokenize<'a>(inputs: &ValidatedInputs<'a>) -> SentinelTokens<Token<'a>> {

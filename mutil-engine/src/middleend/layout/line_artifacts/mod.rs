@@ -273,7 +273,6 @@ fn classify_edges(
     span: &InlineDecorationSpan,
     line_bytes: TextRange,
     base_rtl: bool,
-    truncated: bool,
     [at_start_own_cloned, at_end_own_cloned]: [bool; 2],
     group: &VisualGroup,
 ) -> SpanFragmentEdges {
@@ -304,8 +303,6 @@ fn classify_edges(
                 SpanEdgeCut::LogicalEnd
             } else if group.bytes.end() < line_bytes.end() {
                 SpanEdgeCut::BidiSplit
-            } else if truncated {
-                wrap_cut(span, true)
             } else {
                 wrap_cut(span, if rtl { left_cloned } else { right_cloned })
             };
@@ -393,7 +390,6 @@ impl<'i, 'a> Layout<'i, 'a> {
                     span,
                     bytes,
                     self.base.is_rtl(),
-                    line.truncated,
                     [at_start_own_cloned, at_end_own_cloned],
                     g,
                 );

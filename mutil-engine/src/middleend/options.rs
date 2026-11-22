@@ -10,8 +10,7 @@ use std::sync::Arc;
 /// Trailing whitespace at a soft wrap (spec §5 Stage 1.7; CSS `white-space` `[W1]`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum HangingWhitespaceMode {
-    /// CSS `normal`: trailing `WordSpace`/`CjkAutospace` collapse to zero width but stay
-    /// in `PositionedLine::byte_range` (`visible_byte_end` marks the last visible cluster).
+    /// CSS `normal`: trailing `WordSpace`/`CjkAutospace` collapse to zero width inside `byte_range`.
     #[default]
     Collapsible,
     /// CSS `pre-wrap`: trailing spaces hang outside the line yet keep caret slots.
@@ -170,9 +169,7 @@ pub enum HangStartMode {
     AllLines,
 }
 
-/// Hanging punctuation (spec §5 Stage 1.3; JLReq 2.5.1, CSS Text 4 `[W4][W2]`): at most
-/// one character per logical edge. [`HangMode::allows`] maps the edges to the physical
-/// `PositionedLine::hanging_left()`/`hanging_right()` (`PositionedLine::validate`).
+/// Hanging punctuation (spec §5 Stage 1.3; JLReq 2.5.1, CSS Text 4 `[W4][W2]`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct HangMode {
     /// Hanging at the start of a line.
@@ -188,8 +185,7 @@ impl HangMode {
         end: HangEndMode::None,
     };
 
-    /// Whether punctuation may hang at the physical `side` of a line in a
-    /// `direction` paragraph; `is_first_line` is whether it is line index 0.
+    /// Whether punctuation may hang at `side` in `direction` (`is_first_line` for line 0).
     #[must_use]
     pub const fn allows(self, side: HangSide, direction: Direction, is_first_line: bool) -> bool {
         match self.start {
@@ -207,8 +203,7 @@ pub enum LineHeight {
     /// CSS `normal`: the union of every used font's glyph bounds, plus the line gap.
     #[default]
     Normal,
-    /// A finite, positive multiple of the font size (first available font; fallbacks may
-    /// overflow the line box).
+    /// A finite, positive multiple of the font size (first available font; fallbacks may overflow).
     Fixed(f32),
 }
 
@@ -222,10 +217,7 @@ impl LineHeight {
         }
     }
 
-    /// Resolves the paragraph strut from `font` at `size`, from the vertical metrics in a
-    /// vertical `mode` (spec §5 Stage 4.1). `Fixed(m)` splits the possibly negative leading
-    /// `m * size - (ascent + descent)` evenly above and below and zeroes the line gap (CSS
-    /// half-leading).
+    /// Resolves the paragraph strut from `font` at `size` in `mode` (spec §5 Stage 4.1).
     #[must_use]
     pub fn resolve_strut(self, font: &FontMetrics, size: f32, mode: WritingMode) -> StrutMetrics {
         let [ascent, descent, line_gap] = if mode.is_vertical() {
@@ -253,9 +245,7 @@ impl LineHeight {
     }
 }
 
-/// The resolved paragraph strut (spec §5 Stage 4.1): the minimum (`Normal`) or exact (`Fixed`)
-/// line box. With half-leading folded in, `ascent`/`descent` may be negative (raw
-/// [`FontMetrics`] never are).
+/// The resolved paragraph strut (spec §5 Stage 4.1): minimum (`Normal`) or exact (`Fixed`) box.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StrutMetrics {
     /// Extent toward line-over, half-leading included.
@@ -284,8 +274,7 @@ impl StrutMetrics {
     }
 }
 
-/// Tab stops at every multiple of `step` from the line-start edge of the slot
-/// (spec OPT-1, ST3-1). Parsed, not validated (spec §1.5, AX-3).
+/// Tab stops at every multiple of `step` from the slot's line-start edge (spec OPT-1, ST3-1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabStops {
     step: f32,
@@ -310,7 +299,6 @@ impl TabStops {
     /// The first stop strictly beyond `x`, or `None` if no finite one is representable.
     #[must_use]
     pub fn next_stop(&self, x: f32) -> Option<f32> {
-        // Where the product rounds back to `x` or overflows, try `x + step`.
         let next = ((x / self.step).floor() + 1.0) * self.step;
         [next, x + self.step]
             .into_iter()
@@ -321,10 +309,9 @@ impl TabStops {
 /// Container geometry: what layout must fit into (the policy is [`LayoutOptions`]).
 #[derive(Clone, Debug)]
 pub struct LayoutConstraints {
-    /// Inline start of the first line's standard slot: in `[0, wrap_width)`,
-    /// or merely finite with a geometry provider (which ignores it).
+    /// Inline start of line 0's standard slot (`[0, wrap_width)` without a provider).
     pub first_line_indent: f32,
-    /// Same, for the subsequent lines.
+    /// Same, for subsequent lines.
     pub hanging_indent: f32,
     /// Optional obstacle-aware container geometry.
     pub geometry_provider: Option<Arc<dyn LineGeometryProvider>>,
@@ -347,8 +334,7 @@ impl Default for LayoutConstraints {
 }
 
 impl LayoutConstraints {
-    /// Positive `wrap_width` (infinite or a measurement), measurement indents,
-    /// each in `[0, wrap_width)` without a provider.
+    /// Positive `wrap_width` and valid indents in `[0, wrap_width)` without a provider.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         let wrap_ok = self.wrap_width == f32::INFINITY
@@ -361,8 +347,7 @@ impl LayoutConstraints {
                 || (in_envelope(self.first_line_indent) && in_envelope(self.hanging_indent)))
     }
 
-    /// Line `line_index`'s unvalidated geometry over `[block_start, block_end)`: the
-    /// provider's answer, or the standard slot `[indent, wrap_width]` (none if malformed).
+    /// Unvalidated geometry for `line_index` over `[block_start, block_end)`.
     #[must_use]
     pub fn resolve_line_geometry(
         &self,
@@ -391,8 +376,7 @@ pub struct InlineSlotConstraint {
 }
 
 impl InlineSlotConstraint {
-    /// `[start, end)`, or `None` unless `start` is finite and `end` lies beyond
-    /// it, at a finite distance or at positive infinity.
+    /// `[start, end)`, or `None` unless finite `start` precedes `end` with finite or infinite width.
     #[must_use]
     pub fn try_new(start: f32, end: f32) -> Option<Self> {
         (start.is_finite() && end > start && (end == f32::INFINITY || (end - start).is_finite()))
@@ -417,8 +401,7 @@ impl InlineSlotConstraint {
         self.end - self.start
     }
 
-    /// Whether the slot lies in the envelope `[0, wrap_width]` within the
-    /// geometry tolerance (only `start >= 0` for an infinite `wrap_width`).
+    /// Whether the slot lies in `[0, wrap_width]` within tolerance.
     #[must_use]
     pub fn lies_in_envelope(self, wrap_width: f32) -> bool {
         self.start >= -tolerance(self.start, 0.0)

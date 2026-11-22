@@ -84,7 +84,6 @@ pub(crate) fn checked_shape_run(
         if !(is_measurement(c.font.scale) && c.font.scale > 0.0)
             || !c.orientation.is_valid(mode, c.bidi_level)
             || !is_extent(c.natural_width)
-            || glyphs.is_empty()
             || !glyphs.iter().all(glyph_is_measured)
         {
             return Err(LayoutInputError::InvalidShaperMetrics);

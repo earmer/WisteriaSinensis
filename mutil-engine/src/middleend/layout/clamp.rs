@@ -26,11 +26,13 @@ impl<'i, 'a> Layout<'i, 'a> {
         ellipsis: &str,
         geometry: &OpenGeometry,
         scratch: &mut LayoutScratch<'a>,
-    ) -> Result<(PositionedLine, f64), LayoutInputError> {
+    ) -> Result<Option<(PositionedLine, f64)>, LayoutInputError> {
         let end_token = match end {
             LineEnd::At { token, .. } | LineEnd::Before(token) => token,
         };
-        let mut boundary = self.atomic_safe_boundary(cursor.token_start, end_token);
+        let Some(mut boundary) = self.atomic_safe_boundary(cursor, end_token) else {
+            return Ok(None);
+        };
         let slot_width = f64::from(geometry.first_slot().width());
         let (mut suffix_run, mut suffix) = (None, None);
         loop {
@@ -41,11 +43,13 @@ impl<'i, 'a> Layout<'i, 'a> {
                 suffix = self.shape_ellipsis(run, ellipsis)?;
                 suffix_run = Some(run);
             }
+            let mut reshapes = Reshapes::new();
+            self.repair_seam(cursor, boundary, &mut reshapes);
             let (line, height) = self.place(
                 cursor,
                 LineEnd::Before(boundary),
                 geometry,
-                &Reshapes::new(),
+                &reshapes,
                 scratch,
                 Some(suffix.as_ref()),
             )?;
@@ -53,22 +57,37 @@ impl<'i, 'a> Layout<'i, 'a> {
                 || line.byte_range.is_empty()
                 || boundary == cursor.token_start
             {
-                return Ok((line, height));
+                if !line.byte_range.is_empty() {
+                    self.reshaped.extend(reshapes);
+                }
+                return Ok(Some((line, height)));
             }
-            let prev = boundary.prev().unwrap_or(cursor.token_start);
-            boundary = self.atomic_safe_boundary(cursor.token_start, prev);
+            let Some(next) = boundary
+                .prev()
+                .filter(|&p| p >= cursor.token_start)
+                .and_then(|p| self.atomic_safe_boundary(cursor, p))
+            else {
+                return Ok(None);
+            };
+            boundary = next;
         }
     }
 
-    fn atomic_safe_boundary(&self, start: TokenIdx, boundary: TokenIdx) -> TokenIdx {
+    fn atomic_safe_boundary(
+        &self,
+        cursor: &LineCursor<'_>,
+        boundary: TokenIdx,
+    ) -> Option<TokenIdx> {
         let bytes = self.tokens.at_or_sentinel(boundary).bytes().start();
         match self.ast.atomic_span_containing(bytes) {
-            Some(s) if s.byte_range.start() < bytes => self
-                .tokens
-                .iter_range(start, boundary)
-                .find(|(_, t)| t.bytes().start() >= s.byte_range.start())
-                .map_or(boundary, |(index, _)| index),
-            _ => boundary,
+            Some(s) if s.byte_range.start() < cursor.byte_start => None,
+            Some(s) if s.byte_range.start() < bytes => Some(
+                self.tokens
+                    .iter_range(cursor.token_start, boundary)
+                    .find(|(_, t)| t.bytes().start() >= s.byte_range.start())
+                    .map_or(boundary, |(i, _)| i),
+            ),
+            _ => Some(boundary),
         }
     }
 
@@ -116,6 +135,9 @@ impl<'i, 'a> Layout<'i, 'a> {
             &atoms,
             self.ast.writing_mode,
             |cluster, glyphs| {
+                if glyphs.is_empty() {
+                    return Ok(());
+                }
                 width += glyphs.iter().map(|g| f64::from(g.x_advance)).sum::<f64>();
                 let (a, d) = half_leaded(checked_line_box(
                     self.shaper,
