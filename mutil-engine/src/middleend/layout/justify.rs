@@ -1,5 +1,4 @@
-//! Stage 3 justification (spec ST3-2 to ST3-5): the priority ladder that
-//! spends a line's slack on its glue and inter-cluster gaps.
+//! Stage 3 justification priority ladder (spec ST3-2 to ST3-5).
 
 use super::scratch::LogicalPiece;
 use super::trim::is_trim_transparent;
@@ -8,18 +7,10 @@ use crate::frontend::{GlueKind, GlueTier};
 use crate::middleend::FIT_EPSILON;
 use crate::types::{AtomFlags, ScriptTag};
 
-/// The inter-character stretch of an `ALLOW_CJK_JUSTIFY_AFTER` gap, per
-/// unit of the run's font size (ST1-7, Tier 2).
 pub(super) const CJK_GAP_STRETCH: f64 = 0.25;
-/// The residual inter-cluster expansion of Level 3, per unit of the run's
-/// font size (ST3-2).
 const LETTER_GAP_STRETCH: f64 = 0.125;
-/// The ladder's levels: glue Tiers 0 and 1, then the gaps of Tier 2 and
-/// Level 3.
 const LEVELS: usize = 4;
 
-/// What one piece offers: it takes part in exactly one level. Only glue
-/// (Levels 0 and 1) shrinks.
 #[derive(Clone, Copy, Default)]
 struct Capacity {
     level: usize,
@@ -27,14 +18,11 @@ struct Capacity {
     shrink: f64,
 }
 
-/// Scripts that expand at word separators only (ST3-5).
 fn expands_at_words_only(script: ScriptTag) -> bool {
     matches!(&script.as_bytes(), b"Thai" | b"Laoo" | b"Khmr" | b"Mymr")
 }
 
-/// Effective shrink capacity per piece in `body`, deducting static CJK
-/// punctuation trims already applied across `GlueKind::CjkPunctCompression`
-/// seams so justification never double-shrinks a statically trimmed pair.
+// Deduct static CJK punctuation trims across CjkPunctCompression seams so justification never double-shrinks.
 fn effective_shrinks(
     body: &[LogicalPiece<'_>],
     lead_trims: &[f64],
@@ -78,9 +66,6 @@ fn effective_shrinks(
 }
 
 impl Layout<'_, '_> {
-    /// The capacities of the pieces after the line's last tab (ST3-1): glue
-    /// by its tier, and the gap after each cluster that another cluster
-    /// follows, with no inline object between them (ST1-7, ST3-2).
     fn capacities(
         &self,
         body: &[LogicalPiece<'_>],
@@ -132,15 +117,12 @@ impl Layout<'_, '_> {
         capacities
     }
 
-    /// The index of the first piece of `body` after its last tab; only
-    /// those take part in justification (ST3-1).
     fn after_last_tab(body: &[LogicalPiece<'_>]) -> usize {
         body.iter()
             .rposition(|p| matches!(p.piece.kind, PieceKind::Tab))
             .map_or(0, |tab| tab + 1)
     }
 
-    /// `Z`: how much the glue after the line's last tab can shrink (ST1-7).
     pub(super) fn shrink_capacity(
         body: &[LogicalPiece<'_>],
         lead_trims: &[f64],
@@ -156,12 +138,6 @@ impl Layout<'_, '_> {
         .sum()
     }
 
-    /// Spends `slack` on the body pieces after the line's last tab, level by
-    /// level, each level shared in proportion to its capacities via cumulative
-    /// prefix distribution (ST3-2, ST3-3), adding to their `widths` and, for a
-    /// cluster, its `expansions`. Expansion after a cluster widens it; the
-    /// cluster's glyphs place it by direction. Returns whether the line came
-    /// out flush (ST3-4).
     pub(super) fn justify(
         &self,
         body: &[LogicalPiece<'_>],

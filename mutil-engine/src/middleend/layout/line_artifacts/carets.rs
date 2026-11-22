@@ -11,35 +11,24 @@ use crate::middleend::{
 use crate::types::{AtomFlags, BidiLevel, GlyphOrientation, TextRange};
 use smallvec::SmallVec;
 
-/// A candidate caret stop, with the affinity and level it takes at a
-/// direction boundary (CRT-3): upstream at its piece's end, downstream at its
-/// start, and the level of its entity if that renders.
 #[derive(Clone, Copy)]
 struct RawStop {
     x: f64,
     offset: usize,
     affinity: CaretAffinity,
     level: Option<BidiLevel>,
-    /// Set by deduplication or shared-offset merging before `retain`.
     dropped: bool,
 }
 
-/// The working buffers of [`Layout::caret_stops`], kept across the lines
-/// of a paragraph.
 #[derive(Default)]
 pub(in crate::middleend::layout) struct CaretScratch {
     raw: Vec<RawStop>,
-    /// `(offset, x, index)` tuples sorted by offset for non-monotone dedup.
     by_offset: Vec<(usize, f64, usize)>,
-    /// `(offset, index)` pairs sorted by offset.
     pairs: Vec<(usize, usize)>,
     entities: Vec<Entity>,
 }
 
 impl Layout<'_, '_> {
-    /// The line's caret stops in visual order (spec §6.1, CRT-1 to CRT-3,
-    /// INT-4 to INT-6, INT-9), given the end of its visible bytes, where its
-    /// content starts, and its glyph runs and boxes.
     pub(in crate::middleend::layout) fn caret_stops(
         &self,
         line: &AlignedLine<'_, '_>,
@@ -56,10 +45,6 @@ impl Layout<'_, '_> {
             entities,
         } = scratch;
         let bytes = line.byte_range;
-        // Under `Collapsible`, a soft wrap hides the trailing white space,
-        // whose offsets belong to the next line (INT-6). Otherwise it all
-        // sits beyond the far edge of the base direction (HNG-3), so the end
-        // of a hard-broken line or of the paragraph stays reachable.
         let hides_trailing =
             line.soft_wrap() && self.options.whitespace == HangingWhitespaceMode::Collapsible;
         raw.clear();
@@ -86,7 +71,6 @@ impl Layout<'_, '_> {
         for &piece in body.chain(forward).chain(backward.iter().rev()) {
             self.push_piece_stops(piece, raw, pending);
         }
-        // A hard break's own bytes start the next line.
         let drops_end = !line.soft_wrap()
             && !bytes.is_empty()
             && line
@@ -105,9 +89,6 @@ impl Layout<'_, '_> {
         raw.retain(|s| belongs_here(s.offset));
         distinct_stops(raw, by_offset);
         resolve_shared_offsets(raw, pairs, line.soft_wrap());
-        // The level of an entity touching `offset`, else the paragraph's.
-        // When every run and box shares the base level, every stop takes it
-        // directly without indexing entities.
         let base_level = self.base.base_level();
         if runs.iter().all(|r| r.bidi_level == base_level)
             && boxes.iter().all(|b| b.bidi_level == base_level)
@@ -137,11 +118,6 @@ impl Layout<'_, '_> {
             .collect()
     }
 
-    /// A piece's caret stops, left to right: its two visual edges and, between
-    /// them, those between a ligature's atoms (INT-5) from the font's caret
-    /// positions, none for a single atom or an emoji sequence. Positions
-    /// increase from the left edge (SHP-7); in RTL they pair with the atoms
-    /// in reverse logical order, and the justification lies before the glyphs.
     fn push_piece_stops(
         &self,
         placed: PlacedPiece<'_>,
@@ -149,15 +125,12 @@ impl Layout<'_, '_> {
         pending: &Reshapes,
     ) {
         let p = placed.piece;
-        // A compression pool squeezed below zero overlaps its neighbours and
-        // owns no bytes: its edges would only duplicate theirs (CRT-3).
         if placed.width < 0.0
             && matches!(p.kind, PieceKind::Glue(glue)
                 if glue.kind == GlueKind::CjkPunctCompression)
         {
             return;
         }
-        // A glyph-less piece lends no level of its own (spec CRT-2).
         let level = match p.kind {
             PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => None,
             _ => Some(p.level),
@@ -182,13 +155,10 @@ impl Layout<'_, '_> {
             && let c = self.inputs.cluster(cluster)
             && c.atom_count() > 1
             && !c.flags.contains(AtomFlags::IS_EMOJI_SEQUENCE)
-            // A tate-chu-yoko cluster merges several atoms but is no ligature.
             && c.orientation != GlyphOrientation::HorizontalInVertical
         {
             let direction = p.level.direction();
             let (glyphs, width) = self.cluster_glyphs(pending, cluster);
-            // A cluster with no glyph has no ligature to ask GDEF about; it
-            // takes the equal slots (INT-5).
             let carets = glyphs.first().map_or_else(SmallVec::new, |glyph| {
                 let instance = self.inputs.run(run).font_instance(c.font);
                 self.shaper
@@ -215,18 +185,7 @@ impl Layout<'_, '_> {
     }
 }
 
-/// One stop per distinct `(x, offset)` (INT-20), the first emitted of each,
-/// in emission order. Two pieces that meet at an offset need not be emitted
-/// next to each other: an RTL line's trailing white space is emitted after
-/// its whole body but sits at its visual left, beside the body's last
-/// logical edge. So every stop is compared with all earlier stops of its
-/// offset, not with its recent neighbours.
-///
-/// `by_offset` is a working buffer.
 fn distinct_stops(raw: &mut Vec<RawStop>, by_offset: &mut Vec<(usize, f64, usize)>) {
-    // Fast path: when offsets are already monotone (pure LTR or pure RTL),
-    // equal offsets are contiguous and in emission order, so deduplication is
-    // one linear in-place pass with no sort.
     let monotone =
         raw.is_sorted_by_key(|s| s.offset) || raw.is_sorted_by(|a, b| a.offset >= b.offset);
     if monotone {
@@ -247,7 +206,6 @@ fn distinct_stops(raw: &mut Vec<RawStop>, by_offset: &mut Vec<(usize, f64, usize
     }
     by_offset.clear();
     by_offset.extend(raw.iter().enumerate().map(|(i, s)| (s.offset, s.x, i)));
-    // Stable: emission order within an offset.
     by_offset.sort_by_key(|&(offset, ..)| offset);
     let mut kept_xs: SmallVec<[f64; 4]> = SmallVec::new();
     for same in by_offset.chunk_by(|a, b| a.0 == b.0) {
@@ -265,8 +223,6 @@ fn distinct_stops(raw: &mut Vec<RawStop>, by_offset: &mut Vec<(usize, f64, usize
     raw.retain(|s| !s.dropped);
 }
 
-/// Fast path for [`resolve_shared_offsets`] when stops are already ordered by
-/// both `x` and `offset`: equal offsets are contiguous so no sort is needed.
 fn resolve_ordered_shared_offsets(stops: &mut Vec<RawStop>, soft_wrap: bool) {
     let last_offset = stops.last().map(|s| s.offset);
     let mut any_merged = false;
@@ -310,12 +266,6 @@ fn resolve_ordered_shared_offsets(stops: &mut Vec<RawStop>, soft_wrap: bool) {
     }
 }
 
-/// Resolves the stops, in visual order, that share an offset (CRT-3). Those
-/// all of one level, e.g. where a negative-width `CjkPunctCompression`
-/// overlaps two clusters, merge into one at their midpoint. Only stops at two
-/// positions, a direction boundary, keep their own affinity and level; the
-/// others lean downstream, except the line's last logical stop at a soft
-/// wrap, which is upstream (INT-1, INT-9). `by_offset` is a working buffer.
 fn resolve_shared_offsets(
     stops: &mut Vec<RawStop>,
     by_offset: &mut Vec<(usize, usize)>,
@@ -379,30 +329,19 @@ fn resolve_shared_offsets(
     }
 }
 
-/// One glyph cluster or box of a line, as [`EntityLevels`] indexes it.
 struct Entity {
     range: TextRange,
-    /// Position in visual order (glyphs of all runs, then boxes).
     rank: usize,
     level: BidiLevel,
-    /// The greatest end of this entity and all those sorted before it.
     reach: usize,
 }
 
-/// The levels of the entities of a line, by byte range, so that "the first
-/// entity in visual order whose closed range holds `offset`" is a binary
-/// search, not a scan of every glyph. Consecutive glyphs of one cluster share
-/// a range and a level, so only the first is indexed: a multi-glyph cluster
-/// costs one entry, not one per glyph. The index lives in the paragraph's
-/// scratch and is built for a line when its first stop needs it.
 struct EntityLevels<'s> {
-    /// Sorted by range start, then rank.
     sorted: &'s mut Vec<Entity>,
     built: bool,
 }
 
 impl EntityLevels<'_> {
-    /// Indexes the glyphs of `runs` and then `boxes`.
     fn build(&mut self, runs: &[VisualGlyphRun], boxes: &[PositionedInlineBox]) {
         let glyphs = runs.iter().flat_map(|r| {
             r.glyphs
@@ -433,8 +372,6 @@ impl EntityLevels<'_> {
         self.built = true;
     }
 
-    /// The level of the first entity in visual order whose closed range
-    /// holds `offset`, building the index on first use.
     fn at(
         &mut self,
         runs: &[VisualGlyphRun],

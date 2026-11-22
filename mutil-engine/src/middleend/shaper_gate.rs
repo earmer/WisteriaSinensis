@@ -1,23 +1,12 @@
-//! The shaper gate (spec AX-3, G2): every answer a [`TextShaper`] gives at
-//! layout time is checked here, once, before layout uses it.
-//!
-//! Shaping output that the frontend stores in the AST is checked by the input
-//! gate instead. Ligature carets are checked by
-//! [`resolve_ligature_carets`](super::resolve_ligature_carets) (spec INT-5).
+//! The shaper gate (spec AX-3, G2): checks every `TextShaper` reply at layout time.
 
 use super::{LayoutInputError, LineHeight, StrutMetrics};
 use crate::shaping::{ReshapeRequest, ShapeOutput, TextShaper};
 use crate::types::{
-    FontInstanceRef, FontMetrics, RawShapedGlyph, ShapedCluster, WritingMode, is_extent,
-    is_measurement, natural_width,
+    FontInstanceRef, FontMetrics, GraphemeAtom, RawShapedGlyph, ShapedCluster, ShapingRun,
+    WritingMode, is_extent, is_measurement, natural_width,
 };
 
-/// The shaper's metrics for one font instance, checked against MSR-1 and
-/// FNT-4 before layout uses them.
-///
-/// # Errors
-/// `InvalidShaperMetrics` when any metric or line-gap relation fails
-/// [`FontMetrics::is_valid`].
 pub(crate) fn checked_font_metrics(
     shaper: &dyn TextShaper,
     instance: FontInstanceRef<'_>,
@@ -27,13 +16,6 @@ pub(crate) fn checked_font_metrics(
         .ok_or(LayoutInputError::InvalidShaperMetrics)
 }
 
-/// The line box of one font instance under `line_height`: the shaper's
-/// metrics for `instance`, checked (spec FNT-4, MSR-1), resolved like the
-/// paragraph strut and checked again as a strut.
-///
-/// # Errors
-/// `InvalidShaperMetrics` when the shaper's metrics are invalid or resolve to an
-/// invalid line box.
 pub(crate) fn checked_line_box(
     shaper: &dyn TextShaper,
     instance: FontInstanceRef<'_>,
@@ -45,11 +27,6 @@ pub(crate) fn checked_line_box(
     resolved_line_box(&metrics, font_size, line_height, mode)
 }
 
-/// The line box `line_height` resolves from already checked `metrics`, like
-/// the paragraph strut, checked again as a strut.
-///
-/// # Errors
-/// `InvalidShaperMetrics` when the metrics resolve to an invalid line box.
 pub(crate) fn resolved_line_box(
     metrics: &FontMetrics,
     font_size: f32,
@@ -61,21 +38,12 @@ pub(crate) fn resolved_line_box(
         .ok_or(LayoutInputError::InvalidShaperMetrics)
 }
 
-/// Whether every measurement of `glyph` is a measurement (MSR-1).
 pub(crate) fn glyph_is_measured(glyph: &RawShapedGlyph) -> bool {
     [glyph.x_advance, glyph.x_offset, glyph.y_offset]
         .into_iter()
         .all(is_measurement)
 }
 
-/// Re-shape `cluster` by `request`, a plain request over its bytes, and
-/// verify the shaper's reply (spec ST1-5, G2, MSR-1).
-///
-/// Returns the replacement glyphs and adjusted cluster width when the shaper
-/// produces a single cluster over `cluster`'s atoms, in its font instance
-/// (layout draws the glyphs under that instance), with valid glyph bounds and
-/// measurements; otherwise returns `None` so callers keep the original
-/// shaping.
 pub(crate) fn checked_reshape_window(
     shaper: &dyn TextShaper,
     request: &ReshapeRequest<'_>,
@@ -97,4 +65,31 @@ pub(crate) fn checked_reshape_window(
     }
     let width = natural_width(&glyphs, request.run.letter_spacing);
     is_extent(width).then_some((glyphs, width))
+}
+
+pub(crate) fn checked_shape_run(
+    shaper: &dyn TextShaper,
+    text: &str,
+    run: &ShapingRun,
+    atoms: &[GraphemeAtom],
+    mode: WritingMode,
+    mut emit: impl FnMut(&ShapedCluster, &[RawShapedGlyph]) -> Result<(), LayoutInputError>,
+) -> Result<(), LayoutInputError> {
+    let mut output = ShapeOutput::default();
+    shaper.shape_run(text, run, atoms, &mut output);
+    for c in &output.clusters {
+        let Some(glyphs) = output.glyphs.get(c.glyph_range.clone()) else {
+            return Err(LayoutInputError::InvalidShaperMetrics);
+        };
+        if !(is_measurement(c.font.scale) && c.font.scale > 0.0)
+            || !c.orientation.is_valid(mode, c.bidi_level)
+            || !is_extent(c.natural_width)
+            || glyphs.is_empty()
+            || !glyphs.iter().all(glyph_is_measured)
+        {
+            return Err(LayoutInputError::InvalidShaperMetrics);
+        }
+        emit(c, glyphs)?;
+    }
+    Ok(())
 }

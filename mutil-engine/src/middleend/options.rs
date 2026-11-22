@@ -18,9 +18,7 @@ pub enum HangingWhitespaceMode {
     Preserved,
 }
 
-/// Line-breaking strategy (spec §5 Stage 1.6.1): one beam-lookahead machine `[L3][L6]`.
-///
-/// Phase 1 and 2 layout breaks every strategy greedily (spec ME-2).
+/// Line-breaking strategy (spec §5 Stage 1.6.1): maps onto the parameterised breaker (ST1-6).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LineBreakStrategy {
     /// First-fit with the overflow ladder; each line depends only on its start.
@@ -30,6 +28,27 @@ pub enum LineBreakStrategy {
     Balanced,
     /// Knuth-Plass quality over a bounded window, with dominator pruning.
     Publication,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BreakingParameters {
+    pub(crate) beam_width: usize,
+    pub(crate) window_depth: usize,
+}
+
+impl LineBreakStrategy {
+    #[must_use]
+    pub(crate) const fn parameters(self) -> BreakingParameters {
+        let (beam_width, window_depth) = match self {
+            Self::Greedy => (1, 1),
+            Self::Balanced => (2, 2),
+            Self::Publication => (8, 6),
+        };
+        BreakingParameters {
+            beam_width,
+            window_depth,
+        }
+    }
 }
 
 /// Copy policy for a source U+00AD (spec §6.6); a generated hyphen is never copied.

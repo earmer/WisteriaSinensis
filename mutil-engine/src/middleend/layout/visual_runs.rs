@@ -1,5 +1,4 @@
-//! A placed line's glyph runs in visual order, inline boxes and tabs
-//! (spec §5 Stage 4, OUT-3).
+//! Visual glyph runs, inline boxes, and tabs (spec §5 Stage 4, OUT-3).
 
 use super::line_builder::{AlignedLine, PlacedLine};
 use super::{Layout, PieceKind, PlacedPiece, Reshapes};
@@ -12,14 +11,11 @@ use crate::types::{
 };
 use smallvec::SmallVec;
 
-/// Widens `extent` to hold `[a, b]` in either order.
 fn extend_extent(extent: &mut Option<(f64, f64)>, a: f64, b: f64) {
     let (lo, hi) = (a.min(b), a.max(b));
     *extent = Some(extent.map_or((lo, hi), |(l, h)| (l.min(lo), h.max(hi))));
 }
 
-/// What a run's glyphs share: consecutive clusters with equal keys merge
-/// into one run (OUT-3).
 #[derive(Clone, Copy, PartialEq)]
 struct RunKey<'k> {
     font: FontRef,
@@ -41,23 +37,15 @@ impl<'k> RunKey<'k> {
     }
 }
 
-/// How one cluster's glyphs are placed: from aligned pen position `pen` in
-/// `f64`, raised by the cluster's baseline shift, owning its bytes unless
-/// synthesized.
 struct ClusterGlyphs {
     pen: f64,
     y_shift: f64,
     byte_range: TextRange,
-    /// An LTR cluster's justification, on its last glyph in visual order.
     ltr_expansion: Option<f64>,
-    /// Visual-left trim (lead_trim in LTR, trail_trim in RTL).
     left_trim: f64,
-    /// Total side-slot trim (lead_trim + trail_trim).
     total_trim: f64,
 }
 
-/// Yields `(glyph, pen_start, advance)` for each glyph in `glyphs` in `f64`,
-/// deducting `total_trim` from positive advances.
 fn trimmed_glyphs<'g>(
     mut pen: f64,
     mut remaining_trim: f64,
@@ -75,8 +63,6 @@ fn trimmed_glyphs<'g>(
 }
 
 impl ClusterGlyphs {
-    /// Appends `glyphs`, already in visual order, to `target`, advancing `pen`
-    /// in `f64` and converting to `f32` once at emission.
     fn push<'g>(
         &self,
         target: &mut Vec<PositionedGlyph>,
@@ -107,8 +93,6 @@ impl ClusterGlyphs {
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
-    /// Pre-alignment `f64` inline extent of visible glyphs, objects and tabs,
-    /// and the end of the last visible source byte.
     pub(super) fn visual_extent(
         &self,
         line: &PlacedLine<'_, '_>,
@@ -160,8 +144,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         (extent, visible_end)
     }
 
-    /// The line's glyph runs in visual order (OUT-3), built after alignment so
-    /// every glyph's `x` is shifted in `f64` and rounded to `f32` once.
     pub(super) fn build_visual_runs(
         &self,
         line: &AlignedLine<'_, '_>,
@@ -178,7 +160,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         runs
     }
 
-    /// The key of the run a cluster's glyphs join, at level `level`.
     fn run_key(&self, run: RunId, cluster: ClusterId, level: BidiLevel) -> RunKey<'a> {
         let (r, c) = (self.inputs.run(run), self.inputs.cluster(cluster));
         RunKey {
@@ -190,8 +171,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// How many glyphs each of the line's runs will hold, in visual order,
-    /// so each run's glyphs are allocated once.
     fn run_sizes(&self, line: &PlacedLine<'_, '_>, pending: &Reshapes) -> SmallVec<[usize; 8]> {
         let mut sizes = SmallVec::new();
         let mut last = None;
@@ -213,10 +192,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         sizes
     }
 
-    /// Appends the glyphs of placed cluster `p` to the line's runs, merging
-    /// into the last run when font, level, size, orientation and variations
-    /// agree. The glyphs go straight into that run, in visual order; a new
-    /// run takes the next of `sizes` as its capacity.
     fn push_cluster_glyphs(
         &self,
         runs: &mut Vec<VisualGlyphRun>,
@@ -231,8 +206,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         if glyphs.is_empty() {
             return;
         }
-        // Justification after an RTL cluster lies before its first glyph
-        // in visual order, after an LTR one on its last glyph (ST3-2).
         let level = p.piece.level;
         let rtl_cluster = level.direction().is_rtl();
         let pen = p.x + if rtl_cluster { p.expansion } else { 0.0 };
@@ -261,7 +234,6 @@ impl<'i, 'a> Layout<'i, 'a> {
             v.byte_range = v.byte_range.cover(c.byte_range);
             place(&mut v.glyphs);
         } else {
-            // `run_sizes` counted this run; the hint only sizes the Vec.
             let mut positioned = Vec::with_capacity(sizes.next().unwrap_or(glyphs.len()));
             place(&mut positioned);
             runs.push(VisualGlyphRun {
@@ -276,7 +248,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         }
     }
 
-    /// Boxes and tabs are built in logical order directly.
     pub(super) fn build_boxes_and_tabs(
         &self,
         placed: &[PlacedPiece<'_>],
