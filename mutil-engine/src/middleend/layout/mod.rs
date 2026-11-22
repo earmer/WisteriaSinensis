@@ -375,14 +375,19 @@ impl<'i, 'a> Layout<'i, 'a> {
             .sum();
         let mut best: Option<(f64, f64, f64)> = None;
         for k in 1..=sf.max_lines {
-            let (target, mut lines_fu) = (total_w / k as f64, [(0.0, 0.0); 16]);
-            let (mut li, mut f_acc, mut u_acc, mut cw) = (0usize, 0.0, 0.0, 0.0);
+            let (target, mut lines_fu) = (total_w / k as f64, [(0.0, 0.0, 0.0); 16]);
+            let (mut li, mut f_acc, mut u_acc, mut obj_h, mut cw, mut overflowed) =
+                (0usize, 0.0, 0.0, 0.0_f64, 0.0, false);
             for (_, tok) in self.tokens.iter_from(TokenIdx::START) {
                 match tok {
                     Token::Piece(p) => {
                         match p.kind {
                             PieceKind::Cluster { .. } | PieceKind::Glue(_) => f_acc += p.width,
-                            PieceKind::Object(_) | PieceKind::SpanEdge { .. } => u_acc += p.width,
+                            PieceKind::Object(o) => {
+                                u_acc += p.width;
+                                obj_h = obj_h.max(f64::from(o.ascent + o.descent));
+                            }
+                            PieceKind::SpanEdge { .. } => u_acc += p.width,
                             PieceKind::Tab => {}
                         }
                         cw += p.width;
@@ -391,23 +396,47 @@ impl<'i, 'a> Layout<'i, 'a> {
                         if !b.is_paragraph_end()
                             && (b.is_mandatory() || (cw >= target && li + 1 < k)) =>
                     {
-                        if let Some(s) = lines_fu.get_mut(li) {
-                            *s = (f_acc, u_acc);
+                        if b.is_mandatory() && li + 1 >= k {
+                            overflowed = true;
+                            break;
                         }
-                        li = (li + 1).min(k - 1);
-                        (f_acc, u_acc, cw) = (0.0, 0.0, 0.0);
+                        if let Some(s) = lines_fu.get_mut(li) {
+                            *s = (f_acc, u_acc, obj_h);
+                        }
+                        li += 1;
+                        (f_acc, u_acc, obj_h, cw) = (0.0, 0.0, 0.0, 0.0);
                     }
                     Token::Break(_) => {}
                 }
             }
-            if let Some(s) = lines_fu.get_mut(li) {
-                *s = (f_acc, u_acc);
+            if overflowed {
+                continue;
             }
-            let uk = (li + 1).max(1) as f64;
-            let mut s_hi = sf
-                .max_height
-                .map_or(s_hi0, |h| s_hi0.min(f64::from(h) / (uk * h1)));
-            for &(fj, uj) in lines_fu.iter().take(li + 1) {
+            if let Some(s) = lines_fu.get_mut(li) {
+                *s = (f_acc, u_acc, obj_h);
+            }
+            let used = lines_fu.get(..=li).unwrap_or(&[]);
+            let uk = used.len() as f64;
+            let mut s_hi = s_hi0;
+            if let Some(h_max) = sf.max_height {
+                let h_max = f64::from(h_max);
+                let fixed_h: f64 = used.iter().map(|&(_, _, oh)| oh).sum();
+                if fixed_h > h_max {
+                    s_hi = s_lo;
+                } else {
+                    s_hi = s_hi.min(h_max / (uk * h1));
+                    while used
+                        .iter()
+                        .map(|&(_, _, oh)| (h1 * s_hi).max(oh))
+                        .sum::<f64>()
+                        > h_max
+                        && s_hi > s_lo
+                    {
+                        s_hi = (s_hi * 0.95).max(s_lo);
+                    }
+                }
+            }
+            for &(fj, uj, _) in used {
                 if fj > 0.0 {
                     s_hi = s_hi.min((w_max - uj).max(0.0) / (c_min * fj));
                 }
@@ -416,18 +445,17 @@ impl<'i, 'a> Layout<'i, 'a> {
                 .target_aspect_ratio
                 .map_or(s_hi, |r| s_hi.min(w_max / (f64::from(r) * uk * h1)))
                 .clamp(s_lo, s_hi0);
-            let w_min = lines_fu
+            let total_h: f64 = used.iter().map(|&(_, _, oh)| (h1 * s).max(oh)).sum();
+            let w_min = used
                 .iter()
-                .take(li + 1)
-                .map(|&(fj, uj)| uj + c_min * s * fj)
+                .map(|&(fj, uj, _)| uj + c_min * s * fj)
                 .fold(0.0_f64, f64::max);
             let w = sf.target_aspect_ratio.map_or(w_max, |r| {
-                (f64::from(r) * uk * h1 * s).clamp(w_min.min(w_max), w_max)
+                (f64::from(r) * total_h).clamp(w_min.min(w_max), w_max)
             });
-            let dist = lines_fu
+            let dist = used
                 .iter()
-                .take(li + 1)
-                .map(|&(fj, uj)| {
+                .map(|&(fj, uj, _)| {
                     if fj <= 0.0 {
                         0.0
                     } else {
@@ -437,7 +465,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 .fold(0.0_f64, f64::max);
             let infeas = (w_min - w).max(0.0) * 1e6;
             let score = sf.target_aspect_ratio.map_or(-s + dist * 0.1, |r| {
-                ((w / (uk * h1 * s).max(1e-9) - f64::from(r)) / f64::from(r)).abs() + dist
+                ((w / total_h.max(1e-9) - f64::from(r)) / f64::from(r)).abs() + dist
             }) + infeas;
             if best.is_none_or(|(b, _, _)| score < b) {
                 best = Some((score, s, w));

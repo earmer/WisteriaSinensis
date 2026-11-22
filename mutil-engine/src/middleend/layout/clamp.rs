@@ -122,6 +122,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             cluster_range: 0..0,
             bidi_level: level,
             orientation,
+            font_size: (f64::from(run.font_size) * self.font_scale) as f32,
             ..run.clone()
         };
         let mut runs = Vec::new();

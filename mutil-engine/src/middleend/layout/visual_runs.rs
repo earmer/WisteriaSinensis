@@ -16,31 +16,25 @@ fn extend_extent(extent: &mut Option<(f64, f64)>, a: f64, b: f64) {
     *extent = Some(extent.map_or((lo, hi), |(l, h)| (l.min(lo), h.max(hi))));
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct RunKey<'k> {
+#[derive(Clone, PartialEq)]
+struct RunKey {
     font: FontRef,
     level: BidiLevel,
     font_size: f32,
     x_scale: f32,
     orientation: GlyphOrientation,
-    variations: &'k [FontVariation],
-    wdth: Option<u32>,
+    variations: SmallVec<[FontVariation; 2]>,
 }
 
-impl<'k> RunKey<'k> {
-    fn of_run(v: &'k VisualGlyphRun) -> Self {
+impl RunKey {
+    fn of_run(v: &VisualGlyphRun) -> Self {
         Self {
             font: v.font,
             level: v.bidi_level,
             font_size: v.font_size,
             x_scale: v.x_scale,
             orientation: v.orientation,
-            variations: &v.variations,
-            wdth: v
-                .variations
-                .iter()
-                .find(|x| x.tag() == *b"wdth")
-                .map(|x| x.value().to_bits()),
+            variations: v.variations.clone(),
         }
     }
 }
@@ -188,21 +182,26 @@ impl<'i, 'a> Layout<'i, 'a> {
         level: BidiLevel,
         x_scale: f64,
         pending: &Reshapes,
-    ) -> RunKey<'a> {
+    ) -> RunKey {
         let (r, c) = (self.inputs.run(run), self.inputs.cluster(cluster));
-        let wdth = pending
+        let mut variations: SmallVec<[FontVariation; 2]> =
+            r.features.variations().iter().copied().collect();
+        if let Some(var) = pending
             .get(&cluster)
             .or_else(|| self.reshaped.get(&cluster))
             .and_then(|res| res.wdth)
-            .map(f32::to_bits);
+            .and_then(|w| FontVariation::try_new(*b"wdth", w))
+        {
+            variations.retain(|v| v.tag() != *b"wdth");
+            variations.push(var);
+        }
         RunKey {
             font: c.font,
             level,
             font_size: (f64::from(r.font_size) * self.font_scale) as f32,
             x_scale: x_scale as f32,
             orientation: c.orientation,
-            variations: r.features.variations(),
-            wdth,
+            variations,
         }
     }
 
@@ -218,7 +217,7 @@ impl<'i, 'a> Layout<'i, 'a> {
                 continue;
             }
             let key = self.run_key(run, cluster, p.piece.level, line.x_scale, pending);
-            match sizes.last_mut().filter(|_| last == Some(key)) {
+            match sizes.last_mut().filter(|_| last.as_ref() == Some(&key)) {
                 Some(size) => *size += count,
                 None => sizes.push(count),
             }
@@ -273,20 +272,11 @@ impl<'i, 'a> Layout<'i, 'a> {
         } else {
             let mut positioned = Vec::with_capacity(sizes.next().unwrap_or(glyphs.len()));
             place(&mut positioned);
-            let mut variations: SmallVec<[FontVariation; 2]> =
-                key.variations.iter().copied().collect();
-            if let Some(var) = key
-                .wdth
-                .and_then(|b| FontVariation::try_new(*b"wdth", f32::from_bits(b)))
-            {
-                variations.retain(|v| v.tag() != *b"wdth");
-                variations.push(var);
-            }
             runs.push(VisualGlyphRun {
                 orientation: c.orientation,
                 font_size: key.font_size,
                 x_scale: key.x_scale,
-                variations,
+                variations: key.variations,
                 font: c.font,
                 bidi_level: level,
                 byte_range: c.byte_range,

@@ -330,7 +330,8 @@ impl<'i, 'a> Layout<'i, 'a> {
         let used = self
             .walk_to(line, token, slot, &reshapes)
             .used_at_break(f64::from(brk.pre_break_width), shrinks);
-        if !within(used, f64::from(slot.width())) {
+        let min_scale = f64::from(self.options.min_horizontal_scale);
+        if !within(used * min_scale, f64::from(slot.width())) {
             reshapes.clear();
         }
         reshapes
@@ -625,6 +626,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             .find_map(|(k, tok)| matches!(tok, Token::Piece(p) if p.is_content()).then_some(k));
         if let Some(first) = first_content {
             let available = f64::from(slot.width());
+            let min_scale = f64::from(self.options.min_horizontal_scale);
             let floor = first.next();
             let mut t = t;
             loop {
@@ -633,7 +635,12 @@ impl<'i, 'a> Layout<'i, 'a> {
                     t = run_start;
                 }
                 let added = self.repair_seam(line, t, &mut reshapes);
-                if t <= floor || within(self.walk_to(line, t, slot, &reshapes).used(), available) {
+                if t <= floor
+                    || within(
+                        self.walk_to(line, t, slot, &reshapes).used() * min_scale,
+                        available,
+                    )
+                {
                     return (LineEnd::Before(t), reshapes);
                 }
                 for c in added {

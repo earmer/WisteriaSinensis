@@ -323,15 +323,52 @@ impl<'i, 'a> Layout<'i, 'a> {
                 pending,
             );
             cur_width = d2 + pre - LineHangs::protrusion(end);
+            if !within(cur_width, slot_width) {
+                body_expansions.fill(0.0);
+                self.justify(
+                    body,
+                    widths,
+                    body_expansions,
+                    [lead_trims, trail_trims],
+                    slot_width - cur_width,
+                    pending,
+                );
+                cur_width = post - LineHangs::protrusion(start)
+                    + body
+                        .iter()
+                        .zip(widths.iter())
+                        .map(|(p, &w)| p.gap + w)
+                        .sum::<f64>()
+                    + pre
+                    - LineHangs::protrusion(end);
+            }
         }
+        let fixed_w: f64 = body
+            .iter()
+            .zip(widths.iter())
+            .map(|(p, &w)| {
+                p.gap
+                    + if matches!(p.piece.kind, PieceKind::Object(_)) {
+                        w
+                    } else {
+                        0.0
+                    }
+            })
+            .sum();
+        let scalable_w = cur_width - fixed_w;
         let x_scale = if slot_width.is_finite()
             && !within(cur_width, slot_width)
-            && cur_width > 0.0
+            && scalable_w > 0.0
             && self.options.min_horizontal_scale < 1.0
         {
-            let s =
-                (slot_width / cur_width).clamp(f64::from(self.options.min_horizontal_scale), 1.0);
-            for v in [&mut *widths, &mut *lead_trims, &mut *trail_trims] {
+            let s = ((slot_width - fixed_w).max(0.0) / scalable_w)
+                .clamp(f64::from(self.options.min_horizontal_scale), 1.0);
+            for (p, w) in body.iter().zip(widths.iter_mut()) {
+                if !matches!(p.piece.kind, PieceKind::Object(_)) {
+                    *w *= s;
+                }
+            }
+            for v in [&mut *lead_trims, &mut *trail_trims] {
                 for x in v.iter_mut() {
                     *x *= s;
                 }
@@ -370,14 +407,20 @@ impl<'i, 'a> Layout<'i, 'a> {
             else {
                 continue;
             };
-            if min_w >= def_w {
+            let mut r = self.inputs.run(run).clone();
+            let cur_w = r
+                .features
+                .variations()
+                .iter()
+                .find(|v| v.tag() == *b"wdth")
+                .map_or(def_w, |v| v.value());
+            if min_w >= cur_w {
                 continue;
             }
-            let target = (def_w * ratio as f32).clamp(min_w, def_w);
+            let target = (cur_w * ratio as f32).clamp(min_w, cur_w);
             let Some(var) = crate::types::FontVariation::try_new(*b"wdth", target) else {
                 continue;
             };
-            let mut r = self.inputs.run(run).clone();
             r.features.push_variation(var);
             let req = crate::shaping::ReshapeRequest::plain(
                 self.inputs.text(),
