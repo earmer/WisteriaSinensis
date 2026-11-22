@@ -1,7 +1,7 @@
 //! A placed line's glyph runs in visual order, inline boxes and tabs
 //! (spec §5 Stage 4, OUT-3).
 
-use super::line_builder::PlacedLine;
+use super::line_builder::{AlignedLine, PlacedLine};
 use super::{Layout, PieceKind, PlacedPiece, Reshapes};
 use crate::middleend::validated::{ClusterId, RunId};
 use crate::middleend::{
@@ -12,23 +12,8 @@ use crate::types::{
 };
 use smallvec::SmallVec;
 
-/// A line's glyph runs before alignment, the inline extent of its visible
-/// entities (`None` when it has none), and the end of its last visible
-/// source byte.
-pub(super) struct VisualRuns {
-    pub(super) runs: Vec<VisualGlyphRun>,
-    pub(super) extent: Option<(f32, f32)>,
-    pub(super) visible_end: usize,
-}
-
-impl VisualRuns {
-    fn extend(&mut self, a: f32, b: f32) {
-        extend_extent(&mut self.extent, a, b);
-    }
-}
-
 /// Widens `extent` to hold `[a, b]` in either order.
-fn extend_extent(extent: &mut Option<(f32, f32)>, a: f32, b: f32) {
+fn extend_extent(extent: &mut Option<(f64, f64)>, a: f64, b: f64) {
     let (lo, hi) = (a.min(b), a.max(b));
     *extent = Some(extent.map_or((lo, hi), |(l, h)| (l.min(lo), h.max(hi))));
 }
@@ -56,84 +41,141 @@ impl<'k> RunKey<'k> {
     }
 }
 
-/// How one cluster's glyphs are placed: from pen position `pen`, raised by
-/// the cluster's baseline shift, owning its bytes unless synthesized.
+/// How one cluster's glyphs are placed: from aligned pen position `pen` in
+/// `f64`, raised by the cluster's baseline shift, owning its bytes unless
+/// synthesized.
 struct ClusterGlyphs {
-    pen: f32,
-    y_shift: f32,
+    pen: f64,
+    y_shift: f64,
     byte_range: TextRange,
     /// An LTR cluster's justification, on its last glyph in visual order.
-    ltr_expansion: Option<f32>,
+    ltr_expansion: Option<f64>,
     /// Visual-left trim (lead_trim in LTR, trail_trim in RTL).
-    left_trim: f32,
+    left_trim: f64,
     /// Total side-slot trim (lead_trim + trail_trim).
-    total_trim: f32,
+    total_trim: f64,
+}
+
+/// Yields `(glyph, pen_start, advance)` for each glyph in `glyphs` in `f64`,
+/// deducting `total_trim` from positive advances.
+fn trimmed_glyphs<'g>(
+    mut pen: f64,
+    mut remaining_trim: f64,
+    glyphs: impl Iterator<Item = &'g RawShapedGlyph>,
+) -> impl Iterator<Item = (&'g RawShapedGlyph, f64, f64)> {
+    glyphs.map(move |g| {
+        let x_adv = f64::from(g.x_advance);
+        let trim = remaining_trim.min(x_adv.max(0.0));
+        remaining_trim -= trim;
+        let advance = x_adv - trim;
+        let start = pen;
+        pen += advance;
+        (g, start, advance)
+    })
 }
 
 impl ClusterGlyphs {
-    /// Appends `glyphs`, already in visual order, to `target`, widening
-    /// `extent` by each shaped advance (net of side-slot trim, not the expansion).
+    /// Appends `glyphs`, already in visual order, to `target`, advancing `pen`
+    /// in `f64` and converting to `f32` once at emission.
     fn push<'g>(
         &self,
         target: &mut Vec<PositionedGlyph>,
         glyphs: impl Iterator<Item = &'g RawShapedGlyph>,
-        extent: &mut Option<(f32, f32)>,
     ) {
-        let mut pen = self.pen;
-        let mut remaining_trim = self.total_trim;
-        target.extend(glyphs.map(|g| {
-            let trim = remaining_trim.min(g.x_advance.max(0.0));
-            remaining_trim -= trim;
-            let advance = g.x_advance - trim;
-            if advance != 0.0 {
-                extend_extent(extent, pen, pen + advance);
-            }
-            let glyph = PositionedGlyph {
-                glyph_id: g.glyph_id,
-                x: pen,
-                x_offset: g.x_offset - self.left_trim,
-                y_offset: g.y_offset + self.y_shift,
-                advance,
-                byte_range: (!g.is_synthesized).then_some(self.byte_range),
-            };
-            pen += advance;
-            glyph
-        }));
-        if let (Some(expansion), Some(last)) = (self.ltr_expansion, target.last_mut()) {
-            last.advance += expansion;
+        let start_len = target.len();
+        let mut last_advance = 0.0_f64;
+        target.extend(trimmed_glyphs(self.pen, self.total_trim, glyphs).map(
+            |(g, pen, advance)| {
+                last_advance = advance;
+                PositionedGlyph {
+                    glyph_id: g.glyph_id,
+                    x: pen as f32,
+                    x_offset: (f64::from(g.x_offset) - self.left_trim) as f32,
+                    y_offset: (f64::from(g.y_offset) + self.y_shift) as f32,
+                    advance: advance as f32,
+                    byte_range: (!g.is_synthesized).then_some(self.byte_range),
+                }
+            },
+        ));
+        if let Some(expansion) = self.ltr_expansion
+            && target.len() > start_len
+            && let Some(last) = target.last_mut()
+        {
+            last.advance = (last_advance + expansion) as f32;
+        }
+    }
+}
+
+/// Accumulates the `f64` inline extent of one cluster's glyphs (net of
+/// side-slot trim, not the expansion).
+fn extend_cluster_extent<'g>(
+    pen: f64,
+    total_trim: f64,
+    glyphs: impl Iterator<Item = &'g RawShapedGlyph>,
+    extent: &mut Option<(f64, f64)>,
+) {
+    for (_, start, advance) in trimmed_glyphs(pen, total_trim, glyphs) {
+        if advance != 0.0 {
+            extend_extent(extent, start, start + advance);
         }
     }
 }
 
 impl<'i, 'a> Layout<'i, 'a> {
-    /// The line's glyph runs in visual order (OUT-3), the inline extent of
-    /// their glyphs, objects and tabs, and the end of the last visible
-    /// source byte, in one pass over the body.
-    pub(super) fn build_visual_runs(
+    /// Computes the pre-alignment `f64` inline extent of the line's visible
+    /// glyphs, objects and tabs, and the end of its last visible source byte.
+    pub(super) fn visual_extent(
         &self,
         line: &PlacedLine<'_, '_>,
         pending: &Reshapes,
-    ) -> VisualRuns {
-        let sizes = self.run_sizes(line, pending);
-        let mut out = VisualRuns {
-            runs: Vec::with_capacity(sizes.len()),
-            extent: None,
-            visible_end: line.byte_range.start(),
-        };
-        let mut sizes = sizes.into_iter();
+    ) -> (Option<(f64, f64)>, usize) {
+        let mut extent = None;
+        let mut visible_end = line.byte_range.start();
         for &p in line.order.pick(line.placed) {
             match p.piece.kind {
-                PieceKind::Cluster { run, cluster } => {
-                    self.push_cluster_glyphs(&mut out, &p, (run, cluster), pending, &mut sizes)
+                PieceKind::Cluster { cluster, .. } => {
+                    let (glyphs, _) = self.cluster_glyphs(pending, cluster);
+                    if glyphs.is_empty() {
+                        continue;
+                    }
+                    let rtl_cluster = p.piece.level.direction().is_rtl();
+                    let pen = p.x + if rtl_cluster { p.expansion } else { 0.0 };
+                    if glyphs.iter().any(|g| !g.is_synthesized) {
+                        visible_end = visible_end.max(p.piece.bytes.end());
+                    }
+                    let total_trim = p.lead_trim + p.trail_trim;
+                    if rtl_cluster {
+                        extend_cluster_extent(pen, total_trim, glyphs.iter().rev(), &mut extent);
+                    } else {
+                        extend_cluster_extent(pen, total_trim, glyphs.iter(), &mut extent);
+                    }
                 }
                 PieceKind::Object(_) | PieceKind::Tab => {
-                    out.extend(p.x, p.x + p.width);
-                    out.visible_end = out.visible_end.max(p.piece.bytes.end());
+                    extend_extent(&mut extent, p.x, p.x + p.width);
+                    visible_end = visible_end.max(p.piece.bytes.end());
                 }
                 PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => {}
             }
         }
-        out
+        (extent, visible_end)
+    }
+
+    /// The line's glyph runs in visual order (OUT-3), built after alignment so
+    /// every glyph's `x` is shifted in `f64` and rounded to `f32` once.
+    pub(super) fn build_visual_runs(
+        &self,
+        line: &AlignedLine<'_, '_>,
+        pending: &Reshapes,
+    ) -> Vec<VisualGlyphRun> {
+        let sizes = self.run_sizes(line, pending);
+        let mut runs = Vec::with_capacity(sizes.len());
+        let mut sizes = sizes.into_iter();
+        for &p in line.order.pick(line.placed) {
+            if let PieceKind::Cluster { run, cluster } = p.piece.kind {
+                self.push_cluster_glyphs(&mut runs, &p, (run, cluster), pending, &mut sizes);
+            }
+        }
+        runs
     }
 
     /// The key of the run a cluster's glyphs join, at level `level`.
@@ -177,7 +219,7 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// run takes the next of `sizes` as its capacity.
     fn push_cluster_glyphs(
         &self,
-        out: &mut VisualRuns,
+        runs: &mut Vec<VisualGlyphRun>,
         p: &PlacedPiece<'_>,
         (run, cluster): (RunId, ClusterId),
         pending: &Reshapes,
@@ -194,9 +236,6 @@ impl<'i, 'a> Layout<'i, 'a> {
         let level = p.piece.level;
         let rtl_cluster = level.direction().is_rtl();
         let pen = p.x + if rtl_cluster { p.expansion } else { 0.0 };
-        if glyphs.iter().any(|g| !g.is_synthesized) {
-            out.visible_end = out.visible_end.max(p.piece.bytes.end());
-        }
         let cluster_glyphs = ClusterGlyphs {
             pen,
             y_shift: p.y_shift,
@@ -209,24 +248,23 @@ impl<'i, 'a> Layout<'i, 'a> {
             },
             total_trim: p.lead_trim + p.trail_trim,
         };
-        let extent = &mut out.extent;
-        let mut place = |target: &mut Vec<PositionedGlyph>| {
+        let place = |target: &mut Vec<PositionedGlyph>| {
             if rtl_cluster {
-                cluster_glyphs.push(target, glyphs.iter().rev(), extent);
+                cluster_glyphs.push(target, glyphs.iter().rev());
             } else {
-                cluster_glyphs.push(target, glyphs.iter(), extent);
+                cluster_glyphs.push(target, glyphs.iter());
             }
         };
         let key = self.run_key(run, cluster, level);
         let joins_last = |v: &&mut VisualGlyphRun| RunKey::of_run(v) == key;
-        if let Some(v) = out.runs.last_mut().filter(joins_last) {
+        if let Some(v) = runs.last_mut().filter(joins_last) {
             v.byte_range = v.byte_range.cover(c.byte_range);
             place(&mut v.glyphs);
         } else {
             // `run_sizes` counted this run; the hint only sizes the Vec.
             let mut positioned = Vec::with_capacity(sizes.next().unwrap_or(glyphs.len()));
             place(&mut positioned);
-            out.runs.push(VisualGlyphRun {
+            runs.push(VisualGlyphRun {
                 orientation: c.orientation,
                 font_size: r.font_size,
                 variations: r.features.variations().iter().copied().collect(),
@@ -254,19 +292,19 @@ impl<'i, 'a> Layout<'i, 'a> {
                         baseline_align: object.baseline_align,
                         box_id: object.box_id,
                         byte_range: object.byte_range,
-                        x: p.x,
-                        y: -p.y_shift,
-                        width: w,
-                        ascent: a,
-                        descent: d,
+                        x: p.x as f32,
+                        y: (-p.y_shift) as f32,
+                        width: w as f32,
+                        ascent: a as f32,
+                        descent: d as f32,
                         overflow_policy: object.overflow_policy,
                         bidi_level: object.bidi_level,
                     });
                 }
                 PieceKind::Tab => tabs.push(PositionedTab {
                     byte_range: p.piece.bytes,
-                    x: p.x,
-                    width: p.width,
+                    x: p.x as f32,
+                    width: p.width as f32,
                 }),
                 PieceKind::Cluster { .. } | PieceKind::Glue(_) | PieceKind::SpanEdge { .. } => {}
             }

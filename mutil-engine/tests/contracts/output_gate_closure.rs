@@ -64,26 +64,7 @@ fn the_fixture_passes_the_output_gate() {
 }
 
 #[test]
-fn par2_a_line_box_far_from_the_origin_is_collapsed() {
-    // At 1e8 the f32 step is 8 and at 1e9 it is 64: the box `baseline - 8 ..
-    // baseline + 2` no longer spans the line's ascent + descent of 10.
-    for baseline_y in [1e8_f32, 1e9] {
-        let mut far = text_line(0, 0, 6);
-        far.baseline_y = baseline_y;
-        let mut p = paragraph(&ctx(), vec![far]);
-        p.total_block_size = 2.0 * baseline_y;
-        assert_eq!(
-            p.validate_geometry(),
-            invalid(0, ParagraphErrorReason::LineBoxCollapsed),
-            "{baseline_y}"
-        );
-        assert_eq!(
-            ValidatedLayout::try_from_paragraph(&p, TEXT).map(drop),
-            invalid(0, ParagraphErrorReason::LineBoxCollapsed),
-            "{baseline_y}"
-        );
-    }
-    // Near the origin the same line is fine.
+fn par2_a_line_box_within_the_physical_domain_passes() {
     let mut p = three_lines();
     for l in &mut p.lines {
         l.baseline_y += 1000.0;

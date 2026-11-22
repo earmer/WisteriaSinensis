@@ -13,6 +13,7 @@ mod clearance;
 mod common;
 mod decoration_spans;
 mod emergency_refit;
+mod f64_domain;
 mod font_table_gates;
 mod fonts;
 mod frontend;

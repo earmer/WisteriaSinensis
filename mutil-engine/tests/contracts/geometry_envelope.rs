@@ -1,6 +1,6 @@
-//! The envelope check of the provider gate G3 (GEO-3): an envelope `f32`
-//! cannot hold is `BlockPositionUnrepresentable`, with or without a
-//! provider, before any answer is judged; and the sealed answer G3 returns.
+//! The envelope check of the provider gate G3 (GEO-3): a non-finite or empty
+//! envelope is `InvalidLineGeometry`, with or without a provider, before any
+//! answer is judged; and the sealed answer G3 returns.
 
 use crate::common::*;
 use mutil_engine::*;
@@ -61,39 +61,8 @@ fn both() -> [(&'static str, LayoutConstraints); 2] {
     ]
 }
 
-/// The `f32` step just above `value` (positive `value`).
-fn step_at(value: f32) -> f32 {
-    value.next_up() - value
-}
-
 #[test]
-fn geo3_the_position_step_is_a_quarter_of_the_extent_rounding() {
-    assert_eq!(MAX_EXTENT_ROUNDING, 0.125);
-    assert_eq!(MAX_POSITION_STEP, MAX_EXTENT_ROUNDING / 4.0);
-}
-
-#[test]
-fn geo3_an_envelope_far_from_the_origin_is_block_position_unrepresentable() {
-    for (name, constraints) in both() {
-        for block_start in [3e8, 5e7, -3e8, 1e30] {
-            assert_eq!(
-                query(&constraints, 0, block_start, 10.0).map(drop),
-                Err(LayoutInputError::BlockPositionUnrepresentable),
-                "{name} at {block_start}"
-            );
-        }
-        // Near the origin the same envelope is fine.
-        for block_start in [0.0, 1000.0, 1e5] {
-            assert!(
-                query(&constraints, 0, block_start, 10.0).is_ok(),
-                "{name} at {block_start}"
-            );
-        }
-    }
-}
-
-#[test]
-fn geo3_a_non_finite_or_empty_envelope_is_block_position_unrepresentable() {
+fn geo3_a_non_finite_or_empty_envelope_is_invalid_line_geometry() {
     for (name, constraints) in both() {
         for (block_start, extent) in [
             (f32::NAN, 10.0),
@@ -109,47 +78,18 @@ fn geo3_a_non_finite_or_empty_envelope_is_block_position_unrepresentable() {
         ] {
             assert_eq!(
                 query(&constraints, 0, block_start, extent).map(drop),
-                Err(LayoutInputError::BlockPositionUnrepresentable),
+                Err(LayoutInputError::InvalidLineGeometry),
                 "{name}: start {block_start}, extent {extent}"
             );
         }
+        // Within the physical domain the envelope is accepted.
+        for block_start in [0.0, 1000.0, 1e5] {
+            assert!(
+                query(&constraints, 0, block_start, 10.0).is_ok(),
+                "{name} at {block_start}"
+            );
+        }
     }
-}
-
-#[test]
-fn geo3_the_step_at_the_envelope_end_is_bounded_by_max_position_step_of_the_extent() {
-    let extent = 10.0;
-    let bound = MAX_POSITION_STEP * extent;
-    // 2e6 + 10 has a step of 0.125, within 0.3125; 4.2e6 + 10 one of 0.5.
-    let (near, far) = (2.0e6_f32, 4.2e6_f32);
-    assert!(step_at(near + extent) <= bound);
-    assert!(step_at(far + extent) > bound);
-    for (name, constraints) in both() {
-        assert!(query(&constraints, 0, near, extent).is_ok(), "{name}");
-        assert_eq!(
-            query(&constraints, 0, far, extent).map(drop),
-            Err(LayoutInputError::BlockPositionUnrepresentable),
-            "{name}"
-        );
-        // A taller envelope at the same far start has room again.
-        let tall = 2.0 * step_at(far + 40.0) / MAX_POSITION_STEP;
-        assert!(query(&constraints, 0, far, tall).is_ok(), "{name}: {tall}");
-    }
-}
-
-#[test]
-fn geo3_the_envelope_is_checked_before_the_provider_answer() {
-    // An answer G3 would reject as `InvalidLineGeometry` ...
-    let bad = with_provider(obstructed(None));
-    assert_eq!(
-        query(&bad, 0, 2.0, 10.0).map(drop),
-        Err(LayoutInputError::InvalidLineGeometry)
-    );
-    // ... is not reached when the envelope itself is unrepresentable.
-    assert_eq!(
-        query(&bad, 0, 3e8, 10.0).map(drop),
-        Err(LayoutInputError::BlockPositionUnrepresentable)
-    );
 }
 
 #[test]

@@ -1,7 +1,5 @@
-//! An obstruction that clears far from the origin (GEO-3): G3 refuses an
-//! envelope `f32` cannot hold as `BlockPositionUnrepresentable`, so layout
-//! fails before any line box collapses; a moderate clearance lays out and
-//! passes the output gate (`LineBoxCollapsed` never fires on engine output).
+//! Clearance jumps (GEO-3, MSR-1): a jump beyond `MAX_MEASUREMENT` is
+//! `InvalidLineGeometry`, while a moderate clearance lays out and passes G4.
 
 use crate::common::*;
 use mutil_engine::*;
@@ -44,11 +42,11 @@ fn lay_out_clearing_at(clear_at: f32, text: &str) -> Result<PositionedParagraph,
 }
 
 #[test]
-fn geo3_a_clearance_far_from_the_origin_is_block_position_unrepresentable() {
-    for clear_at in [3e8_f32, 5e7, 1e12] {
+fn geo3_a_clearance_beyond_max_measurement_is_invalid_line_geometry() {
+    for clear_at in [2.0 * MAX_MEASUREMENT, 5e7, 1e12] {
         assert_eq!(
             lay_out_clearing_at(clear_at, "ab cd").map(drop),
-            Err(LayoutInputError::BlockPositionUnrepresentable),
+            Err(LayoutInputError::InvalidLineGeometry),
             "{clear_at}"
         );
     }

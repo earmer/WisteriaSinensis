@@ -10,10 +10,10 @@ use crate::types::{AtomFlags, ScriptTag};
 
 /// The inter-character stretch of an `ALLOW_CJK_JUSTIFY_AFTER` gap, per
 /// unit of the run's font size (ST1-7, Tier 2).
-pub(super) const CJK_GAP_STRETCH: f32 = 0.25;
+pub(super) const CJK_GAP_STRETCH: f64 = 0.25;
 /// The residual inter-cluster expansion of Level 3, per unit of the run's
 /// font size (ST3-2).
-const LETTER_GAP_STRETCH: f32 = 0.125;
+const LETTER_GAP_STRETCH: f64 = 0.125;
 /// The ladder's levels: glue Tiers 0 and 1, then the gaps of Tier 2 and
 /// Level 3.
 const LEVELS: usize = 4;
@@ -23,8 +23,8 @@ const LEVELS: usize = 4;
 #[derive(Clone, Copy, Default)]
 struct Capacity {
     level: usize,
-    stretch: f32,
-    shrink: f32,
+    stretch: f64,
+    shrink: f64,
 }
 
 /// Scripts that expand at word separators only (ST3-5).
@@ -37,11 +37,11 @@ fn expands_at_words_only(script: ScriptTag) -> bool {
 /// seams so justification never double-shrinks a statically trimmed pair.
 fn effective_shrinks(
     body: &[LogicalPiece<'_>],
-    lead_trims: &[f32],
-    trail_trims: &[f32],
-) -> Vec<f32> {
+    lead_trims: &[f64],
+    trail_trims: &[f64],
+) -> Vec<f64> {
     let mut prev_trails = Vec::with_capacity(body.len());
-    let mut prev_trail = 0.0_f32;
+    let mut prev_trail = 0.0_f64;
     for (p, &trail) in body.iter().zip(trail_trims) {
         prev_trails.push(prev_trail);
         if !is_trim_transparent(&p.piece) {
@@ -51,8 +51,8 @@ fn effective_shrinks(
             };
         }
     }
-    let mut shrinks = vec![0.0_f32; body.len()];
-    let mut next_lead = 0.0_f32;
+    let mut shrinks = vec![0.0_f64; body.len()];
+    let mut next_lead = 0.0_f64;
     for (((p, &lead), &prev_t), out) in body
         .iter()
         .zip(lead_trims)
@@ -62,9 +62,9 @@ fn effective_shrinks(
     {
         if let PieceKind::Glue(glue) = p.piece.kind {
             *out = if glue.kind == GlueKind::CjkPunctCompression {
-                (glue.max_shrink - (prev_t + next_lead)).max(0.0)
+                (f64::from(glue.max_shrink) - (prev_t + next_lead)).max(0.0)
             } else {
-                glue.max_shrink
+                f64::from(glue.max_shrink)
             };
         }
         if !is_trim_transparent(&p.piece) {
@@ -84,8 +84,8 @@ impl Layout<'_, '_> {
     fn capacities(
         &self,
         body: &[LogicalPiece<'_>],
-        lead_trims: &[f32],
-        trail_trims: &[f32],
+        lead_trims: &[f64],
+        trail_trims: &[f64],
         pending: &Reshapes,
     ) -> Vec<Capacity> {
         let shrinks = effective_shrinks(body, lead_trims, trail_trims);
@@ -95,7 +95,7 @@ impl Layout<'_, '_> {
             *cap = match p.piece.kind {
                 PieceKind::Glue(glue) => Capacity {
                     level: usize::from(glue.kind.tier() != GlueTier::Tier0),
-                    stretch: glue.max_stretch,
+                    stretch: f64::from(glue.max_stretch),
                     shrink,
                 },
                 PieceKind::Cluster { run, cluster }
@@ -106,7 +106,7 @@ impl Layout<'_, '_> {
                     if flags.contains(AtomFlags::ALLOW_CJK_JUSTIFY_AFTER) {
                         Capacity {
                             level: 2,
-                            stretch: CJK_GAP_STRETCH * run.font_size,
+                            stretch: CJK_GAP_STRETCH * f64::from(run.font_size),
                             shrink: 0.0,
                         }
                     } else if !flags.contains(AtomFlags::NO_LETTER_SPACING)
@@ -114,7 +114,7 @@ impl Layout<'_, '_> {
                     {
                         Capacity {
                             level: 3,
-                            stretch: LETTER_GAP_STRETCH * run.font_size,
+                            stretch: LETTER_GAP_STRETCH * f64::from(run.font_size),
                             shrink: 0.0,
                         }
                     } else {
@@ -143,9 +143,9 @@ impl Layout<'_, '_> {
     /// `Z`: how much the glue after the line's last tab can shrink (ST1-7).
     pub(super) fn shrink_capacity(
         body: &[LogicalPiece<'_>],
-        lead_trims: &[f32],
-        trail_trims: &[f32],
-    ) -> f32 {
+        lead_trims: &[f64],
+        trail_trims: &[f64],
+    ) -> f64 {
         let first = Self::after_last_tab(body);
         effective_shrinks(
             body.get(first..).unwrap_or_default(),
@@ -157,18 +157,18 @@ impl Layout<'_, '_> {
     }
 
     /// Spends `slack` on the body pieces after the line's last tab, level by
-    /// level, each level shared in proportion to its capacities (ST3-2,
-    /// ST3-3), adding to their `widths` and, for a cluster, its
-    /// `expansions`. Expansion after a cluster widens it; the cluster's
-    /// glyphs place it by direction. Returns whether the line came out flush
-    /// (ST3-4).
+    /// level, each level shared in proportion to its capacities via cumulative
+    /// prefix distribution (ST3-2, ST3-3), adding to their `widths` and, for a
+    /// cluster, its `expansions`. Expansion after a cluster widens it; the
+    /// cluster's glyphs place it by direction. Returns whether the line came
+    /// out flush (ST3-4).
     pub(super) fn justify(
         &self,
         body: &[LogicalPiece<'_>],
-        widths: &mut [f32],
-        expansions: &mut [f32],
-        [lead_trims, trail_trims]: [&[f32]; 2],
-        slack: f32,
+        widths: &mut [f64],
+        expansions: &mut [f64],
+        [lead_trims, trail_trims]: [&[f64]; 2],
+        slack: f64,
         pending: &Reshapes,
     ) -> bool {
         let first = Self::after_last_tab(body);
@@ -180,6 +180,7 @@ impl Layout<'_, '_> {
             trail_trims.get(first..).unwrap_or_default(),
         );
         let capacities = self.capacities(body, lead_trims, trail_trims, pending);
+        let fit_eps = f64::from(FIT_EPSILON);
         let mut remaining = slack.abs();
         let level_count = if slack < 0.0 { 2 } else { LEVELS };
         for level in 0..level_count {
@@ -188,14 +189,23 @@ impl Layout<'_, '_> {
                 (true, true) => c.shrink,
                 (true, false) => c.stretch,
             };
-            let total: f32 = capacities.iter().map(offered).sum();
-            if remaining <= FIT_EPSILON || total <= 0.0 {
+            let total: f64 = capacities.iter().map(offered).sum();
+            if remaining <= fit_eps || total <= 0.0 {
                 continue;
             }
             let spent = remaining.min(total);
+            let mut cum_cap = 0.0_f64;
+            let mut cum_out = 0.0_f64;
             let columns = widths.iter_mut().zip(expansions.iter_mut());
             for ((p, c), (width, expansion)) in body.iter().zip(&capacities).zip(columns) {
-                let share = spent * offered(c) / total;
+                let cap = offered(c);
+                if cap <= 0.0 {
+                    continue;
+                }
+                cum_cap += cap;
+                let target = spent * (cum_cap / total);
+                let share = target - cum_out;
+                cum_out = target;
                 let delta = if slack < 0.0 { -share } else { share };
                 *width += delta;
                 if matches!(p.piece.kind, PieceKind::Cluster { .. }) {
@@ -204,6 +214,6 @@ impl Layout<'_, '_> {
             }
             remaining -= spent;
         }
-        remaining <= FIT_EPSILON
+        remaining <= fit_eps
     }
 }

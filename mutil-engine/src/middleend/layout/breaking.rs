@@ -5,7 +5,7 @@ use super::trim::{TrimInfo, is_trim_transparent, line_start_lead_trim, pair_trim
 use super::{Layout, LineCursor, LineEnd, Piece, PieceKind, Reshaped, Reshapes, Token};
 use crate::frontend::{BoxOverflowPolicy, DiscretionaryNode, GlueKind, InlineObjectBox};
 use crate::middleend::shaper_gate::{checked_font_metrics, checked_reshape_window};
-use crate::middleend::tolerance::tolerance;
+use crate::middleend::tolerance::tolerance_f64;
 use crate::middleend::validated::{ClusterId, RunId, TokenIdx};
 use crate::middleend::{InlineSlotConstraint, LayoutInputError};
 use crate::shaping::ReshapeRequest;
@@ -37,19 +37,19 @@ pub(super) fn ladder_tier(d: &DiscretionaryNode) -> usize {
 /// the shrink of its glue and the protrusion of its last mark (ST1-3).
 #[derive(Clone, Copy)]
 struct LineWalk {
-    pen: f32,
-    body: f32,
+    pen: f64,
+    body: f64,
     has_start: bool,
     has_content: bool,
-    shrink: f32,
-    visible_shrink: f32,
-    end_hang: f32,
-    prev_trim: Option<(TrimInfo, f32)>,
-    pending_punct_glue_shrink: f32,
+    shrink: f64,
+    visible_shrink: f64,
+    end_hang: f64,
+    prev_trim: Option<(TrimInfo, f64)>,
+    pending_punct_glue_shrink: f64,
 }
 
 impl LineWalk {
-    fn new(post: f32) -> Self {
+    fn new(post: f64) -> Self {
         Self {
             pen: post,
             body: post,
@@ -64,13 +64,13 @@ impl LineWalk {
     }
 
     /// The width the line uses if it stops here.
-    fn used(&self) -> f32 {
+    fn used(&self) -> f64 {
         self.body - self.end_hang - self.visible_shrink
     }
 
     /// Advances past an untaken break opportunity; a non-zero `no_break_width`
     /// separates the clusters on either side so they no longer pair for trim.
-    fn advance_break(&mut self, no_break_width: f32) {
+    fn advance_break(&mut self, no_break_width: f64) {
         self.pen += no_break_width;
         if no_break_width != 0.0 {
             self.prev_trim = None;
@@ -79,7 +79,7 @@ impl LineWalk {
 
     /// The width used if the line ends at a break whose cloned padding is
     /// `pre`; a hang needs no padding behind it.
-    fn used_at_break(&self, pre: f32, shrinks: bool) -> f32 {
+    fn used_at_break(&self, pre: f64, shrinks: bool) -> f64 {
         let hang = if pre == 0.0 { self.end_hang } else { 0.0 };
         self.body + pre - hang - if shrinks { self.visible_shrink } else { 0.0 }
     }
@@ -91,8 +91,8 @@ impl LineWalk {
 const MAX_SEAM_CHAIN: usize = 8;
 
 /// `used` fits `limit` within the fitting tolerance.
-pub(super) fn within(used: f32, limit: f32) -> bool {
-    used <= limit + tolerance(used, limit)
+pub(super) fn within(used: f64, limit: f64) -> bool {
+    used <= limit + tolerance_f64(used, limit)
 }
 
 /// The outcome of fitting a line: where it ends, and the emergency re-shapes
@@ -134,12 +134,13 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// The next tab stop after `distance`, measured from the slot's
     /// line-start edge along the base direction, if it lies inside `slot`
     /// (spec ST3-1): a stop further than the slot's width is not reachable.
-    pub(super) fn reachable_stop(&self, distance: f32, slot: InlineSlotConstraint) -> Option<f32> {
-        let width = slot.width();
+    pub(super) fn reachable_stop(&self, distance: f64, slot: InlineSlotConstraint) -> Option<f64> {
+        let width = f64::from(slot.width());
         self.inputs
             .constraints()
             .tab_stops
-            .next_stop(distance)
+            .next_stop(distance as f32)
+            .map(f64::from)
             .filter(|&stop| within(stop, width))
     }
 
@@ -148,10 +149,10 @@ impl<'i, 'a> Layout<'i, 'a> {
     pub(super) fn measure(
         &self,
         piece: &Piece<'_>,
-        pen: f32,
+        pen: f64,
         slot: InlineSlotConstraint,
         pending: Option<&Reshapes>,
-    ) -> (f32, f32) {
+    ) -> (f64, f64) {
         match piece.kind {
             PieceKind::Tab => {
                 // A tab with no reachable stop takes no advance (ST3-1, AX-6).
@@ -162,10 +163,10 @@ impl<'i, 'a> Layout<'i, 'a> {
             }
             PieceKind::Cluster { cluster, .. } => {
                 let (glyphs, width) = self.cluster_glyphs_over(pending, cluster);
-                let mut x = 0.0_f32;
+                let mut x = 0.0_f64;
                 let mut reach = width;
                 for g in glyphs {
-                    x += g.x_advance;
+                    x += f64::from(g.x_advance);
                     reach = reach.max(x);
                 }
                 (width, reach)
@@ -184,16 +185,12 @@ impl<'i, 'a> Layout<'i, 'a> {
     pub(super) fn fitted_object(
         object: &InlineObjectBox,
         slot: InlineSlotConstraint,
-    ) -> (f32, f32, f32) {
-        let InlineObjectBox {
-            width,
-            ascent,
-            descent,
-            overflow_policy,
-            ..
-        } = *object;
-        let reference = slot.width();
-        match overflow_policy {
+    ) -> (f64, f64, f64) {
+        let width = f64::from(object.width);
+        let ascent = f64::from(object.ascent);
+        let descent = f64::from(object.descent);
+        let reference = f64::from(slot.width());
+        match object.overflow_policy {
             BoxOverflowPolicy::AllowOverflow => (width, ascent, descent),
             _ if width <= reference => (width, ascent, descent),
             BoxOverflowPolicy::Clip => (reference, ascent, descent),
@@ -210,7 +207,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         &'s self,
         pending: &'s Reshapes,
         cluster: ClusterId,
-    ) -> (&'s [RawShapedGlyph], f32) {
+    ) -> (&'s [RawShapedGlyph], f64) {
         self.cluster_glyphs_over(Some(pending), cluster)
     }
 
@@ -220,7 +217,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         &'s self,
         pending: Option<&'s Reshapes>,
         cluster: ClusterId,
-    ) -> (&'s [RawShapedGlyph], f32) {
+    ) -> (&'s [RawShapedGlyph], f64) {
         let reshaped = pending
             .and_then(|pending| pending.get(&cluster))
             .or_else(|| self.reshaped.get(&cluster));
@@ -228,7 +225,10 @@ impl<'i, 'a> Layout<'i, 'a> {
             return (&r.glyphs, r.width);
         }
         let c = self.inputs.cluster(cluster);
-        (self.inputs.cluster_glyphs_id(cluster), c.natural_width)
+        (
+            self.inputs.cluster_glyphs_id(cluster),
+            f64::from(c.natural_width),
+        )
     }
 
     /// Greedy fitting (spec ST1-1, ST1-5, ST1-7, WN-1): the last break of
@@ -238,28 +238,28 @@ impl<'i, 'a> Layout<'i, 'a> {
     /// visible glue after the last tab fits; a mark that may hang is credited
     /// with its protrusion (ST1-3).
     pub(super) fn fit(&self, line: &LineCursor<'_>, slot: InlineSlotConstraint) -> LineFit<'a> {
-        let slot_width = slot.width();
+        let slot_width = f64::from(slot.width());
         let mut walk = LineWalk::new(line.post_break_width());
         let mut fits = Fits::default();
         let mut t = line.token_start;
         let end = loop {
             match *self.tokens.at_or_sentinel(t) {
                 Token::Break(b) => {
+                    let pre = f64::from(b.pre_break_width);
                     if b.is_mandatory() {
                         // A line ending here is compressed only under
                         // `compress_last_lines` (ST3-3): otherwise, if only
                         // shrink would fit it, it ends at an earlier break.
-                        let used =
-                            walk.used_at_break(b.pre_break_width, self.options.compress_last_lines);
+                        let used = walk.used_at_break(pre, self.options.compress_last_lines);
                         break fits
                             .best()
                             .filter(|_| !within(used, slot_width))
                             .unwrap_or(LineEnd::At { token: t, brk: b });
                     }
-                    if within(walk.used_at_break(b.pre_break_width, true), slot_width) {
+                    if within(walk.used_at_break(pre, true), slot_width) {
                         fits.record(t, b);
                     }
-                    walk.advance_break(b.no_break_width);
+                    walk.advance_break(f64::from(b.no_break_width));
                 }
                 Token::Piece(piece)
                     if matches!(piece.kind, PieceKind::Tab)
@@ -320,8 +320,8 @@ impl<'i, 'a> Layout<'i, 'a> {
         let shrinks = !brk.is_mandatory() || self.options.compress_last_lines;
         let used = self
             .walk_to(line, token, slot, &reshapes)
-            .used_at_break(brk.pre_break_width, shrinks);
-        if !within(used, slot.width()) {
+            .used_at_break(f64::from(brk.pre_break_width), shrinks);
+        if !within(used, f64::from(slot.width())) {
             reshapes.clear();
         }
         reshapes
@@ -338,13 +338,14 @@ impl<'i, 'a> Layout<'i, 'a> {
         line: &LineCursor<'_>,
         slot: InlineSlotConstraint,
         pending: Option<&Reshapes>,
-    ) -> f32 {
+    ) -> f64 {
         let is_soft_wrap = line.is_soft_wrapped_start();
         match piece.kind {
             PieceKind::Glue(glue) if self.options.justify => {
-                walk.shrink += glue.max_shrink;
+                let shrink = f64::from(glue.max_shrink);
+                walk.shrink += shrink;
                 if glue.kind == GlueKind::CjkPunctCompression {
-                    walk.pending_punct_glue_shrink = glue.max_shrink;
+                    walk.pending_punct_glue_shrink = shrink;
                 }
             }
             PieceKind::Tab => {
@@ -371,8 +372,8 @@ impl<'i, 'a> Layout<'i, 'a> {
         if !is_trim_transparent(piece) {
             if let PieceKind::Cluster { run, cluster } = piece.kind {
                 let info = self.cluster_trim_info(run, cluster, advance);
-                let mut lead_trim = 0.0_f32;
-                let mut a_trail_delta = 0.0_f32;
+                let mut lead_trim = 0.0_f64;
+                let mut a_trail_delta = 0.0_f64;
                 if let Some(b) = info {
                     if !walk.has_content && line.post_break_width() == 0.0 {
                         lead_trim = line_start_lead_trim(b, is_soft_wrap);
@@ -445,7 +446,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             // Re-shaping an unsafe seam can widen its sides (kerning across
             // it is lost); while the line then overflows, the seam moves one
             // piece back and the abandoned re-shape is dropped.
-            let available = slot.width();
+            let available = f64::from(slot.width());
             let floor = first.next();
             let mut t = t;
             loop {
@@ -592,7 +593,15 @@ impl<'i, 'a> Layout<'i, 'a> {
                     ..ReshapeRequest::plain(text, run_ref, atoms, cluster.byte_range)
                 },
                 cluster,
-            ) && reshapes.insert(c, Reshaped { glyphs, width }).is_none()
+            ) && reshapes
+                .insert(
+                    c,
+                    Reshaped {
+                        glyphs,
+                        width: f64::from(width),
+                    },
+                )
+                .is_none()
             {
                 added.push(c);
             }
@@ -628,7 +637,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         end: TokenIdx,
         slot: InlineSlotConstraint,
         pending: &Reshapes,
-    ) -> f32 {
+    ) -> f64 {
         self.walk_to(line, end, slot, pending).used()
     }
 
@@ -644,7 +653,7 @@ impl<'i, 'a> Layout<'i, 'a> {
         let mut walk = LineWalk::new(line.post_break_width());
         for token in self.tokens.slice(line.token_start, end) {
             match token {
-                Token::Break(b) => walk.advance_break(b.no_break_width),
+                Token::Break(b) => walk.advance_break(f64::from(b.no_break_width)),
                 Token::Piece(piece) => {
                     self.walk_piece(&mut walk, piece, line, slot, Some(pending));
                 }

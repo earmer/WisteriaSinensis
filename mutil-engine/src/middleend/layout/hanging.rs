@@ -10,7 +10,7 @@ use crate::types::AtomFlags;
 /// block (ST1-3). A full-width CJK mark keeps its ink in one half of its em
 /// box, so a half-advance hang would push only the blank half out; at 0.85
 /// the ink itself protrudes, and 0.15 of the advance stays inside (HNG-1).
-pub(super) const HANG_FRACTION: f32 = 0.85;
+pub(super) const HANG_FRACTION: f64 = 0.85;
 
 /// The logical edge of a line a mark hangs from.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -23,9 +23,9 @@ pub(super) enum LineEdge {
 #[derive(Clone, Copy)]
 pub(super) struct EndHang {
     /// Cloned padding after the mark.
-    pub(super) pre: f32,
+    pub(super) pre: f64,
     /// The start mark, which the end mark may not be.
-    pub(super) start: Option<(usize, f32)>,
+    pub(super) start: Option<(usize, f64)>,
     /// Whether the line fits without hanging the mark.
     pub(super) fits_without: bool,
 }
@@ -34,18 +34,18 @@ pub(super) struct EndHang {
 /// pieces and the part of its advance that protrudes (ST1-3).
 #[derive(Clone, Copy, Default)]
 pub(super) struct LineHangs {
-    pub(super) start: Option<(usize, f32)>,
-    pub(super) end: Option<(usize, f32)>,
+    pub(super) start: Option<(usize, f64)>,
+    pub(super) end: Option<(usize, f64)>,
 }
 
 impl LineHangs {
     /// The protrusion of a mark, or 0.
-    pub(super) fn protrusion(hang: Option<(usize, f32)>) -> f32 {
+    pub(super) fn protrusion(hang: Option<(usize, f64)>) -> f64 {
         hang.map_or(0.0, |(_, protrusion)| protrusion)
     }
 
     /// The protrusion at the physical left and right edges.
-    pub(super) fn physical(&self, rtl: bool) -> (f32, f32) {
+    pub(super) fn physical(&self, rtl: bool) -> (f64, f64) {
         let (start, end) = (Self::protrusion(self.start), Self::protrusion(self.end));
         if rtl { (end, start) } else { (start, end) }
     }
@@ -64,7 +64,7 @@ impl Layout<'_, '_> {
         first_line: bool,
         is_soft_wrap: bool,
         pending: Option<&Reshapes>,
-    ) -> Option<f32> {
+    ) -> Option<f64> {
         let PieceKind::Cluster { cluster, .. } = piece.kind else {
             return None;
         };
@@ -115,7 +115,7 @@ impl Layout<'_, '_> {
         is_soft_wrap: bool,
         allowed: impl FnOnce(usize) -> bool,
         pending: &Reshapes,
-    ) -> Option<(usize, f32)> {
+    ) -> Option<(usize, f64)> {
         let (k, item) = Self::outermost(body, edge).filter(|&(k, _)| allowed(k))?;
         Some((
             k,
@@ -130,9 +130,9 @@ impl Layout<'_, '_> {
         body: &[LogicalPiece<'_>],
         first_line: bool,
         is_soft_wrap: bool,
-        post: f32,
+        post: f64,
         pending: &Reshapes,
-    ) -> Option<(usize, f32)> {
+    ) -> Option<(usize, f64)> {
         self.hang_at(
             body,
             LineEdge::Start,
@@ -156,7 +156,7 @@ impl Layout<'_, '_> {
             fits_without,
         }: EndHang,
         pending: &Reshapes,
-    ) -> Option<(usize, f32)> {
+    ) -> Option<(usize, f64)> {
         self.hang_at(
             body,
             LineEdge::End,
@@ -175,21 +175,21 @@ impl Layout<'_, '_> {
 /// Stops span fragments and decorations at the content edge on each side
 /// where a mark hangs, so that only the mark protrudes (ST1-3, ST5-1).
 pub(super) fn clip_to_content(
-    (hang_left, hang_right): (f32, f32),
-    (left, right): (f32, f32),
+    (hang_left, hang_right): (f64, f64),
+    (left, right): (f64, f64),
     fragments: &mut [PositionedSpanFragment],
     decorations: &mut [DecorationLine],
 ) {
     let clip = |x: &mut f32, width: &mut f32| {
-        let (mut lo, mut hi) = (*x, *x + *width);
+        let (mut lo, mut hi) = (f64::from(*x), f64::from(*x) + f64::from(*width));
         if hang_left > 0.0 {
             lo = lo.max(left);
         }
         if hang_right > 0.0 {
             hi = hi.min(right);
         }
-        *x = lo;
-        *width = (hi - lo).max(0.0);
+        *x = lo as f32;
+        *width = (hi - lo).max(0.0) as f32;
     };
     for f in fragments {
         clip(&mut f.x, &mut f.width);

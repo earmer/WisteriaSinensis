@@ -3,13 +3,13 @@
 //! (the engine is unit-agnostic); the y axis grows downwards.
 
 /// The largest magnitude a primary measurement may have, in layout units
-/// (spec MSR-1).
+/// (spec MSR-1): `2^20 = 1_048_576.0` (~277 meters at 96 dpi, >40,000 lines).
 ///
-/// The gates accept no width, extent, offset or metric beyond it. A paragraph
-/// has fewer than 2^64 records, so any sum the engine forms over them stays
-/// below `2^64 · 10^15 · 10^4 ≈ 1.8e38 < f32::MAX`: no layout arithmetic can
-/// overflow, and code behind the gates does not check for it.
-pub const MAX_MEASUREMENT: f32 = 1.0e15;
+/// The gates accept no width, extent, offset or metric beyond it. Internal
+/// layout arithmetic runs in `f64`, which losslessly embeds every `f32`
+/// measurement and has 53 bits of significand, so no layout sum can overflow
+/// or suffer `f32` position collapse within the physical typography domain.
+pub const MAX_MEASUREMENT: f32 = 1_048_576.0;
 
 /// `true` when `value` is a measurement: finite with `|value| <=
 /// MAX_MEASUREMENT` (spec MSR-1). Signed: offsets and deltas may be negative.

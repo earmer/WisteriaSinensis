@@ -11,7 +11,6 @@ use super::input_validation::{ValidatedSummary, validate_layout_inputs};
 // `pub(super)`, so only `ValidatedLayout` builds the views that carry G4 facts.
 #[path = "proofs.rs"]
 mod proofs;
-use super::tolerance::resolves_extent;
 use super::{
     AnnotationErrorReason, CaretStop, InlineSlotConstraint, LayoutConstraints, LayoutInputError,
     LayoutOptions, LayoutPolicySnapshot, LineGeometry, LineInvariantError, PositionedAnnotationRun,
@@ -146,10 +145,9 @@ impl<'a> ValidatedInputs<'a> {
     /// derives from constraints G1 accepted and is not checked again.
     ///
     /// # Errors
-    /// `BlockPositionUnrepresentable` when `f32` cannot hold the envelope at
-    /// `block_start`; `InvalidLineGeometry` for a provider answer outside the
-    /// envelope, out of order or stalling; `NonMonotonicGeometry` for one not
-    /// within `previous`.
+    /// `InvalidLineGeometry` when the block envelope is non-finite or empty, or
+    /// for a provider answer outside the envelope, out of order or stalling;
+    /// `NonMonotonicGeometry` for one not within `previous`.
     pub fn line_geometry(
         &self,
         line_index: usize,
@@ -158,10 +156,8 @@ impl<'a> ValidatedInputs<'a> {
         previous: Option<&LineGeometry>,
     ) -> Result<GeometryAnswer, LayoutInputError> {
         let block_end = block_start + extent;
-        if !(block_start.is_finite() && block_end > block_start)
-            || !resolves_extent(block_end, extent)
-        {
-            return Err(LayoutInputError::BlockPositionUnrepresentable);
+        if !(block_start.is_finite() && block_end.is_finite() && block_end > block_start) {
+            return Err(LayoutInputError::InvalidLineGeometry);
         }
         let constraints = self.constraints;
         let geometry = constraints.resolve_line_geometry(line_index, block_start, block_end);

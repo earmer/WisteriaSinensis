@@ -30,8 +30,8 @@ impl LineRelativeEdge {
 struct LineRelativeItem {
     piece_index: BodyIdx,
     edge: LineRelativeEdge,
-    above: f32,
-    below: f32,
+    above: f64,
+    below: f64,
 }
 
 /// Where an item's baseline goes, classified once from its alignment
@@ -41,8 +41,8 @@ struct LineRelativeItem {
 enum BaselinePlacement {
     LineEdge(LineRelativeItem),
     StrutRelative {
-        shift: f32,
-        extent: Option<(f32, f32)>,
+        shift: f64,
+        extent: Option<(f64, f64)>,
     },
 }
 
@@ -57,9 +57,9 @@ struct CachedClusterMetrics {
 }
 
 pub(super) struct LineBoxMetrics {
-    pub(super) ascent: f32,
-    pub(super) descent: f32,
-    pub(super) line_height: f32,
+    pub(super) ascent: f64,
+    pub(super) descent: f64,
+    pub(super) line_height: f64,
 }
 
 impl Layout<'_, '_> {
@@ -69,7 +69,7 @@ impl Layout<'_, '_> {
         &mut self,
         placed: &[LogicalPiece<'_>],
         order: &VisualOrder,
-        y_shifts: &mut Vec<f32>,
+        y_shifts: &mut Vec<f64>,
         byte_range: TextRange,
         slot: InlineSlotConstraint,
     ) -> Result<LineBoxMetrics, LayoutInputError> {
@@ -182,16 +182,19 @@ impl Layout<'_, '_> {
 
     /// The line box from the content's `above` and `below` the baseline: the
     /// strut's under a fixed line height, or for an empty line (spec MET-3).
-    fn resolve_line_box(&self, above: f32, below: f32, byte_range: TextRange) -> LineBoxMetrics {
+    fn resolve_line_box(&self, above: f64, below: f64, byte_range: TextRange) -> LineBoxMetrics {
+        let strut_height = f64::from(self.strut.ascent)
+            + f64::from(self.strut.descent)
+            + f64::from(self.strut.line_gap);
         let (ascent, descent, line_height) = match self.options.line_height {
             LineHeight::Fixed(_) => (
-                self.strut.ascent,
-                self.strut.descent,
-                self.strut.line_height(),
+                f64::from(self.strut.ascent),
+                f64::from(self.strut.descent),
+                strut_height,
             ),
             LineHeight::Normal if byte_range.is_empty() => {
                 let (a, d) = half_leaded(self.strut);
-                (a, d, self.strut.line_height())
+                (a, d, strut_height)
             }
             LineHeight::Normal => (above, below, above + below),
         };
@@ -204,13 +207,17 @@ impl Layout<'_, '_> {
 }
 
 /// A strut's or box's ascent and descent with half its line gap added to each.
-fn half_leaded(m: StrutMetrics) -> (f32, f32) {
-    (m.ascent + m.line_gap / 2.0, m.descent + m.line_gap / 2.0)
+fn half_leaded(m: StrutMetrics) -> (f64, f64) {
+    let half_gap = f64::from(m.line_gap) / 2.0;
+    (
+        f64::from(m.ascent) + half_gap,
+        f64::from(m.descent) + half_gap,
+    )
 }
 
 /// A line-relative item taller than the line deepens it on its free side
 /// under `Normal` (spec BAS-1).
-fn deepen_for_line_relative(items: &[LineRelativeItem], above: &mut f32, below: &mut f32) {
+fn deepen_for_line_relative(items: &[LineRelativeItem], above: &mut f64, below: &mut f64) {
     for item in items {
         let room = *above + *below;
         let item_height = item.above + item.below;
@@ -225,13 +232,13 @@ fn deepen_for_line_relative(items: &[LineRelativeItem], above: &mut f32, below: 
 
 /// A font's offset of a named baseline from its alphabetic one, positive
 /// towards line-over (FNT-4); `None` for the other alignments.
-fn baseline_offset(align: BaselineAlignment, m: &FontMetrics) -> Option<f32> {
+fn baseline_offset(align: BaselineAlignment, m: &FontMetrics) -> Option<f64> {
     match align {
         BaselineAlignment::Auto | BaselineAlignment::Alphabetic => Some(0.0),
-        BaselineAlignment::Ideographic => Some(m.ideographic_baseline_offset),
-        BaselineAlignment::Central => Some(m.central_baseline_offset),
-        BaselineAlignment::Hanging => Some(m.hanging_baseline_offset),
-        BaselineAlignment::Mathematical => Some(m.mathematical_baseline_offset),
+        BaselineAlignment::Ideographic => Some(f64::from(m.ideographic_baseline_offset)),
+        BaselineAlignment::Central => Some(f64::from(m.central_baseline_offset)),
+        BaselineAlignment::Hanging => Some(f64::from(m.hanging_baseline_offset)),
+        BaselineAlignment::Mathematical => Some(f64::from(m.mathematical_baseline_offset)),
         BaselineAlignment::LineTop
         | BaselineAlignment::LineBottom
         | BaselineAlignment::Offset(_) => None,
@@ -241,9 +248,9 @@ fn baseline_offset(align: BaselineAlignment, m: &FontMetrics) -> Option<f32> {
 /// The shift of an item towards line-over (spec BAS-1): its own named
 /// baseline (a run's font's; an object's is its alphabetic one, `own` is
 /// `None`) onto the strut's, or an explicit offset.
-fn baseline_shift(align: BaselineAlignment, strut: &FontMetrics, own: Option<&FontMetrics>) -> f32 {
+fn baseline_shift(align: BaselineAlignment, strut: &FontMetrics, own: Option<&FontMetrics>) -> f64 {
     match align {
-        BaselineAlignment::Offset(offset) => offset,
+        BaselineAlignment::Offset(offset) => f64::from(offset),
         _ => baseline_offset(align, strut).map_or(0.0, |s| {
             s - own.and_then(|m| baseline_offset(align, m)).unwrap_or(0.0)
         }),

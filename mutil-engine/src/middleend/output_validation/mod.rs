@@ -383,9 +383,6 @@ pub enum ParagraphErrorReason {
     /// A line box is not finite, is inverted, starts above the previous
     /// line's bottom, or ends above it.
     LineBoxesOverlap,
-    /// A line box's span loses more than an eighth of `ascent + descent` to
-    /// `f32` rounding at its block position (spec GEO-3).
-    LineBoxCollapsed,
     /// A line's `ascent + descent` exceeds its `line_height`.
     LineBoxExceedsLineHeight,
     /// Under [`SlotSource::Standard`](super::SlotSource::Standard), a line's

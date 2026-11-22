@@ -24,7 +24,7 @@ use crate::types::BidiLevel;
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LogicalPiece<'a> {
     pub(super) piece: Piece<'a>,
-    pub(super) gap: f32,
+    pub(super) gap: f64,
 }
 
 /// The reusable columns and buffers of one line's placement.
@@ -37,17 +37,17 @@ pub(super) struct LayoutScratch<'a> {
     /// The body's visual order (UAX #9 L2).
     pub(super) order: VisualOrder,
     /// Each piece's advance, by logical index.
-    pub(super) widths: Vec<f32>,
+    pub(super) widths: Vec<f64>,
     /// Each piece's justification inside its advance (ST3-2).
-    pub(super) expansions: Vec<f32>,
+    pub(super) expansions: Vec<f64>,
     /// Each piece's inline position.
-    pub(super) xs: Vec<f32>,
+    pub(super) xs: Vec<f64>,
     /// Each piece's baseline shift (BAS-1).
-    pub(super) y_shifts: Vec<f32>,
+    pub(super) y_shifts: Vec<f64>,
     /// Each piece's CJK punctuation leading trim.
-    pub(super) lead_trims: Vec<f32>,
+    pub(super) lead_trims: Vec<f64>,
     /// Each piece's CJK punctuation trailing trim.
-    pub(super) trail_trims: Vec<f32>,
+    pub(super) trail_trims: Vec<f64>,
     /// The finished pieces, built from the columns above.
     pub(super) placed: Vec<PlacedPiece<'a>>,
     /// The visual order indexed for span grouping (ST2-3).
@@ -62,7 +62,7 @@ pub(super) struct LayoutScratch<'a> {
 pub(super) fn build_placed<'a>(
     placed: &mut Vec<PlacedPiece<'a>>,
     logical: &[LogicalPiece<'a>],
-    [xs, widths, expansions, y_shifts, lead_trims, trail_trims]: [&[f32]; 6],
+    [xs, widths, expansions, y_shifts, lead_trims, trail_trims]: [&[f64]; 6],
 ) {
     placed.clear();
     placed.extend(

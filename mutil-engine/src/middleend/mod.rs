@@ -45,9 +45,7 @@ pub use output::{
 pub use output_validation::{
     AnnotationErrorReason, LineInvariantError, ParagraphErrorReason, SlotErrorReason,
 };
-pub use tolerance::{
-    LINE_GEOMETRY_ABS_EPSILON, LINE_GEOMETRY_REL_EPSILON, MAX_EXTENT_ROUNDING, MAX_POSITION_STEP,
-};
+pub use tolerance::{LINE_GEOMETRY_ABS_EPSILON, LINE_GEOMETRY_REL_EPSILON};
 pub use validated::{
     Clearance, GeometryAnswer, OpenGeometry, PlacedGlyph, PlacedRun, PlacedRunSource,
     ValidatedInputs, ValidatedLayout,
