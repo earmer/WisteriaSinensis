@@ -224,21 +224,38 @@ impl<'i, 'a> Layout<'i, 'a> {
         self.cluster_glyphs_over(Some(pending), cluster)
     }
 
+    #[inline]
+    pub(super) fn has_reshapes(&self, pending: Option<&Reshapes>) -> bool {
+        !self.reshaped.is_empty() || pending.is_some_and(|p| !p.is_empty())
+    }
+
+    #[inline]
     pub(super) fn cluster_glyphs_over<'s>(
         &'s self,
         pending: Option<&'s Reshapes>,
         cluster: ClusterId,
     ) -> (&'s [RawShapedGlyph], f64) {
-        if let Some(r) = pending
-            .and_then(|p| p.get(&cluster))
-            .or_else(|| self.reshaped.get(&cluster))
+        if self.has_reshapes(pending)
+            && let Some(reshaped) = self.reshaped_cluster(pending, cluster)
         {
-            return (&r.glyphs, r.width);
+            return (&reshaped.glyphs, reshaped.width);
         }
         (
             self.inputs.cluster_glyphs_id(cluster),
             f64::from(self.inputs.cluster(cluster).natural_width) * self.font_scale,
         )
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(super) fn reshaped_cluster<'s>(
+        &'s self,
+        pending: Option<&'s Reshapes>,
+        cluster: ClusterId,
+    ) -> Option<&'s Reshaped> {
+        pending
+            .and_then(|p| p.get(&cluster))
+            .or_else(|| self.reshaped.get(&cluster))
     }
 
     fn fit(

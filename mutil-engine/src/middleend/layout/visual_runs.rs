@@ -27,15 +27,13 @@ struct RunKey {
 }
 
 impl RunKey {
-    fn of_run(v: &VisualGlyphRun) -> Self {
-        Self {
-            font: v.font,
-            level: v.bidi_level,
-            font_size: v.font_size,
-            x_scale: v.x_scale,
-            orientation: v.orientation,
-            variations: v.variations.clone(),
-        }
+    fn matches_run(&self, run: &VisualGlyphRun) -> bool {
+        self.font == run.font
+            && self.level == run.bidi_level
+            && self.font_size == run.font_size
+            && self.x_scale == run.x_scale
+            && self.orientation == run.orientation
+            && self.variations == run.variations
     }
 }
 
@@ -185,12 +183,12 @@ impl<'i, 'a> Layout<'i, 'a> {
     ) -> RunKey {
         let (r, c) = (self.inputs.run(run), self.inputs.cluster(cluster));
         let mut variations: SmallVec<[FontVariation; 2]> =
-            r.features.variations().iter().copied().collect();
-        if let Some(var) = pending
-            .get(&cluster)
-            .or_else(|| self.reshaped.get(&cluster))
-            .and_then(|res| res.wdth)
-            .and_then(|w| FontVariation::try_new(*b"wdth", w))
+            SmallVec::from_slice(r.features.variations());
+        if self.has_reshapes(Some(pending))
+            && let Some(var) = self
+                .reshaped_cluster(Some(pending), cluster)
+                .and_then(|res| res.wdth)
+                .and_then(|w| FontVariation::try_new(*b"wdth", w))
         {
             variations.retain(|v| v.tag() != *b"wdth");
             variations.push(var);
@@ -265,7 +263,7 @@ impl<'i, 'a> Layout<'i, 'a> {
             }
         };
         let key = self.run_key(run, cluster, level, x_scale, pending);
-        let joins_last = |v: &&mut VisualGlyphRun| RunKey::of_run(v) == key;
+        let joins_last = |v: &&mut VisualGlyphRun| key.matches_run(v);
         if let Some(v) = runs.last_mut().filter(joins_last) {
             v.byte_range = v.byte_range.cover(c.byte_range);
             place(&mut v.glyphs);

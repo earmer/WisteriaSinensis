@@ -47,9 +47,16 @@ fn opt(value: Option<impl Display>) -> String {
     value.map_or_else(|| "null".to_owned(), |value| value.to_string())
 }
 
-fn list<T>(items: impl IntoIterator<Item = T>, item: impl FnMut(T) -> String) -> String {
-    let items: Vec<String> = items.into_iter().map(item).collect();
-    format!("[{}]", items.join(","))
+fn list<T>(items: impl IntoIterator<Item = T>, mut format_item: impl FnMut(T) -> String) -> String {
+    let mut out = String::from("[");
+    for (index, value) in items.into_iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&format_item(value));
+    }
+    out.push(']');
+    out
 }
 
 fn interval(start: f32, end: f32) -> String {
@@ -105,7 +112,7 @@ fn edge_cut_str(cut: SpanEdgeCut) -> &'static str {
 /// paint attribution (spec HST-3/HST-4, FE-17).
 pub fn layout_json(layout: &ValidatedLayout<'_>, id: usize, marked: &Marked) -> String {
     let paragraph = layout.paragraph();
-    let runs: Vec<(usize, String)> = layout
+    let mut runs = layout
         .glyph_runs()
         .map(|run| {
             let glyphs = list(run.glyphs(), |glyph| {
@@ -130,10 +137,10 @@ pub fn layout_json(layout: &ValidatedLayout<'_>, id: usize, marked: &Marked) -> 
             );
             (run.line(), json)
         })
-        .collect();
+        .peekable();
     let lines = list(paragraph.lines.iter().enumerate(), |(index, line)| {
-        let line_runs = runs.iter().filter(|(run_line, _)| *run_line == index);
-        line_json(line, list(line_runs, |(_, json)| json.clone()))
+        let line_runs = std::iter::from_fn(|| runs.next_if(|(run_line, _)| *run_line == index));
+        line_json(line, list(line_runs, |(_, json)| json))
     });
     let paint_spans = list(&marked.paint_spans, |span| {
         format!(

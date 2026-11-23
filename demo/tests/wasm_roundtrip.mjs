@@ -43,6 +43,30 @@ engine.clearParagraphs();
 assert.equal(engine.layout('日本語 abc '.repeat(30), 300, 16, 0, 'ja', false, null, false, 0).ok, true);
 assert.equal(live(), 0);
 
+engine.clearParagraphs();
+const mixed = engine.layout('abc אבג def דהו ghi זחט', 80, 16, 0, null, false, null, false, 0);
+assert.equal(mixed.ok, true);
+assert.equal(mixed.lines.length, 3);
+for (const [lineIndex, line] of mixed.lines.entries()) {
+  const start = lineIndex * 11;
+  const runByteRanges = line.runs.map(run =>
+    run.glyphs.map(([_id, _x, _y, byteStart, byteEnd]) => [byteStart, byteEnd]),
+  );
+  assert.deepEqual(runByteRanges, [
+    [[start, start + 1], [start + 1, start + 2], [start + 2, start + 3]],
+    [[start + 8, start + 10], [start + 6, start + 8], [start + 4, start + 6]],
+  ]);
+  const xPositions = line.runs.flatMap(run => run.glyphs.map(([_id, x]) => x));
+  assert.deepEqual(xPositions, xPositions.toSorted((a, b) => a - b));
+}
+assert.equal(live(), 0);
+
+engine.clearParagraphs();
+const empty = engine.layout('', 80, 16, 0, null, false, null, false, 0);
+assert.equal(empty.ok, true);
+assert.ok(empty.lines.every(line => line.runs.length === 0));
+assert.equal(live(), 0);
+
 // 5. Steady state: repeated calls neither leak buffers nor grow memory.
 const before = x.memory.buffer.byteLength;
 for (let i = 0; i < 2000; i++) { engine.clearParagraphs(); engine.layout('xy '.repeat(100), 400, 16, 0, null, false, null, false, 0); }
