@@ -10,6 +10,8 @@ use std::collections::{HashMap, HashSet};
 
 impl ParagraphErrorReason {
     /// The paragraph-level violation, reported at `line`.
+    #[cold]
+    #[inline(never)]
     fn at(self, line: usize) -> (usize, LineInvariantError) {
         (line, LineInvariantError::InvalidParagraph { reason: self })
     }

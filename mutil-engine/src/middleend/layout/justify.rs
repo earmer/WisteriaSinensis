@@ -39,24 +39,19 @@ fn effective_shrinks(
             };
         }
     }
-    let mut shrinks = vec![0.0_f64; body.len()];
+    let mut shrinks = prev_trails;
     let mut next_lead = 0.0_f64;
-    for (((p, &lead), &prev_t), out) in body
-        .iter()
-        .zip(lead_trims)
-        .zip(&prev_trails)
-        .zip(shrinks.iter_mut())
-        .rev()
-    {
-        if let PieceKind::Glue(glue) = p.piece.kind {
-            *out = if glue.kind == GlueKind::CjkPunctCompression {
-                (f64::from(glue.max_shrink) - (prev_t + next_lead)).max(0.0)
-            } else {
-                f64::from(glue.max_shrink)
-            };
-        }
-        if !is_trim_transparent(&p.piece) {
-            next_lead = match p.piece.kind {
+    for ((piece, &lead), slot) in body.iter().zip(lead_trims).zip(&mut shrinks).rev() {
+        let prev_trail = *slot;
+        *slot = match piece.piece.kind {
+            PieceKind::Glue(glue) if glue.kind == GlueKind::CjkPunctCompression => {
+                (f64::from(glue.max_shrink) - (prev_trail + next_lead)).max(0.0)
+            }
+            PieceKind::Glue(glue) => f64::from(glue.max_shrink),
+            _ => 0.0,
+        };
+        if !is_trim_transparent(&piece.piece) {
+            next_lead = match piece.piece.kind {
                 PieceKind::Cluster { .. } => lead,
                 _ => 0.0,
             };

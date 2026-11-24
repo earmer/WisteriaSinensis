@@ -407,6 +407,8 @@ pub enum ParagraphErrorReason {
 
 impl SlotErrorReason {
     /// The line error reporting this violation of the slots.
+    #[cold]
+    #[inline(never)]
     const fn error(self) -> LineInvariantError {
         LineInvariantError::InvalidSlots { reason: self }
     }
@@ -414,6 +416,8 @@ impl SlotErrorReason {
 
 impl AnnotationErrorReason {
     /// The line error reporting this violation of annotation `index`.
+    #[cold]
+    #[inline(never)]
     const fn at(self, index: usize) -> LineInvariantError {
         LineInvariantError::InvalidAnnotation {
             index,
